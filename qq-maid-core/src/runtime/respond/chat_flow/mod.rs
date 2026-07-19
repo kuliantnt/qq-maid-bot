@@ -16,6 +16,7 @@ use crate::{
         session::{SessionMeta, SessionRecord, SessionTurnActor, is_shared_conversation_scope},
         tools::{
             StatusHint, ToolTurnDiagnostics, agent_turn_diagnostics,
+            knowledge::KnowledgeEvidenceStatus,
             memory::{
                 MemoryActor, MemoryDreamContext, MemoryRecall, MemoryRecord, MemoryTarget,
                 MemoryVisibility,
@@ -58,6 +59,28 @@ pub(super) struct PreparedChat {
     pub session: SessionRecord,
     pub respond_route: AgentRouteDecision,
     pub status_hint: Option<StatusHint>,
+}
+
+struct KnowledgeContextOutcome {
+    context: String,
+    hit_count: usize,
+    status: Option<KnowledgeEvidenceStatus>,
+    injection_allowed: bool,
+    injection_reason: &'static str,
+    candidate_count: usize,
+}
+
+impl KnowledgeContextOutcome {
+    fn skipped() -> Self {
+        Self {
+            context: String::new(),
+            hit_count: 0,
+            status: None,
+            injection_allowed: false,
+            injection_reason: "mode_tool",
+            candidate_count: 0,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -134,9 +157,8 @@ impl RustRespondService {
             system_prompts
         };
         let policy = self.resolve_agent_policy(&req)?;
-        let (knowledge_context, knowledge_hit_count) =
-            self.automatic_knowledge_context(policy.knowledge_mode, &user_text)?;
-        let used_knowledge = knowledge_hit_count > 0;
+        let knowledge = self.automatic_knowledge_context(policy.knowledge_mode, &user_text)?;
+        let used_knowledge = knowledge.hit_count > 0;
         let dream_context =
             self.memory_dream_context(&req, &meta, policy.resolve_auxiliary_model(None));
         // 群聊 Tool Loop 的用户私有交互状态必须与公开 conversation session 隔离。
@@ -152,7 +174,7 @@ impl RustRespondService {
             message_context: req.message_context.clone(),
             system_prompts,
             memory_context,
-            knowledge_context: knowledge_context.clone(),
+            knowledge_context: knowledge.context.clone(),
             session_context,
             history_messages: recent_session_messages(&session, SESSION_HISTORY_MESSAGE_LIMIT),
             scope_key: meta.scope_key.clone(),
@@ -336,7 +358,11 @@ impl RustRespondService {
             "used_memory": used_memory,
             "used_knowledge": used_knowledge,
             "knowledge_mode": policy.knowledge_mode.as_str(),
-            "knowledge_hit_count": knowledge_hit_count,
+            "knowledge_hit_count": knowledge.hit_count,
+            "knowledge_status": knowledge.status.map(KnowledgeEvidenceStatus::as_str),
+            "knowledge_injection_allowed": knowledge.injection_allowed,
+            "knowledge_injection_reason": knowledge.injection_reason,
+            "knowledge_candidate_count": knowledge.candidate_count,
             "used_search": used_search,
             "respond_route": respond_route.route.as_str(),
             "route_reason": respond_route.reason,
@@ -452,9 +478,8 @@ impl RustRespondService {
         let used_memory = !memory_context.trim().is_empty();
         let system_prompts = self.prompt_config.load_system_prompts()?;
         let policy = self.resolve_agent_policy(&req)?;
-        let (knowledge_context, knowledge_hit_count) =
-            self.automatic_knowledge_context(policy.knowledge_mode, &user_text)?;
-        let used_knowledge = knowledge_hit_count > 0;
+        let knowledge = self.automatic_knowledge_context(policy.knowledge_mode, &user_text)?;
+        let used_knowledge = knowledge.hit_count > 0;
         let dream_context =
             self.memory_dream_context(&req, &meta, policy.resolve_auxiliary_model(None));
         if !policy.enabled {
@@ -482,7 +507,7 @@ impl RustRespondService {
                     message_context: req.message_context.clone(),
                     system_prompts,
                     memory_context,
-                    knowledge_context: knowledge_context.clone(),
+                    knowledge_context: knowledge.context.clone(),
                     session_context,
                     history_messages: recent_session_messages(
                         &session,
@@ -540,7 +565,11 @@ impl RustRespondService {
             "used_memory": used_memory,
             "used_knowledge": used_knowledge,
             "knowledge_mode": policy.knowledge_mode.as_str(),
-            "knowledge_hit_count": knowledge_hit_count,
+            "knowledge_hit_count": knowledge.hit_count,
+            "knowledge_status": knowledge.status.map(KnowledgeEvidenceStatus::as_str),
+            "knowledge_injection_allowed": knowledge.injection_allowed,
+            "knowledge_injection_reason": knowledge.injection_reason,
+            "knowledge_candidate_count": knowledge.candidate_count,
             "used_search": false,
             "respond_route": respond_route.route.as_str(),
             "route_reason": respond_route.reason,
@@ -558,22 +587,72 @@ impl RustRespondService {
         Ok(response)
     }
 
-    /// `tool` 模式完全跳过自动检索；`auto` 只保留为紧急回退。
+    /// preflight 失败和低相关都必须零注入；`auto` 才保留旧版无条件回退。
     fn automatic_knowledge_context(
         &self,
         mode: KnowledgeRetrievalMode,
         user_text: &str,
-    ) -> Result<(String, usize), LlmError> {
+    ) -> Result<KnowledgeContextOutcome, LlmError> {
         if mode == KnowledgeRetrievalMode::Tool {
-            return Ok((String::new(), 0));
+            return Ok(KnowledgeContextOutcome::skipped());
         }
-        let evidence = self.knowledge_index.search_evidence(user_text);
-        reject_failed_knowledge_search(&evidence)?;
+        let evidence = match mode {
+            KnowledgeRetrievalMode::Preflight => {
+                self.knowledge_index.search_preflight_evidence(user_text)
+            }
+            KnowledgeRetrievalMode::Auto => self.knowledge_index.search_auto_evidence(user_text),
+            KnowledgeRetrievalMode::Tool => unreachable!(),
+        };
+        if mode == KnowledgeRetrievalMode::Auto {
+            reject_failed_knowledge_search(&evidence)?;
+        }
+        let candidate_count = evidence.diagnostics.fused_candidate_count;
+        let status = evidence.status;
+        let decision_reason = evidence.injection.reason.as_str();
+        let injection_allowed = if mode == KnowledgeRetrievalMode::Auto {
+            !evidence.items.is_empty()
+        } else {
+            evidence.injection.allow_injection
+                && !matches!(
+                    evidence.status,
+                    KnowledgeEvidenceStatus::NoHit
+                        | KnowledgeEvidenceStatus::LowRelevance
+                        | KnowledgeEvidenceStatus::Failed
+                )
+        };
+        if !injection_allowed {
+            if evidence.status == KnowledgeEvidenceStatus::Failed {
+                tracing::warn!(
+                    error_code = evidence
+                        .failure
+                        .as_ref()
+                        .map(|failure| failure.error_code.as_str())
+                        .unwrap_or("knowledge_search_failed"),
+                    "knowledge preflight failed; continuing without injected evidence"
+                );
+            }
+            return Ok(KnowledgeContextOutcome {
+                context: String::new(),
+                hit_count: 0,
+                status: Some(status),
+                injection_allowed: false,
+                injection_reason: decision_reason,
+                candidate_count,
+            });
+        }
         let hit_count = evidence.diagnostics.returned_chunk_count;
-        Ok((
-            crate::runtime::tools::knowledge::render_context(&evidence),
+        Ok(KnowledgeContextOutcome {
+            context: crate::runtime::tools::knowledge::render_context(&evidence),
             hit_count,
-        ))
+            status: Some(status),
+            injection_allowed: true,
+            injection_reason: if mode == KnowledgeRetrievalMode::Auto {
+                "auto_fallback"
+            } else {
+                decision_reason
+            },
+            candidate_count,
+        })
     }
 
     /// 从长期记忆存储中读取当前请求可访问的分层记录，组装为系统提示上下文。

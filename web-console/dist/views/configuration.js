@@ -167,6 +167,20 @@ function renderAgent(snapshot) {
         return;
     }
     const documentValue = record(agent.savedValue);
+    const knowledge = record(documentValue.knowledge);
+    const embedding = record(knowledge.embedding);
+    const runningKnowledge = record(record(agent.runningValue).knowledge);
+    const runningEmbedding = record(runningKnowledge.embedding);
+    target.append(fieldGroup("知识检索", [
+        selectField("知识检索模式", "agent-knowledge-mode", string(knowledge.mode) || "preflight", [
+            ["preflight", "preflight（高相关时条件注入）"],
+            ["tool", "tool（完全由 Agent 检索）"],
+            ["auto", "auto（紧急回退）"],
+        ], !agent.editable),
+        checkboxField("本地语义召回", "agent-knowledge-embedding-enabled", embedding.enabled === true, !agent.editable),
+        statusField(`当前生效：${string(runningKnowledge.mode) || "preflight"} · 本地语义召回：${runningEmbedding.enabled === true ? "开启" : "关闭"}`, `来源：${sourceLabel(agent.source)}${agent.pendingRestart ? " · 已保存变更等待重启" : ""}`),
+        statusField("本地模型资源", "首次开启会下载 BAAI/bge-small-zh-v1.5，并增加 CPU、内存占用；低配置服务器建议关闭。"),
+    ]));
     const modelRoutes = record(documentValue.model_routes);
     for (const routeName of ["private_main", "group_main", "aux"]) {
         const route = record(modelRoutes[routeName]);
@@ -296,7 +310,15 @@ async function saveAgent() {
         return;
     const documentValue = record(current.agent.savedValue);
     const scenes = record(documentValue.scenes);
-    const changes = [];
+    const embedding = record(record(documentValue.knowledge).embedding);
+    const changes = [{
+            action: "set_knowledge",
+            mode: element("agent-knowledge-mode", HTMLSelectElement).value,
+            embedding: {
+                enabled: element("agent-knowledge-embedding-enabled", HTMLInputElement).checked,
+                cache_dir: string(embedding.cache_dir) || "cache/knowledge-embedding",
+            },
+        }];
     for (const routeName of ["private_main", "group_main", "aux"]) {
         const candidates = element(`agent-route-${routeName}`, HTMLInputElement).value
             .split(",").map((value) => value.trim()).filter(Boolean);
@@ -500,6 +522,50 @@ function textField(labelText, id, value, disabled) {
     input.value = value;
     input.disabled = disabled;
     row.append(label, input);
+    return row;
+}
+function selectField(labelText, id, value, options, disabled) {
+    const row = document.createElement("div");
+    row.className = "config-row";
+    const label = document.createElement("label");
+    label.htmlFor = id;
+    label.textContent = labelText;
+    const select = document.createElement("select");
+    select.id = id;
+    select.disabled = disabled;
+    for (const [optionValue, optionLabel] of options) {
+        const option = document.createElement("option");
+        option.value = optionValue;
+        option.textContent = optionLabel;
+        select.append(option);
+    }
+    select.value = value;
+    row.append(label, select);
+    return row;
+}
+function checkboxField(labelText, id, checked, disabled) {
+    const row = document.createElement("div");
+    row.className = "config-row compact-row";
+    const label = document.createElement("label");
+    label.htmlFor = id;
+    label.textContent = labelText;
+    const input = document.createElement("input");
+    input.id = id;
+    input.type = "checkbox";
+    input.checked = checked;
+    input.disabled = disabled;
+    row.append(label, input);
+    return row;
+}
+function statusField(summary, detail) {
+    const row = document.createElement("div");
+    row.className = "config-row";
+    const label = document.createElement("strong");
+    label.textContent = summary;
+    const meta = document.createElement("span");
+    meta.className = "field-meta";
+    meta.textContent = detail;
+    row.append(label, meta);
     return row;
 }
 function badge(text, kind) {

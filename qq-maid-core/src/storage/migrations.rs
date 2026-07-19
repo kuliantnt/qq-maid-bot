@@ -6,7 +6,7 @@
 use crate::{
     config::center::CONFIG_SECRET_SCHEMA_V1,
     management::CONSOLE_ADMIN_SCHEMA_V1,
-    runtime::tools::knowledge::{KNOWLEDGE_SCHEMA_V1, KNOWLEDGE_SCHEMA_V2},
+    runtime::tools::knowledge::{KNOWLEDGE_SCHEMA_V1, KNOWLEDGE_SCHEMA_V2, KNOWLEDGE_SCHEMA_V3},
     runtime::tools::memory::{
         MEMORY_CONSOLIDATION_SCHEMA_V4, MEMORY_DOMAIN_SCHEMA_V3, MEMORY_SCHEMA_V1,
         MEMORY_SCOPE_SCHEMA_V2,
@@ -64,6 +64,7 @@ pub const APP_MIGRATIONS: &[SqliteMigration] = &[
     MANUAL_DISPLAY_NAMES_SCHEMA_V1,
     KNOWLEDGE_SCHEMA_V1,
     KNOWLEDGE_SCHEMA_V2,
+    KNOWLEDGE_SCHEMA_V3,
 ];
 
 #[cfg(test)]

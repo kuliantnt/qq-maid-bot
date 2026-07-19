@@ -109,6 +109,7 @@ pub struct AgentRuntimeConfig {
     profiles: HashMap<String, AgentProfile>,
     scenes: AgentScenes,
     knowledge_mode: KnowledgeRetrievalMode,
+    knowledge_embedding: KnowledgeEmbeddingConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,13 +187,37 @@ pub struct ResolvedAgentPolicy {
 #[serde(rename_all = "snake_case")]
 pub enum KnowledgeRetrievalMode {
     #[default]
+    Preflight,
     Tool,
     Auto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeEmbeddingConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_knowledge_embedding_cache_dir")]
+    pub cache_dir: String,
+}
+
+impl Default for KnowledgeEmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cache_dir: default_knowledge_embedding_cache_dir(),
+        }
+    }
+}
+
+fn default_knowledge_embedding_cache_dir() -> String {
+    "cache/knowledge-embedding".to_owned()
 }
 
 impl KnowledgeRetrievalMode {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Preflight => "preflight",
             Self::Tool => "tool",
             Self::Auto => "auto",
         }
@@ -204,7 +229,7 @@ impl KnowledgeRetrievalMode {
 pub(in crate::config) struct AgentConfigDocument {
     version: u32,
     #[serde(default)]
-    knowledge: KnowledgeConfigFile,
+    pub(in crate::config) knowledge: KnowledgeConfigFile,
     #[serde(default)]
     providers: HashMap<String, ProviderFile>,
     #[serde(default)]
@@ -218,9 +243,11 @@ pub(in crate::config) struct AgentConfigDocument {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct KnowledgeConfigFile {
+pub(in crate::config) struct KnowledgeConfigFile {
     #[serde(default)]
-    mode: KnowledgeRetrievalMode,
+    pub(in crate::config) mode: KnowledgeRetrievalMode,
+    #[serde(default)]
+    pub(in crate::config) embedding: KnowledgeEmbeddingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -391,6 +418,7 @@ impl AgentRuntimeConfig {
             search_routes,
             profiles,
             knowledge_mode: file.knowledge.mode,
+            knowledge_embedding: file.knowledge.embedding,
             scenes: AgentScenes {
                 private: scene_from_file(file.scenes.private),
                 group: scene_from_file(file.scenes.group),
@@ -487,6 +515,13 @@ impl AgentRuntimeConfig {
         let group = self.resolve(ChatScene::Group)?;
         Ok(serde_json::json!({
             "source": self.source_label(),
+            "knowledge": {
+                "mode": self.knowledge_mode.as_str(),
+                "embedding": {
+                    "enabled": self.knowledge_embedding.enabled,
+                    "cache_dir": &self.knowledge_embedding.cache_dir,
+                },
+            },
             "private": private.diagnostic_summary(),
             "group": group.diagnostic_summary(),
         }))
@@ -509,7 +544,16 @@ impl AgentRuntimeConfig {
         self.providers.values().cloned().collect()
     }
 
+    pub fn knowledge_embedding(&self) -> &KnowledgeEmbeddingConfig {
+        &self.knowledge_embedding
+    }
+
     fn validate(&self) -> Result<(), LlmError> {
+        if self.knowledge_embedding.cache_dir.trim().is_empty() {
+            return Err(LlmError::config(
+                "agent knowledge embedding cache_dir must not be empty",
+            ));
+        }
         if self.routes.is_empty() {
             return Err(LlmError::config(
                 "agent config must define at least one model route",
@@ -602,7 +646,8 @@ impl AgentRuntimeConfig {
             routes,
             search_routes: HashMap::from([("search".to_owned(), search_model.to_owned())]),
             profiles,
-            knowledge_mode: KnowledgeRetrievalMode::Tool,
+            knowledge_mode: KnowledgeRetrievalMode::Preflight,
+            knowledge_embedding: KnowledgeEmbeddingConfig::default(),
             scenes: AgentScenes {
                 private: AgentScenePolicy {
                     enabled: true,

@@ -269,6 +269,7 @@ function parseConfigurationSnapshot(value: unknown, toolsValue: unknown = [], re
     agent: Object.keys(agent).length === 0 ? null : {
       revision: string(agent.revision, "missing"),
       fileExists: agent.file_exists === true,
+      source: typeof agent.source === "string" ? agent.source as ConfigFieldSnapshot["source"] : "not_configured",
       editable: agent.editable === true,
       readOnly: agent.read_only === true,
       pendingRestart: agent.pending_restart === true,

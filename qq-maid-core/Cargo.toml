@@ -27,6 +27,8 @@ libc = "0.2"
 dotenvy = "0.15"
 # RSS / Atom feed 解析
 feed-rs = "2.4.0"
+# 可选本地语义召回；默认配置关闭，启用后模型与推理均留在本机。
+fastembed = { version = "5.17.3", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
 # 异步数据流工具
 futures = "0.3"
 # HTML 摘要转纯文本

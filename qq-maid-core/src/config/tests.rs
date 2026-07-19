@@ -660,6 +660,7 @@ fn env_example_documents_knowledge_dir() {
     let env_example = include_str!("../../../runtime/config/.env.example");
 
     assert!(env_example.contains("KNOWLEDGE_DIR="));
+    assert!(!env_example.contains("KNOWLEDGE_EMBEDDING_"));
 }
 
 #[test]

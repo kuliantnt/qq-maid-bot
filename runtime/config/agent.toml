@@ -6,9 +6,16 @@
 # openid、群 ID、聊天记录、SQLite 路径或日志路径。
 version = 1
 
-# 默认由 Agent 按需调用 knowledge_search；auto 仅用于紧急回退到自动注入。
+# preflight 每轮只做一次低成本本地检索，高相关时注入少量主证据；
+# knowledge_search 仍可供 Agent 深入检索。tool 完全依赖 Agent，auto 仅作紧急回退。
 [knowledge]
-mode = "tool"
+mode = "preflight"
+
+# 本地语义召回默认关闭，避免升级后隐式下载模型。启用后首次启动会下载公开模型；
+# 模型推理、文档正文与知识向量均留在本机，关闭后稳定退回纯 BM25。
+[knowledge.embedding]
+enabled = false
+cache_dir = "cache/knowledge-embedding"
 
 # 可声明非敏感的 OpenAI-compatible provider 元数据；真实 API key 仍只从环境变量读取。
 # 下面注册 MiMo provider，并将它放入默认降级候选；未配置 MIMO_API_KEY 时会跳过该候选。

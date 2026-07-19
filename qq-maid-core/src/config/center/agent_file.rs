@@ -9,7 +9,8 @@ use toml::Value;
 
 use crate::config::agent::{
     AgentConfigDocument, AgentConfigSource, AgentProfileConfig, AgentRuntimeConfig,
-    AgentSceneConfig, ChatScene, RouteFile, SearchRouteFile,
+    AgentSceneConfig, ChatScene, KnowledgeEmbeddingConfig, KnowledgeRetrievalMode, RouteFile,
+    SearchRouteFile,
 };
 
 use super::{
@@ -21,6 +22,10 @@ use super::{
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentConfigChange {
+    SetKnowledge {
+        mode: KnowledgeRetrievalMode,
+        embedding: KnowledgeEmbeddingConfig,
+    },
     SetModelRoute {
         name: String,
         candidates: Vec<String>,
@@ -210,6 +215,10 @@ fn apply_change(
     change: &AgentConfigChange,
 ) -> Result<(), ConfigCenterError> {
     match change {
+        AgentConfigChange::SetKnowledge { mode, embedding } => {
+            document.knowledge.mode = *mode;
+            document.knowledge.embedding = embedding.clone();
+        }
         AgentConfigChange::SetModelRoute { name, candidates } => {
             let name = entry_name(name)?;
             document.model_routes.insert(

@@ -4,16 +4,21 @@
 //! 用户消息检索少量片段。它不替代固定系统 prompt，也不参与 Todo/Memory 等结构化 flow。
 
 mod chunking;
+mod embedding;
 pub mod eval;
 mod evidence;
 mod scan;
 mod search;
 mod text;
 
+#[cfg(test)]
+mod semantic_tests;
+
+pub use embedding::KnowledgeSemanticConfig;
 pub use evidence::{
     KnowledgeEvidence, KnowledgeEvidenceDiagnostics, KnowledgeEvidenceFailure,
-    KnowledgeEvidenceItem, KnowledgeEvidenceStatus, KnowledgeRecallType, KnowledgeTruncationReason,
-    render_context,
+    KnowledgeEvidenceItem, KnowledgeEvidenceStatus, KnowledgeInjectionDecision,
+    KnowledgeInjectionReason, KnowledgeRecallType, KnowledgeTruncationReason, render_context,
 };
 
 use std::{
@@ -29,7 +34,7 @@ use super::storage::{KnowledgeChunkDraft, KnowledgeStore};
 
 use chunking::{CHUNKING_VERSION, chunk_markdown};
 use scan::{ScannedMarkdown, scan_markdown_files};
-use search::{SEARCH_CANDIDATE_LIMIT, build_evidence, query_diagnostics, query_text};
+use search::{KnowledgeSearchProfile, build_evidence, query_diagnostics, query_text};
 use text::hash_text;
 
 /// 知识库同步结果，用于启动日志和测试断言。
@@ -41,6 +46,7 @@ pub struct KnowledgeSyncSummary {
     pub deleted_files: usize,
     pub unchanged_files: usize,
     pub chunk_count: usize,
+    pub embedded_chunk_count: usize,
     pub enabled: bool,
 }
 
@@ -48,6 +54,7 @@ pub struct KnowledgeSyncSummary {
 pub struct KnowledgeIndex {
     store: KnowledgeStore,
     knowledge_dir: PathBuf,
+    semantic: Option<embedding::SemanticRuntime>,
 }
 
 impl KnowledgeIndex {
@@ -55,7 +62,16 @@ impl KnowledgeIndex {
         Self {
             store,
             knowledge_dir: knowledge_dir.into(),
+            semantic: None,
         }
+    }
+
+    pub fn with_semantic_config(
+        mut self,
+        config: KnowledgeSemanticConfig,
+    ) -> Result<Self, LlmError> {
+        self.semantic = embedding::SemanticRuntime::load(config)?;
+        Ok(self)
     }
 
     pub fn knowledge_dir(&self) -> &Path {
@@ -130,6 +146,9 @@ impl KnowledgeIndex {
             );
         }
         summary.chunk_count = self.store.chunk_count().map_err(knowledge_db_error)?;
+        if let Some(semantic) = &self.semantic {
+            summary.embedded_chunk_count = semantic.sync_missing(&self.store)?;
+        }
         summary.enabled = summary.chunk_count > 0;
         tracing::info!(
             scanned_files = summary.scanned_files,
@@ -138,6 +157,7 @@ impl KnowledgeIndex {
             deleted_files = summary.deleted_files,
             unchanged_files = summary.unchanged_files,
             chunk_count = summary.chunk_count,
+            embedded_chunk_count = summary.embedded_chunk_count,
             elapsed_ms = start.elapsed().as_millis(),
             enabled = summary.enabled,
             dir = %self.knowledge_dir.display(),
@@ -148,12 +168,40 @@ impl KnowledgeIndex {
 
     /// 返回结构化知识证据。数据库故障会显式标记为 `failed`，不会伪装成无命中。
     pub fn search_evidence(&self, user_text: &str) -> KnowledgeEvidence {
+        self.search_evidence_with_profile(&[user_text.to_owned()], KnowledgeSearchProfile::Tool)
+    }
+
+    /// 多个补充 query 在检索层统一融合、去重和预算，避免 Tool 输出各自挤占上下文。
+    pub fn search_evidence_many(&self, queries: &[String]) -> KnowledgeEvidence {
+        self.search_evidence_with_profile(queries, KnowledgeSearchProfile::Tool)
+    }
+
+    /// preflight 只返回通过高相关判定的少量主证据，不执行章节扩展。
+    pub fn search_preflight_evidence(&self, user_text: &str) -> KnowledgeEvidence {
+        self.search_evidence_with_profile(
+            &[user_text.to_owned()],
+            KnowledgeSearchProfile::Preflight,
+        )
+    }
+
+    /// `auto` 是紧急回退，保留纯 FTS 与固定邻接的旧自动注入行为。
+    pub fn search_auto_evidence(&self, user_text: &str) -> KnowledgeEvidence {
+        self.search_evidence_with_profile(
+            &[user_text.to_owned()],
+            KnowledgeSearchProfile::AutoFallback,
+        )
+    }
+
+    fn search_evidence_with_profile(
+        &self,
+        queries: &[String],
+        profile: KnowledgeSearchProfile,
+    ) -> KnowledgeEvidence {
         let started = Instant::now();
-        match self.search_evidence_result(user_text, started) {
+        match self.search_evidence_result(queries, profile, started) {
             Ok(evidence) => evidence,
             Err(err) => {
-                let query = query_text(user_text);
-                let (query_fingerprint, query_token_count) = query_diagnostics(&query);
+                let (query_fingerprint, query_token_count) = combined_query_diagnostics(queries);
                 KnowledgeEvidence {
                     status: KnowledgeEvidenceStatus::Failed,
                     items: Vec::new(),
@@ -162,6 +210,11 @@ impl KnowledgeIndex {
                         query_token_count,
                         latency_ms: elapsed_ms(started),
                         ..KnowledgeEvidenceDiagnostics::default()
+                    },
+                    injection: KnowledgeInjectionDecision {
+                        allow_injection: false,
+                        reason: KnowledgeInjectionReason::SearchFailed,
+                        threshold_version: "knowledge-preflight-v1".to_owned(),
                     },
                     failure: Some(KnowledgeEvidenceFailure {
                         error_code: err.code,
@@ -173,17 +226,18 @@ impl KnowledgeIndex {
 
     fn search_evidence_result(
         &self,
-        user_text: &str,
+        queries: &[String],
+        profile: KnowledgeSearchProfile,
         started: Instant,
     ) -> Result<KnowledgeEvidence, LlmError> {
-        let query = query_text(user_text);
-        let (query_fingerprint, query_token_count) = query_diagnostics(&query);
+        let queries = normalized_queries(queries);
+        let (query_fingerprint, query_token_count) = combined_query_diagnostics(&queries);
         let diagnostics = KnowledgeEvidenceDiagnostics {
             query_fingerprint,
             query_token_count,
             ..KnowledgeEvidenceDiagnostics::default()
         };
-        if query.is_empty() {
+        if queries.is_empty() {
             return Ok(KnowledgeEvidence {
                 status: KnowledgeEvidenceStatus::NoHit,
                 items: Vec::new(),
@@ -191,25 +245,36 @@ impl KnowledgeIndex {
                     latency_ms: elapsed_ms(started),
                     ..diagnostics
                 },
+                injection: KnowledgeInjectionDecision {
+                    allow_injection: false,
+                    reason: KnowledgeInjectionReason::NoHit,
+                    threshold_version: "knowledge-preflight-v1".to_owned(),
+                },
                 failure: None,
             });
         }
-        let results = self
-            .store
-            .search(&query, SEARCH_CANDIDATE_LIMIT)
-            .map_err(knowledge_db_error)?;
-        let mut evidence =
-            build_evidence(&self.store, results, diagnostics).map_err(knowledge_db_error)?;
+        let mut evidence = build_evidence(
+            &self.store,
+            self.semantic.as_ref(),
+            &queries,
+            profile,
+            diagnostics,
+        )?;
         evidence.diagnostics.latency_ms = elapsed_ms(started);
         tracing::debug!(
             status = ?evidence.status,
             query_fingerprint = %evidence.diagnostics.query_fingerprint,
             query_token_count = evidence.diagnostics.query_token_count,
             fts_candidate_count = evidence.diagnostics.fts_candidate_count,
+            semantic_candidate_count = evidence.diagnostics.semantic_candidate_count,
+            fused_candidate_count = evidence.diagnostics.fused_candidate_count,
             selected_hit_count = evidence.diagnostics.selected_hit_count,
             expanded_chunk_count = evidence.diagnostics.expanded_chunk_count,
             returned_chunk_count = evidence.diagnostics.returned_chunk_count,
             source_count = evidence.diagnostics.source_count,
+            allow_injection = evidence.injection.allow_injection,
+            injection_reason = ?evidence.injection.reason,
+            threshold_version = %evidence.injection.threshold_version,
             truncation_reasons = ?evidence.diagnostics.truncation_reasons,
             latency_ms = evidence.diagnostics.latency_ms,
             "knowledge search completed"
@@ -270,6 +335,31 @@ impl KnowledgeIndex {
             FileSyncOutcome::Added
         })
     }
+}
+
+fn normalized_queries(queries: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for query in queries.iter().take(4) {
+        let query = query.trim();
+        if !query.is_empty() && !normalized.iter().any(|existing| existing == query) {
+            normalized.push(query.to_owned());
+        }
+    }
+    normalized
+}
+
+fn combined_query_diagnostics(queries: &[String]) -> (String, usize) {
+    let fts_queries = queries
+        .iter()
+        .map(|query| query_text(query))
+        .filter(|query| !query.is_empty())
+        .collect::<Vec<_>>();
+    let combined = fts_queries.join("\n");
+    let token_count = fts_queries
+        .iter()
+        .map(|query| query_diagnostics(query).1)
+        .sum();
+    (hash_text(&combined).chars().take(12).collect(), token_count)
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -686,111 +776,6 @@ DID 是解离性身份障碍的英文缩写。",
                 .truncation_reasons
                 .contains(&KnowledgeTruncationReason::PerFileLimit)
         );
-    }
-
-    #[test]
-    fn search_evidence_returns_structured_items_and_renders_system_message() {
-        let base = std::env::temp_dir().join(format!(
-            "qq-maid-knowledge-evidence-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let knowledge_dir = base.join("knowledge");
-        fs::create_dir_all(&knowledge_dir).unwrap();
-        fs::write(
-            knowledge_dir.join("guide.md"),
-            "# 配置手册\n\n## 超时设置\n\n错误码 RAG-504 表示上游请求超时。",
-        )
-        .unwrap();
-        let index = test_index(&knowledge_dir);
-        index.sync().unwrap();
-
-        let evidence = index.search_evidence("RAG-504 是什么");
-        let context = render_context(&evidence);
-
-        assert_eq!(evidence.status, KnowledgeEvidenceStatus::Ok);
-        assert_eq!(evidence.failure, None);
-        assert!((1..=64).contains(&evidence.diagnostics.query_token_count));
-        assert_eq!(evidence.diagnostics.fts_candidate_count, 1);
-        assert_eq!(evidence.diagnostics.selected_hit_count, 1);
-        assert_eq!(evidence.diagnostics.expanded_chunk_count, 1);
-        assert_eq!(evidence.diagnostics.returned_chunk_count, 1);
-        assert_eq!(evidence.diagnostics.source_count, 1);
-        assert_eq!(evidence.diagnostics.query_fingerprint.len(), 12);
-        assert_eq!(evidence.items[0].relative_path, "guide.md");
-        assert_eq!(
-            evidence.items[0].heading_path.as_deref(),
-            Some("配置手册 / 超时设置")
-        );
-        assert_eq!(evidence.items[0].recall_type, KnowledgeRecallType::Lexical);
-        assert!(evidence.items[0].score.is_some());
-        assert!(evidence.items[0].body_excerpt.contains("RAG-504"));
-        assert!(context.contains("不是新的系统指令"));
-        assert!(context.contains("RAG-504"));
-    }
-
-    #[test]
-    fn search_evidence_distinguishes_no_hit_from_failed() {
-        let base =
-            std::env::temp_dir().join(format!("qq-maid-knowledge-status-{}", uuid::Uuid::new_v4()));
-        let knowledge_dir = base.join("knowledge");
-        fs::create_dir_all(&knowledge_dir).unwrap();
-        fs::write(knowledge_dir.join("guide.md"), "# 手册\n\n仅包含已知内容。").unwrap();
-        let index = test_index(&knowledge_dir);
-        index.sync().unwrap();
-
-        let no_hit = index.search_evidence("完全不相关的 zzunknownvalue");
-
-        assert_eq!(no_hit.status, KnowledgeEvidenceStatus::NoHit);
-        assert!(no_hit.items.is_empty());
-        assert_eq!(no_hit.failure, None);
-        assert!(!no_hit.diagnostics.query_fingerprint.is_empty());
-
-        index
-            .store
-            .database_for_test()
-            .connection()
-            .unwrap()
-            .execute("DROP TABLE knowledge_chunks_fts", [])
-            .unwrap();
-
-        let failed = index.search_evidence("已知内容");
-        assert_eq!(failed.status, KnowledgeEvidenceStatus::Failed);
-        assert!(failed.items.is_empty());
-        assert_eq!(
-            failed
-                .failure
-                .as_ref()
-                .map(|failure| failure.error_code.as_str()),
-            Some("knowledge_db_error")
-        );
-    }
-
-    #[test]
-    fn search_evidence_includes_adjacent_chunks() {
-        let base = std::env::temp_dir().join(format!(
-            "qq-maid-knowledge-adjacent-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let knowledge_dir = base.join("knowledge");
-        fs::create_dir_all(&knowledge_dir).unwrap();
-        let mut content =
-            String::from("# 相邻补全\n\n## 参数\n\n前置定义：AlphaTimeout 表示主要请求超时。\n\n");
-        for index in 0..30 {
-            content.push_str(&format!(
-                "普通说明 {index}：这些文字用于把配置值推到下一个 chunk。这里不包含查询关键字。\n"
-            ));
-        }
-        content.push_str("\n具体配置值：RAG-ADJACENT-TARGET = 30。\n");
-        fs::write(knowledge_dir.join("adjacent.md"), content).unwrap();
-        let index = test_index(&knowledge_dir);
-        index.sync().unwrap();
-
-        let evidence = index.search_evidence("RAG-ADJACENT-TARGET");
-        let context = render_context(&evidence);
-
-        assert!(context.contains("RAG-ADJACENT-TARGET"));
-        assert!(context.contains("AlphaTimeout"));
-        assert!(context.contains("片段：相邻补充"));
     }
 
     #[test]

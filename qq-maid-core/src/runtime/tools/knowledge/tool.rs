@@ -13,6 +13,7 @@ use super::{
 
 pub const KNOWLEDGE_SEARCH_TOOL_NAME: &str = "knowledge_search";
 const MAX_QUERY_CHARS: usize = 2_000;
+const MAX_QUERIES: usize = 4;
 const MAX_RESULTS: usize = 8;
 const BODY_TRUNCATION_MARKER: &str = "\n[正文因字符预算已裁剪]";
 
@@ -50,9 +51,16 @@ impl Tool for KnowledgeSearchTool {
                         "description": "最多返回的证据项数量，1 到 8；不确定时传 null",
                         "minimum": 1,
                         "maximum": MAX_RESULTS
+                    },
+                    "additional_queries": {
+                        "type": ["array", "null"],
+                        "description": "复杂问题可补充 1 到 3 个独立检索表达；结果会统一融合、去重和控制预算",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "maxItems": 3
                     }
                 },
-                "required": ["query", "max_results"],
+                "required": ["query", "max_results", "additional_queries"],
                 "additionalProperties": false
             }),
         }
@@ -87,7 +95,8 @@ impl Tool for KnowledgeSearchTool {
             ));
         }
         let max_results = parse_max_results(arguments.get("max_results"))?;
-        let mut evidence = self.index.search_evidence(query);
+        let queries = parse_queries(query, arguments.get("additional_queries"))?;
+        let mut evidence = self.index.search_evidence_many(&queries);
         if max_results < evidence.items.len() {
             evidence.items = retain_prioritized_items(evidence.items, max_results);
             evidence.diagnostics.returned_chunk_count = evidence.items.len();
@@ -136,15 +145,47 @@ fn invalid_max_results() -> LlmError {
     )
 }
 
+fn parse_queries(primary: &str, value: Option<&Value>) -> Result<Vec<String>, LlmError> {
+    let mut queries = vec![primary.to_owned()];
+    match value {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(values)) if (1..MAX_QUERIES).contains(&values.len()) => {
+            for value in values {
+                let query = value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|query| !query.is_empty())
+                    .ok_or_else(invalid_additional_queries)?;
+                if query.chars().count() > MAX_QUERY_CHARS {
+                    return Err(invalid_additional_queries());
+                }
+                if !queries.iter().any(|existing| existing == query) {
+                    queries.push(query.to_owned());
+                }
+            }
+        }
+        _ => return Err(invalid_additional_queries()),
+    }
+    Ok(queries)
+}
+
+fn invalid_additional_queries() -> LlmError {
+    LlmError::new(
+        "bad_tool_arguments",
+        "additional_queries must be null or an array of 1 to 3 non-empty queries",
+        "tool",
+    )
+}
+
 fn compact_output(mut evidence: KnowledgeEvidence, max_chars: usize) -> Value {
     let original_status = evidence.status;
     let mut budget_truncated = false;
     while serialized_len(&evidence) > max_chars {
-        // adjacent 只用于补充上下文，字符预算不足时优先整项删除，保留 lexical 主命中。
+        // 章节扩展只用于补充上下文，字符预算不足时优先整项删除，保留主命中。
         if let Some(index) = evidence
             .items
             .iter()
-            .rposition(|item| item.recall_type == super::KnowledgeRecallType::Adjacent)
+            .rposition(|item| item.recall_type == super::KnowledgeRecallType::Section)
         {
             evidence.items.remove(index);
             budget_truncated = true;
@@ -165,7 +206,7 @@ fn compact_output(mut evidence: KnowledgeEvidence, max_chars: usize) -> Value {
         let current = evidence.items[index].body_excerpt.clone();
         let next = truncated_excerpt(&current);
         if next == current {
-            // 极小字符预算下连裁剪标记也放不下时，最后才移除 lexical 项，避免死循环。
+            // 极小字符预算下连裁剪标记也放不下时，最后才移除主命中，避免死循环。
             evidence.items.remove(index);
             budget_truncated = true;
             update_item_diagnostics(&mut evidence);
@@ -211,7 +252,7 @@ fn retain_prioritized_items(
     prioritized.extend(
         items
             .iter()
-            .filter(|item| item.recall_type == super::KnowledgeRecallType::Lexical)
+            .filter(|item| item.recall_type != super::KnowledgeRecallType::Section)
             .take(max_results)
             .cloned(),
     );
@@ -219,7 +260,7 @@ fn retain_prioritized_items(
         prioritized.extend(
             items
                 .into_iter()
-                .filter(|item| item.recall_type == super::KnowledgeRecallType::Adjacent)
+                .filter(|item| item.recall_type == super::KnowledgeRecallType::Section)
                 .take(max_results - prioritized.len()),
         );
     }
@@ -263,6 +304,7 @@ fn evidence_value(evidence: &KnowledgeEvidence) -> Value {
         "status": evidence.status,
         "items": evidence.items,
         "diagnostics": evidence.diagnostics,
+        "injection": evidence.injection,
         "failure": evidence.failure,
         "error_code": error_code,
         "message": status_message(evidence.status),
@@ -413,7 +455,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adjacent_lexical_hits_remain_lexical_and_survive_max_results() {
+    async fn separate_section_hits_remain_primary_and_survive_max_results() {
         let content = "# 相邻主命中回归\n\n\
 ## 普通前置片段\n\n这是 lexical 主命中前的普通相邻内容，不包含检索目标。\n\n\
 ## 第一主命中\n\nLEXICAL-PAIR-TARGET 出现在第一个主命中片段。\n\n\
@@ -428,8 +470,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(lexical.len(), 2);
         assert!(lexical.iter().all(|item| item.score.is_some()));
-        assert!(evidence.items.iter().any(|item| {
-            item.recall_type == super::super::KnowledgeRecallType::Adjacent
+        assert!(!evidence.items.iter().any(|item| {
+            item.recall_type == super::super::KnowledgeRecallType::Section
                 && item.body_excerpt.contains("普通相邻内容")
         }));
 
@@ -470,11 +512,20 @@ mod tests {
                     start_line: Some(3),
                     end_line: Some(4),
                     score: None,
-                    recall_type: super::super::KnowledgeRecallType::Adjacent,
+                    recall_type: super::super::KnowledgeRecallType::Section,
                     body_excerpt: long_body,
                 },
             ],
             diagnostics: Default::default(),
+            injection: super::super::KnowledgeInjectionDecision {
+                allow_injection: status != KnowledgeEvidenceStatus::Failed,
+                reason: if status == KnowledgeEvidenceStatus::Failed {
+                    super::super::KnowledgeInjectionReason::SearchFailed
+                } else {
+                    super::super::KnowledgeInjectionReason::LexicalHighConfidence
+                },
+                threshold_version: "test".to_owned(),
+            },
             failure: (status == KnowledgeEvidenceStatus::Failed).then(|| {
                 super::super::KnowledgeEvidenceFailure {
                     error_code: "knowledge_db_error".to_owned(),

@@ -69,6 +69,7 @@ export interface ConfigFieldSnapshot {
 export interface AgentConfigSnapshot {
   revision: string;
   fileExists: boolean;
+  source: ConfigSource;
   editable: boolean;
   readOnly: boolean;
   pendingRestart: boolean;

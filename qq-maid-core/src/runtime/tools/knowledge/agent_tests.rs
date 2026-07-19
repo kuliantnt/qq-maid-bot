@@ -115,6 +115,124 @@ async fn auto_mode_injects_knowledge_and_hides_search_tool() {
 }
 
 #[tokio::test]
+async fn preflight_injects_only_high_confidence_primary_evidence_and_keeps_tool() {
+    let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let inspector = provider.clone();
+    let (service, base) = test_service_with_provider_tool_calling_mode_and_base(
+        provider,
+        crate::config::KnowledgeRetrievalMode::Preflight,
+    );
+    sync_test_knowledge(
+        &service,
+        &base,
+        "operations/errors.md",
+        "# 错误码\n\n## RAG-504\n\nRAG-504 表示上游请求超时。",
+    );
+
+    let response = service
+        .respond(private_message("RAG-504 是什么错误？"))
+        .await
+        .unwrap();
+
+    let request = inspector.tool_requests().remove(0);
+    let knowledge_messages = request
+        .chat
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role == ChatRole::System && message.content.contains("本地 Markdown 知识资料")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(knowledge_messages.len(), 1);
+    assert!(
+        knowledge_messages[0]
+            .content
+            .contains("RAG-504 表示上游请求超时")
+    );
+    assert!(!knowledge_messages[0].content.contains("片段：章节补充"));
+    assert!(
+        request
+            .tools
+            .metadata()
+            .iter()
+            .any(|metadata| metadata.name == KNOWLEDGE_SEARCH_TOOL_NAME)
+    );
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["knowledge_mode"], "preflight");
+    assert_eq!(diagnostics["knowledge_injection_allowed"], true);
+    assert_eq!(
+        diagnostics["knowledge_injection_reason"],
+        "lexical_high_confidence"
+    );
+    assert_eq!(diagnostics["knowledge_hit_count"], 1);
+}
+
+#[tokio::test]
+async fn preflight_low_relevance_candidate_is_zero_injection() {
+    let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let inspector = provider.clone();
+    let (service, base) = test_service_with_provider_tool_calling_mode_and_base(
+        provider,
+        crate::config::KnowledgeRetrievalMode::Preflight,
+    );
+    sync_test_knowledge(
+        &service,
+        &base,
+        "operations/service.md",
+        "# 服务手册\n\n## 部署\n\n服务启动后会同步本地索引。LOW-RELEVANCE-MARKER",
+    );
+
+    let response = service
+        .respond(private_message("这个服务挺不错，晚饭吃什么？"))
+        .await
+        .unwrap();
+
+    let request = inspector.tool_requests().remove(0);
+    assert!(!request.chat.messages.iter().any(|message| {
+        message.role == ChatRole::System && message.content.contains("LOW-RELEVANCE-MARKER")
+    }));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["knowledge_mode"], "preflight");
+    assert_eq!(diagnostics["knowledge_status"], "low_relevance");
+    assert_eq!(diagnostics["knowledge_injection_allowed"], false);
+    assert_eq!(diagnostics["knowledge_injection_reason"], "below_threshold");
+    assert!(diagnostics["knowledge_candidate_count"].as_u64().unwrap() > 0);
+    assert_eq!(diagnostics["knowledge_hit_count"], 0);
+}
+
+#[tokio::test]
+async fn preflight_search_failure_is_zero_injection_without_blocking_chat() {
+    let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let inspector = provider.clone();
+    let (service, base) = test_service_with_provider_tool_calling_mode_and_base(
+        provider,
+        crate::config::KnowledgeRetrievalMode::Preflight,
+    );
+    sync_test_knowledge(
+        &service,
+        &base,
+        "operations/errors.md",
+        "# 错误码\n\nRAG-504 表示上游请求超时。",
+    );
+    break_test_knowledge_search(&service);
+
+    let response = service
+        .respond(private_message("RAG-504 是什么？"))
+        .await
+        .unwrap();
+
+    let request = inspector.tool_requests().remove(0);
+    assert!(!request.chat.messages.iter().any(|message| {
+        message.role == ChatRole::System && message.content.contains("RAG-504 表示上游请求超时")
+    }));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["knowledge_status"], "failed");
+    assert_eq!(diagnostics["knowledge_injection_allowed"], false);
+    assert_eq!(diagnostics["knowledge_injection_reason"], "search_failed");
+    assert_eq!(diagnostics["knowledge_hit_count"], 0);
+}
+
+#[tokio::test]
 async fn no_hit_does_not_preserve_fabricated_model_conclusion() {
     let provider = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)

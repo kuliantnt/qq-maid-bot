@@ -8,7 +8,7 @@ BOT_BIN := qq-maid-bot
 # 不统计 target/、脚本、配置、README、Makefile。
 STATUS_RUST_PATHS := ':(glob)$(COMMON_DIR)/**/*.rs' ':(glob)$(LLM_DIR)/**/*.rs' ':(glob)$(CORE_DIR)/**/*.rs' ':(glob)$(GATEWAY_DIR)/**/*.rs'
 
-.PHONY: help status build release install deploy local remote deploy-local deploy-remote run test test-common test-llm test-core test-gateway knowledge-eval common-fmt common-test common-check llm-fmt llm-test llm-check core-fmt core-test core-check gateway-fmt gateway-test gateway-check clean doctor diagnose
+.PHONY: help status build release install deploy local remote deploy-local deploy-remote run test test-common test-llm test-core test-gateway knowledge-eval knowledge-eval-v3 common-fmt common-test common-check llm-fmt llm-test llm-check core-fmt core-test core-check gateway-fmt gateway-test gateway-check clean doctor diagnose
 
 help:
 	@echo "make status        查看项目状态和 Rust 源码行数"
@@ -26,6 +26,7 @@ help:
 	@echo "make test-core     运行 Rust common 和 Core fmt check、测试和 check"
 	@echo "make test-gateway  运行 Rust common 和 QQ C2C gateway fmt、测试和 check"
 	@echo "make knowledge-eval 运行可复跑的 Knowledge FTS5 基线评测"
+	@echo "make knowledge-eval-v3 运行 Knowledge 混合召回与 preflight F2 评测"
 	@echo "make diagnose      运行网络和环境诊断脚本"
 	@echo "make clean         清理根目录 Cargo workspace 构建产物"
 
@@ -100,6 +101,9 @@ test-gateway: common-fmt gateway-fmt common-test gateway-test common-check gatew
 
 knowledge-eval:
 	cargo run -p qq-maid-core --bin knowledge-eval -- qq-maid-core/src/runtime/tools/knowledge/fixtures/knowledge_eval_v1.json
+
+knowledge-eval-v3:
+	cargo run -p qq-maid-core --bin knowledge-eval -- qq-maid-core/src/runtime/tools/knowledge/fixtures/knowledge_eval_v1.json --semantic --embedding-cache=/tmp/qq-maid-knowledge-embedding
 
 common-fmt:
 	cargo fmt -p qq-maid-common -- --check

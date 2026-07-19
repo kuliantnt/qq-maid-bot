@@ -8,6 +8,10 @@ version = 1
 [knowledge]
 mode = "auto"
 
+[knowledge.embedding]
+enabled = true
+cache_dir = "cache/custom-knowledge-embedding"
+
 [model_routes.main]
 candidates = ["openai:gpt-main", "deepseek:deepseek-chat"]
 
@@ -64,6 +68,11 @@ enabled_tools = ["get_weather", "list_todos", "get_weather"]
     let group = config.resolve(ChatScene::Group).unwrap();
     assert_eq!(private.profile, "deep");
     assert_eq!(private.knowledge_mode, KnowledgeRetrievalMode::Auto);
+    assert!(config.knowledge_embedding().enabled);
+    assert_eq!(
+        config.knowledge_embedding().cache_dir,
+        "cache/custom-knowledge-embedding"
+    );
     assert_eq!(private.main_model, "openai:gpt-main,deepseek:deepseek-chat");
     assert_eq!(private.reasoning_effort, Some(ReasoningEffort::High));
     assert_eq!(private.max_tool_rounds, 8);
@@ -300,6 +309,8 @@ fn default_agent_toml_declares_luna_first_without_embedding_secrets() {
     assert!(!active_config.contains("bigmodel:"));
     assert!(!active_config.contains("glm-"));
     assert!(!active_config.contains("sk-"));
+    assert!(active_config.contains("[knowledge.embedding]"));
+    assert!(active_config.contains("enabled = false"));
 }
 
 #[test]
@@ -313,6 +324,13 @@ fn default_agent_toml_preserves_private_and_group_scene_routes() {
 
     let private = config.resolve(ChatScene::Private).unwrap();
     let group = config.resolve(ChatScene::Group).unwrap();
+    assert_eq!(private.knowledge_mode, KnowledgeRetrievalMode::Preflight);
+    assert_eq!(group.knowledge_mode, KnowledgeRetrievalMode::Preflight);
+    assert!(!config.knowledge_embedding().enabled);
+    assert_eq!(
+        config.knowledge_embedding().cache_dir,
+        "cache/knowledge-embedding"
+    );
     assert_eq!(private.profile, "balanced");
     assert!(private.main_model.starts_with("openai:gpt-5.6-luna,"));
     assert_eq!(private.reasoning_effort, Some(ReasoningEffort::Medium));

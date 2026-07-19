@@ -5,7 +5,7 @@ use toml::Value;
 use crate::{
     config::{
         AgentProfileConfig, AgentRuntimeConfig, AgentSceneConfig, ChatScene,
-        agent::AgentConfigSource,
+        agent::{AgentConfigSource, KnowledgeEmbeddingConfig, KnowledgeRetrievalMode},
     },
     storage::database::SqliteDatabase,
 };
@@ -973,6 +973,55 @@ fn agent_route_save_reloads_new_model_and_reports_pending_restart() {
     let reopened = AgentConfigFile::new(reloaded).unwrap().snapshot().unwrap();
     assert_eq!(reopened.saved_value, reopened.running_value);
     assert!(!reopened.pending_restart);
+}
+
+#[test]
+fn agent_knowledge_embedding_save_uses_agent_toml_and_reports_running_value() {
+    let (file, _running, _database, path) = test_agent_file();
+    let initial = file.snapshot().unwrap();
+
+    let saved = file
+        .update(
+            &initial.revision,
+            &[AgentConfigChange::SetKnowledge {
+                mode: KnowledgeRetrievalMode::Preflight,
+                embedding: KnowledgeEmbeddingConfig {
+                    enabled: true,
+                    cache_dir: "cache/knowledge-embedding".to_owned(),
+                },
+            }],
+        )
+        .unwrap();
+
+    assert_eq!(saved.source, ConfigValueSource::AgentToml);
+    assert!(saved.pending_restart);
+    assert_eq!(
+        saved
+            .saved_value
+            .as_ref()
+            .and_then(|value| value.get("knowledge"))
+            .and_then(|value| value.get("embedding"))
+            .and_then(|value| value.get("enabled"))
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        saved
+            .running_value
+            .as_ref()
+            .and_then(|value| value.get("knowledge"))
+            .and_then(|value| value.get("embedding"))
+            .and_then(|value| value.get("enabled"))
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+
+    let environment = HashMap::from([(
+        crate::config::agent::AGENT_CONFIG_FILE_ENV.to_owned(),
+        path.to_string_lossy().into_owned(),
+    )]);
+    let reloaded = AgentRuntimeConfig::load_from_environment(&environment).unwrap();
+    assert!(reloaded.knowledge_embedding().enabled);
 }
 
 #[test]

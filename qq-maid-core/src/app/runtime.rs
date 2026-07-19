@@ -24,7 +24,7 @@ use crate::{
         session::SessionStore,
         tools::{
             DynRadarExecutor, build_radar_executor,
-            knowledge::{KnowledgeIndex, KnowledgeStore},
+            knowledge::{KnowledgeIndex, KnowledgeSemanticConfig, KnowledgeStore},
             memory::MemoryStore,
             ops::{OpsExecutionStore, OpsTaskRegistry},
             rss::{RssFetchConfig, RssFetcher, RssStore},
@@ -122,8 +122,15 @@ impl CoreRuntimeState {
             rss_store: RssStore::new(database.clone()),
             display_name_store: DisplayNameStore::new(database.clone()),
         };
+        let embedding = config.agent_config.knowledge_embedding();
+        let semantic_config = if embedding.enabled {
+            KnowledgeSemanticConfig::local(embedding.cache_dir.clone())
+        } else {
+            KnowledgeSemanticConfig::disabled(embedding.cache_dir.clone())
+        };
         let knowledge_index =
-            KnowledgeIndex::new(KnowledgeStore::new(database), config.knowledge_dir.clone());
+            KnowledgeIndex::new(KnowledgeStore::new(database), config.knowledge_dir.clone())
+                .with_semantic_config(semantic_config)?;
         // 知识目录不存在或为空会正常降级；数据库/FTS 错误必须阻止启动，
         // 否则会把索引损坏伪装成“没有知识命中”。
         knowledge_index.sync()?;

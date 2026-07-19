@@ -61,6 +61,36 @@ fn lexical_tokens(text: &str) -> Vec<String> {
     tokens.into_iter().filter(|item| item.len() >= 2).collect()
 }
 
+pub(super) fn relevance_terms(text: &str) -> Vec<String> {
+    let mut terms = lexical_tokens(text);
+    terms.extend(cjk_ngrams(text));
+    dedup_preserving_order(terms)
+}
+
+/// 识别通用编号/配置标识形态，只用于相关性信号，不绑定任何业务词表。
+pub(super) fn identifier_terms(text: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut run = String::new();
+    for ch in text.chars().chain(std::iter::once(' ')) {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-') {
+            run.push(ch);
+            continue;
+        }
+        if run.len() >= 4
+            && (run.bytes().any(|byte| byte.is_ascii_digit())
+                || run.contains(['_', '-'])
+                || run
+                    .bytes()
+                    .filter(|byte| byte.is_ascii_alphabetic())
+                    .all(|byte| byte.is_ascii_uppercase()))
+        {
+            terms.push(run.to_ascii_lowercase());
+        }
+        run.clear();
+    }
+    dedup_preserving_order(terms)
+}
+
 fn cjk_ngrams(text: &str) -> Vec<String> {
     let chars = text.chars().filter(|ch| is_cjk(*ch)).collect::<Vec<_>>();
     if chars.is_empty() {

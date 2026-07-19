@@ -60,7 +60,29 @@ pub const KNOWLEDGE_SCHEMA_V2: SqliteMigration = SqliteMigration {
             ON knowledge_chunks(document_id, chunk_index);",
 };
 
-pub const KNOWLEDGE_MIGRATIONS: &[SqliteMigration] = &[KNOWLEDGE_SCHEMA_V1, KNOWLEDGE_SCHEMA_V2];
+/// 本地语义向量独立保存，避免把具体模型和维度固化进可重建的 chunk 主表。
+pub const KNOWLEDGE_SCHEMA_V3: SqliteMigration = SqliteMigration {
+    name: "knowledge_schema_v3_embeddings",
+    sql: "CREATE TABLE IF NOT EXISTS knowledge_chunk_embeddings (
+            chunk_id TEXT NOT NULL,
+            model TEXT NOT NULL,
+            dimensions INTEGER NOT NULL,
+            embedding_version INTEGER NOT NULL,
+            content_hash TEXT NOT NULL,
+            vector BLOB NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(chunk_id, model, embedding_version),
+            FOREIGN KEY(chunk_id) REFERENCES knowledge_chunks(chunk_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_model
+            ON knowledge_chunk_embeddings(model, embedding_version, dimensions);",
+};
+
+pub const KNOWLEDGE_MIGRATIONS: &[SqliteMigration] = &[
+    KNOWLEDGE_SCHEMA_V1,
+    KNOWLEDGE_SCHEMA_V2,
+    KNOWLEDGE_SCHEMA_V3,
+];
 
 /// 待写入数据库的知识片段。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,8 +118,31 @@ pub struct KnowledgeSearchResult {
     pub start_line: Option<usize>,
     pub end_line: Option<usize>,
     pub code_language: Option<String>,
-    pub adjacent: bool,
+    pub search_text: String,
+    pub origin: KnowledgeSearchOrigin,
     pub score: f64,
+}
+
+/// 候选来自哪条召回或扩展路径；融合排序在 index 层完成。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeSearchOrigin {
+    Lexical,
+    Semantic,
+    Section,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEmbeddingSource {
+    pub chunk_id: String,
+    pub content_hash: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeEmbeddingRecord {
+    pub chunk_id: String,
+    pub content_hash: String,
+    pub vector: Vec<f32>,
 }
 
 /// 单个文档的索引同步状态。
@@ -225,6 +270,14 @@ impl KnowledgeStore {
             .map_err(DatabaseError::from_sql)?;
         }
         tx.execute(
+            "DELETE FROM knowledge_chunk_embeddings
+             WHERE chunk_id IN (
+                SELECT chunk_id FROM knowledge_chunks WHERE document_id = ?1
+             )",
+            params![document_id],
+        )
+        .map_err(DatabaseError::from_sql)?;
+        tx.execute(
             "DELETE FROM knowledge_chunks WHERE document_id = ?1",
             params![document_id],
         )
@@ -287,6 +340,17 @@ impl KnowledgeStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(DatabaseError::from_sql)?;
         drop(stmt);
+        tx.execute(
+            "DELETE FROM knowledge_chunk_embeddings
+             WHERE chunk_id IN (
+                SELECT c.chunk_id
+                FROM knowledge_chunks c
+                JOIN knowledge_documents d ON d.id = c.document_id
+                WHERE d.relative_path = ?1
+             )",
+            params![relative_path],
+        )
+        .map_err(DatabaseError::from_sql)?;
         for row_id in row_ids {
             // 删除文档时先清 FTS，再依赖外键级联删除片段行，避免留下不可见倒排项。
             tx.execute(
@@ -337,6 +401,7 @@ impl KnowledgeStore {
                     c.start_line,
                     c.end_line,
                     c.code_language,
+                    c.search_text,
                     bm25(knowledge_chunks_fts) AS rank
                  FROM knowledge_chunks_fts
                  JOIN knowledge_chunks c ON c.row_id = knowledge_chunks_fts.rowid
@@ -347,7 +412,7 @@ impl KnowledgeStore {
             .map_err(DatabaseError::from_sql)?;
         let rows = stmt
             .query_map(params![query, limit as i64], |row| {
-                let rank: f64 = row.get(11)?;
+                let rank: f64 = row.get(12)?;
                 Ok(KnowledgeSearchResult {
                     chunk_id: row.get(0)?,
                     document_id: row.get(1)?,
@@ -364,7 +429,8 @@ impl KnowledgeStore {
                         .get::<_, Option<i64>>(9)?
                         .map(|line| line.max(0) as usize),
                     code_language: row.get(10)?,
-                    adjacent: false,
+                    search_text: row.get(11)?,
+                    origin: KnowledgeSearchOrigin::Lexical,
                     // bm25 越小越相关；对外转成越大越相关的分数，便于诊断理解。
                     score: -rank,
                 })
@@ -374,14 +440,12 @@ impl KnowledgeStore {
             .map_err(DatabaseError::from_sql)
     }
 
-    pub fn adjacent_chunks(
+    pub fn section_chunks(
         &self,
         document_id: i64,
-        chunk_index: usize,
+        heading_path: Option<&str>,
     ) -> Result<Vec<KnowledgeSearchResult>, DatabaseError> {
         let conn = self.database.connection()?;
-        let previous = chunk_index as i64 - 1;
-        let next = chunk_index as i64 + 1;
         let mut stmt = conn
             .prepare(
                 "SELECT
@@ -395,14 +459,16 @@ impl KnowledgeStore {
                     body,
                     start_line,
                     end_line,
-                    code_language
+                    code_language,
+                    search_text
                  FROM knowledge_chunks
-                 WHERE document_id = ?1 AND chunk_index IN (?2, ?3)
+                 WHERE document_id = ?1
+                   AND ((?2 IS NULL AND heading_path IS NULL) OR heading_path = ?2)
                  ORDER BY chunk_index",
             )
             .map_err(DatabaseError::from_sql)?;
         let rows = stmt
-            .query_map(params![document_id, previous, next], |row| {
+            .query_map(params![document_id, heading_path], |row| {
                 Ok(KnowledgeSearchResult {
                     chunk_id: row.get(0)?,
                     document_id: row.get(1)?,
@@ -419,13 +485,257 @@ impl KnowledgeStore {
                         .get::<_, Option<i64>>(9)?
                         .map(|line| line.max(0) as usize),
                     code_language: row.get(10)?,
-                    adjacent: true,
+                    search_text: row.get(11)?,
+                    origin: KnowledgeSearchOrigin::Section,
                     score: 0.0,
                 })
             })
             .map_err(DatabaseError::from_sql)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(DatabaseError::from_sql)
+    }
+
+    /// `auto` 紧急回退保留旧邻接策略，正式 Tool 路径使用章节扩展。
+    pub fn adjacent_chunks(
+        &self,
+        document_id: i64,
+        chunk_index: usize,
+    ) -> Result<Vec<KnowledgeSearchResult>, DatabaseError> {
+        let conn = self.database.connection()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT chunk_id, document_id, relative_path, document_title,
+                        heading_path, chunk_index, chunk_type, body, start_line,
+                        end_line, code_language, search_text
+                 FROM knowledge_chunks
+                 WHERE document_id = ?1 AND chunk_index IN (?2, ?3)
+                 ORDER BY chunk_index",
+            )
+            .map_err(DatabaseError::from_sql)?;
+        let rows = stmt
+            .query_map(
+                params![document_id, chunk_index as i64 - 1, chunk_index as i64 + 1],
+                |row| {
+                    Ok(KnowledgeSearchResult {
+                        chunk_id: row.get(0)?,
+                        document_id: row.get(1)?,
+                        relative_path: row.get(2)?,
+                        document_title: row.get(3)?,
+                        heading_path: row.get(4)?,
+                        chunk_index: row.get::<_, i64>(5)?.max(0) as usize,
+                        chunk_type: row.get(6)?,
+                        body: row.get(7)?,
+                        start_line: row
+                            .get::<_, Option<i64>>(8)?
+                            .map(|line| line.max(0) as usize),
+                        end_line: row
+                            .get::<_, Option<i64>>(9)?
+                            .map(|line| line.max(0) as usize),
+                        code_language: row.get(10)?,
+                        search_text: row.get(11)?,
+                        origin: KnowledgeSearchOrigin::Section,
+                        score: 0.0,
+                    })
+                },
+            )
+            .map_err(DatabaseError::from_sql)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(DatabaseError::from_sql)
+    }
+
+    pub fn missing_embedding_sources(
+        &self,
+        model: &str,
+        embedding_version: i64,
+    ) -> Result<Vec<KnowledgeEmbeddingSource>, DatabaseError> {
+        let conn = self.database.connection()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.chunk_id, c.content_hash,
+                        trim(coalesce(c.document_title, '') || char(10) ||
+                             coalesce(c.heading_path, '') || char(10) || c.body)
+                 FROM knowledge_chunks c
+                 LEFT JOIN knowledge_chunk_embeddings e
+                   ON e.chunk_id = c.chunk_id
+                  AND e.model = ?1
+                  AND e.embedding_version = ?2
+                  AND e.content_hash = c.content_hash
+                 WHERE e.chunk_id IS NULL
+                 ORDER BY c.document_id, c.chunk_index",
+            )
+            .map_err(DatabaseError::from_sql)?;
+        let rows = stmt
+            .query_map(params![model, embedding_version], |row| {
+                Ok(KnowledgeEmbeddingSource {
+                    chunk_id: row.get(0)?,
+                    content_hash: row.get(1)?,
+                    text: row.get(2)?,
+                })
+            })
+            .map_err(DatabaseError::from_sql)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(DatabaseError::from_sql)
+    }
+
+    pub fn upsert_embeddings(
+        &self,
+        model: &str,
+        embedding_version: i64,
+        records: &[KnowledgeEmbeddingRecord],
+    ) -> Result<(), DatabaseError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.database.connection()?;
+        let tx = conn.transaction().map_err(DatabaseError::from_sql)?;
+        let updated_at = now_iso_cn();
+        for record in records {
+            let dimensions = record.vector.len() as i64;
+            let vector = encode_vector(&record.vector);
+            tx.execute(
+                "INSERT INTO knowledge_chunk_embeddings (
+                    chunk_id, model, dimensions, embedding_version,
+                    content_hash, vector, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(chunk_id, model, embedding_version) DO UPDATE SET
+                    dimensions = excluded.dimensions,
+                    content_hash = excluded.content_hash,
+                    vector = excluded.vector,
+                    updated_at = excluded.updated_at",
+                params![
+                    record.chunk_id,
+                    model,
+                    dimensions,
+                    embedding_version,
+                    record.content_hash,
+                    vector,
+                    updated_at,
+                ],
+            )
+            .map_err(DatabaseError::from_sql)?;
+        }
+        tx.commit().map_err(DatabaseError::from_sql)
+    }
+
+    pub fn semantic_search(
+        &self,
+        model: &str,
+        embedding_version: i64,
+        query_vector: &[f32],
+        limit: usize,
+    ) -> Result<Vec<KnowledgeSearchResult>, DatabaseError> {
+        if query_vector.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.database.connection()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT
+                    c.chunk_id, c.document_id, c.relative_path, c.document_title,
+                    c.heading_path, c.chunk_index, c.chunk_type, c.body,
+                    c.start_line, c.end_line, c.code_language, c.search_text, e.vector
+                 FROM knowledge_chunk_embeddings e
+                 JOIN knowledge_chunks c ON c.chunk_id = e.chunk_id
+                 WHERE e.model = ?1
+                   AND e.embedding_version = ?2
+                   AND e.dimensions = ?3
+                   AND e.content_hash = c.content_hash",
+            )
+            .map_err(DatabaseError::from_sql)?;
+        let rows = stmt
+            .query_map(
+                params![model, embedding_version, query_vector.len() as i64],
+                |row| {
+                    let vector = row.get::<_, Vec<u8>>(12)?;
+                    Ok((
+                        KnowledgeSearchResult {
+                            chunk_id: row.get(0)?,
+                            document_id: row.get(1)?,
+                            relative_path: row.get(2)?,
+                            document_title: row.get(3)?,
+                            heading_path: row.get(4)?,
+                            chunk_index: row.get::<_, i64>(5)?.max(0) as usize,
+                            chunk_type: row.get(6)?,
+                            body: row.get(7)?,
+                            start_line: row
+                                .get::<_, Option<i64>>(8)?
+                                .map(|line| line.max(0) as usize),
+                            end_line: row
+                                .get::<_, Option<i64>>(9)?
+                                .map(|line| line.max(0) as usize),
+                            code_language: row.get(10)?,
+                            search_text: row.get(11)?,
+                            origin: KnowledgeSearchOrigin::Semantic,
+                            score: 0.0,
+                        },
+                        vector,
+                    ))
+                },
+            )
+            .map_err(DatabaseError::from_sql)?;
+        let mut results = Vec::new();
+        for row in rows {
+            let (mut result, bytes) = row.map_err(DatabaseError::from_sql)?;
+            let Some(vector) = decode_vector(&bytes) else {
+                continue;
+            };
+            result.score = cosine_similarity(query_vector, &vector);
+            results.push(result);
+        }
+        results.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+        });
+        results.truncate(limit);
+        Ok(results)
+    }
+}
+
+fn encode_vector(vector: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(std::mem::size_of_val(vector));
+    for value in vector {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+fn decode_vector(bytes: &[u8]) -> Option<Vec<f32>> {
+    if !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
+        return None;
+    }
+    Some(
+        bytes
+            .chunks_exact(std::mem::size_of::<f32>())
+            .map(|chunk| {
+                let bytes: [u8; std::mem::size_of::<f32>()] =
+                    chunk.try_into().expect("chunks_exact keeps f32 width");
+                f32::from_le_bytes(bytes)
+            })
+            .collect(),
+    )
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f64 {
+    if left.len() != right.len() || left.is_empty() {
+        return 0.0;
+    }
+    let mut dot = 0.0_f64;
+    let mut left_norm = 0.0_f64;
+    let mut right_norm = 0.0_f64;
+    for (left, right) in left.iter().zip(right) {
+        let left = f64::from(*left);
+        let right = f64::from(*right);
+        dot += left * right;
+        left_norm += left * left;
+        right_norm += right * right;
+    }
+    if left_norm == 0.0 || right_norm == 0.0 {
+        0.0
+    } else {
+        dot / (left_norm.sqrt() * right_norm.sqrt())
     }
 }
 
@@ -484,8 +794,40 @@ mod tests {
         assert_eq!(results[0].chunk_index, 0);
         assert_eq!(results[0].start_line, Some(3));
 
+        let missing = store.missing_embedding_sources("fixture-model", 1).unwrap();
+        assert_eq!(missing.len(), 1);
+        store
+            .upsert_embeddings(
+                "fixture-model",
+                1,
+                &[KnowledgeEmbeddingRecord {
+                    chunk_id: missing[0].chunk_id.clone(),
+                    content_hash: missing[0].content_hash.clone(),
+                    vector: vec![1.0, 0.0],
+                }],
+            )
+            .unwrap();
+        assert!(
+            store
+                .missing_embedding_sources("fixture-model", 1)
+                .unwrap()
+                .is_empty()
+        );
+        let semantic = store
+            .semantic_search("fixture-model", 1, &[1.0, 0.0], 5)
+            .unwrap();
+        assert_eq!(semantic.len(), 1);
+        assert_eq!(semantic[0].origin, KnowledgeSearchOrigin::Semantic);
+        assert!((semantic[0].score - 1.0).abs() < f64::EPSILON);
+
         store.delete_document("example.md").unwrap();
         assert_eq!(store.chunk_count().unwrap(), 0);
         assert!(store.search("rag 407", 5).unwrap().is_empty());
+        assert!(
+            store
+                .semantic_search("fixture-model", 1, &[1.0, 0.0], 5)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

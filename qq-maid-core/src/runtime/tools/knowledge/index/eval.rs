@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::storage::database::SqliteDatabase;
 
-use super::{KnowledgeEvidenceStatus, KnowledgeIndex};
+use super::{KnowledgeEvidenceStatus, KnowledgeIndex, KnowledgeSemanticConfig};
 use crate::runtime::tools::knowledge::storage::{KNOWLEDGE_MIGRATIONS, KnowledgeStore};
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -55,7 +55,11 @@ pub struct KnowledgeEvalMetrics {
     pub source_hit_rate: f64,
     pub no_evidence_accuracy: f64,
     pub low_relevance_injection_rate: f64,
+    pub preflight_injection_accuracy: f64,
+    pub preflight_false_positive_rate: f64,
+    pub preflight_false_negative_rate: f64,
     pub truncated_rate: f64,
+    pub duplicate_rate: f64,
     pub latency_ms_p50: u64,
     pub latency_ms_p95: u64,
 }
@@ -69,6 +73,14 @@ pub struct KnowledgeEvalCaseResult {
     pub retrieved_sources: Vec<String>,
     pub source_recall: f64,
     pub no_evidence_correct: Option<bool>,
+    pub preflight_allowed: bool,
+    pub preflight_expected_allowed: bool,
+    pub preflight_correct: bool,
+    pub duplicate_count: usize,
+    pub top_lexical_coverage: Option<f64>,
+    pub top_semantic_similarity: Option<f64>,
+    pub injection_reason: String,
+    pub preflight_sources: Vec<String>,
     pub latency_ms: u64,
 }
 
@@ -79,6 +91,7 @@ impl KnowledgeEvalReport {
             && self.metrics.source_hit_rate >= 0.6
             && self.metrics.no_evidence_accuracy >= 1.0
             && self.metrics.low_relevance_injection_rate <= 0.0
+            && self.metrics.preflight_false_positive_rate <= 0.0
     }
 }
 
@@ -91,6 +104,25 @@ pub fn parse_dataset(json: &str) -> Result<KnowledgeEvalDataset, String> {
 
 /// 在隔离的临时索引中运行评测，避免接触或修改真实 `APP_DB_FILE` 和知识目录。
 pub fn run_fts5_baseline(dataset: &KnowledgeEvalDataset) -> Result<KnowledgeEvalReport, String> {
+    run_evaluation(dataset, None, "fts5_bm25")
+}
+
+pub fn run_knowledge_v3(
+    dataset: &KnowledgeEvalDataset,
+    embedding_cache_dir: PathBuf,
+) -> Result<KnowledgeEvalReport, String> {
+    run_evaluation(
+        dataset,
+        Some(KnowledgeSemanticConfig::local(embedding_cache_dir)),
+        "fts5_bm25+local_embedding+rrf",
+    )
+}
+
+fn run_evaluation(
+    dataset: &KnowledgeEvalDataset,
+    semantic: Option<KnowledgeSemanticConfig>,
+    engine: &str,
+) -> Result<KnowledgeEvalReport, String> {
     validate_dataset(dataset)?;
     let workspace = EvalWorkspace::create()?;
     for document in &dataset.documents {
@@ -106,7 +138,12 @@ pub fn run_fts5_baseline(dataset: &KnowledgeEvalDataset) -> Result<KnowledgeEval
         KNOWLEDGE_MIGRATIONS,
     )
     .map_err(|error| error.to_string())?;
-    let index = KnowledgeIndex::new(KnowledgeStore::new(database), &workspace.knowledge_dir);
+    let mut index = KnowledgeIndex::new(KnowledgeStore::new(database), &workspace.knowledge_dir);
+    if let Some(config) = semantic {
+        index = index
+            .with_semantic_config(config)
+            .map_err(|error| error.to_string())?;
+    }
     index.sync().map_err(|error| error.to_string())?;
 
     let mut results = Vec::with_capacity(dataset.cases.len());
@@ -129,6 +166,22 @@ pub fn run_fts5_baseline(dataset: &KnowledgeEvalDataset) -> Result<KnowledgeEval
         } else {
             matched as f64 / case.expected_sources.len() as f64
         };
+        let preflight = index.search_preflight_evidence(&case.query);
+        let preflight_expected_allowed = !case.expect_no_hit && !case.expected_sources.is_empty();
+        let preflight_allowed = preflight.injection.allow_injection;
+        let duplicate_count = preflight
+            .items
+            .iter()
+            .map(|item| (&item.relative_path, &item.heading_path))
+            .collect::<HashSet<_>>()
+            .len();
+        let mut preflight_sources = preflight
+            .items
+            .iter()
+            .map(|item| item.relative_path.clone())
+            .collect::<Vec<_>>();
+        preflight_sources.sort();
+        preflight_sources.dedup();
         results.push(KnowledgeEvalCaseResult {
             id: case.id.clone(),
             category: case.category.clone(),
@@ -137,15 +190,31 @@ pub fn run_fts5_baseline(dataset: &KnowledgeEvalDataset) -> Result<KnowledgeEval
             retrieved_sources,
             source_recall,
             no_evidence_correct: case.expect_no_hit.then_some(
-                evidence.items.is_empty() && evidence.status == KnowledgeEvidenceStatus::NoHit,
+                evidence.items.is_empty()
+                    && matches!(
+                        evidence.status,
+                        KnowledgeEvidenceStatus::NoHit | KnowledgeEvidenceStatus::LowRelevance
+                    ),
             ),
+            preflight_allowed,
+            preflight_expected_allowed,
+            preflight_correct: preflight_allowed == preflight_expected_allowed,
+            duplicate_count: preflight.items.len().saturating_sub(duplicate_count),
+            top_lexical_coverage: preflight.diagnostics.top_lexical_coverage,
+            top_semantic_similarity: preflight.diagnostics.top_semantic_similarity,
+            injection_reason: preflight.injection.reason.as_str().to_owned(),
+            preflight_sources,
             latency_ms: evidence.diagnostics.latency_ms,
         });
     }
-    Ok(build_report(dataset.version, results))
+    Ok(build_report(dataset.version, engine, results))
 }
 
-fn build_report(version: u32, cases: Vec<KnowledgeEvalCaseResult>) -> KnowledgeEvalReport {
+fn build_report(
+    version: u32,
+    engine: &str,
+    cases: Vec<KnowledgeEvalCaseResult>,
+) -> KnowledgeEvalReport {
     let evidence_cases = cases
         .iter()
         .filter(|case| !case.expected_sources.is_empty())
@@ -168,25 +237,54 @@ fn build_report(version: u32, cases: Vec<KnowledgeEvalCaseResult>) -> KnowledgeE
     let low_relevance_injection_rate = average(
         no_hit_cases
             .iter()
-            .map(|case| f64::from(!case.retrieved_sources.is_empty())),
+            .map(|case| f64::from(case.preflight_allowed)),
     );
     let truncated_rate = average(
         cases
             .iter()
             .map(|case| f64::from(case.status == KnowledgeEvidenceStatus::Truncated)),
     );
+    let preflight_cases = cases.iter().collect::<Vec<_>>();
+    let preflight_injection_accuracy = average(
+        preflight_cases
+            .iter()
+            .map(|case| f64::from(case.preflight_correct)),
+    );
+    let preflight_false_positive_rate = average(
+        preflight_cases
+            .iter()
+            .filter(|case| !case.preflight_expected_allowed)
+            .map(|case| f64::from(case.preflight_allowed)),
+    );
+    let preflight_false_negative_rate = average(
+        preflight_cases
+            .iter()
+            .filter(|case| case.preflight_expected_allowed)
+            .map(|case| f64::from(!case.preflight_allowed)),
+    );
+    let duplicate_rate = average(cases.iter().map(|case| {
+        if case.preflight_allowed {
+            f64::from(case.duplicate_count > 0)
+        } else {
+            0.0
+        }
+    }));
     let mut latencies = cases.iter().map(|case| case.latency_ms).collect::<Vec<_>>();
     latencies.sort_unstable();
     KnowledgeEvalReport {
         dataset_version: version,
-        engine: "fts5_bm25".to_owned(),
+        engine: engine.to_owned(),
         case_count: cases.len(),
         metrics: KnowledgeEvalMetrics {
             source_recall_at_k,
             source_hit_rate,
             no_evidence_accuracy,
             low_relevance_injection_rate,
+            preflight_injection_accuracy,
+            preflight_false_positive_rate,
+            preflight_false_negative_rate,
             truncated_rate,
+            duplicate_rate,
             latency_ms_p50: percentile(&latencies, 50),
             latency_ms_p95: percentile(&latencies, 95),
         },

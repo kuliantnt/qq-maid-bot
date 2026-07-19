@@ -17,7 +17,9 @@ use tokio::net::lookup_host;
 
 use crate::config::{
     ChatScene,
-    agent::{AgentProfileConfig, AgentSceneConfig},
+    agent::{
+        AgentProfileConfig, AgentSceneConfig, KnowledgeEmbeddingConfig, KnowledgeRetrievalMode,
+    },
     center::{AgentConfigChange, ConfigCenterError, ManagedConfigChange, SecretConfigChange},
 };
 
@@ -248,6 +250,10 @@ struct AgentUpdateRequest {
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum AgentChangeRequest {
+    SetKnowledge {
+        mode: KnowledgeRetrievalMode,
+        embedding: KnowledgeEmbeddingConfig,
+    },
     SetModelRoute {
         name: String,
         candidates: Vec<String>,
@@ -734,6 +740,9 @@ fn admin_context(
 
 fn agent_change(change: AgentChangeRequest) -> Result<AgentConfigChange, BoxedResponse> {
     Ok(match change {
+        AgentChangeRequest::SetKnowledge { mode, embedding } => {
+            AgentConfigChange::SetKnowledge { mode, embedding }
+        }
         AgentChangeRequest::SetModelRoute { name, candidates } => {
             AgentConfigChange::SetModelRoute { name, candidates }
         }
