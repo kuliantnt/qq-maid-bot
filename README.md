@@ -17,21 +17,16 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.20.2`，项目处于 `20.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.20.3`，项目处于 `20.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
 ## 20.x 版本线更新
-- **配置与部署体验升级**（v0.20.0 - v0.20.2）：建立安全配置中心与 `/console/` 部署管理入口，支持 Provider、平台入口和主要功能开关的受保护配置；升级脚本会在 v0.20.2 首次跨版本升级时备份并更新 Agent 配置模板，后续新增普通可选字段由程序默认值兼容。
-- **知识库从自动注入转为受控 Agent 工具**（PR #528、#534）：增加结构化证据、知识预检、词法与语义混合召回、章节扩展、统一证据预算和可评测索引流程；检索结果保留来源与相关性信息，模型按需调用并以证据回答。
-- **升级迁移流程收口**（PR #529、#538）：Unix、Windows 和远程部署均覆盖 Agent 配置升级提示、备份和一次性迁移标记，避免升级后静默覆盖用户策略。
-- **控制台工具治理与重启入口**（PR #530）：可在 `/console/` 查看已注册工具、按场景配置工具白名单并执行受保护重启，降低修改 Agent 策略和运维操作的门槛。
-- **统一 Provider TLS 依赖**（PR #537）：统一使用 rustls `ring` 后端，减少跨平台构建差异并移除不必要的 native TLS 构建依赖。
+- **配置与部署升级**（v0.20.0 - v0.20.3）：新增安全配置中心、`/console/` 管理入口、Agent 配置迁移和工具白名单，支持在网页中配置 Provider、QQ / OneBot / 微信入口及主要运行能力。
+- **知识库 Agent 化**（PR #528、#534）：知识检索改为按需调用的受控工具，支持结构化证据、混合召回和相关性评测。
 - **QQ 语音与命令前缀**（v0.20.1）：QQ 语音转写进入普通对话链路，所有入口支持统一可配置的聊天命令前缀。
-- **主线：安全配置中心与部署管理控制台**（[Epic #194](https://github.com/kuliantnt/qq-maid-bot/issues/194) Phase 2+3）：新实例可在 `/console/` 用网页完成 Provider、QQ/OneBot/微信入口与主要功能开关配置，不必再编辑 `.env`。
-- **配置中心已落地**（PR #514）：普通运行配置走 `runtime.toml`，API Key / Token 加密写入 SQLite，主密钥独立存放于 `secrets/master.key`；`agent.toml` 仍是模型路线与 Tool Calling 的唯一事实来源。
-- **`/console/` 首次向导**（PR #520）：用 `bootstrap.token` 建立首位部署管理员，分步保存配置，支持忘记密码重置、启动预检与受控 Provider 连接测试。
-- **优先级更清楚**：已登记字段在 WebUI 保存后以受管值为准；`.env` 仍可做首次启动兜底与 Bootstrap 路径。生产反代请配 `WEB_CONSOLE_TRUSTED_PROXY_IPS`，HTTPS 开 `WEB_CONSOLE_SECURE_COOKIES`。
+- **图片生成与多平台发送**（v0.20.3）：支持 QQ 官方与 OneBot 11 图片发送，并兼容 Windows 本地图片的 `file://` URI。
+- **运维与多模型能力**（v0.19.0 - v0.20.2）：支持白名单 `/ops` 运维、多模型候选降级、联网查询、RSS 推送和可选长期记忆整理。
 
 ### 配置方式变化
 
