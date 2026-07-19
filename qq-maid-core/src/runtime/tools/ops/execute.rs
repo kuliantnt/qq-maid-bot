@@ -97,7 +97,9 @@ pub(super) async fn execute_codex(
 ) -> OpsExecutionResult {
     let program_directory = match config.canonical_program_directory() {
         Ok(directory) => directory,
-        Err(_) => return spawn_failed("codex", Duration::ZERO),
+        Err(_) => {
+            return spawn_failed("codex", Duration::ZERO, "spawn_program_directory_failed");
+        }
     };
     execute_spec(
         "codex",
@@ -153,7 +155,7 @@ async fn execute_spec(
     if let Some(directory) = &spec.prepend_path_directory
         && prepend_program_directory_to_path(&mut command, directory).is_err()
     {
-        return spawn_failed(name, started_at.elapsed());
+        return spawn_failed(name, started_at.elapsed(), "spawn_path_failed");
     }
     if let Some(directory) = &spec.working_directory {
         command.current_dir(directory);
@@ -166,7 +168,9 @@ async fn execute_spec(
     }
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(_) => return spawn_failed(name, started_at.elapsed()),
+        Err(error) => {
+            return spawn_failed(name, started_at.elapsed(), spawn_error_type(&error));
+        }
     };
     *process_id.lock().unwrap() = child.id();
 
@@ -353,7 +357,7 @@ async fn terminate_task(child: &mut Child) -> TerminationOutcome {
     }
 }
 
-fn spawn_failed(name: &str, elapsed: Duration) -> OpsExecutionResult {
+fn spawn_failed(name: &str, elapsed: Duration, error_type: &'static str) -> OpsExecutionResult {
     OpsExecutionResult {
         command: name.to_owned(),
         status: OpsExecutionStatus::SpawnFailed,
@@ -363,8 +367,19 @@ fn spawn_failed(name: &str, elapsed: Duration) -> OpsExecutionResult {
         stderr: String::new(),
         stdout_truncated: false,
         stderr_truncated: false,
-        error_type: Some("spawn_failed".to_owned()),
+        error_type: Some(error_type.to_owned()),
         tree_termination_limited: false,
+    }
+}
+
+fn spawn_error_type(error: &std::io::Error) -> &'static str {
+    // 只保留可诊断类别，不把程序路径、参数或操作系统原始错误文本带入结果。
+    match error.kind() {
+        std::io::ErrorKind::NotFound => "spawn_not_found",
+        std::io::ErrorKind::PermissionDenied => "spawn_permission_denied",
+        std::io::ErrorKind::WouldBlock => "spawn_resource_exhausted",
+        std::io::ErrorKind::InvalidInput => "spawn_invalid_input",
+        _ => "spawn_failed",
     }
 }
 
