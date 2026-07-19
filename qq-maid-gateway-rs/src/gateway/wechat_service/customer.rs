@@ -25,7 +25,7 @@ pub(super) fn build_customer_messenger(
         return None;
     };
     Some(Arc::new(WechatCustomerMessageClient::new(
-        reqwest::Client::new(),
+        qq_maid_common::http_client::client(),
         config.api_base.clone(),
         app_id.clone(),
         app_secret.clone(),

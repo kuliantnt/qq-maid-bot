@@ -916,8 +916,11 @@ mod tests {
             }),
         ])
         .await;
-        let client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let client = ChatCompletionsClient::new(
+            "test-key",
+            Some(&base_url),
+            qq_maid_common::http_client::client(),
+        );
         let tools = ToolRegistry::new()
             .register(WeatherToolStub::new("小雨"))
             .unwrap();
@@ -985,8 +988,11 @@ mod tests {
             }),
         ])
         .await;
-        let client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let client = ChatCompletionsClient::new(
+            "test-key",
+            Some(&base_url),
+            qq_maid_common::http_client::client(),
+        );
         let tools = ToolRegistry::new()
             .register(WeatherToolStub::new("小雨"))
             .unwrap();
@@ -1047,8 +1053,11 @@ mod tests {
             }),
         ])
         .await;
-        let client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let client = ChatCompletionsClient::new(
+            "test-key",
+            Some(&base_url),
+            qq_maid_common::http_client::client(),
+        );
         let sequence = Arc::new(StdMutex::new(Vec::new()));
         let mut tools = ToolRegistry::new();
         tools
@@ -1100,8 +1109,11 @@ mod tests {
             }]
         })])
         .await;
-        let client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let client = ChatCompletionsClient::new(
+            "test-key",
+            Some(&base_url),
+            qq_maid_common::http_client::client(),
+        );
         let tools = ToolRegistry::new()
             .register(WeatherToolStub::new("小雨"))
             .unwrap();
@@ -1205,8 +1217,11 @@ mod tests {
             }),
         ])
         .await;
-        let client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let client = ChatCompletionsClient::new(
+            "test-key",
+            Some(&base_url),
+            qq_maid_common::http_client::client(),
+        );
         let tools = ToolRegistry::new()
             .register(WeatherToolStub::new("小雨"))
             .unwrap();
@@ -1246,8 +1261,11 @@ mod tests {
             }]
         })])
         .await;
-        let client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), reqwest::Client::new());
+        let client = ChatCompletionsClient::new(
+            "test-key",
+            Some(&base_url),
+            qq_maid_common::http_client::client(),
+        );
         let tools = ToolRegistry::new()
             .register(WeatherToolStub::new("小雨"))
             .unwrap();

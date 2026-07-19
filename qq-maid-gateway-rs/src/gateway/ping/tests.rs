@@ -637,7 +637,7 @@ async fn ping_check_direct_failure_overrides_stale_healthz_status() {
     let config = config();
     let runtime = GatewayRuntimeStatus::new_for_test();
     let auth = AccessTokenManager::new(
-        reqwest::Client::new(),
+        qq_maid_common::http_client::client(),
         "appid",
         "app-secret-value",
         Duration::from_secs(60),

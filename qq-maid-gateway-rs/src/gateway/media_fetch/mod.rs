@@ -502,7 +502,7 @@ mod tests {
         };
 
         fetch_qq_official_image_attachments(
-            &reqwest::Client::new(),
+            &qq_maid_common::http_client::client(),
             &context,
             "msg-1",
             &mut parts,
@@ -550,7 +550,7 @@ mod tests {
         };
 
         fetch_qq_official_image_attachments(
-            &reqwest::Client::new(),
+            &qq_maid_common::http_client::client(),
             &context,
             "msg-1",
             &mut parts,
@@ -645,7 +645,7 @@ mod tests {
         };
 
         fetch_qq_official_image_attachments(
-            &reqwest::Client::new(),
+            &qq_maid_common::http_client::client(),
             &context,
             "msg-1",
             &mut parts,
@@ -716,7 +716,7 @@ mod tests {
         };
 
         fetch_qq_official_image_attachments(
-            &reqwest::Client::new(),
+            &qq_maid_common::http_client::client(),
             &context,
             "msg-1",
             &mut parts,
@@ -784,7 +784,7 @@ mod tests {
         };
 
         fetch_qq_official_image_attachments(
-            &reqwest::Client::new(),
+            &qq_maid_common::http_client::client(),
             &context,
             "msg-1",
             &mut parts,
@@ -848,7 +848,7 @@ mod tests {
         };
 
         fetch_qq_official_image_attachments(
-            &reqwest::Client::new(),
+            &qq_maid_common::http_client::client(),
             &context,
             "msg-1",
             &mut parts,

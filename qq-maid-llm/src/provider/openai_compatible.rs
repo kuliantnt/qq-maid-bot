@@ -54,7 +54,13 @@ impl OpenAiCompatibleProvider {
         let timeout = config
             .request_timeout_seconds
             .unwrap_or(request_timeout_seconds);
-        let http_client = reqwest::Client::builder()
+        let http_client = qq_maid_common::http_client::try_builder()
+            .map_err(|err| {
+                LlmError::config(format!(
+                    "failed to configure {} TLS: {err}",
+                    config.id.as_str()
+                ))
+            })?
             .timeout(Duration::from_secs(timeout))
             .build()
             .map_err(|err| {

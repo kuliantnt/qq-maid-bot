@@ -274,7 +274,7 @@ pub(crate) async fn handle_c2c_message(
         return Ok(());
     }
     fetch_qq_official_image_attachments(
-        &reqwest::Client::new(),
+        &qq_maid_common::http_client::client(),
         &MediaFetchContext {
             platform: "qq_official",
             app_id: config

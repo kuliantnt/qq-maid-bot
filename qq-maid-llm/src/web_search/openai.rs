@@ -67,7 +67,10 @@ impl OpenAiWebSearchExecutor {
             .openai_api_key
             .clone()
             .ok_or_else(|| LlmError::config("OPENAI_API_KEY is required"))?;
-        let client = reqwest::Client::builder()
+        let client = qq_maid_common::http_client::try_builder()
+            .map_err(|err| {
+                LlmError::config(format!("failed to configure OpenAI query TLS: {err}"))
+            })?
             .timeout(std::time::Duration::from_secs(
                 config.request_timeout_seconds,
             ))
@@ -687,7 +690,7 @@ mod tests {
         .to_owned();
         let (base_url, state) = spawn_mock_search(body).await;
         let executor = OpenAiWebSearchExecutor {
-            client: reqwest::Client::new(),
+            client: qq_maid_common::http_client::client(),
             api_key: "test-key".to_owned(),
             base_url: Some(base_url),
             search_model: "gpt-search".to_owned(),
@@ -721,7 +724,7 @@ mod tests {
             .to_owned();
         let (base_url, _state) = spawn_mock_search(body).await;
         let executor = OpenAiWebSearchExecutor {
-            client: reqwest::Client::new(),
+            client: qq_maid_common::http_client::client(),
             api_key: "test-key".to_owned(),
             base_url: Some(base_url),
             search_model: "gpt-search".to_owned(),

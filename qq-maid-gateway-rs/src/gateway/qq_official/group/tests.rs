@@ -247,10 +247,10 @@ fn respond_client_with_response(
 
 fn api_client() -> QqApiClient {
     QqApiClient::new(
-        reqwest::Client::new(),
+        qq_maid_common::http_client::client(),
         "http://127.0.0.1:1",
         AccessTokenManager::new(
-            reqwest::Client::new(),
+            qq_maid_common::http_client::client(),
             "app",
             "secret",
             Duration::from_secs(60),
