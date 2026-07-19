@@ -167,26 +167,26 @@ fn render_assistant_output_parts_for_profile(
             }
         }
         // parts 只有重复 Text、没有 Markdown part 时，补上 markdown 字段，避免直接落到纯文本。
-        if prefer_markdown && !saw_markdown_part {
-            if let Some(markdown) = output
+        if prefer_markdown
+            && !saw_markdown_part
+            && let Some(markdown) = output
                 .markdown
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-            {
-                let fallback_text = if !output.text_fallback.trim().is_empty() {
-                    output.text_fallback.clone()
-                } else {
-                    qq_maid_common::markdown::to_chat_text(markdown)
-                };
-                rendered.insert(
-                    0,
-                    OutboundMessage::Markdown {
-                        markdown: MarkdownPayload::new(markdown),
-                        fallback_text,
-                    },
-                );
-            }
+        {
+            let fallback_text = if !output.text_fallback.trim().is_empty() {
+                output.text_fallback.clone()
+            } else {
+                qq_maid_common::markdown::to_chat_text(markdown)
+            };
+            rendered.insert(
+                0,
+                OutboundMessage::Markdown {
+                    markdown: MarkdownPayload::new(markdown),
+                    fallback_text,
+                },
+            );
         }
         if !rendered.is_empty() {
             return rendered;
