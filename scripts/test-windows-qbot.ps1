@@ -117,7 +117,8 @@ try {
     Complete-AgentConfigMigration -CurrentVersion "v0.20.3" -TargetVersion "v0.21.0"
     Assert-True (Test-Path -LiteralPath $mixedMarker -PathType Leaf) "installed v0.20.2+ did not get the shared marker"
 
-    $failedMarker = Join-Path $appDir "config\failed\.agent-config-v0.20.2"
+    $failedMarker = Join-Path $appDir "config\.agent-config-v0.20.2"
+    Remove-Item -LiteralPath $failedMarker -Force -ErrorAction SilentlyContinue
     $failedReplacementError = $null
     try {
         Replace-AgentConfigFromRelease -ConfigFile (Join-Path $appDir "config\missing.toml") -TemplateFile $agentTemplate
