@@ -143,7 +143,7 @@ impl RenderProfile {
         Self {
             supports_text: true,
             supports_markdown: config.enable_markdown,
-            supports_image: supports_image && config.enable_image,
+            supports_image,
             supports_attachment: false,
             unsupported_fallback: UnsupportedCapabilityFallback::UseText,
         }

@@ -38,7 +38,6 @@ fn loads_defaults_with_bound_credentials() {
         Duration::from_secs(DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS)
     );
     assert!(config.enable_markdown);
-    assert!(config.enable_image);
     assert!(config.bot_mention_ids.is_empty());
     assert!(!config.enable_group_messages);
     assert!(!config.verbose_log);
@@ -364,7 +363,6 @@ fn loads_optional_values() {
         ("QQ_BOT_TOKEN_REFRESH_MARGIN_SECONDS", "120"),
         ("QQ_MAID_BOT_MENTION_IDS", "bot-openid,member-openid"),
         ("QQ_MAID_ENABLE_MARKDOWN", "true"),
-        ("QQ_MAID_ENABLE_IMAGE", "1"),
         ("QQ_MAID_ENABLE_GROUP_MESSAGES", "yes"),
         ("QQ_MAID_GATEWAY_VERBOSE_LOG", "on"),
         ("CONVERSATION_QUEUE_CAPACITY", "24"),
@@ -408,7 +406,6 @@ fn loads_optional_values() {
     assert_eq!(config.token_refresh_margin, Duration::from_secs(120));
     assert_eq!(config.bot_mention_ids, vec!["bot-openid", "member-openid"]);
     assert!(config.enable_markdown);
-    assert!(config.enable_image);
     assert!(config.enable_group_messages);
     assert!(config.verbose_log);
     assert_eq!(config.conversation_queue_capacity, 24);

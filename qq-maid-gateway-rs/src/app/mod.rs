@@ -82,7 +82,6 @@ fn log_startup(config: &AppConfig) {
         api_base = %config.api_base,
         sandbox = config.sandbox,
         enable_markdown = config.enable_markdown,
-        enable_image = config.enable_image,
         enable_group_messages = config.enable_group_messages,
         verbose_log = config.verbose_log,
         conversation_queue_capacity = config.conversation_queue_capacity,

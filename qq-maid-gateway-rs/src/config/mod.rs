@@ -74,7 +74,6 @@ pub struct AppConfig {
     pub api_base: String,
     pub token_refresh_margin: Duration,
     pub enable_markdown: bool,
-    pub enable_image: bool,
     pub enable_group_messages: bool,
     pub verbose_log: bool,
     /// 是否在入站时调用 #229 群成员详情接口补全展示字段（#319）。
@@ -312,8 +311,6 @@ impl AppConfig {
         let margin_seconds = parse_u64(env, "QQ_BOT_TOKEN_REFRESH_MARGIN_SECONDS")?
             .unwrap_or(DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS);
         let enable_markdown = parse_bool(env, "QQ_MAID_ENABLE_MARKDOWN")?.unwrap_or(true);
-        // QQ C2C 与群聊图片上传/发送均已实现；保留环境变量作为平台级紧急停用开关。
-        let enable_image = parse_bool(env, "QQ_MAID_ENABLE_IMAGE")?.unwrap_or(true);
         let enable_group_messages =
             parse_bool(env, "QQ_MAID_ENABLE_GROUP_MESSAGES")?.unwrap_or(false);
         let verbose_log = parse_bool(env, "QQ_MAID_GATEWAY_VERBOSE_LOG")?.unwrap_or(false);
@@ -408,7 +405,6 @@ impl AppConfig {
             api_base,
             token_refresh_margin: Duration::from_secs(margin_seconds),
             enable_markdown,
-            enable_image,
             enable_group_messages,
             verbose_log,
             member_detail_enrich_enabled,

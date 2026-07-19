@@ -533,7 +533,6 @@ mod tests {
     fn qq_c2c_and_group_scopes_follow_reply_capabilities() {
         let snapshot = snapshot_with(&[
             ("QQ_MAID_ENABLE_MARKDOWN", "true"),
-            ("QQ_MAID_ENABLE_IMAGE", "true"),
             ("QQ_MAID_C2C_FINAL_REPLY_STREAM_ENABLED", "true"),
             ("QQ_MAID_GROUP_MESSAGE_MODE", "mention"),
         ]);
@@ -574,21 +573,6 @@ mod tests {
         assert_eq!(
             group.capabilities.outbound.streaming,
             ConsoleValueState::Unsupported
-        );
-    }
-
-    #[test]
-    fn qq_image_delivery_can_still_be_explicitly_disabled() {
-        let snapshot = snapshot_with(&[("QQ_MAID_ENABLE_IMAGE", "false")]);
-        let qq = platform(&snapshot, "qq_official");
-
-        assert_eq!(
-            scope(qq, "c2c").capabilities.outbound.image,
-            ConsoleValueState::Disabled
-        );
-        assert_eq!(
-            scope(qq, "group").capabilities.outbound.image,
-            ConsoleValueState::Disabled
         );
     }
 

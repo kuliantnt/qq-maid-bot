@@ -890,7 +890,6 @@ mod tests {
             api_base: "https://example.test".to_owned(),
             token_refresh_margin: Duration::from_secs(60),
             enable_markdown: false,
-            enable_image: false,
             enable_group_messages: true,
             verbose_log: false,
             member_detail_enrich_enabled: false,

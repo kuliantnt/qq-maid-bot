@@ -36,7 +36,6 @@ pub(crate) fn qq_official_test_config() -> AppConfig {
         api_base: "https://example.test".to_owned(),
         token_refresh_margin: Duration::from_secs(60),
         enable_markdown: true,
-        enable_image: false,
         enable_group_messages: false,
         verbose_log: false,
         member_detail_enrich_enabled: false,

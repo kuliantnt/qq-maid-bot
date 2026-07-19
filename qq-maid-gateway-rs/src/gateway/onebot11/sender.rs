@@ -194,9 +194,9 @@ fn onebot_image_file(image: &ImagePayload) -> Result<String, OneBotSendError> {
         .local_path
         .as_deref()
         .map(str::trim)
-        .filter(|value| std::path::Path::new(value).is_absolute())
+        .and_then(local_path_file_uri)
     {
-        return Ok(format!("file://{path}"));
+        return Ok(path);
     }
     image
         .data_base64
@@ -205,6 +205,25 @@ fn onebot_image_file(image: &ImagePayload) -> Result<String, OneBotSendError> {
         .filter(|value| !value.is_empty())
         .map(|data| format!("base64://{data}"))
         .ok_or(OneBotSendError::InvalidImage)
+}
+
+fn local_path_file_uri(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    let windows_drive_path = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    if windows_drive_path {
+        // 不依赖当前编译宿主识别 Windows 路径，并让 URL parser 编码空格等字符。
+        let normalized = path.replace('\\', "/");
+        return reqwest::Url::parse(&format!("file:///{normalized}"))
+            .ok()
+            .map(Into::into);
+    }
+    if !std::path::Path::new(path).is_absolute() {
+        return None;
+    }
+    reqwest::Url::from_file_path(path).ok().map(Into::into)
 }
 
 fn build_image_params(
@@ -316,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn image_segment_file_supports_url_and_base64() {
+    fn image_segment_file_supports_url_base64_and_unix_path() {
         assert_eq!(
             onebot_image_file(&ImagePayload::from_url("https://example.test/image.png")).unwrap(),
             "https://example.test/image.png"
@@ -331,6 +350,25 @@ mod tests {
         );
         assert!(matches!(
             onebot_image_file(&ImagePayload::new("qq-file-info")),
+            Err(OneBotSendError::InvalidImage)
+        ));
+    }
+
+    #[test]
+    fn image_segment_normalizes_windows_drive_path_as_file_uri() {
+        assert_eq!(
+            onebot_image_file(&ImagePayload::from_local_path(
+                r"C:\Users\Lian Lian\Pictures\生成图.png"
+            ))
+            .unwrap(),
+            "file:///C:/Users/Lian%20Lian/Pictures/%E7%94%9F%E6%88%90%E5%9B%BE.png"
+        );
+        assert_eq!(
+            onebot_image_file(&ImagePayload::from_local_path("D:/images/result.jpg")).unwrap(),
+            "file:///D:/images/result.jpg"
+        );
+        assert!(matches!(
+            onebot_image_file(&ImagePayload::from_local_path(r"images\relative.png")),
             Err(OneBotSendError::InvalidImage)
         ));
     }

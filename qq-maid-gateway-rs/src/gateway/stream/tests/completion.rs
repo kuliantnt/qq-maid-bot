@@ -179,8 +179,7 @@ async fn active_text_stream_sends_completed_image_then_only_its_fallback() {
         RespondEvent::Completed(Box::new(response)),
     ]);
     let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None)]);
-    let mut config = test_config();
-    config.enable_image = true;
+    let config = test_config();
 
     stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &config)
         .await
