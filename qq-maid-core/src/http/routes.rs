@@ -455,6 +455,8 @@ mod tests {
         let (css_status, _) =
             request_response(test_state(), "GET", "/console/styles.css", None).await;
         let (js_status, _) = request_response(test_state(), "GET", "/console/app.js", None).await;
+        let (agent_tools_status, _) =
+            request_response(test_state(), "GET", "/console/agent-tools.js", None).await;
         let (status_api, _) =
             request_response(test_state(), "GET", "/api/v1/console/status", None).await;
 
@@ -462,6 +464,7 @@ mod tests {
         assert_eq!(render_status, axum::http::StatusCode::NOT_FOUND);
         assert_eq!(css_status, axum::http::StatusCode::NOT_FOUND);
         assert_eq!(js_status, axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(agent_tools_status, axum::http::StatusCode::NOT_FOUND);
         assert_eq!(status_api, axum::http::StatusCode::NOT_FOUND);
         Ok(())
     }
@@ -506,6 +509,7 @@ mod tests {
         for (path, expected_content_type) in [
             ("/console/styles.css", "text/css; charset=utf-8"),
             ("/console/app.js", "text/javascript; charset=utf-8"),
+            ("/console/agent-tools.js", "text/javascript; charset=utf-8"),
         ] {
             let (status, headers, body) =
                 request_text_response(state.clone(), "GET", path, None, None).await;

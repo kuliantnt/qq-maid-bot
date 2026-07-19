@@ -64,54 +64,74 @@ pub(super) async fn console_index(
     ))
 }
 
+// dist 新增前端模块时必须同步登记；下方测试会校验构建产物与静态 import 均已覆盖。
+const CONSOLE_ASSETS: &[(&str, &str, &str)] = &[
+    (
+        "styles.css",
+        include_str!("../../../web-console/dist/styles.css"),
+        "text/css; charset=utf-8",
+    ),
+    (
+        "app.js",
+        include_str!("../../../web-console/dist/app.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "agent-tools.js",
+        include_str!("../../../web-console/dist/agent-tools.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "api.js",
+        include_str!("../../../web-console/dist/api.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "dom.js",
+        include_str!("../../../web-console/dist/dom.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "types.js",
+        include_str!("../../../web-console/dist/types.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/dashboard.js",
+        include_str!("../../../web-console/dist/views/dashboard.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/markdown.js",
+        include_str!("../../../web-console/dist/views/markdown.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/platforms.js",
+        include_str!("../../../web-console/dist/views/platforms.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/storage.js",
+        include_str!("../../../web-console/dist/views/storage.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/configuration.js",
+        include_str!("../../../web-console/dist/views/configuration.js"),
+        "text/javascript; charset=utf-8",
+    ),
+];
+
 pub(super) async fn console_asset(
     State(state): State<OpsHttpState>,
     Path(asset): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let found = match asset.as_str() {
-        "styles.css" => Some((
-            include_str!("../../../web-console/dist/styles.css"),
-            "text/css; charset=utf-8",
-        )),
-        "app.js" => Some((
-            include_str!("../../../web-console/dist/app.js"),
-            "text/javascript; charset=utf-8",
-        )),
-        "api.js" => Some((
-            include_str!("../../../web-console/dist/api.js"),
-            "text/javascript; charset=utf-8",
-        )),
-        "dom.js" => Some((
-            include_str!("../../../web-console/dist/dom.js"),
-            "text/javascript; charset=utf-8",
-        )),
-        "types.js" => Some((
-            include_str!("../../../web-console/dist/types.js"),
-            "text/javascript; charset=utf-8",
-        )),
-        "views/dashboard.js" => Some((
-            include_str!("../../../web-console/dist/views/dashboard.js"),
-            "text/javascript; charset=utf-8",
-        )),
-        "views/markdown.js" => Some((
-            include_str!("../../../web-console/dist/views/markdown.js"),
-            "text/javascript; charset=utf-8",
-        )),
-        "views/platforms.js" => Some((
-            include_str!("../../../web-console/dist/views/platforms.js"),
-            "text/javascript; charset=utf-8",
-        )),
-        "views/storage.js" => Some((
-            include_str!("../../../web-console/dist/views/storage.js"),
-            "text/javascript; charset=utf-8",
-        )),
-        "views/configuration.js" => Some((
-            include_str!("../../../web-console/dist/views/configuration.js"),
-            "text/javascript; charset=utf-8",
-        )),
-        _ => None,
-    };
+    let found = CONSOLE_ASSETS
+        .iter()
+        .find(|(path, _, _)| *path == asset)
+        .map(|(_, body, content_type)| (*body, *content_type));
     match found {
         Some((body, content_type)) => static_console_asset(body, content_type, &state, &headers),
         None => with_console_cors(StatusCode::NOT_FOUND.into_response(), &state, &headers),
@@ -346,4 +366,106 @@ pub(super) fn allowed_console_origin<'a>(
         .iter()
         .map(String::as_str)
         .find(|allowed| *allowed == origin)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CONSOLE_ASSETS;
+    use regex::Regex;
+    use std::path::{Path, PathBuf};
+
+    fn dist_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../web-console/dist")
+    }
+
+    fn collect_dist_files(root: &Path, directory: &Path, files: &mut Vec<String>) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect_dist_files(root, &path, files);
+            } else {
+                files.push(
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .replace('\\', "/"),
+                );
+            }
+        }
+    }
+
+    fn resolve_import(source: &str, specifier: &str) -> String {
+        let mut components = source
+            .rsplit_once('/')
+            .map(|(parent, _)| parent.split('/').collect::<Vec<_>>())
+            .unwrap_or_default();
+        for component in specifier.split('/') {
+            match component {
+                "." | "" => {}
+                ".." => {
+                    components.pop();
+                }
+                value => components.push(value),
+            }
+        }
+        components.join("/")
+    }
+
+    #[test]
+    fn embedded_console_assets_match_dist_output() {
+        let root = dist_root();
+        let mut dist_files = Vec::new();
+        collect_dist_files(&root, &root, &mut dist_files);
+        dist_files.retain(|path| path != "index.html");
+        dist_files.sort();
+
+        let mut embedded = CONSOLE_ASSETS
+            .iter()
+            .map(|(path, body, _)| {
+                assert!(!body.is_empty(), "控制台资源内容不能为空: {path}");
+                (*path).to_owned()
+            })
+            .collect::<Vec<_>>();
+        embedded.sort();
+
+        assert_eq!(
+            embedded, dist_files,
+            "dist 构建产物必须全部注册到控制台资源表"
+        );
+    }
+
+    #[test]
+    fn html_and_javascript_static_imports_are_embedded() {
+        let registered = CONSOLE_ASSETS
+            .iter()
+            .map(|(path, _, _)| *path)
+            .collect::<std::collections::HashSet<_>>();
+        let html = std::fs::read_to_string(dist_root().join("index.html")).unwrap();
+        let html_asset = Regex::new(r#"(?:src|href)=["'](/console/[^"'?#]+)["']"#).unwrap();
+        for captures in html_asset.captures_iter(&html) {
+            let path = captures[1].trim_start_matches("/console/");
+            assert!(registered.contains(path), "HTML 静态资源未注册: {path}");
+        }
+
+        let static_import =
+            Regex::new(r#"(?m)^\s*(?:import|export)\s+(?:.*?\s+from\s+)?["']([^"']+)["'];?\s*$"#)
+                .unwrap();
+        for (source, body, content_type) in CONSOLE_ASSETS {
+            if *content_type != "text/javascript; charset=utf-8" {
+                continue;
+            }
+            for captures in static_import.captures_iter(body) {
+                let specifier = &captures[1];
+                if !specifier.starts_with('.') {
+                    continue;
+                }
+                let imported = resolve_import(source, specifier);
+                assert!(
+                    registered.contains(imported.as_str()),
+                    "JavaScript 静态 import 未注册: {source} -> {specifier} ({imported})"
+                );
+            }
+        }
+    }
 }
