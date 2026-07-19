@@ -173,7 +173,7 @@ pub(crate) struct ReplyCapability {
     pub(crate) supports_quote_original: bool,
     pub(crate) supports_at_mention: bool,
     pub(crate) supports_multi_part: bool,
-    /// 区分 sender 未实现图片通道与图片通道已实现但被运行配置关闭。
+    /// 表示平台 sender 是否实现图片发送通道。
     pub(crate) image_delivery_implemented: bool,
     pub(crate) supports_synchronous_reply: bool,
     pub(crate) supports_asynchronous_reply: bool,
