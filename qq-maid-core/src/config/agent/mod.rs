@@ -284,6 +284,8 @@ pub struct AgentProfileConfig {
     pub aux_route: Option<String>,
     #[serde(default)]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// 新增 profile 字段时保持旧配置可启动；5 轮与 balanced 默认档位一致。
+    #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: usize,
     #[serde(default)]
     pub max_output_tokens: Option<u64>,
@@ -312,7 +314,10 @@ pub struct AgentSceneConfig {
     pub max_tool_rounds: Option<usize>,
     #[serde(default)]
     pub max_output_tokens: Option<u64>,
+    /// Tool Calling 默认关闭，避免旧配置升级后意外开放写入类工具。
+    #[serde(default)]
     pub tool_calling_enabled: bool,
+    #[serde(default)]
     pub enabled_tools: Vec<String>,
 }
 
@@ -813,6 +818,10 @@ fn validate_positive(name: &str, value: usize) -> Result<(), LlmError> {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_max_tool_rounds() -> usize {
+    5
 }
 
 fn default_auth_header() -> String {

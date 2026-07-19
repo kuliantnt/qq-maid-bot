@@ -24,6 +24,11 @@ assert_target Linux aarch64 linux-aarch64
 assert_target Darwin x86_64 macos-x86_64
 assert_target Darwin arm64 macos-aarch64
 
+agent_config_reset_required v0.20.1 v0.20.2
+agent_config_reset_required v0.20.1 v0.21.0
+! agent_config_reset_required v0.20.2 v0.20.3
+! agent_config_reset_required v0.20.3 v0.21.0
+
 # Unix 安装器不得再包含 Windows target、ZIP 或原生 Windows 二进制分支。
 if rg -n 'MINGW|MSYS|CYGWIN|windows-(x86_64|aarch64)|\.zip|qq-maid-bot\.exe' \
     "${REPO_DIR}/scripts/qbot.sh" >/dev/null; then
@@ -39,26 +44,16 @@ printf '%s\n' 'version = 1' '[scenes.private]' 'enabled_tools = ["new_tool"]' > 
 
 agent_yes="${tmp_dir}/agent-yes.toml"
 printf '%s\n' 'version = 1' 'custom = "keep-before-replacement"' > "${agent_yes}"
-output="$(prompt_agent_config_replacement "${agent_yes}" "${agent_template}" y)"
+output="$(upgrade_agent_config_from_release "${agent_yes}" "${agent_template}")"
 cmp -s "${agent_yes}" "${agent_template}"
 grep -Fqx 'custom = "keep-before-replacement"' "${agent_yes}.old"
 [[ "${output}" == *"旧配置备份: ${agent_yes}.old"* ]]
 [[ "${output}" == *"Provider、模型路线、Scene 和工具白名单"* ]]
 
-for response in n ""; do
-    agent_keep="${tmp_dir}/agent-keep-${response:-empty}.toml"
-    printf '%s\n' 'version = 1' "custom = \"keep-${response:-empty}\"" > "${agent_keep}"
-    original_hash="$(sha256sum "${agent_keep}")"
-    output="$(prompt_agent_config_replacement "${agent_keep}" "${agent_template}" "${response}")"
-    [[ "$(sha256sum "${agent_keep}")" == "${original_hash}" ]]
-    [[ ! -e "${agent_keep}.old" ]]
-    [[ "${output}" == *"已保留现有 agent.toml"* ]]
-done
-
 agent_collision="${tmp_dir}/agent-collision.toml"
 printf '%s\n' 'current-old-config' > "${agent_collision}"
 printf '%s\n' 'earlier-backup' > "${agent_collision}.old"
-prompt_agent_config_replacement "${agent_collision}" "${agent_template}" y >/dev/null
+upgrade_agent_config_from_release "${agent_collision}" "${agent_template}" >/dev/null
 grep -Fqx 'earlier-backup' "${agent_collision}.old"
 grep -Fqx 'current-old-config' "${agent_collision}.old.1"
 cmp -s "${agent_collision}" "${agent_template}"
@@ -89,11 +84,11 @@ fi
 [[ "${failure_output}" == *"已恢复原文件"* ]]
 
 agent_noninteractive="${tmp_dir}/agent-noninteractive.toml"
-printf '%s\n' 'noninteractive-must-stay' > "${agent_noninteractive}"
-output="$(prompt_agent_config_replacement "${agent_noninteractive}" "${agent_template}" < /dev/null)"
-grep -Fqx 'noninteractive-must-stay' "${agent_noninteractive}"
-[[ ! -e "${agent_noninteractive}.old" ]]
-[[ "${output}" == *"非交互环境，默认保留"* ]]
+printf '%s\n' 'noninteractive-must-update' > "${agent_noninteractive}"
+output="$(upgrade_agent_config_from_release "${agent_noninteractive}" "${agent_template}" < /dev/null)"
+cmp -s "${agent_noninteractive}" "${agent_template}"
+grep -Fqx 'noninteractive-must-update' "${agent_noninteractive}.old"
+[[ "${output}" == *"自动备份并更新"* ]]
 
 fixture="${tmp_dir}/fixture"
 output="${tmp_dir}/output"
