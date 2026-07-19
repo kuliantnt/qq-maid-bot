@@ -27,6 +27,10 @@ try {
     Assert-True (Test-SupportedWindowsArchitecture "AMD64") "Windows AMD64 should be supported"
     Assert-True (Test-SupportedWindowsArchitecture "x86_64") "Windows x86_64 should be supported"
     Assert-True (-not (Test-SupportedWindowsArchitecture "ARM64")) "Windows ARM64 should be rejected"
+    Assert-True (Test-AgentConfigResetRequired -CurrentVersion "v0.20.1" -TargetVersion "v0.20.2") "v0.20.1 -> v0.20.2 should reset agent.toml"
+    Assert-True (Test-AgentConfigResetRequired -CurrentVersion "v0.20.1" -TargetVersion "v0.21.0") "skipped upgrade should reset agent.toml"
+    Assert-True (-not (Test-AgentConfigResetRequired -CurrentVersion "v0.20.2" -TargetVersion "v0.20.3")) "post-reset upgrade should preserve agent.toml"
+    Assert-True (-not (Test-AgentConfigResetRequired -CurrentVersion "v0.20.3" -TargetVersion "v0.21.0")) "later upgrade should preserve agent.toml"
     $arm64Error = $null
     try {
         Assert-SupportedWindowsArchitecture "ARM64"
@@ -60,26 +64,16 @@ try {
 
     $agentYes = Join-Path $agentTestDir "yes.toml"
     Set-Content -LiteralPath $agentYes -Value "custom-before-replacement" -Encoding ASCII
-    $yesOutput = (Request-AgentConfigReplacement -ConfigFile $agentYes -TemplateFile $agentTemplate -Response "y") -join "`n"
-    Assert-True ((Get-FileHash $agentYes).Hash -eq (Get-FileHash $agentTemplate).Hash) "y did not install the Release agent template"
-    Assert-True ((Get-Content -LiteralPath "${agentYes}.old" -Raw).Contains("custom-before-replacement")) "y did not preserve the old agent config"
-    Assert-True ($yesOutput.Contains("旧配置备份: ${agentYes}.old")) "y did not report the agent backup path"
-    Assert-True ($yesOutput.Contains("Provider、模型路线、Scene 和工具白名单")) "y did not report required custom configuration work"
-
-    foreach ($case in @(@{ Name = "no"; Response = "n" }, @{ Name = "empty"; Response = "" })) {
-        $agentKeep = Join-Path $agentTestDir ("keep-" + $case.Name + ".toml")
-        Set-Content -LiteralPath $agentKeep -Value ("keep-" + $case.Name) -Encoding ASCII
-        $beforeHash = (Get-FileHash -LiteralPath $agentKeep -Algorithm SHA256).Hash
-        $keepOutput = (Request-AgentConfigReplacement -ConfigFile $agentKeep -TemplateFile $agentTemplate -Response $case.Response) -join "`n"
-        Assert-True ((Get-FileHash -LiteralPath $agentKeep -Algorithm SHA256).Hash -eq $beforeHash) "$($case.Name) changed agent.toml"
-        Assert-True (-not (Test-Path -LiteralPath "${agentKeep}.old")) "$($case.Name) created an unexpected backup"
-        Assert-True ($keepOutput.Contains("已保留现有 agent.toml")) "$($case.Name) did not report that agent.toml was preserved"
-    }
+    $yesOutput = (Update-AgentConfigFromRelease -ConfigFile $agentYes -TemplateFile $agentTemplate) -join "`n"
+    Assert-True ((Get-FileHash $agentYes).Hash -eq (Get-FileHash $agentTemplate).Hash) "upgrade did not install the Release agent template"
+    Assert-True ((Get-Content -LiteralPath "${agentYes}.old" -Raw).Contains("custom-before-replacement")) "upgrade did not preserve the old agent config"
+    Assert-True ($yesOutput.Contains("旧配置备份: ${agentYes}.old")) "upgrade did not report the agent backup path"
+    Assert-True ($yesOutput.Contains("Provider、模型路线、Scene 和工具白名单")) "upgrade did not report required custom configuration work"
 
     $agentCollision = Join-Path $agentTestDir "collision.toml"
     Set-Content -LiteralPath $agentCollision -Value "current-old-config" -Encoding ASCII
     Set-Content -LiteralPath "${agentCollision}.old" -Value "earlier-backup" -Encoding ASCII
-    Request-AgentConfigReplacement -ConfigFile $agentCollision -TemplateFile $agentTemplate -Response "Y" | Out-Null
+    Update-AgentConfigFromRelease -ConfigFile $agentCollision -TemplateFile $agentTemplate | Out-Null
     Assert-True ((Get-Content -LiteralPath "${agentCollision}.old" -Raw).Contains("earlier-backup")) "existing .old backup was overwritten"
     Assert-True ((Get-Content -LiteralPath "${agentCollision}.old.1" -Raw).Contains("current-old-config")) "replacement did not use the next backup suffix"
 
@@ -108,11 +102,31 @@ try {
     Assert-True (@(Get-ChildItem -LiteralPath $agentTestDir -Filter ".agent.toml.new.*").Count -eq 0) "replacement failure left a temporary file"
 
     $agentNonInteractive = Join-Path $agentTestDir "noninteractive.toml"
-    Set-Content -LiteralPath $agentNonInteractive -Value "noninteractive-must-stay" -Encoding ASCII
-    $nonInteractiveOutput = (Request-AgentConfigReplacement -ConfigFile $agentNonInteractive -TemplateFile $agentTemplate -NonInteractive) -join "`n"
-    Assert-True ((Get-Content -LiteralPath $agentNonInteractive -Raw).Contains("noninteractive-must-stay")) "non-interactive update replaced agent.toml"
-    Assert-True (-not (Test-Path -LiteralPath "${agentNonInteractive}.old")) "non-interactive update created an unexpected backup"
-    Assert-True ($nonInteractiveOutput.Contains("非交互环境，默认保留")) "non-interactive update did not explain the default"
+    Set-Content -LiteralPath $agentNonInteractive -Value "noninteractive-must-update" -Encoding ASCII
+    $nonInteractiveOutput = (Update-AgentConfigFromRelease -ConfigFile $agentNonInteractive -TemplateFile $agentTemplate) -join "`n"
+    Assert-True ((Get-FileHash $agentNonInteractive).Hash -eq (Get-FileHash $agentTemplate).Hash) "non-interactive upgrade did not replace agent.toml"
+    Assert-True ((Get-Content -LiteralPath "${agentNonInteractive}.old" -Raw).Contains("noninteractive-must-update")) "non-interactive upgrade did not create a backup"
+    Assert-True ($nonInteractiveOutput.Contains("自动备份并更新")) "non-interactive upgrade did not explain the automatic migration"
+
+    $mixedMarker = Join-Path $appDir "config\.agent-config-v0.20.2"
+    New-Item -ItemType Directory -Path (Split-Path -Parent $mixedMarker) -Force | Out-Null
+    Complete-AgentConfigMigration -CurrentVersion "v0.20.1" -TargetVersion "v0.20.2"
+    Assert-True (Test-Path -LiteralPath $mixedMarker -PathType Leaf) "successful updater migration did not create the shared marker"
+    Assert-True (-not (Test-AgentConfigResetRequired -CurrentVersion "v0.20.1" -TargetVersion "v0.20.2" -MarkerFile $mixedMarker)) "remote migration marker did not prevent a second updater reset"
+    Remove-Item -LiteralPath $mixedMarker -Force
+    Complete-AgentConfigMigration -CurrentVersion "v0.20.3" -TargetVersion "v0.21.0"
+    Assert-True (Test-Path -LiteralPath $mixedMarker -PathType Leaf) "installed v0.20.2+ did not get the shared marker"
+
+    $failedMarker = Join-Path $appDir "config\.agent-config-v0.20.2"
+    Remove-Item -LiteralPath $failedMarker -Force -ErrorAction SilentlyContinue
+    $failedReplacementError = $null
+    try {
+        Replace-AgentConfigFromRelease -ConfigFile (Join-Path $appDir "config\missing.toml") -TemplateFile $agentTemplate
+    } catch {
+        $failedReplacementError = $_.Exception.Message
+    }
+    Assert-True ($null -ne $failedReplacementError) "failed agent migration did not return an error"
+    Assert-True (-not (Test-Path -LiteralPath $failedMarker)) "failed agent migration left a marker"
 
     New-Item -ItemType Directory -Path (Join-Path $appDir "config") -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $appDir "data\storage") -Force | Out-Null

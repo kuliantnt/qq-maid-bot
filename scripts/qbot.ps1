@@ -80,6 +80,8 @@ $script:ObsoleteEnvKeys = @(
     "TOOL_CALLING_ENABLED", "TOOL_CALLING_GROUP_ENABLED", "TOOL_CALLING_MAX_ROUNDS",
     "TODO_MODEL", "MEMBER_ID_MAPPING_FILE"
 )
+$script:AgentConfigMigrationVersion = [Version]"0.20.2"
+$script:AgentConfigMigrationMarkerName = ".agent-config-v0.20.2"
 
 function Show-QbotUsage {
     @"
@@ -116,6 +118,55 @@ function Normalize-Version {
         return $Version
     }
     return "v$Version"
+}
+
+function ConvertTo-AgentConfigVersion {
+    param([AllowEmptyString()][string]$Version)
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        return $null
+    }
+    $normalized = $Version.Trim()
+    if ($normalized.StartsWith("v")) {
+        $normalized = $normalized.Substring(1)
+    }
+    $normalized = ($normalized -split '[-+]', 2)[0]
+    $parsed = $null
+    if (-not [Version]::TryParse($normalized, [ref]$parsed)) {
+        return $null
+    }
+    return $parsed
+}
+
+function Test-AgentConfigResetRequired {
+    param(
+        [AllowEmptyString()][string]$CurrentVersion,
+        [Parameter(Mandatory = $true)][string]$TargetVersion,
+        [AllowEmptyString()][string]$MarkerFile
+    )
+    if (-not [string]::IsNullOrWhiteSpace($MarkerFile) -and (Test-Path -LiteralPath $MarkerFile)) {
+        return $false
+    }
+    $target = ConvertTo-AgentConfigVersion $TargetVersion
+    if ($null -eq $target -or $target -lt $script:AgentConfigMigrationVersion) {
+        return $false
+    }
+    $current = ConvertTo-AgentConfigVersion $CurrentVersion
+    return $null -eq $current -or $current -lt $script:AgentConfigMigrationVersion
+}
+
+function Complete-AgentConfigMigration {
+    param(
+        [AllowEmptyString()][string]$CurrentVersion,
+        [Parameter(Mandatory = $true)][string]$TargetVersion
+    )
+    $current = ConvertTo-AgentConfigVersion $CurrentVersion
+    $target = ConvertTo-AgentConfigVersion $TargetVersion
+    if (($null -eq $current -or $current -lt $script:AgentConfigMigrationVersion) -and
+        ($null -eq $target -or $target -lt $script:AgentConfigMigrationVersion)) {
+        return
+    }
+    $marker = Join-Path $script:AppDir "config\$($script:AgentConfigMigrationMarkerName)"
+    New-Item -ItemType File -Path $marker -Force | Out-Null
 }
 
 function Get-LatestVersion {
@@ -409,40 +460,15 @@ function Replace-AgentConfigFromRelease {
     Write-Output "请参考备份重新填写 Provider、模型路线、Scene 和工具白名单等自定义配置。"
 }
 
-function Request-AgentConfigReplacement {
+function Update-AgentConfigFromRelease {
     param(
         [Parameter(Mandatory = $true)][string]$ConfigFile,
-        [Parameter(Mandatory = $true)][string]$TemplateFile,
-        [AllowEmptyString()][string]$Response,
-        [switch]$NonInteractive
+        [Parameter(Mandatory = $true)][string]$TemplateFile
     )
     if (-not (Test-Path -LiteralPath $ConfigFile)) {
         return
     }
-
-    Write-Output "检测到现有 agent.toml，当前版本的配置结构可能已更新。"
-    $responseProvided = $PSBoundParameters.ContainsKey("Response")
-    $inputRedirected = $false
-    try {
-        $inputRedirected = [Console]::IsInputRedirected
-    } catch {
-        $inputRedirected = $true
-    }
-
-    if (-not $responseProvided -and
-        ($NonInteractive -or -not [Environment]::UserInteractive -or $inputRedirected)) {
-        Write-Output "当前为非交互环境，默认保留现有 agent.toml。"
-        Write-Output "旧配置可能不兼容；请手工检查，或在交互终端重新运行 qbot update。"
-        return
-    }
-    if (-not $responseProvided) {
-        $Response = Read-Host "是否使用新版默认配置替换？原文件将备份为 agent.toml.old。[y/N]"
-    }
-    if ($Response -notin @("y", "Y")) {
-        Write-Output "已保留现有 agent.toml；旧配置可能不兼容，请自行检查。"
-        return
-    }
-
+    Write-Output "检测到跨版本升级，自动备份并更新 agent.toml。"
     Replace-AgentConfigFromRelease -ConfigFile $ConfigFile -TemplateFile $TemplateFile
 }
 
@@ -466,14 +492,19 @@ function Install-OrUpdate {
         Expand-Archive -LiteralPath $archive -DestinationPath $tempDir -Force
         $releaseDir = Join-Path $tempDir $package
 
-        Request-AgentConfigReplacement `
-            -ConfigFile (Join-Path $script:AppDir "config\agent.toml") `
-            -TemplateFile (Join-Path $releaseDir "config\agent.toml")
-
         if ($Mode -eq "update" -and $null -ne $current -and (Normalize-Version $current) -eq $version) {
             Remove-ObsoleteEnvConfig -ConfigFile (Join-Path $script:AppDir "config\.env")
+            Complete-AgentConfigMigration -CurrentVersion $current -TargetVersion $version
             Write-Output "already installed: $current"
             return
+        }
+
+        # v0.20.2 完成一次结构升级；跨过门槛后只靠字段默认值兼容，不再覆盖用户策略。
+        $agentConfigMarker = Join-Path $script:AppDir "config\$($script:AgentConfigMigrationMarkerName)"
+        if ($Mode -eq "update" -and (Test-AgentConfigResetRequired -CurrentVersion $current -TargetVersion $version -MarkerFile $agentConfigMarker)) {
+            Update-AgentConfigFromRelease `
+                -ConfigFile (Join-Path $script:AppDir "config\agent.toml") `
+                -TemplateFile (Join-Path $releaseDir "config\agent.toml")
         }
 
         $wasRunning = Test-InstalledBotRunning
@@ -482,6 +513,7 @@ function Install-OrUpdate {
             Invoke-BotControl "stop"
         }
         Install-ReleasePayload -ReleaseDir $releaseDir -Version $version
+        Complete-AgentConfigMigration -CurrentVersion $current -TargetVersion $version
         Write-Output "qbot $Mode completed: $version"
         Write-Output "directory: $($script:AppDir)"
         Write-Output "config: $(Join-Path $script:AppDir 'config\.env')"

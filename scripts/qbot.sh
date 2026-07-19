@@ -34,6 +34,8 @@ OBSOLETE_ENV_KEYS=(
     TOOL_CALLING_ENABLED TOOL_CALLING_GROUP_ENABLED TOOL_CALLING_MAX_ROUNDS
     TODO_MODEL MEMBER_ID_MAPPING_FILE
 )
+AGENT_CONFIG_MIGRATION_VERSION="v0.20.2"
+AGENT_CONFIG_MIGRATION_MARKER_NAME=".agent-config-v0.20.2"
 
 cleanup_tmp_dir() {
     if [[ -n "${TMP_DIR_TO_CLEAN}" && -d "${TMP_DIR_TO_CLEAN}" ]]; then
@@ -357,6 +359,50 @@ normalize_version() {
     else
         echo "v${version}"
     fi
+}
+
+version_at_least() {
+    local left="${1#v}"
+    local right="${2#v}"
+    local left_major left_minor left_patch left_extra
+    local right_major right_minor right_patch right_extra
+
+    left="${left%%[-+]*}"
+    right="${right%%[-+]*}"
+    IFS=. read -r left_major left_minor left_patch left_extra <<< "${left}"
+    IFS=. read -r right_major right_minor right_patch right_extra <<< "${right}"
+    [[ -z "${left_extra:-}" && -z "${right_extra:-}" ]] || return 1
+    [[ "${left_major:-}" =~ ^[0-9]+$ && "${left_minor:-}" =~ ^[0-9]+$ && "${left_patch:-}" =~ ^[0-9]+$ ]] || return 1
+    [[ "${right_major:-}" =~ ^[0-9]+$ && "${right_minor:-}" =~ ^[0-9]+$ && "${right_patch:-}" =~ ^[0-9]+$ ]] || return 1
+
+    ((10#${left_major} > 10#${right_major})) && return 0
+    ((10#${left_major} < 10#${right_major})) && return 1
+    ((10#${left_minor} > 10#${right_minor})) && return 0
+    ((10#${left_minor} < 10#${right_minor})) && return 1
+    ((10#${left_patch} >= 10#${right_patch}))
+}
+
+agent_config_reset_required() {
+    local current="$1"
+    local target="$2"
+    local marker="${3:-${APP_DIR}/config/${AGENT_CONFIG_MIGRATION_MARKER_NAME}}"
+
+    [[ ! -e "${marker}" ]] || return 1
+    version_at_least "${target}" "${AGENT_CONFIG_MIGRATION_VERSION}" || return 1
+    [[ -z "${current}" ]] && return 0
+    ! version_at_least "${current}" "${AGENT_CONFIG_MIGRATION_VERSION}"
+}
+
+mark_agent_config_migration_complete() {
+    local current="$1"
+    local target="$2"
+    local marker="${APP_DIR}/config/${AGENT_CONFIG_MIGRATION_MARKER_NAME}"
+
+    if ! version_at_least "${current}" "${AGENT_CONFIG_MIGRATION_VERSION}" &&
+        ! version_at_least "${target}" "${AGENT_CONFIG_MIGRATION_VERSION}"; then
+        return 0
+    fi
+    : > "${marker}"
 }
 
 latest_version() {
@@ -717,34 +763,12 @@ replace_agent_config_from_release() {
     echo "请参考备份重新填写 Provider、模型路线、Scene 和工具白名单等自定义配置。"
 }
 
-prompt_agent_config_replacement() {
+upgrade_agent_config_from_release() {
     local file="$1"
     local template="$2"
-    local reply=""
-    local reply_provided=0
 
     [[ -f "${file}" || -L "${file}" ]] || return 0
-    echo "检测到现有 agent.toml，当前版本的配置结构可能已更新。"
-
-    # 第三个参数只供脚本回归测试注入回答；真实更新必须来自交互终端。
-    if (($# >= 3)); then
-        reply="${3}"
-        reply_provided=1
-    elif [[ -t 0 ]]; then
-        read -r -p "是否使用新版默认配置替换？原文件将备份为 agent.toml.old。[y/N] " reply || reply=""
-        reply_provided=1
-    fi
-
-    if ((reply_provided == 0)); then
-        echo "当前为非交互环境，默认保留现有 agent.toml。"
-        echo "旧配置可能不兼容；请手工检查，或在交互终端重新运行 qbot update。"
-        return 0
-    fi
-    if [[ "${reply}" != "y" && "${reply}" != "Y" ]]; then
-        echo "已保留现有 agent.toml；旧配置可能不兼容，请自行检查。"
-        return 0
-    fi
-
+    echo "检测到跨版本升级，自动备份并更新 agent.toml。"
     replace_agent_config_from_release "${file}" "${template}"
 }
 
@@ -2003,16 +2027,20 @@ install_or_update() {
 
     release_dir="$(download_release "${version}" "${target}" "${tmp_dir}")"
 
-    prompt_agent_config_replacement \
-        "${APP_DIR}/config/agent.toml" \
-        "${release_dir}/config/agent.toml" || die "替换 agent.toml 失败，已停止本次更新"
-
     if [[ "${command_name}" == "update" && -n "${current}" && "$(normalize_version "${current}")" == "${version}" ]]; then
         migrate_obsolete_env_config
+        mark_agent_config_migration_complete "${current}" "${version}"
         rm -rf "${tmp_dir}"
         TMP_DIR_TO_CLEAN=""
         echo "当前已是目标版本: ${current}"
         return 0
+    fi
+
+    # v0.20.2 完成一次结构升级；跨过门槛后只靠字段默认值兼容，不再覆盖用户策略。
+    if [[ "${command_name}" == "update" ]] && agent_config_reset_required "${current}" "${version}"; then
+        upgrade_agent_config_from_release \
+            "${APP_DIR}/config/agent.toml" \
+            "${release_dir}/config/agent.toml" || die "替换 agent.toml 失败，已停止本次更新"
     fi
 
     was_running=0
@@ -2023,6 +2051,7 @@ install_or_update() {
     fi
 
     copy_release_into_app "${release_dir}" "${version}"
+    mark_agent_config_migration_complete "${current}" "${version}"
     rm -rf "${tmp_dir}"
     TMP_DIR_TO_CLEAN=""
 

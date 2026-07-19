@@ -85,6 +85,40 @@ enabled_tools = ["get_weather", "list_todos", "get_weather"]
 }
 
 #[test]
+fn toml_config_defaults_new_optional_profile_and_scene_fields() {
+    let text = r#"
+version = 1
+
+[model_routes.main]
+candidates = ["openai:gpt-main"]
+
+[search_routes.search]
+model = "gpt-search"
+
+[profiles.balanced]
+main_route = "main"
+
+[scenes.private]
+profile = "balanced"
+
+[scenes.group]
+profile = "balanced"
+"#;
+
+    let config = AgentRuntimeConfig::from_toml(
+        text,
+        AgentConfigSource::File("config/agent.toml".to_owned()),
+    )
+    .unwrap();
+
+    let private = config.resolve(ChatScene::Private).unwrap();
+    assert!(private.enabled);
+    assert_eq!(private.max_tool_rounds, 5);
+    assert!(!private.tool_calling_enabled);
+    assert!(private.enabled_tools.is_empty());
+}
+
+#[test]
 fn toml_config_accepts_openai_compatible_mimo_provider() {
     let text = r#"
 version = 1

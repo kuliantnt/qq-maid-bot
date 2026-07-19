@@ -2,6 +2,12 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [Unreleased]
+
+### Changed
+
+* **Agent 配置升级兼容**（#533）：在 `v0.20.2` 的一次性升级中，Unix/Windows 更新器和远程部署会先将现有 `config/agent.toml` 备份为不覆盖历史备份的 `.old` 文件，再启用新版模板；之后的版本升级不会再次覆盖用户策略。Agent 配置新增普通可选字段时由代码默认值兜底，旧文件无需每次手动改模板。
+
 ## [v0.20.1] - 2026-07-19
 
 ### Release Focus

@@ -24,6 +24,12 @@ assert_target Linux aarch64 linux-aarch64
 assert_target Darwin x86_64 macos-x86_64
 assert_target Darwin arm64 macos-aarch64
 
+version_marker="${TMPDIR:-/tmp}/qbot-agent-version-marker-$$"
+agent_config_reset_required v0.20.1 v0.20.2 "${version_marker}"
+agent_config_reset_required v0.20.1 v0.21.0 "${version_marker}"
+! agent_config_reset_required v0.20.2 v0.20.3 "${version_marker}"
+! agent_config_reset_required v0.20.3 v0.21.0 "${version_marker}"
+
 # Unix 安装器不得再包含 Windows target、ZIP 或原生 Windows 二进制分支。
 if rg -n 'MINGW|MSYS|CYGWIN|windows-(x86_64|aarch64)|\.zip|qq-maid-bot\.exe' \
     "${REPO_DIR}/scripts/qbot.sh" >/dev/null; then
@@ -39,26 +45,16 @@ printf '%s\n' 'version = 1' '[scenes.private]' 'enabled_tools = ["new_tool"]' > 
 
 agent_yes="${tmp_dir}/agent-yes.toml"
 printf '%s\n' 'version = 1' 'custom = "keep-before-replacement"' > "${agent_yes}"
-output="$(prompt_agent_config_replacement "${agent_yes}" "${agent_template}" y)"
+output="$(upgrade_agent_config_from_release "${agent_yes}" "${agent_template}")"
 cmp -s "${agent_yes}" "${agent_template}"
 grep -Fqx 'custom = "keep-before-replacement"' "${agent_yes}.old"
 [[ "${output}" == *"旧配置备份: ${agent_yes}.old"* ]]
 [[ "${output}" == *"Provider、模型路线、Scene 和工具白名单"* ]]
 
-for response in n ""; do
-    agent_keep="${tmp_dir}/agent-keep-${response:-empty}.toml"
-    printf '%s\n' 'version = 1' "custom = \"keep-${response:-empty}\"" > "${agent_keep}"
-    original_hash="$(sha256sum "${agent_keep}")"
-    output="$(prompt_agent_config_replacement "${agent_keep}" "${agent_template}" "${response}")"
-    [[ "$(sha256sum "${agent_keep}")" == "${original_hash}" ]]
-    [[ ! -e "${agent_keep}.old" ]]
-    [[ "${output}" == *"已保留现有 agent.toml"* ]]
-done
-
 agent_collision="${tmp_dir}/agent-collision.toml"
 printf '%s\n' 'current-old-config' > "${agent_collision}"
 printf '%s\n' 'earlier-backup' > "${agent_collision}.old"
-prompt_agent_config_replacement "${agent_collision}" "${agent_template}" y >/dev/null
+upgrade_agent_config_from_release "${agent_collision}" "${agent_template}" >/dev/null
 grep -Fqx 'earlier-backup' "${agent_collision}.old"
 grep -Fqx 'current-old-config' "${agent_collision}.old.1"
 cmp -s "${agent_collision}" "${agent_template}"
@@ -89,11 +85,48 @@ fi
 [[ "${failure_output}" == *"已恢复原文件"* ]]
 
 agent_noninteractive="${tmp_dir}/agent-noninteractive.toml"
-printf '%s\n' 'noninteractive-must-stay' > "${agent_noninteractive}"
-output="$(prompt_agent_config_replacement "${agent_noninteractive}" "${agent_template}" < /dev/null)"
-grep -Fqx 'noninteractive-must-stay' "${agent_noninteractive}"
-[[ ! -e "${agent_noninteractive}.old" ]]
-[[ "${output}" == *"非交互环境，默认保留"* ]]
+printf '%s\n' 'noninteractive-must-update' > "${agent_noninteractive}"
+output="$(upgrade_agent_config_from_release "${agent_noninteractive}" "${agent_template}" < /dev/null)"
+cmp -s "${agent_noninteractive}" "${agent_template}"
+grep -Fqx 'noninteractive-must-update' "${agent_noninteractive}.old"
+[[ "${output}" == *"自动备份并更新"* ]]
+
+# 两个升级入口共享 marker：任一入口完成迁移后，另一入口不得再次覆盖用户配置。
+mixed_app="${tmp_dir}/mixed-upgrade"
+APP_DIR="${mixed_app}"
+mkdir -p "${APP_DIR}/config"
+mixed_agent="${APP_DIR}/config/agent.toml"
+mixed_marker="${APP_DIR}/config/.agent-config-v0.20.2"
+printf '%s\n' 'before-updater' > "${mixed_agent}"
+upgrade_agent_config_from_release "${mixed_agent}" "${agent_template}" >/dev/null
+mark_agent_config_migration_complete v0.20.1 v0.20.2
+[[ -f "${mixed_marker}" ]]
+printf '%s\n' 'user-config-after-updater' > "${mixed_agent}"
+if [[ ! -e "${mixed_marker}" ]]; then
+    cp "${agent_template}" "${mixed_agent}"
+fi
+grep -Fqx 'user-config-after-updater' "${mixed_agent}"
+
+printf '%s\n' 'user-config-after-remote' > "${mixed_agent}"
+! agent_config_reset_required v0.20.1 v0.20.2 "${mixed_marker}"
+grep -Fqx 'user-config-after-remote' "${mixed_agent}"
+grep -Fqx 'marker=config/.agent-config-v0.20.2' "${REPO_DIR}/scripts/deploy-remote.sh"
+
+current_version_app="${tmp_dir}/current-version"
+APP_DIR="${current_version_app}"
+mkdir -p "${APP_DIR}/config"
+mark_agent_config_migration_complete v0.20.3 v0.21.0
+[[ -f "${APP_DIR}/config/.agent-config-v0.20.2" ]]
+
+failed_marker_app="${tmp_dir}/failed-migration"
+APP_DIR="${failed_marker_app}"
+mkdir -p "${APP_DIR}/config"
+set +e
+replace_agent_config_from_release "${APP_DIR}/config/missing.toml" "${agent_template}" >/dev/null 2>&1
+replacement_status=$?
+set -e
+[[ "${replacement_status}" -ne 0 ]]
+[[ ! -e "${APP_DIR}/config/.agent-config-v0.20.2" ]]
 
 fixture="${tmp_dir}/fixture"
 output="${tmp_dir}/output"
