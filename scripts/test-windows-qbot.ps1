@@ -108,6 +108,25 @@ try {
     Assert-True ((Get-Content -LiteralPath "${agentNonInteractive}.old" -Raw).Contains("noninteractive-must-update")) "non-interactive upgrade did not create a backup"
     Assert-True ($nonInteractiveOutput.Contains("自动备份并更新")) "non-interactive upgrade did not explain the automatic migration"
 
+    $mixedMarker = Join-Path $appDir "config\.agent-config-v0.20.2"
+    New-Item -ItemType Directory -Path (Split-Path -Parent $mixedMarker) -Force | Out-Null
+    Complete-AgentConfigMigration -CurrentVersion "v0.20.1" -TargetVersion "v0.20.2"
+    Assert-True (Test-Path -LiteralPath $mixedMarker -PathType Leaf) "successful updater migration did not create the shared marker"
+    Assert-True (-not (Test-AgentConfigResetRequired -CurrentVersion "v0.20.1" -TargetVersion "v0.20.2" -MarkerFile $mixedMarker)) "remote migration marker did not prevent a second updater reset"
+    Remove-Item -LiteralPath $mixedMarker -Force
+    Complete-AgentConfigMigration -CurrentVersion "v0.20.3" -TargetVersion "v0.21.0"
+    Assert-True (Test-Path -LiteralPath $mixedMarker -PathType Leaf) "installed v0.20.2+ did not get the shared marker"
+
+    $failedMarker = Join-Path $appDir "config\failed\.agent-config-v0.20.2"
+    $failedReplacementError = $null
+    try {
+        Replace-AgentConfigFromRelease -ConfigFile (Join-Path $appDir "config\missing.toml") -TemplateFile $agentTemplate
+    } catch {
+        $failedReplacementError = $_.Exception.Message
+    }
+    Assert-True ($null -ne $failedReplacementError) "failed agent migration did not return an error"
+    Assert-True (-not (Test-Path -LiteralPath $failedMarker)) "failed agent migration left a marker"
+
     New-Item -ItemType Directory -Path (Join-Path $appDir "config") -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $appDir "data\storage") -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $appDir "logs") -Force | Out-Null

@@ -80,6 +80,8 @@ $script:ObsoleteEnvKeys = @(
     "TOOL_CALLING_ENABLED", "TOOL_CALLING_GROUP_ENABLED", "TOOL_CALLING_MAX_ROUNDS",
     "TODO_MODEL", "MEMBER_ID_MAPPING_FILE"
 )
+$script:AgentConfigMigrationVersion = [Version]"0.20.2"
+$script:AgentConfigMigrationMarkerName = ".agent-config-v0.20.2"
 
 function Show-QbotUsage {
     @"
@@ -138,15 +140,33 @@ function ConvertTo-AgentConfigVersion {
 function Test-AgentConfigResetRequired {
     param(
         [AllowEmptyString()][string]$CurrentVersion,
-        [Parameter(Mandatory = $true)][string]$TargetVersion
+        [Parameter(Mandatory = $true)][string]$TargetVersion,
+        [AllowEmptyString()][string]$MarkerFile
     )
-    $resetVersion = [Version]"0.20.2"
+    if (-not [string]::IsNullOrWhiteSpace($MarkerFile) -and (Test-Path -LiteralPath $MarkerFile)) {
+        return $false
+    }
     $target = ConvertTo-AgentConfigVersion $TargetVersion
-    if ($null -eq $target -or $target -lt $resetVersion) {
+    if ($null -eq $target -or $target -lt $script:AgentConfigMigrationVersion) {
         return $false
     }
     $current = ConvertTo-AgentConfigVersion $CurrentVersion
-    return $null -eq $current -or $current -lt $resetVersion
+    return $null -eq $current -or $current -lt $script:AgentConfigMigrationVersion
+}
+
+function Complete-AgentConfigMigration {
+    param(
+        [AllowEmptyString()][string]$CurrentVersion,
+        [Parameter(Mandatory = $true)][string]$TargetVersion
+    )
+    $current = ConvertTo-AgentConfigVersion $CurrentVersion
+    $target = ConvertTo-AgentConfigVersion $TargetVersion
+    if (($null -eq $current -or $current -lt $script:AgentConfigMigrationVersion) -and
+        ($null -eq $target -or $target -lt $script:AgentConfigMigrationVersion)) {
+        return
+    }
+    $marker = Join-Path $script:AppDir "config\$($script:AgentConfigMigrationMarkerName)"
+    New-Item -ItemType File -Path $marker -Force | Out-Null
 }
 
 function Get-LatestVersion {
@@ -474,12 +494,14 @@ function Install-OrUpdate {
 
         if ($Mode -eq "update" -and $null -ne $current -and (Normalize-Version $current) -eq $version) {
             Remove-ObsoleteEnvConfig -ConfigFile (Join-Path $script:AppDir "config\.env")
+            Complete-AgentConfigMigration -CurrentVersion $current -TargetVersion $version
             Write-Output "already installed: $current"
             return
         }
 
         # v0.20.2 完成一次结构升级；跨过门槛后只靠字段默认值兼容，不再覆盖用户策略。
-        if ($Mode -eq "update" -and (Test-AgentConfigResetRequired -CurrentVersion $current -TargetVersion $version)) {
+        $agentConfigMarker = Join-Path $script:AppDir "config\$($script:AgentConfigMigrationMarkerName)"
+        if ($Mode -eq "update" -and (Test-AgentConfigResetRequired -CurrentVersion $current -TargetVersion $version -MarkerFile $agentConfigMarker)) {
             Update-AgentConfigFromRelease `
                 -ConfigFile (Join-Path $script:AppDir "config\agent.toml") `
                 -TemplateFile (Join-Path $releaseDir "config\agent.toml")
@@ -491,6 +513,7 @@ function Install-OrUpdate {
             Invoke-BotControl "stop"
         }
         Install-ReleasePayload -ReleaseDir $releaseDir -Version $version
+        Complete-AgentConfigMigration -CurrentVersion $current -TargetVersion $version
         Write-Output "qbot $Mode completed: $version"
         Write-Output "directory: $($script:AppDir)"
         Write-Output "config: $(Join-Path $script:AppDir 'config\.env')"

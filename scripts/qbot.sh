@@ -34,6 +34,8 @@ OBSOLETE_ENV_KEYS=(
     TOOL_CALLING_ENABLED TOOL_CALLING_GROUP_ENABLED TOOL_CALLING_MAX_ROUNDS
     TODO_MODEL MEMBER_ID_MAPPING_FILE
 )
+AGENT_CONFIG_MIGRATION_VERSION="v0.20.2"
+AGENT_CONFIG_MIGRATION_MARKER_NAME=".agent-config-v0.20.2"
 
 cleanup_tmp_dir() {
     if [[ -n "${TMP_DIR_TO_CLEAN}" && -d "${TMP_DIR_TO_CLEAN}" ]]; then
@@ -383,11 +385,24 @@ version_at_least() {
 agent_config_reset_required() {
     local current="$1"
     local target="$2"
-    local reset_version="v0.20.2"
+    local marker="${3:-${APP_DIR}/config/${AGENT_CONFIG_MIGRATION_MARKER_NAME}}"
 
-    version_at_least "${target}" "${reset_version}" || return 1
+    [[ ! -e "${marker}" ]] || return 1
+    version_at_least "${target}" "${AGENT_CONFIG_MIGRATION_VERSION}" || return 1
     [[ -z "${current}" ]] && return 0
-    ! version_at_least "${current}" "${reset_version}"
+    ! version_at_least "${current}" "${AGENT_CONFIG_MIGRATION_VERSION}"
+}
+
+mark_agent_config_migration_complete() {
+    local current="$1"
+    local target="$2"
+    local marker="${APP_DIR}/config/${AGENT_CONFIG_MIGRATION_MARKER_NAME}"
+
+    if ! version_at_least "${current}" "${AGENT_CONFIG_MIGRATION_VERSION}" &&
+        ! version_at_least "${target}" "${AGENT_CONFIG_MIGRATION_VERSION}"; then
+        return 0
+    fi
+    : > "${marker}"
 }
 
 latest_version() {
@@ -2014,6 +2029,7 @@ install_or_update() {
 
     if [[ "${command_name}" == "update" && -n "${current}" && "$(normalize_version "${current}")" == "${version}" ]]; then
         migrate_obsolete_env_config
+        mark_agent_config_migration_complete "${current}" "${version}"
         rm -rf "${tmp_dir}"
         TMP_DIR_TO_CLEAN=""
         echo "当前已是目标版本: ${current}"
@@ -2035,6 +2051,7 @@ install_or_update() {
     fi
 
     copy_release_into_app "${release_dir}" "${version}"
+    mark_agent_config_migration_complete "${current}" "${version}"
     rm -rf "${tmp_dir}"
     TMP_DIR_TO_CLEAN=""
 

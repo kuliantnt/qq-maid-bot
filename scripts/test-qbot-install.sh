@@ -24,10 +24,11 @@ assert_target Linux aarch64 linux-aarch64
 assert_target Darwin x86_64 macos-x86_64
 assert_target Darwin arm64 macos-aarch64
 
-agent_config_reset_required v0.20.1 v0.20.2
-agent_config_reset_required v0.20.1 v0.21.0
-! agent_config_reset_required v0.20.2 v0.20.3
-! agent_config_reset_required v0.20.3 v0.21.0
+version_marker="${TMPDIR:-/tmp}/qbot-agent-version-marker-$$"
+agent_config_reset_required v0.20.1 v0.20.2 "${version_marker}"
+agent_config_reset_required v0.20.1 v0.21.0 "${version_marker}"
+! agent_config_reset_required v0.20.2 v0.20.3 "${version_marker}"
+! agent_config_reset_required v0.20.3 v0.21.0 "${version_marker}"
 
 # Unix 安装器不得再包含 Windows target、ZIP 或原生 Windows 二进制分支。
 if rg -n 'MINGW|MSYS|CYGWIN|windows-(x86_64|aarch64)|\.zip|qq-maid-bot\.exe' \
@@ -89,6 +90,43 @@ output="$(upgrade_agent_config_from_release "${agent_noninteractive}" "${agent_t
 cmp -s "${agent_noninteractive}" "${agent_template}"
 grep -Fqx 'noninteractive-must-update' "${agent_noninteractive}.old"
 [[ "${output}" == *"自动备份并更新"* ]]
+
+# 两个升级入口共享 marker：任一入口完成迁移后，另一入口不得再次覆盖用户配置。
+mixed_app="${tmp_dir}/mixed-upgrade"
+APP_DIR="${mixed_app}"
+mkdir -p "${APP_DIR}/config"
+mixed_agent="${APP_DIR}/config/agent.toml"
+mixed_marker="${APP_DIR}/config/.agent-config-v0.20.2"
+printf '%s\n' 'before-updater' > "${mixed_agent}"
+upgrade_agent_config_from_release "${mixed_agent}" "${agent_template}" >/dev/null
+mark_agent_config_migration_complete v0.20.1 v0.20.2
+[[ -f "${mixed_marker}" ]]
+printf '%s\n' 'user-config-after-updater' > "${mixed_agent}"
+if [[ ! -e "${mixed_marker}" ]]; then
+    cp "${agent_template}" "${mixed_agent}"
+fi
+grep -Fqx 'user-config-after-updater' "${mixed_agent}"
+
+printf '%s\n' 'user-config-after-remote' > "${mixed_agent}"
+! agent_config_reset_required v0.20.1 v0.20.2 "${mixed_marker}"
+grep -Fqx 'user-config-after-remote' "${mixed_agent}"
+grep -Fqx 'marker=config/.agent-config-v0.20.2' "${REPO_DIR}/scripts/deploy-remote.sh"
+
+current_version_app="${tmp_dir}/current-version"
+APP_DIR="${current_version_app}"
+mkdir -p "${APP_DIR}/config"
+mark_agent_config_migration_complete v0.20.3 v0.21.0
+[[ -f "${APP_DIR}/config/.agent-config-v0.20.2" ]]
+
+failed_marker_app="${tmp_dir}/failed-migration"
+APP_DIR="${failed_marker_app}"
+mkdir -p "${APP_DIR}/config"
+set +e
+replace_agent_config_from_release "${APP_DIR}/config/missing.toml" "${agent_template}" >/dev/null 2>&1
+replacement_status=$?
+set -e
+[[ "${replacement_status}" -ne 0 ]]
+[[ ! -e "${APP_DIR}/config/.agent-config-v0.20.2" ]]
 
 fixture="${tmp_dir}/fixture"
 output="${tmp_dir}/output"
