@@ -716,6 +716,7 @@ pub(crate) fn format_web_search_tool_reply(output: &Value) -> String {
 }
 
 fn format_web_search_research_reply(output: &Value) -> String {
+    let (successful, failed) = multi_entity_research_counts(output);
     let items = output
         .get("results")
         .and_then(Value::as_array)
@@ -724,6 +725,9 @@ fn format_web_search_research_reply(output: &Value) -> String {
     let mut rendered = Vec::new();
 
     for (index, item) in items.iter().enumerate() {
+        if json_string_field(item, "status").as_deref() != Some("success") {
+            continue;
+        }
         let facts = json_string_field(item, "facts")
             .or_else(|| json_string_field(item, "summary"))
             .or_else(|| json_string_field(item, "answer"));
@@ -749,11 +753,62 @@ fn format_web_search_research_reply(output: &Value) -> String {
         rendered.push(line);
     }
 
+    let title = multi_entity_research_title(successful, failed);
     if rendered.is_empty() {
-        return format_web_search_command_reply("");
+        return format!("{title}\n\n没查到明确结果。可以换一个关键词再试。");
     }
 
-    format_web_search_command_reply(&format!("多目标调研结果：\n\n{}", rendered.join("\n")))
+    truncate_chars(
+        &format!("{title}\n\n多目标调研结果：\n\n{}", rendered.join("\n")),
+        1500,
+    )
+}
+
+pub(crate) fn format_web_search_research_error_reply(output: &Value, error: &str) -> String {
+    let (successful, failed) = multi_entity_research_counts(output);
+    let title = multi_entity_research_title(successful, failed);
+    let body = error.strip_prefix("【联网查询】\n\n").unwrap_or(error);
+    format!("{title}\n\n{body}")
+}
+
+fn multi_entity_research_title(successful: usize, failed: usize) -> String {
+    if failed == 0 {
+        "【联网查询】".to_owned()
+    } else {
+        format!("【联网查询（成功 {successful}，失败 {failed}）】")
+    }
+}
+
+fn multi_entity_research_counts(output: &Value) -> (usize, usize) {
+    let top_level_counts = output
+        .get("successful")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .zip(
+            output
+                .get("failed")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok()),
+        );
+    if let Some(counts) = top_level_counts {
+        return counts;
+    }
+
+    let mut successful = 0;
+    let mut failed = 0;
+    for item in output
+        .get("results")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        match json_string_field(item, "status").as_deref() {
+            Some("success") => successful += 1,
+            Some("failed" | "timeout") => failed += 1,
+            _ => {}
+        }
+    }
+    (successful, failed)
 }
 
 fn format_web_search_research_source(source: &Value) -> Option<String> {

@@ -17,7 +17,10 @@ use crate::{
                 ToolOutcomeStatus,
             },
             common::{CommandBody, structured_command_body, truncate_chars},
-            search_flow::{format_web_search_error_reply, format_web_search_tool_reply},
+            search_flow::{
+                format_web_search_error_reply, format_web_search_research_error_reply,
+                format_web_search_tool_reply,
+            },
             train_flow::{format_train_error_reply, format_train_schedule_reply},
             weather_flow::{format_forecast_day_label, weather_code_label},
         },
@@ -561,7 +564,11 @@ fn web_search_error_body(output: &Value) -> CommandBody {
         .and_then(Value::as_str)
         .unwrap_or("web_search");
     let err = LlmError::new(code, "web search tool failed", stage);
-    structured_command_body(format_web_search_error_reply(&err))
+    let reply = format_web_search_error_reply(&err);
+    if string_field(output, "mode").as_deref() == Some("multi_entity_research") {
+        return structured_command_body(format_web_search_research_error_reply(output, &reply));
+    }
+    structured_command_body(reply)
 }
 
 fn web_search_skip_body(output: &Value) -> CommandBody {
@@ -850,6 +857,7 @@ mod tests {
             "sources": []
         }));
 
+        assert!(text.starts_with("【联网查询】"));
         assert!(text.contains("单次搜索的明确答案"));
         assert!(!text.contains("没查到明确结果"));
     }
@@ -874,6 +882,8 @@ mod tests {
     fn multi_entity_web_search_renders_facts_without_top_level_answer() {
         let text = web_search_fact_text(json!({
             "mode": "multi_entity_research",
+            "successful": 1,
+            "failed": 0,
             "results": [{
                 "entity": "项目甲",
                 "status": "success",
@@ -886,19 +896,82 @@ mod tests {
             }]
         }));
 
+        assert!(text.starts_with("【联网查询】"));
         assert!(text.contains("项目甲支持能力 A"));
         assert!(text.contains("项目甲文档"));
         assert!(!text.contains("没查到明确结果"));
     }
 
     #[test]
-    fn empty_multi_entity_web_search_keeps_empty_result_hint() {
+    fn multi_entity_web_search_shows_partial_success_counts() {
         let text = web_search_fact_text(json!({
             "mode": "multi_entity_research",
-            "results": []
+            "successful": "类型异常",
+            "failed": null,
+            "results": [{
+                "entity": "成功项",
+                "status": "success",
+                "facts": "成功事实"
+            }, {
+                "entity": "失败项",
+                "status": "failed",
+                "facts": "不应展示的失败详情",
+                "error": {"message": "内部错误"}
+            }]
         }));
 
-        assert!(text.contains("没查到明确结果"));
+        assert!(text.starts_with("【联网查询（成功 1，失败 1）】"));
+        assert!(text.contains("成功事实"));
+        assert!(!text.contains("不应展示的失败详情"));
+        assert!(!text.contains("内部错误"));
+    }
+
+    #[test]
+    fn multi_entity_web_search_counts_timeout_as_failure() {
+        let text = web_search_fact_text(json!({
+            "mode": "multi_entity_research",
+            "results": [{
+                "entity": "成功项",
+                "status": "success",
+                "facts": "成功事实"
+            }, {
+                "entity": "超时项",
+                "status": "timeout"
+            }, {
+                "entity": "失败项",
+                "status": "failed"
+            }]
+        }));
+
+        assert!(text.starts_with("【联网查询（成功 1，失败 2）】"));
+        assert!(text.contains("成功事实"));
+    }
+
+    #[test]
+    fn all_failed_multi_entity_web_search_keeps_friendly_failure_hint() {
+        let outcome = tool_outcome_from_web_search_result(&web_search_result(json!({
+            "ok": false,
+            "mode": "multi_entity_research",
+            "successful": 0,
+            "failed": 2,
+            "results": [{
+                "entity": "失败项",
+                "status": "failed",
+                "error": {"message": "内部错误"}
+            }, {
+                "entity": "超时项",
+                "status": "timeout"
+            }]
+        })))
+        .unwrap();
+
+        assert_eq!(outcome.status, ToolOutcomeStatus::Failed);
+        let ResponseBlock::Error(body) = &outcome.blocks[0] else {
+            panic!("expected web search error block");
+        };
+        assert!(body.text.starts_with("【联网查询（成功 0，失败 2）】"));
+        assert!(body.text.contains("联网查询服务暂时不可用"));
+        assert!(!body.text.contains("内部错误"));
     }
 
     #[test]
