@@ -49,8 +49,8 @@ pub trait AgentStepSession: Send {
     ///
     /// - `results`：上一轮工具执行结果；首轮为空切片。
     /// - `allow_tool_calls`：是否允许本轮产生工具调用。当为 `false` 时，协议层
-    ///   必须显式设置等价于 `tool_choice=none` 的禁用选项；Provider 违反约束仍
-    ///   返回工具调用时，由 `run_agent_loop` 受控终止。
+    ///   必须使用该 Provider 兼容的禁用方式（可移除工具字段，或使用等价于
+    ///   `tool_choice=none` 的选项）；Provider 违反约束仍由 `run_agent_loop` 受控终止。
     async fn advance(
         &mut self,
         results: &[AgentToolResult],

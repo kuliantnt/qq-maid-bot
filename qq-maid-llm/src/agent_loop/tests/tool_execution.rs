@@ -41,6 +41,141 @@ async fn request_limited_read_only_tool_forces_final_answer_after_two_calls() {
 }
 
 #[tokio::test]
+async fn request_limit_only_rejects_knowledge_call_in_same_batch() {
+    let knowledge_calls = Arc::new(StdMutex::new(0));
+    let other_calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![
+        Arc::new(LimitedReadOnlyTool {
+            calls: knowledge_calls.clone(),
+        }) as _,
+        Arc::new(CountingTool {
+            name: "web_search",
+            calls: other_calls.clone(),
+            fail: false,
+            soft_fail: false,
+            dependency: ToolCallDependency::None,
+        }) as _,
+    ]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![
+                tool_call("knowledge_search", "k1", r#"{"query":"a"}"#),
+                tool_call("knowledge_search", "k2", r#"{"query":"b"}"#),
+            ]),
+            tool_calls(vec![
+                tool_call("knowledge_search", "k3", r#"{"query":"c"}"#),
+                tool_call("web_search", "w1", r#"{"value":"d"}"#),
+            ]),
+            final_reply("done"),
+        ],
+    ));
+
+    let outcome = run_agent_loop(session, registry, test_context(), 5, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(*knowledge_calls.lock().unwrap(), 2);
+    assert_eq!(*other_calls.lock().unwrap(), 1);
+    assert_eq!(outcome.reply, "done");
+    assert_eq!(
+        outcome.agent.executed_tools,
+        ["knowledge_search", "knowledge_search", "web_search"]
+    );
+    assert_eq!(outcome.agent.tool_results.len(), 4);
+    assert_eq!(
+        outcome.agent.tool_results[2].output["error_code"],
+        "tool_call_limit"
+    );
+    assert!(outcome.agent.tool_results[3].succeeded);
+}
+
+#[tokio::test]
+async fn request_limit_does_not_skip_same_batch_side_effect_tool() {
+    let knowledge_calls = Arc::new(StdMutex::new(0));
+    let todo_calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![
+        Arc::new(LimitedReadOnlyTool {
+            calls: knowledge_calls.clone(),
+        }) as _,
+        Arc::new(CountingTool {
+            name: "add_todo",
+            calls: todo_calls.clone(),
+            fail: false,
+            soft_fail: false,
+            dependency: ToolCallDependency::None,
+        }) as _,
+    ]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![
+                tool_call("knowledge_search", "k1", r#"{"query":"a"}"#),
+                tool_call("knowledge_search", "k2", r#"{"query":"b"}"#),
+            ]),
+            tool_calls(vec![
+                tool_call("knowledge_search", "k3", r#"{"query":"c"}"#),
+                tool_call("add_todo", "t1", r#"{"value":"write"}"#),
+            ]),
+            final_reply("done"),
+        ],
+    ));
+
+    let outcome = run_agent_loop(session, registry, test_context(), 5, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(*knowledge_calls.lock().unwrap(), 2);
+    assert_eq!(*todo_calls.lock().unwrap(), 1);
+    assert_eq!(outcome.agent.side_effecting_tools_started, ["add_todo"]);
+    assert!(outcome.agent.tool_results[3].succeeded);
+    assert_eq!(outcome.reply, "done");
+}
+
+#[tokio::test]
+async fn read_only_cache_hit_does_not_consume_execution_limit() {
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(LimitedReadOnlyTool {
+        calls: calls.clone(),
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call(
+                "knowledge_search",
+                "k1",
+                r#"{"query":"a"}"#,
+            )]),
+            tool_calls(vec![
+                tool_call("knowledge_search", "k2", r#"{"query":"a"}"#),
+                tool_call("knowledge_search", "k3", r#"{"query":"b"}"#),
+            ]),
+            tool_calls(vec![tool_call(
+                "knowledge_search",
+                "k4",
+                r#"{"query":"c"}"#,
+            )]),
+            final_reply("done"),
+        ],
+    ));
+
+    let outcome = run_agent_loop(session, registry, test_context(), 5, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(*calls.lock().unwrap(), 2);
+    assert_eq!(outcome.agent.tool_results[1].output["deduplicated"], true);
+    assert_eq!(
+        outcome.agent.tool_results[3].output["error_code"],
+        "tool_call_limit"
+    );
+    assert_eq!(outcome.reply, "done");
+}
+
+#[tokio::test]
 async fn duplicate_read_only_tool_call_replays_success_and_keeps_dependency_chain() {
     let calls = Arc::new(StdMutex::new(0));
     let dependent_calls = Arc::new(StdMutex::new(0));

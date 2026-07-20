@@ -29,7 +29,23 @@ fn payload_disables_tool_calls_explicitly() {
         false,
     );
 
-    assert_eq!(payload["tool_choice"], "none");
+    assert!(payload.get("tools").is_none());
+    assert!(payload.get("tool_choice").is_none());
+    assert!(payload.get("parallel_tool_calls").is_none());
+
+    let streaming_payload = openai_tool_loop_payload(
+        &[json!({"role": "user", "content": "总结已有结果"})],
+        &[json!({"type": "function", "name": "search"})],
+        "gpt-test",
+        1200,
+        None,
+        false,
+        true,
+    );
+    assert!(streaming_payload.get("tools").is_none());
+    assert!(streaming_payload.get("tool_choice").is_none());
+    assert!(streaming_payload.get("parallel_tool_calls").is_none());
+    assert_eq!(streaming_payload["stream"], true);
 }
 
 #[test]

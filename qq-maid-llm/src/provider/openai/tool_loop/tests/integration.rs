@@ -86,8 +86,9 @@ async fn tool_loop_budget_before_first_request_disables_tools_for_answer() {
     assert_eq!(outcome.reply, "杭州今天有小雨，建议带伞。");
     let requests = &state.lock().await.requests;
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0]["tool_choice"], "none");
-    assert!(requests[0]["tools"].as_array().is_some_and(Vec::is_empty));
+    assert!(requests[0].get("tools").is_none());
+    assert!(requests[0].get("tool_choice").is_none());
+    assert!(requests[0].get("parallel_tool_calls").is_none());
 }
 
 #[tokio::test]
@@ -130,8 +131,9 @@ async fn tool_loop_budget_after_tool_result_disables_tools_for_final_answer() {
     let requests = &state.lock().await.requests;
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0]["tools"][0]["name"], "get_weather");
-    assert_eq!(requests[1]["tool_choice"], "none");
-    assert!(requests[1]["tools"].as_array().is_some_and(Vec::is_empty));
+    assert!(requests[1].get("tools").is_none());
+    assert!(requests[1].get("tool_choice").is_none());
+    assert!(requests[1].get("parallel_tool_calls").is_none());
 }
 
 #[tokio::test]

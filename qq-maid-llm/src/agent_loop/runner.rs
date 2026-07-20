@@ -150,8 +150,8 @@ pub(super) async fn run_agent_loop_with_timeouts(
                 attempt_baseline,
             ));
         }
-        // 最后一轮或最终回答预算阶段都在协议层显式禁用工具；Provider 若忽略
-        // tool_choice=none，下面会直接受控终止，不能再开启模型轮次。
+        // 最后一轮或最终回答预算阶段都在协议层禁用工具；Provider 若仍返回
+        // tool call，下面会直接受控终止，不能再开启模型轮次。
         let preserve_finalization_budget = force_finalization_without_tools
             || (run_handle.has_completed_tool_result_since(attempt_baseline.tool_results)
                 && run_handle.should_preserve_finalization_budget());
@@ -757,6 +757,7 @@ async fn execute_tool_batch(
         .collect::<Vec<_>>();
     executor.begin_batch();
     let mut results = Vec::with_capacity(calls.len());
+    let mut stop_remaining_batch = false;
     let mut skipped_for_finalization = false;
     for (call, prepared) in calls.iter().zip(prepared_calls) {
         let tool_started_at = Instant::now();
@@ -764,7 +765,7 @@ async fn execute_tool_batch(
             .execute_prepared_call(
                 prepared,
                 |tool_name, _effect| {
-                    if skipped_for_finalization {
+                    if stop_remaining_batch {
                         return Ok(ToolCallStartDecision::SkipForFinalAnswer);
                     }
                     let has_completed_result =
@@ -805,6 +806,7 @@ async fn execute_tool_batch(
         sync_diagnostics(run_handle, executor, &emitted_tools, baseline);
         let output = output?;
         skipped_for_finalization |= output.skipped_for_finalization;
+        stop_remaining_batch |= output.stop_remaining_batch;
         results.push(AgentToolResult {
             call_id: call.call_id.clone(),
             output: output.output,

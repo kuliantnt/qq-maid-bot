@@ -317,13 +317,12 @@ pub fn fit_tool_loop_payload(
         return Ok((payload, false));
     }
 
-    // 工具定义只服务于下一次工具调用；进入收尾轮后移除定义，避免定义本身侵占
-    // 最终回答预算。协议层同时使用 tool_choice=none（若该字段存在）。
-    if let Some(object) = payload.as_object_mut()
-        && object.contains_key("tools")
-    {
-        object.insert("tools".to_owned(), Value::Array(Vec::new()));
-        object.insert("tool_choice".to_owned(), Value::String("none".to_owned()));
+    // 工具定义只服务于下一次工具调用；进入收尾轮后移除所有工具控制字段，
+    // 避免空 tools 与 tool_choice=none 在部分兼容 Provider 上组成非法组合。
+    if let Some(object) = payload.as_object_mut() {
+        object.remove("tools");
+        object.remove("tool_choice");
+        object.remove("parallel_tool_calls");
     }
     compact_tool_outputs(&mut payload, max_input_chars, &estimate)?;
     let retained_chars = estimate(&payload)?;
@@ -371,27 +370,27 @@ fn compact_tool_outputs(
     max_input_chars: usize,
     estimate: &impl Fn(&Value) -> Result<usize, LlmError>,
 ) -> Result<(), LlmError> {
+    let mut compacted_paths = std::collections::HashSet::new();
     while estimate(value)? > max_input_chars {
         let mut candidates = Vec::new();
         collect_tool_output_paths(value, &mut Vec::new(), &mut candidates);
-        let Some((path, current_len)) = candidates.into_iter().max_by_key(|(_, len)| *len) else {
+        let Some((path, _current_len)) = candidates
+            .into_iter()
+            .filter(|(path, _)| !compacted_paths.contains(path))
+            .max_by_key(|(_, len)| *len)
+        else {
             break;
         };
-        let target =
-            current_len.saturating_sub(estimate(value)?.saturating_sub(max_input_chars).max(64));
         let Some(slot) = value.pointer_mut(&path) else {
             break;
         };
         let Some(text) = slot.as_str() else { break };
-        let marker = "\n[工具结果已为最终回答预算裁剪]";
-        let keep = target.saturating_sub(marker.chars().count());
-        let mut shortened = text.chars().take(keep).collect::<String>();
-        shortened.push_str(marker);
-        if shortened.chars().count() >= text.chars().count() {
-            *slot = json!({"truncated": true, "original_chars": text.chars().count()});
-        } else {
-            *slot = Value::String(shortened);
-        }
+        let original_chars = text.chars().count();
+        let marker = format!("[工具结果已省略，原始长度 {original_chars} 字符]");
+        // 工具输出字段的协议类型不能改变：Chat Completions 的 content 和
+        // Responses 的 function_call_output.output 都必须继续是字符串。
+        *slot = Value::String(marker);
+        compacted_paths.insert(path);
     }
     Ok(())
 }
@@ -586,13 +585,101 @@ mod tests {
         assert!(disabled);
         assert_eq!(fitted["messages"][1]["tool_calls"][0]["id"], "call-1");
         assert_eq!(fitted["messages"][2]["tool_call_id"], "call-1");
-        assert_eq!(fitted["tool_choice"], "none");
+        assert!(fitted.get("tools").is_none());
+        assert!(fitted.get("tool_choice").is_none());
         assert!(
             fitted["messages"][2]["content"]
                 .as_str()
                 .unwrap()
-                .contains("裁剪")
+                .contains("工具结果已省略")
         );
+    }
+
+    #[test]
+    fn short_chat_tool_outputs_are_compacted_as_strings_and_keep_pairing() {
+        let payload = json!({
+            "messages": [
+                {"role": "user", "content": "查资料"},
+                {"role": "assistant", "tool_calls": [
+                    {"id": "call-1", "type": "function", "function": {"name": "search", "arguments": "{}"}},
+                    {"id": "call-2", "type": "function", "function": {"name": "weather", "arguments": "{}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call-1", "content": "a".repeat(80)},
+                {"role": "tool", "tool_call_id": "call-2", "content": "b".repeat(80)}
+            ],
+            "tools": [{"type": "function", "function": {"name": "search"}}],
+            "tool_choice": "auto",
+            "parallel_tool_calls": false
+        });
+        let (fitted, disabled) = fit_tool_loop_payload(
+            ContextBudgetConfig {
+                context_window_chars: 440,
+                output_reserve_chars: 20,
+                protected_recent_turns: 0,
+            },
+            payload,
+            "tool_loop",
+        )
+        .unwrap();
+
+        assert!(disabled);
+        assert!(fitted.get("tools").is_none());
+        assert!(fitted.get("tool_choice").is_none());
+        assert!(fitted.get("parallel_tool_calls").is_none());
+        assert_eq!(fitted["messages"][1]["tool_calls"][0]["id"], "call-1");
+        assert_eq!(fitted["messages"][1]["tool_calls"][1]["id"], "call-2");
+        for (index, call_id) in [(2, "call-1"), (3, "call-2")] {
+            assert_eq!(fitted["messages"][index]["tool_call_id"], call_id);
+            assert!(fitted["messages"][index]["content"].is_string());
+            assert!(
+                fitted["messages"][index]["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("工具结果已省略")
+            );
+        }
+        serde_json::to_string(&fitted).unwrap();
+    }
+
+    #[test]
+    fn short_responses_tool_outputs_are_compacted_as_strings_and_keep_pairing() {
+        let payload = json!({
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "查资料"}]},
+                {"type": "function_call", "call_id": "call-1", "name": "search", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call-1", "output": "a".repeat(80)},
+                {"type": "function_call", "call_id": "call-2", "name": "weather", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call-2", "output": "b".repeat(80)}
+            ],
+            "tools": [{"type": "function", "name": "search"}],
+            "parallel_tool_calls": false
+        });
+        let (fitted, disabled) = fit_tool_loop_payload(
+            ContextBudgetConfig {
+                context_window_chars: 445,
+                output_reserve_chars: 20,
+                protected_recent_turns: 0,
+            },
+            payload,
+            "tool_loop",
+        )
+        .unwrap();
+
+        assert!(disabled);
+        assert!(fitted.get("tools").is_none());
+        assert!(fitted.get("tool_choice").is_none());
+        assert!(fitted.get("parallel_tool_calls").is_none());
+        for (index, call_id) in [(2, "call-1"), (4, "call-2")] {
+            assert_eq!(fitted["input"][index]["call_id"], call_id);
+            assert!(fitted["input"][index]["output"].is_string());
+            assert!(
+                fitted["input"][index]["output"]
+                    .as_str()
+                    .unwrap()
+                    .contains("工具结果已省略")
+            );
+        }
+        serde_json::to_string(&fitted).unwrap();
     }
 
     struct FailingSerialize;

@@ -251,14 +251,17 @@ fn chat_completions_tool_loop_payload(
     allow_tool_calls: bool,
     stream: bool,
 ) -> Value {
-    json!({
+    let mut payload = json!({
         "model": model,
         "messages": messages,
         "max_tokens": max_output_tokens,
-        "tools": tools,
-        "tool_choice": if allow_tool_calls { "auto" } else { "none" },
         "stream": stream,
-    })
+    });
+    if allow_tool_calls {
+        payload["tools"] = json!(tools);
+        payload["tool_choice"] = json!("auto");
+    }
+    payload
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

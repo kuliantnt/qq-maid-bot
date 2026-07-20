@@ -437,8 +437,8 @@ async fn tool_loop_budget_before_first_request_disables_tools_for_answer() {
     assert_eq!(outcome.reply, "should not be requested");
     let requests = &state.lock().await.requests;
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0]["tool_choice"], "none");
-    assert!(requests[0]["tools"].as_array().is_some_and(Vec::is_empty));
+    assert!(requests[0].get("tools").is_none());
+    assert!(requests[0].get("tool_choice").is_none());
 }
 
 #[test]
@@ -486,7 +486,20 @@ fn payload_disables_tool_calls_explicitly() {
         false,
     );
 
-    assert_eq!(payload["tool_choice"], "none");
+    assert!(payload.get("tools").is_none());
+    assert!(payload.get("tool_choice").is_none());
+
+    let streaming_payload = chat_completions_tool_loop_payload(
+        &[json!({"role": "user", "content": "总结已有结果"})],
+        &[json!({"type": "function", "function": {"name": "search"}})],
+        "test-model",
+        1200,
+        false,
+        true,
+    );
+    assert!(streaming_payload.get("tools").is_none());
+    assert!(streaming_payload.get("tool_choice").is_none());
+    assert_eq!(streaming_payload["stream"], true);
 }
 
 #[tokio::test]
@@ -548,8 +561,8 @@ async fn tool_loop_budget_after_tool_result_disables_tools_for_final_answer() {
     let requests = &state.lock().await.requests;
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0]["tools"][0]["function"]["name"], "get_weather");
-    assert_eq!(requests[1]["tool_choice"], "none");
-    assert!(requests[1]["tools"].as_array().is_some_and(Vec::is_empty));
+    assert!(requests[1].get("tools").is_none());
+    assert!(requests[1].get("tool_choice").is_none());
 }
 
 #[tokio::test]

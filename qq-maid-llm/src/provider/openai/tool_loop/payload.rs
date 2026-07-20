@@ -71,15 +71,14 @@ pub(super) fn openai_tool_loop_payload(
         "model": model,
         "input": input,
         "max_output_tokens": max_output_tokens,
-        "tools": tools,
-        // 首期只支持串行工具循环；后续多工具并行需要结果聚合和更细的权限审计。
-        "parallel_tool_calls": false,
     });
+    if allow_tool_calls {
+        payload["tools"] = json!(tools);
+        // 首期只支持串行工具循环；后续多工具并行需要结果聚合和更细的权限审计。
+        payload["parallel_tool_calls"] = json!(false);
+    }
     if let Some(effort) = reasoning_effort.filter(|_| openai_model_supports_reasoning(model)) {
         payload["reasoning"] = json!({ "effort": effort.as_str() });
-    }
-    if !allow_tool_calls {
-        payload["tool_choice"] = json!("none");
     }
     if stream {
         payload["stream"] = json!(true);

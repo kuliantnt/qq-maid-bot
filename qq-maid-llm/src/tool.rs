@@ -138,7 +138,7 @@ pub trait Tool: Send + Sync {
             .then(|| serde_json::to_string(arguments).ok())
             .flatten()
     }
-    /// 同一 Agent 请求内允许启动的最大调用次数；默认不限制。
+    /// 同一 Agent 请求内允许真实执行的最大次数；只读缓存命中不消耗该额度，默认不限制。
     fn max_calls_per_request(&self) -> Option<usize> {
         None
     }
@@ -175,7 +175,7 @@ pub struct PreparedToolCall {
     pub effect: ToolEffect,
     /// 同一 Agent 请求内的只读调用去重键。
     pub deduplication_key: Option<String>,
-    /// 请求级调用上限，供统一 Tool Loop 执行器计数。
+    /// 请求级真实执行上限，供统一 Tool Loop 执行器计数；缓存命中不计入。
     pub max_calls_per_request: Option<usize>,
     /// 与同轮前一项调用的依赖关系。
     pub dependency: ToolCallDependency,

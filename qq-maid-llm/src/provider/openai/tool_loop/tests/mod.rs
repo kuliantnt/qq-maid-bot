@@ -286,8 +286,10 @@ async fn mock_tool_loop_handler(
 ) -> Json<Value> {
     let mut state = state.lock().await;
     state.requests.push(body);
-    if state.requests[0].get("tool_choice") == Some(&json!("none"))
-        || state.requests[0]
+    let latest = state.requests.last().expect("request recorded");
+    if (latest.get("tools").is_none() && latest.get("tool_choice").is_none())
+        || latest.get("tool_choice") == Some(&json!("none"))
+        || latest
             .get("tools")
             .and_then(Value::as_array)
             .is_some_and(Vec::is_empty)
