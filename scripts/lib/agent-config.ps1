@@ -1,4 +1,4 @@
-# qbot.ps1 在 Release 解压后加载本文件；它不是独立的用户命令。
+# Loaded by qbot.ps1 from the extracted release payload; not a standalone command.
 
 function Migrate-AgentWebSearchConfig {
     param([Parameter(Mandatory = $true)][string]$ConfigFile)
@@ -55,5 +55,5 @@ function Migrate-AgentWebSearchConfig {
         Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
         throw "Agent web-search config migration failed; original config remains at $ConfigFile and backup is $backup"
     }
-    Write-Output "已将旧联网搜索 route 迁移到 tools.web_search，旧配置备份: $backup"
+    Write-Output "Migrated legacy web-search routes to tools.web_search; backup: $backup"
 }

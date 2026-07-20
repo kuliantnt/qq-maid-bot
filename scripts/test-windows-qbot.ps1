@@ -76,7 +76,7 @@ try {
     Assert-True ($migratedWebSearch.Contains('[tools.web_search.routes.private_search]')) "legacy web-search route was not migrated"
     Assert-True (-not $migratedWebSearch.Contains('[search_routes.private_search]')) "legacy web-search route remained"
     Assert-True ((Get-Content -LiteralPath "${webSearchAgent}.old" -Raw).Contains('[search_routes.private_search]')) "web-search migration backup lost the legacy route"
-    Assert-True ($webSearchOutput.Contains("旧配置备份: ${webSearchAgent}.old")) "web-search migration did not report its backup"
+    Assert-True ($webSearchOutput.Contains("backup: ${webSearchAgent}.old")) "web-search migration did not report its backup"
     Migrate-AgentWebSearchConfig -ConfigFile $webSearchAgent
     Assert-True (-not (Test-Path -LiteralPath "${webSearchAgent}.old.1")) "idempotent web-search migration created another backup"
 
