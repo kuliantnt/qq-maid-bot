@@ -82,6 +82,7 @@ fn list_todos_schema_exposes_structured_combination_filters() {
     assert!(required.contains(&json!("date_range_text")));
     assert!(required.contains(&json!("time_filter")));
     assert!(required.contains(&json!("keyword")));
+    assert!(required.contains(&json!("recurring")));
     assert!(json_type_contains(
         &schema["properties"]["due_date"],
         "string"
@@ -105,6 +106,14 @@ fn list_todos_schema_exposes_structured_combination_filters() {
     assert!(json_type_contains(
         &schema["properties"]["keyword"],
         "string"
+    ));
+    assert!(json_type_contains(
+        &schema["properties"]["recurring"],
+        "boolean"
+    ));
+    assert!(json_type_contains(
+        &schema["properties"]["recurring"],
+        "null"
     ));
 }
 

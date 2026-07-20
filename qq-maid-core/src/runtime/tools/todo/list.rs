@@ -66,9 +66,13 @@ impl Tool for ListTodoTool {
                     "keyword": {
                         "type": ["string", "null"],
                         "description": "在待办标题、详情和原文中模糊搜索；多个空格分隔词使用 AND 匹配。项目名称当前也按关键词搜索。"
+                    },
+                    "recurring": {
+                        "type": ["boolean", "null"],
+                        "description": "周期类型筛选：true 只查询周期性待办，false 只查询非周期性、一次性待办，null 不限制周期类型。"
                     }
                 },
-                "required": ["status", "due_date", "date_range_text", "time_filter", "keyword"],
+                "required": ["status", "due_date", "date_range_text", "time_filter", "keyword", "recurring"],
                 "additionalProperties": false
             }),
         }
@@ -151,6 +155,7 @@ impl Tool for ListTodoTool {
             },
             time,
             keyword: optional_text(&arguments, "keyword")?,
+            recurring: optional_recurring(&arguments)?,
             ..TodoQuery::default()
         };
         validate_todo_query(&query).map_err(todo_tool_error)?;
@@ -179,6 +184,13 @@ impl Tool for ListTodoTool {
         if let Some(value) = query.keyword.as_deref() {
             conditions.push(format!("关键词“{value}”"));
         }
+        if let Some(recurring) = query.recurring {
+            conditions.push(if recurring {
+                "周期性待办".to_owned()
+            } else {
+                "一次性待办".to_owned()
+            });
+        }
         let condition = if conditions.is_empty() {
             status.condition().to_owned()
         } else {
@@ -203,8 +215,17 @@ impl Tool for ListTodoTool {
             "displayed_count": page.items.len(),
             "truncated": page.offset + page.items.len() < page.total_count,
             "keyword": query.keyword,
+            "recurring": query.recurring,
             "numbering": "visible_number 是本轮工具查询编号，仅在当前 Tool Loop 内有效；用户跨轮次的第 N 条仍以最近实际展示给用户的 /todo 列表为准；未暴露数据库内部 ID。"
         })))
+    }
+}
+
+fn optional_recurring(arguments: &serde_json::Value) -> Result<Option<bool>, LlmError> {
+    match arguments.get("recurring") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(bad_tool_arguments("recurring must be true/false/null")),
     }
 }
 
