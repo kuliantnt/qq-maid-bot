@@ -37,7 +37,7 @@ cleanup_local_validate_dir() {
 }
 
 prepare_validate_runtime() {
-    install -d "${LOCAL_VALIDATE_DIR}/config"
+    install -d "${LOCAL_VALIDATE_DIR}/config" "${LOCAL_VALIDATE_DIR}/lib"
     install -m 0755 target/release/qq-maid-bot "${LOCAL_VALIDATE_DIR}/qq-maid-bot"
     install -m 0755 scripts/botctl.sh "${LOCAL_VALIDATE_DIR}/botctl.sh"
     install -m 0755 scripts/diagnose-network.sh "${LOCAL_VALIDATE_DIR}/diagnose-network.sh"
@@ -45,6 +45,7 @@ prepare_validate_runtime() {
     install -m 0755 scripts/qq-maid-healthcheck.sh "${LOCAL_VALIDATE_DIR}/qq-maid-healthcheck.sh"
     install -m 0755 scripts/botmon.sh "${LOCAL_VALIDATE_DIR}/botmon.sh"
     install -m 0755 scripts/qq-maid-systemd.sh "${LOCAL_VALIDATE_DIR}/qq-maid-systemd.sh"
+    install -m 0644 scripts/lib/agent-config.sh "${LOCAL_VALIDATE_DIR}/lib/agent-config.sh"
     install -m 0644 runtime/config/.env.example "${LOCAL_VALIDATE_DIR}/config/.env.example"
     install -m 0644 runtime/config/agent.toml "${LOCAL_VALIDATE_DIR}/config/agent.toml"
     install -m 0644 runtime/config/ops.example.toml "${LOCAL_VALIDATE_DIR}/config/ops.example.toml"
@@ -69,7 +70,7 @@ echo "==> Uploading artifacts..."
 # 应用根目录独立承载二进制、控制脚本、公开配置模板和运行期子目录。
 # secrets/ 是主密钥的持久化目录。部署只负责创建并收紧目录权限；绝不上传、覆盖或
 # 重新生成 master.key，避免升级后已有密文永久不可解。
-ssh "${REMOTE_HOST}" "mkdir -p '${REMOTE_APP_DIR}/config' '${REMOTE_APP_DIR}/config/secrets' '${REMOTE_APP_DIR}/data/storage' '${REMOTE_APP_DIR}/logs' '${REMOTE_APP_DIR}/run' && chmod 0700 '${REMOTE_APP_DIR}/config/secrets'"
+ssh "${REMOTE_HOST}" "mkdir -p '${REMOTE_APP_DIR}/config' '${REMOTE_APP_DIR}/config/secrets' '${REMOTE_APP_DIR}/data/storage' '${REMOTE_APP_DIR}/lib' '${REMOTE_APP_DIR}/logs' '${REMOTE_APP_DIR}/run' && chmod 0700 '${REMOTE_APP_DIR}/config/secrets'"
 
 # 将编译产物、脚本和配置模板上传为 .new 临时文件，避免覆盖正在运行的服务。
 scp target/release/qq-maid-bot "${REMOTE_HOST}:${REMOTE_APP_DIR}/.qq-maid-bot.new"
@@ -79,6 +80,7 @@ scp scripts/validate-runtime.sh "${REMOTE_HOST}:${REMOTE_APP_DIR}/.validate-runt
 scp scripts/qq-maid-healthcheck.sh "${REMOTE_HOST}:${REMOTE_APP_DIR}/.qq-maid-healthcheck.sh.new"
 scp scripts/botmon.sh "${REMOTE_HOST}:${REMOTE_APP_DIR}/.botmon.sh.new"
 scp scripts/qq-maid-systemd.sh "${REMOTE_HOST}:${REMOTE_APP_DIR}/.qq-maid-systemd.sh.new"
+scp scripts/lib/agent-config.sh "${REMOTE_HOST}:${REMOTE_APP_DIR}/lib/.agent-config.sh.new"
 scp runtime/config/.env.example "${REMOTE_HOST}:${REMOTE_APP_DIR}/config/.env.example.new"
 scp runtime/config/agent.toml "${REMOTE_HOST}:${REMOTE_APP_DIR}/config/agent.toml.new"
 scp runtime/config/ops.example.toml "${REMOTE_HOST}:${REMOTE_APP_DIR}/config/ops.example.toml.new"
@@ -88,7 +90,7 @@ scp runtime/README.md "${REMOTE_HOST}:${REMOTE_APP_DIR}/README.md"
 echo "==> Installing artifacts..."
 # 设置可执行权限后，将临时文件原子地替换为目标文件；清理旧 qq-maid-* 时需保留
 # 当前二进制、健康检查脚本和 systemd 管理脚本，避免远端巡检/自启动入口在部署后被误删。
-ssh "${REMOTE_HOST}" "cd '${REMOTE_APP_DIR}' && chmod 0755 .qq-maid-bot.new .botctl.sh.new .diagnose-network.sh.new .validate-runtime.sh.new .qq-maid-healthcheck.sh.new .botmon.sh.new .qq-maid-systemd.sh.new && mv -f .qq-maid-bot.new qq-maid-bot && mv -f .botctl.sh.new botctl.sh && mv -f .diagnose-network.sh.new diagnose-network.sh && mv -f .validate-runtime.sh.new validate-runtime.sh && mv -f .qq-maid-healthcheck.sh.new qq-maid-healthcheck.sh && mv -f .botmon.sh.new botmon.sh && mv -f .qq-maid-systemd.sh.new qq-maid-systemd.sh && mv -f config/.env.example.new config/.env.example && mv -f config/ops.example.toml.new config/ops.example.toml && mv -f config/runtime.example.toml.new config/runtime.example.toml && find . -maxdepth 1 -type f -name 'qq-maid-*' ! -name 'qq-maid-bot' ! -name 'qq-maid-healthcheck.sh' ! -name 'qq-maid-systemd.sh' -delete && find . -maxdepth 1 -type f -name '*ctl.sh' ! -name 'botctl.sh' -delete && rm -f botctl.ps1 botctl.cmd windows-startup-example.bat .env.example && rm -rf static .static.new static.old"
+ssh "${REMOTE_HOST}" "cd '${REMOTE_APP_DIR}' && chmod 0755 .qq-maid-bot.new .botctl.sh.new .diagnose-network.sh.new .validate-runtime.sh.new .qq-maid-healthcheck.sh.new .botmon.sh.new .qq-maid-systemd.sh.new && chmod 0644 lib/.agent-config.sh.new && mv -f .qq-maid-bot.new qq-maid-bot && mv -f .botctl.sh.new botctl.sh && mv -f .diagnose-network.sh.new diagnose-network.sh && mv -f .validate-runtime.sh.new validate-runtime.sh && mv -f .qq-maid-healthcheck.sh.new qq-maid-healthcheck.sh && mv -f .botmon.sh.new botmon.sh && mv -f .qq-maid-systemd.sh.new qq-maid-systemd.sh && mv -f lib/.agent-config.sh.new lib/agent-config.sh && mv -f config/.env.example.new config/.env.example && mv -f config/ops.example.toml.new config/ops.example.toml && mv -f config/runtime.example.toml.new config/runtime.example.toml && find . -maxdepth 1 -type f -name 'qq-maid-*' ! -name 'qq-maid-bot' ! -name 'qq-maid-healthcheck.sh' ! -name 'qq-maid-systemd.sh' -delete && find . -maxdepth 1 -type f -name '*ctl.sh' ! -name 'botctl.sh' -delete && rm -f botctl.ps1 botctl.cmd windows-startup-example.bat .env.example && rm -rf static .static.new static.old"
 # Agent 策略模板随 Release 一起升级：先保留远端旧文件，再原子启用新版。
 # 这是本次版本升级的唯一自动替换点；后续新增普通可选字段由程序默认值兼容。
 ssh "${REMOTE_HOST}" "cd '${REMOTE_APP_DIR}' && bash -s" <<'REMOTE_AGENT_CONFIG'
