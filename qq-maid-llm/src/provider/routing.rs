@@ -332,8 +332,11 @@ impl LlmProvider for ModelRouteProvider {
                         !diagnostics.side_effecting_tools_started.is_empty()
                             || !diagnostics.tools_with_unknown_result.is_empty()
                     };
+                    // Tool Loop 本地上下文超限不代表 Provider 不可用；在尚未外发
+                    // 内容且未启动副作用时可安全换候选，但绝不重跑已产生副作用的轮次。
+                    let local_budget_fallback = err.code == "context_budget_exceeded";
                     let fallback = index + 1 < candidates.len()
-                        && should_try_next_model(&err)
+                        && (should_try_next_model(&err) || local_budget_fallback)
                         && !visible_delta_sent
                         && !tool_side_effect_started;
                     tracing::warn!(

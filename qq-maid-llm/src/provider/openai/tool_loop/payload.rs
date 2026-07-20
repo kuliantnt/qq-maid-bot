@@ -1,12 +1,11 @@
 //! Responses Tool Loop 的 input、工具定义、请求 payload 与上下文预算。
 
+use std::borrow::Borrow;
+
 use serde_json::{Value, json};
 
 use crate::{
-    context_budget::{
-        BudgetItemKind, ContextBudgetConfig, ensure_required_budget, estimated_json_chars,
-        log_budget_report,
-    },
+    context_budget::{ContextBudgetConfig, fit_tool_loop_payload},
     error::LlmError,
     provider::types::{ChatMessage, ReasoningEffort},
     tool::ToolMetadata,
@@ -14,29 +13,15 @@ use crate::{
 
 use crate::provider::openai::payload::{openai_model_supports_reasoning, openai_responses_message};
 
-pub(super) fn enforce_tool_loop_budget(
+pub(super) fn enforce_tool_loop_budget<P: Borrow<Value>>(
     context_budget: Option<ContextBudgetConfig>,
-    payload: &Value,
-) -> Result<(), LlmError> {
+    payload: P,
+) -> Result<(Value, bool), LlmError> {
+    let payload = payload.borrow().clone();
     let Some(config) = context_budget else {
-        return Ok(());
+        return Ok((payload, false));
     };
-    // Responses Tool Loop 首期不拆分、不淘汰已进入循环的结构化轮次；
-    // 工具结果增长依靠单项结果上限和 max_rounds 控制，超预算时显式失败。
-    // 只估算模型实际可见的 input 与 tools；model、stream、输出上限等 HTTP
-    // 传输字段不占模型上下文，计入它们会在预算边界产生几十字符的误判。
-    let model_context = json!({
-        "input": payload.get("input"),
-        "tools": payload.get("tools"),
-    });
-    let report = ensure_required_budget(
-        config,
-        BudgetItemKind::ToolLoopAtomicTurn,
-        estimated_json_chars(&model_context, "tool_loop")?,
-        "tool_loop",
-    )?;
-    log_budget_report("responses_tool_loop", &report);
-    Ok(())
+    fit_tool_loop_payload(config, payload, "tool_loop")
 }
 
 pub(super) fn openai_tool_loop_input(

@@ -161,7 +161,7 @@ impl AgentStepSession for ResponsesAgentSession {
             allow_tool_calls,
             false,
         );
-        enforce_tool_loop_budget(self.context_budget, &payload)?;
+        let (payload, _tools_disabled) = enforce_tool_loop_budget(self.context_budget, payload)?;
         let response = send_openai_responses_request(
             &self.client,
             &self.api_key,
@@ -229,7 +229,7 @@ impl AgentStepSession for ResponsesAgentSession {
             allow_tool_calls,
             true,
         );
-        enforce_tool_loop_budget(self.context_budget, &payload)?;
+        let (payload, tools_disabled) = enforce_tool_loop_budget(self.context_budget, payload)?;
         let response = send_openai_responses_request(
             &self.client,
             &self.api_key,
@@ -241,7 +241,7 @@ impl AgentStepSession for ResponsesAgentSession {
         let step = collect_responses_tool_loop_stream(
             response,
             &mut input,
-            allow_tool_calls,
+            allow_tool_calls && !tools_disabled,
             text_delta_sink,
             self.streaming_diagnostics.clone(),
             self.streaming_activity_counter.clone(),

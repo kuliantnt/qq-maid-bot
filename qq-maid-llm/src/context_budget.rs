@@ -5,6 +5,7 @@
 //! retention policy 的预算项，本模块只负责按策略保留、淘汰和生成统一日志。
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use tracing::{debug, warn};
 
 use crate::error::LlmError;
@@ -292,6 +293,150 @@ pub fn ensure_required_budget(
     }
 }
 
+/// 为 Tool Loop 计算一次可发送的上下文。
+///
+/// 工具结果是可压缩的输入；当它们把输入推过 `window - output_reserve` 时，
+/// 先裁剪结果并关闭后续工具调用，给最终回答留出既定 reserve。只有用户历史和
+/// 必须保留的协议内容本身仍然超限时，才返回 `context_budget_exceeded`。
+pub fn fit_tool_loop_payload(
+    config: ContextBudgetConfig,
+    mut payload: Value,
+    stage: &'static str,
+) -> Result<(Value, bool), LlmError> {
+    config.validate()?;
+    let max_input_chars = config.effective_input_limit();
+    let estimate = |value: &Value| {
+        let model_context = if value.get("input").is_some() {
+            json!({"input": value.get("input"), "tools": value.get("tools")})
+        } else {
+            json!({"messages": value.get("messages"), "tools": value.get("tools")})
+        };
+        estimated_json_chars(&model_context, stage)
+    };
+    if estimate(&payload)? <= max_input_chars {
+        return Ok((payload, false));
+    }
+
+    // 工具定义只服务于下一次工具调用；进入收尾轮后移除定义，避免定义本身侵占
+    // 最终回答预算。协议层同时使用 tool_choice=none（若该字段存在）。
+    if let Some(object) = payload.as_object_mut()
+        && object.contains_key("tools")
+    {
+        object.insert("tools".to_owned(), Value::Array(Vec::new()));
+        object.insert("tool_choice".to_owned(), Value::String("none".to_owned()));
+    }
+    compact_tool_outputs(&mut payload, max_input_chars, &estimate)?;
+    let retained_chars = estimate(&payload)?;
+    if retained_chars > max_input_chars {
+        let report = BudgetReport {
+            unit: BudgetUnit::Chars,
+            max_input_chars,
+            output_reserve_chars: config.output_reserve_chars,
+            retained_chars,
+            evicted_chars: 0,
+            actions: vec![BudgetLogEntry {
+                kind: BudgetItemKind::ToolLoopAtomicTurn,
+                action: BudgetAction::RequiredExceeded,
+                chars: retained_chars,
+            }],
+        };
+        return Err(context_budget_exceeded(&report, stage));
+    }
+    let report = BudgetReport {
+        unit: BudgetUnit::Chars,
+        max_input_chars,
+        output_reserve_chars: config.output_reserve_chars,
+        retained_chars,
+        evicted_chars: max_input_chars.saturating_sub(retained_chars),
+        actions: vec![BudgetLogEntry {
+            kind: BudgetItemKind::ToolLoopAtomicTurn,
+            action: BudgetAction::Evicted,
+            chars: retained_chars,
+        }],
+    };
+    log_budget_report(stage, &report);
+    tracing::debug!(
+        stage,
+        retained_chars,
+        max_input_chars,
+        output_reserve_chars = config.output_reserve_chars,
+        tools_disabled = true,
+        "tool loop entered forced finalization budget"
+    );
+    Ok((payload, true))
+}
+
+fn compact_tool_outputs(
+    value: &mut Value,
+    max_input_chars: usize,
+    estimate: &impl Fn(&Value) -> Result<usize, LlmError>,
+) -> Result<(), LlmError> {
+    while estimate(value)? > max_input_chars {
+        let mut candidates = Vec::new();
+        collect_tool_output_paths(value, &mut Vec::new(), &mut candidates);
+        let Some((path, current_len)) = candidates.into_iter().max_by_key(|(_, len)| *len) else {
+            break;
+        };
+        let target =
+            current_len.saturating_sub(estimate(value)?.saturating_sub(max_input_chars).max(64));
+        let Some(slot) = value.pointer_mut(&path) else {
+            break;
+        };
+        let Some(text) = slot.as_str() else { break };
+        let marker = "\n[工具结果已为最终回答预算裁剪]";
+        let keep = target.saturating_sub(marker.chars().count());
+        let mut shortened = text.chars().take(keep).collect::<String>();
+        shortened.push_str(marker);
+        if shortened.chars().count() >= text.chars().count() {
+            *slot = json!({"truncated": true, "original_chars": text.chars().count()});
+        } else {
+            *slot = Value::String(shortened);
+        }
+    }
+    Ok(())
+}
+
+fn collect_tool_output_paths(
+    value: &Value,
+    path: &mut Vec<String>,
+    output: &mut Vec<(String, usize)>,
+) {
+    match value {
+        Value::Object(map) => {
+            let is_tool = map.get("type").and_then(Value::as_str) == Some("function_call_output")
+                || map.get("role").and_then(Value::as_str) == Some("tool");
+            for (key, child) in map {
+                path.push(key.clone());
+                if is_tool
+                    && (key == "output" || key == "content")
+                    && let Some(text) = child.as_str()
+                {
+                    output.push((
+                        format!(
+                            "/{}",
+                            path.iter()
+                                .map(|p| p.replace('~', "~0").replace('/', "~1"))
+                                .collect::<Vec<_>>()
+                                .join("/")
+                        ),
+                        text.chars().count(),
+                    ));
+                }
+                collect_tool_output_paths(child, path, output);
+                path.pop();
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                path.push(index.to_string());
+                collect_tool_output_paths(child, path, output);
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn context_budget_exceeded(report: &BudgetReport, stage: &'static str) -> LlmError {
     log_budget_report(stage, report);
     LlmError::new(
@@ -415,6 +560,39 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.code, "config");
+    }
+
+    #[test]
+    fn tool_loop_compaction_keeps_call_and_result_pairing() {
+        let payload = json!({
+            "messages": [
+                {"role": "user", "content": "请查资料"},
+                {"role": "assistant", "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "knowledge_search", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "call-1", "content": "重要证据".repeat(80)}
+            ],
+            "tools": [{"type": "function", "function": {"name": "knowledge_search"}}],
+            "tool_choice": "auto"
+        });
+        let (fitted, disabled) = fit_tool_loop_payload(
+            ContextBudgetConfig {
+                context_window_chars: 420,
+                output_reserve_chars: 40,
+                protected_recent_turns: 0,
+            },
+            payload,
+            "tool_loop",
+        )
+        .unwrap();
+        assert!(disabled);
+        assert_eq!(fitted["messages"][1]["tool_calls"][0]["id"], "call-1");
+        assert_eq!(fitted["messages"][2]["tool_call_id"], "call-1");
+        assert_eq!(fitted["tool_choice"], "none");
+        assert!(
+            fitted["messages"][2]["content"]
+                .as_str()
+                .unwrap()
+                .contains("裁剪")
+        );
     }
 
     struct FailingSerialize;

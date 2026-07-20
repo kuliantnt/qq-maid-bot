@@ -5,6 +5,8 @@
 //! 工具执行和退出条件由 `qq_maid_llm::agent_loop::run_agent_loop` 统一控制；
 //! 本模块不再维护自己的循环，避免 provider 侧重复维护同一套退出逻辑。
 
+use std::borrow::Borrow;
+
 use serde_json::{Value, json};
 
 use crate::{
@@ -12,16 +14,16 @@ use crate::{
         AgentSessionRequest, AgentStep, AgentStepSession, AgentTextDeltaSink, AgentToolCall,
         AgentToolResult,
     },
-    context_budget::{
-        BudgetItemKind, ContextBudgetConfig, ensure_required_budget, estimated_json_chars,
-        log_budget_report,
-    },
+    context_budget::{ContextBudgetConfig, fit_tool_loop_payload},
     error::LlmError,
     metrics::MetricsRecorder,
     provider::types::{ChatMessage, TokenUsage},
     sse::{parse_sse_frame, take_sse_frame},
     tool::{ToolMetadata, ToolRegistry},
 };
+
+#[cfg(test)]
+use crate::context_budget::estimated_json_chars;
 
 use super::chat::{
     ChatCompletionsClient, chat_completions_messages, extract_chat_completion_text,
@@ -96,7 +98,7 @@ impl AgentStepSession for ChatCompletionsAgentSession {
             allow_tool_calls,
             false,
         );
-        enforce_tool_loop_budget(self.context_budget, &payload)?;
+        let (payload, _tools_disabled) = enforce_tool_loop_budget(self.context_budget, payload)?;
         let response = send_chat_completions_request(&self.client, &payload, false).await?;
         let body: Value = response.json().await.map_err(|err| {
             LlmError::provider(
@@ -155,12 +157,12 @@ impl AgentStepSession for ChatCompletionsAgentSession {
             allow_tool_calls,
             true,
         );
-        enforce_tool_loop_budget(self.context_budget, &payload)?;
+        let (payload, tools_disabled) = enforce_tool_loop_budget(self.context_budget, payload)?;
         let response = send_chat_completions_request(&self.client, &payload, true).await?;
         let step = collect_chat_completions_tool_loop_stream(
             response,
             &mut messages,
-            allow_tool_calls,
+            allow_tool_calls && !tools_disabled,
             text_delta_sink,
         )
         .await?;
@@ -214,29 +216,15 @@ where
         .map(|_| crate::provider::ToolCallingProtocol::ChatCompletionsToolCalls)
 }
 
-fn enforce_tool_loop_budget(
+fn enforce_tool_loop_budget<P: Borrow<Value>>(
     context_budget: Option<ContextBudgetConfig>,
-    payload: &Value,
-) -> Result<(), LlmError> {
+    payload: P,
+) -> Result<(Value, bool), LlmError> {
+    let payload = payload.borrow().clone();
     let Some(config) = context_budget else {
-        return Ok(());
+        return Ok((payload, false));
     };
-    // Chat Completions 的 assistant tool_calls 与对应 tool messages 必须成组保留；
-    // 首期只做完整 payload 检查，不静默删除任何工具轮次。
-    // 只估算模型实际可见的 messages 与 tools，排除 stream、model、max_tokens
-    // 等传输控制字段，避免在上下文预算临界点误报超限。
-    let model_context = json!({
-        "messages": payload.get("messages"),
-        "tools": payload.get("tools"),
-    });
-    let report = ensure_required_budget(
-        config,
-        BudgetItemKind::ToolLoopAtomicTurn,
-        estimated_json_chars(&model_context, "tool_loop")?,
-        "tool_loop",
-    )?;
-    log_budget_report("chat_completions_tool_loop", &report);
-    Ok(())
+    fit_tool_loop_payload(config, payload, "tool_loop")
 }
 
 fn chat_completions_tool_defs(metadata: Vec<ToolMetadata>) -> Vec<Value> {

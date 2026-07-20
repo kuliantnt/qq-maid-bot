@@ -244,6 +244,7 @@ pub enum CoreFailureKind {
     SearchFailed,
     LlmTimeout,
     LlmFailed,
+    ContextBudgetExceeded,
     Cancelled,
     Internal,
 }

@@ -764,6 +764,9 @@ async fn execute_tool_batch(
             .execute_prepared_call(
                 prepared,
                 |tool_name, _effect| {
+                    if skipped_for_finalization {
+                        return Ok(ToolCallStartDecision::SkipForFinalAnswer);
+                    }
                     let has_completed_result =
                         run_handle.has_completed_tool_result_since(baseline.tool_results);
                     let reserve_reached = run_handle.should_preserve_finalization_budget();

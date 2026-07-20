@@ -398,7 +398,7 @@ async fn tool_loop_prepares_same_round_calls_before_executing_any_tool() {
 }
 
 #[tokio::test]
-async fn tool_loop_budget_exceeded_before_first_provider_request() {
+async fn tool_loop_budget_before_first_request_disables_tools_for_answer() {
     let (base_url, state) = spawn_mock_tool_loop(vec![json!({
         "choices": [{
             "message": {
@@ -417,7 +417,7 @@ async fn tool_loop_budget_exceeded_before_first_provider_request() {
         .register(WeatherToolStub::new("小雨"))
         .unwrap();
 
-    let err = run_session(
+    let outcome = run_session(
         client,
         "deepseek",
         "deepseek-chat",
@@ -432,11 +432,13 @@ async fn tool_loop_budget_exceeded_before_first_provider_request() {
         2,
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(err.code, "context_budget_exceeded");
-    assert_eq!(err.stage, "tool_loop");
-    assert!(state.lock().await.requests.is_empty());
+    assert_eq!(outcome.reply, "should not be requested");
+    let requests = &state.lock().await.requests;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["tool_choice"], "none");
+    assert!(requests[0]["tools"].as_array().is_some_and(Vec::is_empty));
 }
 
 #[test]
@@ -488,7 +490,7 @@ fn payload_disables_tool_calls_explicitly() {
 }
 
 #[tokio::test]
-async fn tool_loop_budget_exceeded_after_tool_result_skips_next_provider_request() {
+async fn tool_loop_budget_after_tool_result_disables_tools_for_final_answer() {
     let (base_url, state) = spawn_mock_tool_loop(vec![
         json!({
             "choices": [{
@@ -525,7 +527,7 @@ async fn tool_loop_budget_exceeded_after_tool_result_skips_next_provider_request
         .register(WeatherToolStub::new("小雨"))
         .unwrap();
 
-    let err = run_session(
+    let outcome = run_session(
         client,
         "deepseek",
         "deepseek-chat",
@@ -540,13 +542,14 @@ async fn tool_loop_budget_exceeded_after_tool_result_skips_next_provider_request
         2,
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(err.code, "context_budget_exceeded");
-    assert_eq!(err.stage, "tool_loop");
+    assert_eq!(outcome.reply, "should not be requested");
     let requests = &state.lock().await.requests;
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     assert_eq!(requests[0]["tools"][0]["function"]["name"], "get_weather");
+    assert_eq!(requests[1]["tool_choice"], "none");
+    assert!(requests[1]["tools"].as_array().is_some_and(Vec::is_empty));
 }
 
 #[tokio::test]

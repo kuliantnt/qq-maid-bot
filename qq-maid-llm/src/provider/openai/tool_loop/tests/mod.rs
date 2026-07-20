@@ -286,6 +286,17 @@ async fn mock_tool_loop_handler(
 ) -> Json<Value> {
     let mut state = state.lock().await;
     state.requests.push(body);
+    if state.requests[0].get("tool_choice") == Some(&json!("none"))
+        || state.requests[0]
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+    {
+        return Json(json!({
+            "output_text": "杭州今天有小雨，建议带伞。",
+            "output": [{"type":"message","content":[{"type":"output_text","text":"杭州今天有小雨，建议带伞。"}]}]
+        }));
+    }
     if state.requests.len() == 1 {
         return Json(json!({
             "output": [{

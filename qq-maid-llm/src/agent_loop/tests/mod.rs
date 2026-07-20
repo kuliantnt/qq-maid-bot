@@ -310,6 +310,36 @@ struct FailOnceReadOnlyTool {
     calls: Arc<StdMutex<usize>>,
 }
 
+struct LimitedReadOnlyTool {
+    calls: Arc<StdMutex<usize>>,
+}
+
+#[async_trait]
+impl crate::tool::Tool for LimitedReadOnlyTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "knowledge_search".to_owned(),
+            description: "limited read-only knowledge search".to_owned(),
+            parameters: json!({"type": "object", "properties": {"query": {"type": "string"}}}),
+        }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    fn max_calls_per_request(&self) -> Option<usize> {
+        Some(2)
+    }
+
+    async fn execute(&self, _ctx: ToolContext, arguments: Value) -> Result<ToolOutput, LlmError> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolOutput::json(
+            json!({"ok": true, "evidence": arguments["query"]}),
+        ))
+    }
+}
+
 #[async_trait]
 impl crate::tool::Tool for FailOnceReadOnlyTool {
     fn metadata(&self) -> ToolMetadata {

@@ -105,6 +105,7 @@ impl CoreRespondFailure {
             ("timeout", "query" | "search" | "web_search") => CoreFailureKind::SearchTimeout,
             ("timeout", _) => CoreFailureKind::LlmTimeout,
             (_, "query" | "search" | "web_search") => CoreFailureKind::SearchFailed,
+            ("context_budget_exceeded", _) => CoreFailureKind::ContextBudgetExceeded,
             ("provider_error" | "http_error" | "upstream_unavailable" | "rate_limited", _) => {
                 CoreFailureKind::LlmFailed
             }
@@ -132,6 +133,9 @@ fn user_visible_failure_message(kind: CoreFailureKind) -> String {
         CoreFailureKind::SearchFailed => "联网查询暂时不可用，请稍后再试。",
         CoreFailureKind::LlmTimeout => "LLM 服务处理超时，请稍后再试。",
         CoreFailureKind::LlmFailed => "上游服务暂时不可用，请稍后再试。",
+        CoreFailureKind::ContextBudgetExceeded => {
+            "本次查阅的资料较多，已超出当前对话可处理范围，请缩小查询范围后重试。"
+        }
         CoreFailureKind::Cancelled => "请求已取消。",
         CoreFailureKind::Internal => "处理失败，请稍后再试。",
     }
@@ -259,6 +263,19 @@ mod tests {
         ));
         assert_eq!(max_rounds.kind, CoreFailureKind::Internal);
         assert!(!max_rounds.retryable);
+    }
+
+    #[test]
+    fn context_budget_failure_has_capacity_message() {
+        let failure = CoreRespondFailure::from_llm_error(&agent_error(
+            "context_budget_exceeded",
+            "tool_loop",
+            AgentStopReason::Failed,
+        ));
+        assert_eq!(failure.kind, CoreFailureKind::ContextBudgetExceeded);
+        assert!(failure.message.contains("资料较多"));
+        assert!(!failure.message.contains("上游服务"));
+        assert!(!failure.retryable);
     }
 
     #[test]

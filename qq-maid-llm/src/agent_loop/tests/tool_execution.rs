@@ -1,6 +1,46 @@
 use super::*;
 
 #[tokio::test]
+async fn request_limited_read_only_tool_forces_final_answer_after_two_calls() {
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(LimitedReadOnlyTool {
+        calls: calls.clone(),
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call(
+                "knowledge_search",
+                "c1",
+                r#"{"query":"a"}"#,
+            )]),
+            tool_calls(vec![tool_call(
+                "knowledge_search",
+                "c2",
+                r#"{"query":"b"}"#,
+            )]),
+            tool_calls(vec![tool_call(
+                "knowledge_search",
+                "c3",
+                r#"{"query":"c"}"#,
+            )]),
+            final_reply("based on the available evidence"),
+        ],
+    ));
+    let observed = session.observed.clone();
+    let outcome = run_agent_loop(session, registry, test_context(), 5, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(*calls.lock().unwrap(), 2);
+    assert_eq!(outcome.reply, "based on the available evidence");
+    let observed = observed.lock().unwrap();
+    assert!(!observed[3].1, "final answer round must disable tool calls");
+    assert!(outcome.agent.tool_results[2].output["error_code"] == "tool_call_limit");
+}
+
+#[tokio::test]
 async fn duplicate_read_only_tool_call_replays_success_and_keeps_dependency_chain() {
     let calls = Arc::new(StdMutex::new(0));
     let dependent_calls = Arc::new(StdMutex::new(0));
@@ -48,7 +88,8 @@ async fn duplicate_read_only_tool_call_replays_success_and_keeps_dependency_chai
             .all(|result| result.succeeded)
     );
     let observed = observed.lock().unwrap();
-    assert_eq!(observed[1].0[0].output, observed[2].0[0].output);
+    assert_ne!(observed[1].0[0].output, observed[2].0[0].output);
+    assert!(observed[2].0[0].output.contains("deduplicated"));
     assert!(observed[2].0[1].output.contains("continue"));
 }
 
