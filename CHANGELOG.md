@@ -2,6 +2,18 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.20.4] - 2026-07-20
+
+### Fixed
+
+* **管理员完整令牌输入**（PR #547）：管理员初始化和密码重置接口支持裸 token，以及项目生成的 `qq-maid-bootstrap-v1:<时间>:<token>` 和 `qq-maid-password-reset-v1:<时间>:<token>` 完整令牌字符串；严格校验前缀、字段与用途，并区分输入格式错误和 token 无效或过期。
+* **群聊 Markdown 输出保留**（PR #546）：Provider 同时返回 Text part 与 Markdown 通道时优先保留 Markdown，避免群聊非流式回复被降级为纯文本。
+
+### Compatibility
+
+* 本版本无数据库 migration、配置项变更或令牌有效期调整；原有裸 token 输入保持兼容，Bootstrap token 与密码重置 token 仍不可跨用途使用。
+* 根包 `qq-maid-bot` 版本号提升到 `0.20.4`，内部 crate 版本不统一提升。
+
 ## [v0.20.3] - 2026-07-19
 
 ### Added
