@@ -22,7 +22,7 @@ candidates = ["openai:gpt-fast"]
 [model_routes.aux]
 candidates = ["openai:gpt-aux"]
 
-[search_routes.search]
+[tools.web_search.routes.search]
 model = "gpt-search"
 
 [profiles.fast]
@@ -93,7 +93,7 @@ version = 1
 [model_routes.main]
 candidates = ["openai:gpt-main"]
 
-[search_routes.search]
+[tools.web_search.routes.search]
 model = "gpt-search"
 
 [profiles.balanced]
@@ -135,7 +135,7 @@ request_timeout_seconds = 45
 [model_routes.private_main]
 candidates = ["mimo:mimo-v2.5-pro", "deepseek:deepseek-chat"]
 
-[search_routes.search]
+[tools.web_search.routes.search]
 model = "gpt-search"
 
 [profiles.fast]
@@ -203,10 +203,10 @@ candidates = ["openai:gpt-private"]
 [model_routes.group_main]
 candidates = ["openai:gpt-group"]
 
-[search_routes.search]
+[tools.web_search.routes.search]
 model = "gpt-search"
 
-[search_routes.private_search]
+[tools.web_search.routes.private_search]
 model = "gemini:gemini-2.5-flash"
 
 [profiles.fast]
@@ -243,6 +243,36 @@ enabled_tools = ["save_memory"]
 
     let private = config.resolve(ChatScene::Private).unwrap();
     assert_eq!(private.search_model, "gemini:gemini-2.5-flash");
+}
+
+#[test]
+fn toml_config_rejects_legacy_search_routes_section() {
+    let text = r#"
+version = 1
+
+[model_routes.main]
+candidates = ["openai:gpt-main"]
+
+[search_routes.search]
+model = "gpt-search"
+
+[profiles.balanced]
+main_route = "main"
+
+[scenes.private]
+profile = "balanced"
+
+[scenes.group]
+profile = "balanced"
+"#;
+
+    let error = AgentRuntimeConfig::from_toml(
+        text,
+        AgentConfigSource::File("config/agent.toml".to_owned()),
+    )
+    .unwrap_err();
+
+    assert!(error.message.contains("unknown field `search_routes`"));
 }
 
 #[test]
@@ -324,6 +354,38 @@ profile = "balanced"
     .unwrap_err();
 
     assert!(error.message.contains("connect_timeout_seconds"));
+}
+
+#[test]
+fn toml_config_rejects_invalid_web_search_backend_and_tavily_options() {
+    let template = include_str!("../../../../runtime/config/agent.toml");
+    for (current, invalid, field) in [
+        (
+            "backend = \"provider_native\"",
+            "backend = \"unknown\"",
+            "backend",
+        ),
+        ("max_results = 5", "max_results = 11", "max_results"),
+        (
+            "search_depth = \"basic\"",
+            "search_depth = \"exhaustive\"",
+            "search_depth",
+        ),
+        ("topic = \"general\"", "topic = \"sports\"", "topic"),
+        (
+            "# time_range = \"week\"",
+            "time_range = \"forever\"",
+            "time_range",
+        ),
+    ] {
+        let text = template.replacen(current, invalid, 1);
+        let error = AgentRuntimeConfig::from_toml(
+            &text,
+            AgentConfigSource::File("config/agent.toml".to_owned()),
+        )
+        .unwrap_err();
+        assert!(error.message.contains(field), "{field}: {}", error.message);
+    }
 }
 
 #[test]

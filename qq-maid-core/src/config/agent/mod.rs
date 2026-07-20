@@ -114,7 +114,7 @@ pub struct AgentRuntimeConfig {
     document: Option<AgentConfigDocument>,
     providers: HashMap<String, AgentProviderConfig>,
     routes: HashMap<String, ModelRoute>,
-    search_routes: HashMap<String, String>,
+    web_search_routes: HashMap<String, String>,
     profiles: HashMap<String, AgentProfile>,
     scenes: AgentScenes,
     knowledge_mode: KnowledgeRetrievalMode,
@@ -247,8 +247,6 @@ pub(in crate::config) struct AgentConfigDocument {
     providers: HashMap<String, ProviderFile>,
     #[serde(default)]
     pub(in crate::config) model_routes: HashMap<String, RouteFile>,
-    #[serde(default)]
-    pub(in crate::config) search_routes: HashMap<String, SearchRouteFile>,
     #[serde(default)]
     pub(in crate::config) profiles: HashMap<String, AgentProfileConfig>,
     pub(in crate::config) scenes: ScenesFile,
@@ -407,15 +405,11 @@ impl AgentRuntimeConfig {
             let joined = route.candidates.join(",");
             routes.insert(name.clone(), ModelRoute::parse_config(&joined, &name)?);
         }
-        let mut search_routes = HashMap::new();
-        for (name, route) in file.search_routes {
-            let model = super::openai_model_name(&route.model, &format!("search_routes.{name}"))?;
-            search_routes.insert(name, model);
-        }
+        let mut web_search_routes = HashMap::new();
         for (name, route) in file.tools.web_search.routes {
             let model =
                 super::openai_model_name(&route.model, &format!("tools.web_search.routes.{name}"))?;
-            search_routes.insert(name, model);
+            web_search_routes.insert(name, model);
         }
         let mut profiles = HashMap::new();
         for (name, profile) in file.profiles {
@@ -439,7 +433,7 @@ impl AgentRuntimeConfig {
             document: Some(document),
             providers,
             routes,
-            search_routes,
+            web_search_routes,
             profiles,
             knowledge_mode: file.knowledge.mode,
             knowledge_embedding: file.knowledge.embedding,
@@ -502,7 +496,7 @@ impl AgentRuntimeConfig {
         let search_route_name = scene_policy.search_route.as_deref().unwrap_or("search");
         let search_model = match self.web_search.default_backend {
             WebSearchBackend::ProviderNative => self
-                .search_routes
+                .web_search_routes
                 .get(search_route_name)
                 .cloned()
                 .ok_or_else(|| {
@@ -513,7 +507,7 @@ impl AgentRuntimeConfig {
                 })?,
             // Tavily 和 disabled 不调用模型原生搜索，允许配置中完全移除旧 search route。
             WebSearchBackend::Tavily | WebSearchBackend::Disabled => self
-                .search_routes
+                .web_search_routes
                 .get(search_route_name)
                 .cloned()
                 .unwrap_or_default(),
@@ -694,7 +688,7 @@ impl AgentRuntimeConfig {
             document: None,
             providers: HashMap::new(),
             routes,
-            search_routes: HashMap::from([("search".to_owned(), search_model.to_owned())]),
+            web_search_routes: HashMap::from([("search".to_owned(), search_model.to_owned())]),
             profiles,
             knowledge_mode: KnowledgeRetrievalMode::Preflight,
             knowledge_embedding: KnowledgeEmbeddingConfig::default(),

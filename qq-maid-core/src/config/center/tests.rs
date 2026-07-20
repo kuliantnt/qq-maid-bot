@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use qq_maid_llm::web_search::WebSearchBackend;
 use toml::Value;
 
 use crate::{
@@ -1206,7 +1207,6 @@ fn partial_agent_save_preserves_custom_provider_routes_profiles_scenes_and_tools
     assert!(text.contains("[model_routes.custom_route]"));
     assert!(text.contains("[profiles.custom_profile]"));
     assert!(text.contains("[tools.web_search.routes.private_search]"));
-    assert!(!text.contains("[search_routes.private_search]"));
     assert!(text.contains("list_todos"));
     let reloaded = AgentRuntimeConfig::from_toml(
         &text,
@@ -1220,34 +1220,74 @@ fn partial_agent_save_preserves_custom_provider_routes_profiles_scenes_and_tools
 }
 
 #[test]
-fn agent_save_migrates_all_legacy_search_routes_to_unified_section() {
-    let (_file, _running, database, path) = test_agent_file();
-    let text = std::fs::read_to_string(&path)
-        .unwrap()
-        .replace("[tools.web_search.routes.", "[search_routes.");
-    std::fs::write(&path, &text).unwrap();
-    let running = AgentRuntimeConfig::from_toml(
-        &text,
-        AgentConfigSource::File(path.to_string_lossy().into_owned()),
-    )
-    .unwrap();
-    let file = AgentConfigFile::new(running).unwrap();
-    let snapshot = file.snapshot().unwrap();
+fn agent_web_search_backend_switches_preserve_routes_and_parameters() {
+    let (file, _running, _database, path) = test_agent_file();
+    let mut revision = file.snapshot().unwrap().revision;
 
-    file.update(
-        &snapshot.revision,
-        &[AgentConfigChange::SetSearchRoute {
-            name: "private_search".to_owned(),
-            model: "gpt-migrated".to_owned(),
-        }],
-    )
-    .unwrap();
+    for (backend, expected) in [
+        ("tavily", WebSearchBackend::Tavily),
+        ("disabled", WebSearchBackend::Disabled),
+        ("provider_native", WebSearchBackend::ProviderNative),
+    ] {
+        let saved = file
+            .update(
+                &revision,
+                &[AgentConfigChange::SetWebSearch {
+                    backend: backend.to_owned(),
+                    max_results: 8,
+                    search_depth: "advanced".to_owned(),
+                    topic: "news".to_owned(),
+                    time_range: Some("week".to_owned()),
+                    connect_timeout_seconds: 5,
+                    first_response_timeout_seconds: 15,
+                    total_timeout_seconds: 45,
+                }],
+            )
+            .unwrap();
+        revision = saved.revision;
 
-    let saved = std::fs::read_to_string(path).unwrap();
-    assert!(saved.contains("[tools.web_search.routes.private_search]"));
-    assert!(saved.contains("[tools.web_search.routes.group_search]"));
-    assert!(!saved.contains("[search_routes."));
-    drop(database);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[tools.web_search.routes.private_search]"));
+        assert!(text.contains("[tools.web_search.routes.group_search]"));
+        let reloaded = AgentRuntimeConfig::from_toml(
+            &text,
+            AgentConfigSource::File(path.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+        assert_eq!(reloaded.web_search().default_backend, expected);
+        assert_eq!(reloaded.web_search().max_results, 8);
+        assert_eq!(
+            reloaded.resolve(ChatScene::Private).unwrap().search_model,
+            "gpt-5.6-luna"
+        );
+    }
+}
+
+#[test]
+fn agent_web_search_update_rejects_invalid_parameters_without_replacing_file() {
+    let (file, _running, _database, path) = test_agent_file();
+    let initial = file.snapshot().unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    let error = file
+        .update(
+            &initial.revision,
+            &[AgentConfigChange::SetWebSearch {
+                backend: "tavily".to_owned(),
+                max_results: 0,
+                search_depth: "advanced".to_owned(),
+                topic: "news".to_owned(),
+                time_range: Some("week".to_owned()),
+                connect_timeout_seconds: 20,
+                first_response_timeout_seconds: 10,
+                total_timeout_seconds: 30,
+            }],
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "invalid_config");
+    assert!(error.message().contains("max_results"));
+    assert_eq!(std::fs::read(path).unwrap(), before);
 }
 
 #[cfg(unix)]

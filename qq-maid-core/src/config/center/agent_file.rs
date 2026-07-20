@@ -37,6 +37,16 @@ pub enum AgentConfigChange {
         name: String,
         model: String,
     },
+    SetWebSearch {
+        backend: String,
+        max_results: u8,
+        search_depth: String,
+        topic: String,
+        time_range: Option<String>,
+        connect_timeout_seconds: u64,
+        first_response_timeout_seconds: u64,
+        total_timeout_seconds: u64,
+    },
     RemoveSearchRoute {
         name: String,
     },
@@ -214,15 +224,6 @@ fn apply_change(
     document: &mut AgentConfigDocument,
     change: &AgentConfigChange,
 ) -> Result<(), ConfigCenterError> {
-    // 配置中心一旦保存，就把仍可读取的旧 route 收敛到统一位置；显式新配置优先。
-    for (name, route) in std::mem::take(&mut document.search_routes) {
-        document
-            .tools
-            .web_search
-            .routes
-            .entry(name)
-            .or_insert(route);
-    }
     match change {
         AgentConfigChange::SetKnowledge { mode, embedding } => {
             document.knowledge.mode = *mode;
@@ -249,10 +250,29 @@ fn apply_change(
                 },
             );
         }
+        AgentConfigChange::SetWebSearch {
+            backend,
+            max_results,
+            search_depth,
+            topic,
+            time_range,
+            connect_timeout_seconds,
+            first_response_timeout_seconds,
+            total_timeout_seconds,
+        } => {
+            let web_search = &mut document.tools.web_search;
+            web_search.backend = backend.clone();
+            web_search.max_results = *max_results;
+            web_search.search_depth = search_depth.clone();
+            web_search.topic = topic.clone();
+            web_search.time_range = time_range.clone();
+            web_search.connect_timeout_seconds = *connect_timeout_seconds;
+            web_search.first_response_timeout_seconds = *first_response_timeout_seconds;
+            web_search.total_timeout_seconds = *total_timeout_seconds;
+        }
         AgentConfigChange::RemoveSearchRoute { name } => {
             let name = entry_name(name)?;
             document.tools.web_search.routes.remove(name.as_str());
-            document.search_routes.remove(name.as_str());
         }
         AgentConfigChange::SetProfile { name, profile } => {
             document.profiles.insert(entry_name(name)?, profile.clone());

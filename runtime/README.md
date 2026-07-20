@@ -254,7 +254,7 @@ Markdown 文件
 
 - `providers`：可选的 OpenAI-compatible provider 元数据，例如 `mimo` 的 base URL、认证头和 API key 环境变量名；
 - `model_routes`：可选的命名模型候选链，例如覆盖内置 `private_main`、`group_main`、`aux`；
-- `search_routes`：可选的 `/查` 搜索模型，例如覆盖内置 `private_search`、`group_search`；裸模型或 `openai:` 走 OpenAI Responses web_search，`gemini:` 走 Gemini Google Search 工具；
+- `tools.web_search.routes`：`provider_native` 后端使用的 `/查` 搜索模型，例如覆盖内置 `private_search`、`group_search`；裸模型或 `openai:` 走 OpenAI Responses web_search，`gemini:` 走 Gemini Google Search 工具；
 - `profiles.fast / balanced / deep`：主模型路线、可选 `aux_route`、reasoning effort、最大 Tool Loop 轮数和输出预算；
 - `scenes.private / group`：群聊 / 私聊是否启用普通 AI 聊天、选择哪个 profile、是否允许 Tool Calling。
 
@@ -274,10 +274,10 @@ candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-flash", "mimo:mimo-v2.5"
 [model_routes.aux]
 candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-flash", "mimo:mimo-v2.5", "deepseek:deepseek-chat"]
 
-[search_routes.private_search]
+[tools.web_search.routes.private_search]
 model = "gpt-5.6-luna"
 
-[search_routes.group_search]
+[tools.web_search.routes.group_search]
 model = "gpt-5.6-luna"
 ```
 
@@ -302,7 +302,7 @@ candidates = ["mimo:mimo-v2.5-pro", "deepseek:deepseek-chat"]
 candidates = ["mimo:mimo-v2.5", "deepseek:deepseek-chat"]
 ```
 
-默认 Luna 路线需要在 `.env` 配置 `OPENAI_API_KEY`，并确认账号具备 `gpt-5.6-luna` API 访问权限。运行时始终按 `agent.toml` 候选中的 Provider 前缀自动路由；改用其他 Provider 时，`.env` 只需配置实际用到的 `DEEPSEEK_API_KEY` / `MIMO_API_KEY` 等敏感项，`agent.toml` 不写 key。Gemini 是内置 Provider，配置 `GEMINI_API_KEY` 后可直接在 `model_routes` 或 `search_routes` 使用 `gemini:` 前缀。`/查` 可走 OpenAI Responses web_search 或 Gemini Google Search 工具，不使用 `/查` 时可删除 `search_routes`。
+默认 Luna 路线需要在 `.env` 配置 `OPENAI_API_KEY`，并确认账号具备 `gpt-5.6-luna` API 访问权限。运行时始终按 `agent.toml` 候选中的 Provider 前缀自动路由；改用其他 Provider 时，`.env` 只需配置实际用到的 `DEEPSEEK_API_KEY` / `MIMO_API_KEY` 等敏感项，`agent.toml` 不写 key。Gemini 是内置 Provider，配置 `GEMINI_API_KEY` 后可直接在 `model_routes` 或 `tools.web_search.routes` 使用 `gemini:` 前缀。`/查` 可走 OpenAI Responses web_search、Gemini Google Search 或 Tavily；不使用 Provider 原生搜索时可保留 routes，后续切回时无需重新配置。
 
 ### `config/prompts/*.md`
 

@@ -378,6 +378,8 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(13, 138
 }
 .config-row > * { min-width: 0; }
 .config-row:focus-within { border-color: #9fd3bd; box-shadow: 0 0 0 3px rgba(13, 138, 95, .08); }
+.config-row-warning { border-color: #e2ad6d; background: #fffaf3; }
+.config-row-warning > strong, .config-row-warning .field-meta { color: var(--warn); }
 .config-row > label:first-child { margin: 0; color: var(--ink); }
 .config-row > input:not([type="checkbox"]) { width: 100%; }
 .config-row .password-field { width: 100%; }

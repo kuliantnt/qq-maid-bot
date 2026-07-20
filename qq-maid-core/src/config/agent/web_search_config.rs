@@ -21,24 +21,24 @@ pub(in crate::config) struct ToolsConfigFile {
 #[serde(deny_unknown_fields)]
 pub(in crate::config) struct WebSearchConfigFile {
     #[serde(default = "default_web_search_backend")]
-    backend: String,
+    pub(in crate::config) backend: String,
     #[serde(default = "default_web_search_max_results")]
-    max_results: u8,
+    pub(in crate::config) max_results: u8,
     #[serde(default = "default_web_search_depth")]
-    search_depth: String,
+    pub(in crate::config) search_depth: String,
     #[serde(default = "default_web_search_topic")]
-    topic: String,
+    pub(in crate::config) topic: String,
     #[serde(default)]
-    time_range: Option<String>,
+    pub(in crate::config) time_range: Option<String>,
     /// OpenAI/Gemini 等模型原生搜索 route 统一收敛在联网搜索配置下。
     #[serde(default)]
     pub(in crate::config) routes: HashMap<String, SearchRouteFile>,
     #[serde(default = "default_web_search_connect_timeout_seconds")]
-    connect_timeout_seconds: u64,
+    pub(in crate::config) connect_timeout_seconds: u64,
     #[serde(default = "default_web_search_first_response_timeout_seconds")]
-    first_response_timeout_seconds: u64,
+    pub(in crate::config) first_response_timeout_seconds: u64,
     #[serde(default = "default_web_search_total_timeout_seconds")]
-    total_timeout_seconds: u64,
+    pub(in crate::config) total_timeout_seconds: u64,
 }
 
 impl Default for WebSearchConfigFile {
