@@ -12,6 +12,8 @@ use futures::StreamExt;
 use qq_maid_common::output_part::OutputPart;
 use qq_maid_common::{
     identity_context::{ConversationKind, ExecutionActorContext, ExecutionConversationContext},
+    input_part::MessageInputPart,
+    markdown::escape_unclosed_backticks,
     time_context::{RequestTimeContext, request_time_context},
 };
 use qq_maid_llm::{
@@ -578,14 +580,37 @@ fn build_respond_messages_for_model(
 ) -> Vec<ChatMessage> {
     match req.purpose {
         RespondPurpose::Chat => build_chat_messages_for_model(req, supports_vision),
-        RespondPurpose::MemoryDraft => {
-            with_request_time_context_after_system_prefix(build_memory_draft_messages(req), 1)
+        RespondPurpose::MemoryDraft => normalize_user_messages_for_provider(
+            with_request_time_context_after_system_prefix(build_memory_draft_messages(req), 1),
+        ),
+        RespondPurpose::TodoParse => {
+            normalize_user_messages_for_provider(build_todo_parse_messages(req))
         }
-        RespondPurpose::TodoParse => build_todo_parse_messages(req),
-        RespondPurpose::Compact => {
-            with_request_time_context_after_system_prefix(build_compact_messages(req), 1)
+        RespondPurpose::Compact => normalize_user_messages_for_provider(
+            with_request_time_context_after_system_prefix(build_compact_messages(req), 1),
+        ),
+    }
+}
+
+fn normalize_user_messages_for_provider(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    messages
+        .into_iter()
+        .map(normalize_user_message_for_provider)
+        .collect()
+}
+
+fn normalize_user_message_for_provider(mut message: ChatMessage) -> ChatMessage {
+    if message.role != ChatRole::User {
+        return message;
+    }
+
+    message.content = escape_unclosed_backticks(&message.content);
+    for part in &mut message.content_parts {
+        if let MessageInputPart::Text { text, .. } = part {
+            *text = escape_unclosed_backticks(text);
         }
     }
+    message
 }
 
 /// 在消息列表头部注入时间上下文系统消息（如果尚未存在）。
@@ -663,11 +688,14 @@ fn build_chat_messages_for_model(req: &RespondRequest, supports_vision: bool) ->
         req.history_messages
             .iter()
             .filter(|message| !message.content.trim().is_empty())
-            .cloned(),
+            .cloned()
+            .map(normalize_user_message_for_provider),
     );
-    messages.push(ChatMessage::user_with_parts(
-        req.user_text.clone(),
-        current_user_parts_for_model(req, supports_vision),
+    messages.push(normalize_user_message_for_provider(
+        ChatMessage::user_with_parts(
+            req.user_text.clone(),
+            current_user_parts_for_model(req, supports_vision),
+        ),
     ));
     messages
 }
@@ -720,6 +748,7 @@ fn budget_chat_messages(
         .iter()
         .filter(|message| !message.content.trim().is_empty())
         .cloned()
+        .map(normalize_user_message_for_provider)
         .collect::<Vec<_>>();
     for (messages, protected) in
         partition_history_for_budget(&history, config.protected_recent_turns)
@@ -737,10 +766,10 @@ fn budget_chat_messages(
     push_message_item(
         &mut items,
         BudgetItemKind::Required,
-        ChatMessage::user_with_parts(
+        normalize_user_message_for_provider(ChatMessage::user_with_parts(
             req.user_text.clone(),
             current_user_parts_for_model(req, supports_vision),
-        ),
+        )),
     )?;
 
     let budgeted = apply_context_budget(items, config)?;

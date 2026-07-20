@@ -12,10 +12,12 @@
 //! - 转义符号 `\\*` `\\_` 还原为字面量；
 //! - `<br>`、`</p>` 等 HTML 标签转换为换行后移除其余标签。
 
+mod backticks;
 mod chat_text;
 mod plain_text;
 mod qq;
 
+pub use backticks::escape_unclosed_backticks;
 pub use chat_text::to_chat_text;
 pub use plain_text::to_plain_text;
 pub use qq::{to_qq, to_qq_with_limit};

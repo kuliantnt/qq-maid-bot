@@ -49,6 +49,64 @@ async fn chat_returns_markdown_and_plaintext_fallback_for_structured_reply() {
 }
 
 #[tokio::test]
+async fn unclosed_backticks_reach_agent_provider_as_markdown_literals() {
+    let cases = [
+        ("测试`", "测试\\`"),
+        ("`测试", "\\`测试"),
+        ("测试`内容", "测试\\`内容"),
+        (
+            "BAAI/bge-small-zh-v1.5` 这模型配置要求多少",
+            "BAAI/bge-small-zh-v1.5\\` 这模型配置要求多少",
+        ),
+        (
+            "`BAAI/bge-small-zh-v1.5` 这模型配置要求多少",
+            "`BAAI/bge-small-zh-v1.5` 这模型配置要求多少",
+        ),
+        (
+            "```text\n中文 mixed English\n```",
+            "```text\n中文 mixed English\n```",
+        ),
+    ];
+
+    for (input, expected_provider_text) in cases {
+        let inspector = MockProvider::new()
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+            .with_tool_loop_reply_without_tool("正常回复");
+        let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+        let response = service.respond(private_message(input)).await.unwrap();
+
+        assert_eq!(response.text.as_deref(), Some("正常回复"), "input={input}");
+        let request = inspector.tool_requests().remove(0);
+        let current = request.chat.messages.last().unwrap();
+        assert_eq!(current.role, ChatRole::User, "input={input}");
+        assert_eq!(current.content, expected_provider_text, "input={input}");
+        assert!(
+            current
+                .content_parts
+                .iter()
+                .filter_map(|part| match part {
+                    qq_maid_common::input_part::MessageInputPart::Text { text, .. } => Some(text),
+                    _ => None,
+                })
+                .any(|text| text == expected_provider_text),
+            "input={input}"
+        );
+        let session = service
+            .session_store
+            .get_or_create_active(&private_test_meta())
+            .unwrap();
+        assert!(
+            session
+                .history
+                .iter()
+                .any(|message| message.content == input),
+            "session 应保存未经 Provider 兼容转义的用户原文，input={input}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn private_strong_todo_reference_without_context_enters_tool_loop_and_clarifies() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
