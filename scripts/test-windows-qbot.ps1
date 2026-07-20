@@ -64,18 +64,25 @@ try {
     Set-Content -LiteralPath $agentTemplate -Value "new-release-template" -Encoding ASCII
 
     $webSearchAgent = Join-Path $agentTestDir "web-search.toml"
-    Set-Content -LiteralPath $webSearchAgent -Value @(
+    $utf8NoBom = New-Object Text.UTF8Encoding($false)
+    # 用 UTF-8 无 BOM 写入含中文注释的旧格式，覆盖 Windows PowerShell 5.1 默认 ANSI 读文件路径。
+    $legacyWebSearchLines = @(
         'version = 1',
+        '# 旧版私聊联网搜索路由',
         '',
         '[search_routes.private_search]',
         'model = "gpt-search"'
-    ) -Encoding ASCII
+    )
+    [IO.File]::WriteAllLines($webSearchAgent, $legacyWebSearchLines, $utf8NoBom)
     $webSearchOutput = (Migrate-AgentWebSearchConfig -ConfigFile $webSearchAgent) -join "`n"
-    $migratedWebSearch = Get-Content -LiteralPath $webSearchAgent -Raw
+    $migratedWebSearch = [IO.File]::ReadAllText($webSearchAgent, $utf8NoBom)
+    $webSearchBackup = [IO.File]::ReadAllText("${webSearchAgent}.old", $utf8NoBom)
     Assert-True ($migratedWebSearch.Contains('[tools.web_search]')) "web-search defaults were not added"
     Assert-True ($migratedWebSearch.Contains('[tools.web_search.routes.private_search]')) "legacy web-search route was not migrated"
     Assert-True (-not $migratedWebSearch.Contains('[search_routes.private_search]')) "legacy web-search route remained"
-    Assert-True ((Get-Content -LiteralPath "${webSearchAgent}.old" -Raw).Contains('[search_routes.private_search]')) "web-search migration backup lost the legacy route"
+    Assert-True ($migratedWebSearch.Contains('# 旧版私聊联网搜索路由')) "web-search migration corrupted UTF-8 comments"
+    Assert-True ($webSearchBackup.Contains('[search_routes.private_search]')) "web-search migration backup lost the legacy route"
+    Assert-True ($webSearchBackup.Contains('# 旧版私聊联网搜索路由')) "web-search migration backup corrupted UTF-8 comments"
     Assert-True ($webSearchOutput.Contains("backup: ${webSearchAgent}.old")) "web-search migration did not report its backup"
     Migrate-AgentWebSearchConfig -ConfigFile $webSearchAgent
     Assert-True (-not (Test-Path -LiteralPath "${webSearchAgent}.old.1")) "idempotent web-search migration created another backup"

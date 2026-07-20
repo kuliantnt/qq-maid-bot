@@ -10,7 +10,9 @@ function Migrate-AgentWebSearchConfig {
         return
     }
 
-    $lines = @(Get-Content -LiteralPath $ConfigFile)
+    # Windows PowerShell 5.1 默认按系统 ANSI 读文件；agent.toml 是 UTF-8 无 BOM，必须显式指定。
+    $utf8 = New-Object Text.UTF8Encoding($false)
+    $lines = [IO.File]::ReadAllLines($ConfigFile, $utf8)
     $legacyPattern = '^\s*\[search_routes\.[A-Za-z0-9_-]+\]\s*(#.*)?$'
     $newPattern = '^\s*\[tools\.web_search\.routes\.[A-Za-z0-9_-]+\]\s*(#.*)?$'
     if (-not ($lines | Where-Object { $_ -match $legacyPattern })) {
