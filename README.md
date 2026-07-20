@@ -17,13 +17,14 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.20.4`，项目处于 `20.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.20.5`，项目处于 `20.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
 ## 20.x 版本线更新
-- **配置与部署升级**（v0.20.0 - v0.20.4）：新增安全配置中心、`/console/` 管理入口、Agent 配置迁移和工具白名单，支持在网页中配置 Provider、QQ / OneBot / 微信入口及主要运行能力；管理员初始化与密码重置可直接粘贴完整令牌字符串。
+- **配置与部署升级**（v0.20.0 - v0.20.5）：新增安全配置中心、`/console/` 管理入口、Agent 配置迁移和工具白名单，支持在网页中配置 Provider、QQ / OneBot / 微信入口及主要运行能力；管理员初始化和密码重置可直接粘贴完整令牌字符串。
 - **知识库 Agent 化**（PR #528、#534）：知识检索改为按需调用的受控工具，支持结构化证据、混合召回和相关性评测。
+- **联网搜索后端与结果展示**（v0.20.5，PR #551、#552）：`/查` 和自然语言搜索可统一选择 Provider 原生搜索、Tavily 或关闭，并为多目标查询展示带来源的可信结果卡片和成功/失败统计。
 - **QQ 语音与命令前缀**（v0.20.1）：QQ 语音转写进入普通对话链路，所有入口支持统一可配置的聊天命令前缀。
 - **图片生成与多平台发送**（v0.20.3）：支持 QQ 官方与 OneBot 11 图片发送，并兼容 Windows 本地图片的 `file://` URI。
 - **运维与多模型能力**（v0.19.0 - v0.20.2）：支持白名单 `/ops` 运维、多模型候选降级、联网查询、RSS 推送和可选长期记忆整理。
