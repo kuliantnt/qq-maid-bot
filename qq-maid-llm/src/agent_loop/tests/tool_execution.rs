@@ -53,6 +53,68 @@ async fn duplicate_read_only_tool_call_replays_success_and_keeps_dependency_chai
 }
 
 #[tokio::test]
+async fn failed_tool_followed_by_same_singleton_call_is_recorded_as_retry() {
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(FailOnceReadOnlyTool {
+        calls: calls.clone(),
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("search", "c1", r#"{"value":"rust"}"#)]),
+            tool_calls(vec![tool_call("search", "c2", r#"{"value":"rust"}"#)]),
+            final_reply("done"),
+        ],
+    ));
+
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(*calls.lock().unwrap(), 2);
+    assert_eq!(outcome.agent.tool_results.len(), 2);
+    assert!(!outcome.agent.tool_results[0].succeeded);
+    assert!(outcome.agent.tool_results[1].succeeded);
+    assert_eq!(outcome.agent.tool_attempts.len(), 2);
+    assert_eq!(outcome.agent.tool_attempts[0].retry_of, None);
+    assert_eq!(outcome.agent.tool_attempts[1].retry_of, Some(0));
+}
+
+#[tokio::test]
+async fn independent_same_round_calls_are_not_recorded_as_retry() {
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(FailOnceReadOnlyTool {
+        calls: calls.clone(),
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![
+                tool_call("search", "c1", r#"{"value":"rust"}"#),
+                tool_call("search", "c2", r#"{"value":"rust"}"#),
+            ]),
+            final_reply("done"),
+        ],
+    ));
+
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(*calls.lock().unwrap(), 2);
+    assert_eq!(outcome.agent.tool_attempts.len(), 2);
+    assert!(
+        outcome
+            .agent
+            .tool_attempts
+            .iter()
+            .all(|attempt| attempt.retry_of.is_none())
+    );
+}
+
+#[tokio::test]
 async fn side_effecting_tool_invalidates_read_only_deduplication() {
     let search_calls = Arc::new(StdMutex::new(0));
     let write_calls = Arc::new(StdMutex::new(0));

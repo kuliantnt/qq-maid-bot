@@ -44,8 +44,8 @@ pub use runner::{run_agent_loop, run_agent_loop_with_handle};
 pub use session::{AgentStepSession, AgentStreamingDiagnostics};
 pub use types::{
     AgentRunDiagnostics, AgentRunHandle, AgentSessionRequest, AgentStep, AgentStopReason,
-    AgentTextDeltaFuture, AgentTextDeltaSink, AgentToolCall, AgentToolResult, ToolExecutionResult,
-    ToolLoopProgressEvent, ToolLoopProgressFuture, ToolLoopProgressSink,
+    AgentTextDeltaFuture, AgentTextDeltaSink, AgentToolCall, AgentToolResult, ToolExecutionAttempt,
+    ToolExecutionResult, ToolLoopProgressEvent, ToolLoopProgressFuture, ToolLoopProgressSink,
 };
 
 #[cfg(test)]

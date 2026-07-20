@@ -15,6 +15,7 @@ fn agent_tool_trace(
         side_effecting_tools_started: executed_tools.clone(),
         executed_tools,
         tool_results,
+        tool_attempts: Vec::new(),
         tools_with_unknown_result: Vec::new(),
         streaming_fallback_used: false,
         stop_reason: Some(AgentStopReason::ToolUsed),
@@ -66,6 +67,7 @@ enum MockToolAction {
     },
     ReturnToolResults {
         results: Vec<ToolExecutionResult>,
+        attempts: Vec<ToolExecutionAttempt>,
         reply: String,
     },
     ReplyWithoutTool {
@@ -248,6 +250,24 @@ impl MockProvider {
             .unwrap()
             .push(MockToolAction::ReturnToolResults {
                 results,
+                attempts: Vec::new(),
+                reply: reply.into(),
+            });
+        self
+    }
+
+    pub(crate) fn with_raw_tool_results_and_attempts(
+        self,
+        results: Vec<ToolExecutionResult>,
+        attempts: Vec<ToolExecutionAttempt>,
+        reply: impl Into<String>,
+    ) -> Self {
+        self.tool_actions
+            .lock()
+            .unwrap()
+            .push(MockToolAction::ReturnToolResults {
+                results,
+                attempts,
                 reply: reply.into(),
             });
         self
@@ -634,7 +654,11 @@ impl LlmProvider for MockProvider {
                     diagnostics.stop_reason = Some(AgentStopReason::Failed);
                     return Err(error.with_agent(diagnostics));
                 }
-                MockToolAction::ReturnToolResults { results, reply } => {
+                MockToolAction::ReturnToolResults {
+                    results,
+                    attempts,
+                    reply,
+                } => {
                     let emitted_tools = results
                         .iter()
                         .map(|result| result.name.clone())
@@ -661,7 +685,21 @@ impl LlmProvider for MockProvider {
                             total_tokens: None,
                         }),
                         fallback_used: false,
-                        agent: agent_tool_trace(emitted_tools, results),
+                        agent: AgentRunDiagnostics {
+                            model_rounds: 3,
+                            emitted_tools,
+                            tool_execution_attempted: true,
+                            executed_tools: results
+                                .iter()
+                                .map(|result| result.name.clone())
+                                .collect(),
+                            side_effecting_tools_started: Vec::new(),
+                            tool_results: results,
+                            tool_attempts: attempts,
+                            tools_with_unknown_result: Vec::new(),
+                            streaming_fallback_used: false,
+                            stop_reason: Some(AgentStopReason::ToolUsed),
+                        },
                     });
                 }
                 MockToolAction::ReplyWithoutTool { reply } => {
@@ -715,6 +753,7 @@ impl LlmProvider for MockProvider {
                             executed_tools: Vec::new(),
                             side_effecting_tools_started: Vec::new(),
                             tool_results: Vec::new(),
+                            tool_attempts: Vec::new(),
                             tools_with_unknown_result: Vec::new(),
                             streaming_fallback_used: false,
                             stop_reason: Some(AgentStopReason::Rejected),
