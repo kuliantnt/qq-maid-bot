@@ -11,6 +11,52 @@ use crate::runtime::tools::todo::{TodoItemDraft, TodoStore, TodoTimePrecision};
 use super::support::*;
 
 #[tokio::test]
+async fn multi_entity_web_search_fact_card_preserves_model_summary_without_empty_hint() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results(
+            vec![raw_tool_result(
+                "web_search",
+                serde_json::json!({
+                    "ok": true,
+                    "mode": "multi_entity_research",
+                    "results": [{
+                        "entity": "项目甲",
+                        "status": "success",
+                        "facts": "项目甲适合场景 A",
+                        "sources": [{
+                            "title": "项目甲文档",
+                            "url": "https://example.test/project-a",
+                            "snippet": "公开资料摘要"
+                        }]
+                    }, {
+                        "entity": "项目乙",
+                        "status": "success",
+                        "facts": "项目乙适合场景 B",
+                        "sources": []
+                    }]
+                }),
+                true,
+            )],
+            "综合来看，项目甲偏向场景 A，项目乙偏向场景 B。",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("联网对比项目甲和项目乙"))
+        .await
+        .unwrap();
+
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("项目甲适合场景 A"));
+    assert!(text.contains("综合来看，项目甲偏向场景 A"));
+    assert!(!text.contains("没查到明确结果"));
+    assert_eq!(response.command.as_deref(), Some("web_search"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["tool_outcomes"][0]["presentation"], "trusted");
+}
+
+#[tokio::test]
 async fn todo_tool_ok_false_without_error_code_is_failed_outcome() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)

@@ -17,7 +17,7 @@ use crate::{
                 ToolOutcomeStatus,
             },
             common::{CommandBody, structured_command_body, truncate_chars},
-            search_flow::{format_web_search_command_reply, format_web_search_error_reply},
+            search_flow::{format_web_search_error_reply, format_web_search_tool_reply},
             train_flow::{format_train_error_reply, format_train_schedule_reply},
             weather_flow::{format_forecast_day_label, weather_code_label},
         },
@@ -140,12 +140,9 @@ pub(crate) fn tool_outcome_from_web_search_result(
     let status = ToolOutcomeStatus::from_tool_result(result);
     let error_code = structured_error_code(&result.output);
     let block = match status {
-        ToolOutcomeStatus::Succeeded => {
-            let answer = string_field(&result.output, "answer").unwrap_or_default();
-            ResponseBlock::FactCard(structured_command_body(format_web_search_command_reply(
-                &answer,
-            )))
-        }
+        ToolOutcomeStatus::Succeeded => ResponseBlock::FactCard(structured_command_body(
+            format_web_search_tool_reply(&result.output),
+        )),
         ToolOutcomeStatus::Skipped => ResponseBlock::Warning(web_search_skip_body(&result.output)),
         ToolOutcomeStatus::RequiresClarification => {
             ResponseBlock::Clarification(CommandBody::plain("请说明要联网查询什么内容。"))
@@ -828,6 +825,80 @@ mod tests {
             output,
             succeeded: true,
         }
+    }
+
+    fn web_search_result(output: Value) -> ToolExecutionResult {
+        ToolExecutionResult {
+            name: WEB_SEARCH_TOOL_NAME.to_owned(),
+            output,
+            succeeded: true,
+        }
+    }
+
+    fn web_search_fact_text(output: Value) -> String {
+        let outcome = tool_outcome_from_web_search_result(&web_search_result(output)).unwrap();
+        let ResponseBlock::FactCard(body) = &outcome.blocks[0] else {
+            panic!("expected web search fact card");
+        };
+        body.text.clone()
+    }
+
+    #[test]
+    fn single_web_search_keeps_top_level_answer_card() {
+        let text = web_search_fact_text(json!({
+            "answer": "单次搜索的明确答案",
+            "sources": []
+        }));
+
+        assert!(text.contains("单次搜索的明确答案"));
+        assert!(!text.contains("没查到明确结果"));
+    }
+
+    #[test]
+    fn single_web_search_with_only_sources_does_not_look_empty() {
+        let text = web_search_fact_text(json!({
+            "answer": "",
+            "sources": [{
+                "title": "来源标题",
+                "url": "https://example.test/source",
+                "snippet": "来源摘要"
+            }]
+        }));
+
+        assert!(text.contains("来源标题"));
+        assert!(text.contains("来源摘要"));
+        assert!(!text.contains("没查到明确结果"));
+    }
+
+    #[test]
+    fn multi_entity_web_search_renders_facts_without_top_level_answer() {
+        let text = web_search_fact_text(json!({
+            "mode": "multi_entity_research",
+            "results": [{
+                "entity": "项目甲",
+                "status": "success",
+                "facts": "项目甲支持能力 A",
+                "sources": [{
+                    "title": "项目甲文档",
+                    "url": "https://example.test/project-a",
+                    "snippet": "官方功能摘要"
+                }]
+            }]
+        }));
+
+        assert!(text.contains("项目甲支持能力 A"));
+        assert!(text.contains("项目甲文档"));
+        assert!(!text.contains("没查到明确结果"));
+    }
+
+    #[test]
+    fn empty_multi_entity_web_search_keeps_empty_result_hint() {
+        let text = web_search_fact_text(json!({
+            "mode": "multi_entity_research",
+            "results": []
+        }));
+
+        assert!(text.contains("没查到明确结果"));
     }
 
     #[test]
