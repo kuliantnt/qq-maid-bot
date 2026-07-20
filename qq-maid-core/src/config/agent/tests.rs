@@ -1,4 +1,5 @@
 use super::*;
+use qq_maid_llm::web_search::{WebSearchDepth, WebSearchTopic};
 
 #[test]
 fn toml_config_overrides_routes_profiles_and_scenes() {
@@ -245,6 +246,87 @@ enabled_tools = ["save_memory"]
 }
 
 #[test]
+fn toml_config_unifies_web_search_backend_routes_and_tavily_options() {
+    let text = r#"
+version = 1
+
+[tools.web_search]
+backend = "tavily"
+max_results = 8
+search_depth = "advanced"
+topic = "news"
+time_range = "week"
+connect_timeout_seconds = 5
+first_response_timeout_seconds = 15
+total_timeout_seconds = 45
+
+[model_routes.main]
+candidates = ["openai:gpt-main"]
+
+[profiles.balanced]
+main_route = "main"
+
+[scenes.private]
+profile = "balanced"
+
+[scenes.group]
+profile = "balanced"
+"#;
+
+    let config = AgentRuntimeConfig::from_toml(
+        text,
+        AgentConfigSource::File("config/agent.toml".to_owned()),
+    )
+    .unwrap();
+    let private = config.resolve(ChatScene::Private).unwrap();
+
+    assert_eq!(private.search_backend, WebSearchBackend::Tavily);
+    assert!(private.search_model.is_empty());
+    assert_eq!(config.web_search().max_results, 8);
+    assert_eq!(config.web_search().search_depth, WebSearchDepth::Advanced);
+    assert_eq!(config.web_search().topic, WebSearchTopic::News);
+    assert_eq!(
+        config.web_search().time_range,
+        Some(WebSearchTimeRange::Week)
+    );
+}
+
+#[test]
+fn toml_config_rejects_invalid_web_search_timeout_order() {
+    let text = r#"
+version = 1
+
+[tools.web_search]
+connect_timeout_seconds = 20
+first_response_timeout_seconds = 10
+total_timeout_seconds = 30
+
+[tools.web_search.routes.search]
+model = "gpt-search"
+
+[model_routes.main]
+candidates = ["openai:gpt-main"]
+
+[profiles.balanced]
+main_route = "main"
+
+[scenes.private]
+profile = "balanced"
+
+[scenes.group]
+profile = "balanced"
+"#;
+
+    let error = AgentRuntimeConfig::from_toml(
+        text,
+        AgentConfigSource::File("config/agent.toml".to_owned()),
+    )
+    .unwrap_err();
+
+    assert!(error.message.contains("connect_timeout_seconds"));
+}
+
+#[test]
 fn toml_config_rejects_removed_provider_retry_fields() {
     let text = r#"
 version = 1
@@ -306,6 +388,7 @@ fn default_agent_toml_prefers_luna_and_keeps_provider_fallbacks() {
         Some("openai:gpt-5.6-luna,gemini:gemini-2.5-flash,mimo:mimo-v2.5,deepseek:deepseek-chat")
     );
     assert_eq!(private.search_model, "gpt-5.6-luna");
+    assert_eq!(private.search_backend, WebSearchBackend::ProviderNative);
     assert_eq!(
         group.main_model,
         "openai:gpt-5.6-luna,gemini:gemini-2.5-flash,mimo:mimo-v2.5,deepseek:deepseek-chat"
@@ -338,8 +421,9 @@ fn default_agent_toml_declares_luna_first_without_embedding_secrets() {
     assert!(active_config.contains("gemini:gemini-2.5-pro"));
     assert!(active_config.contains("mimo:mimo-v2.5-pro"));
     assert!(active_config.contains("deepseek:deepseek-chat"));
-    assert!(active_config.contains("[search_routes.private_search]"));
-    assert!(active_config.contains("[search_routes.group_search]"));
+    assert!(active_config.contains("[tools.web_search.routes.private_search]"));
+    assert!(active_config.contains("[tools.web_search.routes.group_search]"));
+    assert!(active_config.contains("backend = \"provider_native\""));
     assert!(!active_config.contains("bigmodel:"));
     assert!(!active_config.contains("glm-"));
     assert!(!active_config.contains("sk-"));

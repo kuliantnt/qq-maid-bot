@@ -4,6 +4,7 @@
 //! 基础配置，避免 `qq-maid-llm` 反向依赖 core 的业务配置。
 
 use crate::provider::types::{ModelProvider, ModelRoute};
+use crate::web_search::WebSearchConfig;
 
 /// LLM 供应商选择模式。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +117,8 @@ pub struct LlmConfig {
     pub media_max_bytes: u64,
     /// 最大输出 token。
     pub max_output_tokens: u64,
-    /// OpenAI Web Search 模型。
-    pub openai_search_model: String,
+    /// 联网搜索统一后端配置；敏感密钥只保存在进程内，不参与序列化和日志。
+    pub web_search: WebSearchConfig,
+    /// Tavily API 密钥；仅在选择 Tavily 后端时使用。
+    pub tavily_api_key: Option<String>,
 }

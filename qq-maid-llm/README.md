@@ -105,7 +105,8 @@ qq-maid-llm/src/
 - `gemini_api_key`、`gemini_base_url`、`gemini_model`。
 - `openai_compatible_providers`：由 `agent.toml [providers.*]` 声明的自定义 Chat Completions provider，例如 `mimo`；实际 API key 由 core 按 `api_key_env` 从环境变量读取。
 - `request_timeout`、`stream`、`max_output_tokens`。
-- `search_model`：`/查` 使用的搜索模型；裸模型或 `openai:` 走 OpenAI Responses web_search，`gemini:` 走 Gemini Google Search 工具。
+- `web_search`：统一联网搜索后端及默认参数；`provider_native` 按搜索模型前缀选择 OpenAI Responses web_search 或 Gemini Google Search，`tavily` 调用 Tavily Search，`disabled` 关闭联网搜索。
+- `tavily_api_key`：Tavily Search 密钥；由 core 从安全配置中心或兼容环境变量 `TAVILY_API_KEY` 注入，不写入 `agent.toml`。
 
 Tool Calling、轮数预算与工具白名单由 core 从 `agent.toml` 的 Profile / Scene 解析；本 crate 只接收已经构造好的 `ToolChatRequest`。Todo、标题、记忆、Compact、翻译等业务路线同样由 core 的 Agent Profile 管理，Provider 凭证和连接参数以 [runtime/config/.env.example](../runtime/config/.env.example) 为准。
 

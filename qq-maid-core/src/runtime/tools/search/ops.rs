@@ -17,7 +17,7 @@ use crate::error::LlmError;
 
 use super::{
     WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME, WebSearchTool, WebSearchToolRequest,
-    optional_string_field, parse_context_size, parse_max_results,
+    optional_string_field, parse_context_size, parse_max_results, parse_time_range, parse_topic,
 };
 
 pub(super) const WEB_SEARCH_RESEARCH_MAX_TARGETS: usize = 5;
@@ -44,6 +44,8 @@ pub(super) async fn execute_research(
     let raw_question = optional_string_field(arguments, "raw_question");
     let max_results = parse_max_results(arguments.get("max_results"))?;
     let context_size = parse_context_size(arguments.get("context_size"))?;
+    let topic = parse_topic(arguments.get("topic"))?;
+    let time_range = parse_time_range(arguments.get("time_range"))?;
     let total = targets.len();
     let model = tool
         .model_override
@@ -56,6 +58,8 @@ pub(super) async fn execute_research(
         let raw_question = raw_question.clone();
         let model = model.clone();
         let context_size = context_size.clone();
+        let topic = topic.clone();
+        let time_range = time_range.clone();
         async move {
             let started = Instant::now();
             let request = WebSearchToolRequest {
@@ -67,6 +71,9 @@ pub(super) async fn execute_research(
                 )),
                 max_results,
                 context_size,
+                topic,
+                time_range,
+                backend_override: tool.backend_override,
                 model_override: tool.model_override.clone(),
             };
             let outcome = tool

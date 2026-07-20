@@ -83,7 +83,7 @@ impl OpenAiWebSearchExecutor {
             client,
             api_key,
             base_url: config.openai_base_url.clone(),
-            search_model: config.openai_search_model.clone(),
+            search_model: config.web_search.default_model.clone(),
         })
     }
 }
@@ -590,6 +590,9 @@ mod tests {
             raw_question: None,
             max_results: Some(3),
             context_size: Some("high".to_owned()),
+            topic: None,
+            time_range: None,
+            backend_override: None,
             model_override: None,
         };
         let payload = openai_web_search_payload(&req, &req.query, 3, "gpt-search", false);
@@ -620,6 +623,9 @@ mod tests {
             raw_question: None,
             max_results: Some(3),
             context_size: None,
+            topic: None,
+            time_range: None,
+            backend_override: None,
             model_override: None,
         };
         let payload = openai_web_search_payload(&req, &req.query, 3, "gpt-search", true);
@@ -704,6 +710,9 @@ mod tests {
                     raw_question: Some("/查 测试".to_owned()),
                     max_results: None,
                     context_size: None,
+                    topic: None,
+                    time_range: None,
+                    backend_override: None,
                     model_override: None,
                 },
                 delta_tx,
@@ -738,6 +747,9 @@ mod tests {
                     raw_question: Some("/查 测试".to_owned()),
                     max_results: None,
                     context_size: None,
+                    topic: None,
+                    time_range: None,
+                    backend_override: None,
                     model_override: None,
                 },
                 delta_tx,

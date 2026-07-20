@@ -214,6 +214,15 @@ fn apply_change(
     document: &mut AgentConfigDocument,
     change: &AgentConfigChange,
 ) -> Result<(), ConfigCenterError> {
+    // 配置中心一旦保存，就把仍可读取的旧 route 收敛到统一位置；显式新配置优先。
+    for (name, route) in std::mem::take(&mut document.search_routes) {
+        document
+            .tools
+            .web_search
+            .routes
+            .entry(name)
+            .or_insert(route);
+    }
     match change {
         AgentConfigChange::SetKnowledge { mode, embedding } => {
             document.knowledge.mode = *mode;
@@ -233,7 +242,7 @@ fn apply_change(
         }
         AgentConfigChange::SetSearchRoute { name, model } => {
             let name = entry_name(name)?;
-            document.search_routes.insert(
+            document.tools.web_search.routes.insert(
                 name,
                 SearchRouteFile {
                     model: model.clone(),
@@ -241,7 +250,9 @@ fn apply_change(
             );
         }
         AgentConfigChange::RemoveSearchRoute { name } => {
-            document.search_routes.remove(entry_name(name)?.as_str());
+            let name = entry_name(name)?;
+            document.tools.web_search.routes.remove(name.as_str());
+            document.search_routes.remove(name.as_str());
         }
         AgentConfigChange::SetProfile { name, profile } => {
             document.profiles.insert(entry_name(name)?, profile.clone());

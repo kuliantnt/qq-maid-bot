@@ -347,6 +347,9 @@ mod tests {
             raw_question: None,
             max_results: None,
             context_size: None,
+            topic: None,
+            time_range: None,
+            backend_override: None,
             model_override: None,
         }
     }

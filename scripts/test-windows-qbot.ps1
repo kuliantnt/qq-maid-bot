@@ -23,6 +23,7 @@ try {
     $env:LLM_SERVER_PORT = $null
     $env:WEB_CONSOLE_ENABLED = $null
     . (Join-Path $repoDir "scripts\qbot.ps1")
+    . (Join-Path $repoDir "scripts\lib\agent-config.ps1")
 
     Assert-True (Test-SupportedWindowsArchitecture "AMD64") "Windows AMD64 should be supported"
     Assert-True (Test-SupportedWindowsArchitecture "x86_64") "Windows x86_64 should be supported"
@@ -61,6 +62,23 @@ try {
     New-Item -ItemType Directory -Path $agentTestDir -Force | Out-Null
     $agentTemplate = Join-Path $agentTestDir "template.toml"
     Set-Content -LiteralPath $agentTemplate -Value "new-release-template" -Encoding ASCII
+
+    $webSearchAgent = Join-Path $agentTestDir "web-search.toml"
+    Set-Content -LiteralPath $webSearchAgent -Value @(
+        'version = 1',
+        '',
+        '[search_routes.private_search]',
+        'model = "gpt-search"'
+    ) -Encoding ASCII
+    $webSearchOutput = (Migrate-AgentWebSearchConfig -ConfigFile $webSearchAgent) -join "`n"
+    $migratedWebSearch = Get-Content -LiteralPath $webSearchAgent -Raw
+    Assert-True ($migratedWebSearch.Contains('[tools.web_search]')) "web-search defaults were not added"
+    Assert-True ($migratedWebSearch.Contains('[tools.web_search.routes.private_search]')) "legacy web-search route was not migrated"
+    Assert-True (-not $migratedWebSearch.Contains('[search_routes.private_search]')) "legacy web-search route remained"
+    Assert-True ((Get-Content -LiteralPath "${webSearchAgent}.old" -Raw).Contains('[search_routes.private_search]')) "web-search migration backup lost the legacy route"
+    Assert-True ($webSearchOutput.Contains("旧配置备份: ${webSearchAgent}.old")) "web-search migration did not report its backup"
+    Migrate-AgentWebSearchConfig -ConfigFile $webSearchAgent
+    Assert-True (-not (Test-Path -LiteralPath "${webSearchAgent}.old.1")) "idempotent web-search migration created another backup"
 
     $agentYes = Join-Path $agentTestDir "yes.toml"
     Set-Content -LiteralPath $agentYes -Value "custom-before-replacement" -Encoding ASCII

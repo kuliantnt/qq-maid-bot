@@ -133,8 +133,8 @@ runtime/.env
 
 常用配置项：
 
-- `config/agent.toml` / `AGENT_CONFIG_FILE`：非敏感 Agent 场景策略文件，也是模型路线、搜索路线、Profile、Scene、Tool Calling 和工具白名单的唯一权威来源。文件统一描述 `fast / balanced / deep` 档位、群聊 / 私聊策略、Tool Loop 轮数、输出预算、工具白名单、`/查` 搜索路线和 OpenAI-compatible provider 元数据；标题、Memory、压缩、翻译等内部任务使用当前场景 Profile 的 `aux_route`，未配置时继承 `main_route`。文件缺失、引用非法或内容不完整都会拒绝启动，不再从环境变量合成兼容策略。
-- `OPENAI_API_KEY`、`OPENAI_BASE_URLS`、`OPENAI_API_MODE`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`BIGMODEL_API_KEY`、`BIGMODEL_BASE_URL`、`GEMINI_API_KEY`、`GEMINI_BASE_URL`、`MIMO_API_KEY`：Provider 凭证和连接配置；Core 解析后传给 `qq-maid-llm`。`OPENAI_BASE_URLS` 为逗号分隔时取第一个非空地址。`OPENAI_API_MODE=auto` 优先 Responses API 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于只实现 Chat Completions 的网关。MiMo 等自定义 Provider 的公开连接元数据可在 `agent.toml [providers.*]` 声明，真实 key 只能由 `api_key_env` 指向环境变量，不能写入 `agent.toml`。
+- `config/agent.toml` / `AGENT_CONFIG_FILE`：非敏感 Agent 场景策略文件，也是模型路线、联网搜索后端与搜索路线、Profile、Scene、Tool Calling 和工具白名单的唯一权威来源。`[tools.web_search]` 可选择 `provider_native`、`tavily` 或 `disabled`，并配置结果数量、搜索深度、主题、时间范围和 Tavily 独立超时；`[tools.web_search.routes.*]` 保存 OpenAI/Gemini 原生搜索路线，旧 `[search_routes.*]` 仍兼容读取。文件还统一描述 `fast / balanced / deep` 档位、群聊 / 私聊策略、Tool Loop 轮数、输出预算和 OpenAI-compatible provider 元数据；标题、Memory、压缩、翻译等内部任务使用当前场景 Profile 的 `aux_route`，未配置时继承 `main_route`。文件缺失、引用非法或内容不完整都会拒绝启动，不再从环境变量合成兼容策略。
+- `OPENAI_API_KEY`、`OPENAI_BASE_URLS`、`OPENAI_API_MODE`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`BIGMODEL_API_KEY`、`BIGMODEL_BASE_URL`、`GEMINI_API_KEY`、`GEMINI_BASE_URL`、`MIMO_API_KEY`：Provider 凭证和连接配置；Core 解析后传给 `qq-maid-llm`。`OPENAI_BASE_URLS` 为逗号分隔时取第一个非空地址。`OPENAI_API_MODE=auto` 优先 Responses API 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于只实现 Chat Completions 的网关。MiMo 等自定义 Provider 的公开连接元数据可在 `agent.toml [providers.*]` 声明，真实 key 只能由 `api_key_env` 指向环境变量，不能写入 `agent.toml`。Tavily 密钥使用配置中心的 `tools.web_search.tavily.api_key` 或兼容环境变量 `TAVILY_API_KEY`，同样不得写入 `agent.toml`。
 - `LLM_SERVER_HOST`、`LLM_SERVER_PORT`、`LLM_REQUEST_TIMEOUT_SECONDS`：外部健康 / 控制台 HTTP 服务和请求超时行为；`AGENT_FINALIZATION_RESERVE_SECONDS` 为最终无工具回答预留时间，短请求会按总预算裁剪。
 - `WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT_SECONDS`、`WEB_SEARCH_IDLE_TIMEOUT_SECONDS`、`WEB_SEARCH_ABSOLUTE_TIMEOUT_SECONDS`：Agent Tool 与 `/查` 共用的搜索流首活动、静默和独立绝对超时，默认分别为 60、30、120 秒，以兼容联网搜索首字较慢或总耗时较长的上游。
 - `WEB_CONSOLE_ENABLED`、`WEB_CONSOLE_ALLOWED_ORIGINS`：部署管理控制台和跨域 allowlist；新实例默认开启但监听默认仍为 `127.0.0.1`，显式设为 false 时页面、认证和配置 API 全部关闭。
@@ -154,7 +154,7 @@ runtime/.env
 candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-chat"]
 ```
 
-候选项按从左到右的优先级执行。`qq-maid-llm` 会在超时、HTTP/网络错误、Provider 协议错误、上游空响应、429 和 5xx 等可恢复失败后尝试下一个候选；配置错误、本地请求构造错误和业务参数错误不会继续请求其他模型。当前普通聊天使用请求开始时解析出的 `ResolvedAgentPolicy`；会话标题、Memory 草稿、会话压缩、翻译命令和 RSS 翻译使用同一场景策略中的 `aux_route`，缺省辅助路线时继承当前场景 `main_route`。Tool Loop 使用同一请求级策略中的模型、输出预算、reasoning effort 和最大轮数；`/查` 按场景 `search_route` 选择 OpenAI Responses web_search 或 Gemini Google Search 工具。
+候选项按从左到右的优先级执行。`qq-maid-llm` 会在超时、HTTP/网络错误、Provider 协议错误、上游空响应、429 和 5xx 等可恢复失败后尝试下一个候选；配置错误、本地请求构造错误和业务参数错误不会继续请求其他模型。当前普通聊天使用请求开始时解析出的 `ResolvedAgentPolicy`；会话标题、Memory 草稿、会话压缩、翻译命令和 RSS 翻译使用同一场景策略中的 `aux_route`，缺省辅助路线时继承当前场景 `main_route`。Tool Loop 使用同一请求级策略中的模型、输出预算、reasoning effort 和最大轮数；`/查` 与自然语言 `web_search` 共用 `[tools.web_search]` 后端：`provider_native` 再按场景 `search_route` 选择 OpenAI Responses web_search 或 Gemini Google Search，`tavily` 使用统一 Tavily Search 执行器，`disabled` 则关闭该能力。
 
 完整字段以 [runtime/config/.env.example](../runtime/config/.env.example) 为准。真实 `.env`、API Key、Prompt、Markdown 知识资料、SQLite、日志和聊天记录不要提交到仓库。
 

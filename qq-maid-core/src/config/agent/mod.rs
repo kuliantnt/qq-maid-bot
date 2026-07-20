@@ -6,9 +6,17 @@ use std::{collections::HashMap, env, fs, fs::OpenOptions, io::Write, path::Path}
 
 use serde::{Deserialize, Serialize};
 
-use qq_maid_llm::provider::types::{ModelProvider, ModelRoute, ReasoningEffort};
+use qq_maid_llm::{
+    provider::types::{ModelProvider, ModelRoute, ReasoningEffort},
+    web_search::{WebSearchBackend, WebSearchConfig, WebSearchTimeRange},
+};
 
 use crate::error::LlmError;
+
+mod web_search_config;
+
+pub(in crate::config) use web_search_config::ToolsConfigFile;
+use web_search_config::web_search_from_file;
 
 pub const DEFAULT_AGENT_CONFIG_PATH: &str = "config/agent.toml";
 pub const AGENT_CONFIG_FILE_ENV: &str = "AGENT_CONFIG_FILE";
@@ -111,6 +119,7 @@ pub struct AgentRuntimeConfig {
     scenes: AgentScenes,
     knowledge_mode: KnowledgeRetrievalMode,
     knowledge_embedding: KnowledgeEmbeddingConfig,
+    web_search: WebSearchConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +181,7 @@ pub struct ResolvedAgentPolicy {
     pub main_model: String,
     pub main_route: ModelRoute,
     pub aux_model: Option<String>,
+    pub search_backend: WebSearchBackend,
     pub search_model: String,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub max_tool_rounds: usize,
@@ -231,6 +241,8 @@ pub(in crate::config) struct AgentConfigDocument {
     version: u32,
     #[serde(default)]
     pub(in crate::config) knowledge: KnowledgeConfigFile,
+    #[serde(default)]
+    pub(in crate::config) tools: ToolsConfigFile,
     #[serde(default)]
     providers: HashMap<String, ProviderFile>,
     #[serde(default)]
@@ -379,6 +391,7 @@ impl AgentRuntimeConfig {
         }
 
         let document = file.clone();
+        let web_search = web_search_from_file(&file.tools.web_search)?;
         let mut providers = HashMap::new();
         for (name, provider) in file.providers {
             let provider = provider_from_file(&name, provider)?;
@@ -397,6 +410,11 @@ impl AgentRuntimeConfig {
         let mut search_routes = HashMap::new();
         for (name, route) in file.search_routes {
             let model = super::openai_model_name(&route.model, &format!("search_routes.{name}"))?;
+            search_routes.insert(name, model);
+        }
+        for (name, route) in file.tools.web_search.routes {
+            let model =
+                super::openai_model_name(&route.model, &format!("tools.web_search.routes.{name}"))?;
             search_routes.insert(name, model);
         }
         let mut profiles = HashMap::new();
@@ -425,6 +443,7 @@ impl AgentRuntimeConfig {
             profiles,
             knowledge_mode: file.knowledge.mode,
             knowledge_embedding: file.knowledge.embedding,
+            web_search,
             scenes: AgentScenes {
                 private: scene_from_file(file.scenes.private),
                 group: scene_from_file(file.scenes.group),
@@ -481,16 +500,24 @@ impl AgentRuntimeConfig {
             None => None,
         };
         let search_route_name = scene_policy.search_route.as_deref().unwrap_or("search");
-        let search_model = self
-            .search_routes
-            .get(search_route_name)
-            .cloned()
-            .ok_or_else(|| {
-                LlmError::config(format!(
-                    "agent scene `{}` references unknown search route `{search_route_name}`",
-                    scene.as_str()
-                ))
-            })?;
+        let search_model = match self.web_search.default_backend {
+            WebSearchBackend::ProviderNative => self
+                .search_routes
+                .get(search_route_name)
+                .cloned()
+                .ok_or_else(|| {
+                    LlmError::config(format!(
+                        "agent scene `{}` references unknown search route `{search_route_name}`",
+                        scene.as_str()
+                    ))
+                })?,
+            // Tavily 和 disabled 不调用模型原生搜索，允许配置中完全移除旧 search route。
+            WebSearchBackend::Tavily | WebSearchBackend::Disabled => self
+                .search_routes
+                .get(search_route_name)
+                .cloned()
+                .unwrap_or_default(),
+        };
         let max_tool_rounds = scene_policy
             .max_tool_rounds
             .unwrap_or(profile.max_tool_rounds)
@@ -503,6 +530,7 @@ impl AgentRuntimeConfig {
             main_model: main_route.display(),
             main_route: main_route.clone(),
             aux_model,
+            search_backend: self.web_search.default_backend,
             search_model,
             reasoning_effort: scene_policy.reasoning_effort.or(profile.reasoning_effort),
             max_tool_rounds,
@@ -526,6 +554,18 @@ impl AgentRuntimeConfig {
                 "embedding": {
                     "enabled": self.knowledge_embedding.enabled,
                     "cache_dir": &self.knowledge_embedding.cache_dir,
+                },
+            },
+            "tools": {
+                "web_search": {
+                    "backend": self.web_search.default_backend.as_str(),
+                    "max_results": self.web_search.max_results,
+                    "search_depth": self.web_search.search_depth.as_str(),
+                    "topic": self.web_search.topic.as_str(),
+                    "time_range": self.web_search.time_range.map(WebSearchTimeRange::as_str),
+                    "connect_timeout_seconds": self.web_search.connect_timeout_seconds,
+                    "first_response_timeout_seconds": self.web_search.first_response_timeout_seconds,
+                    "total_timeout_seconds": self.web_search.total_timeout_seconds,
                 },
             },
             "private": private.diagnostic_summary(),
@@ -552,6 +592,10 @@ impl AgentRuntimeConfig {
 
     pub fn knowledge_embedding(&self) -> &KnowledgeEmbeddingConfig {
         &self.knowledge_embedding
+    }
+
+    pub fn web_search(&self) -> &WebSearchConfig {
+        &self.web_search
     }
 
     fn validate(&self) -> Result<(), LlmError> {
@@ -654,6 +698,7 @@ impl AgentRuntimeConfig {
             profiles,
             knowledge_mode: KnowledgeRetrievalMode::Preflight,
             knowledge_embedding: KnowledgeEmbeddingConfig::default(),
+            web_search: WebSearchConfig::default(),
             scenes: AgentScenes {
                 private: AgentScenePolicy {
                     enabled: true,
@@ -760,6 +805,7 @@ impl ResolvedAgentPolicy {
             "main_route": self.main_model,
             "aux_route": self.aux_model,
             "search_model": self.search_model,
+            "search_backend": self.search_backend.as_str(),
             "reasoning_effort": self.reasoning_effort.map(ReasoningEffort::as_str),
             "max_tool_rounds": self.max_tool_rounds,
             "max_output_tokens": self.max_output_tokens,

@@ -347,6 +347,9 @@ function Install-ReleasePayload {
         Write-Output "created config template: $configFile"
     }
     Remove-ObsoleteEnvConfig -ConfigFile $configFile
+    if (Get-Command Migrate-AgentWebSearchConfig -CommandType Function -ErrorAction SilentlyContinue) {
+        Migrate-AgentWebSearchConfig -ConfigFile (Join-Path $script:AppDir "config\agent.toml")
+    }
 
     # Remove obsolete distribution files only; private config and runtime data stay untouched.
     foreach ($obsolete in @(
@@ -491,9 +494,16 @@ function Install-OrUpdate {
         Test-ReleaseChecksum -Archive $archive -ChecksumFile $checksum
         Expand-Archive -LiteralPath $archive -DestinationPath $tempDir -Force
         $releaseDir = Join-Path $tempDir $package
+        $agentConfigModule = Join-Path $releaseDir "lib\agent-config.ps1"
+        if (Test-Path -LiteralPath $agentConfigModule -PathType Leaf) {
+            . $agentConfigModule
+        }
 
         if ($Mode -eq "update" -and $null -ne $current -and (Normalize-Version $current) -eq $version) {
             Remove-ObsoleteEnvConfig -ConfigFile (Join-Path $script:AppDir "config\.env")
+            if (Get-Command Migrate-AgentWebSearchConfig -CommandType Function -ErrorAction SilentlyContinue) {
+                Migrate-AgentWebSearchConfig -ConfigFile (Join-Path $script:AppDir "config\agent.toml")
+            }
             Complete-AgentConfigMigration -CurrentVersion $current -TargetVersion $version
             Write-Output "already installed: $current"
             return

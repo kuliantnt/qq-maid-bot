@@ -191,6 +191,20 @@ fn command_prefix_is_public_editable_restart_field_with_slash_default() {
 }
 
 #[test]
+fn tavily_api_key_is_managed_as_restart_secret() {
+    let fields = crate::config::managed_config_fields();
+    let field = fields
+        .iter()
+        .find(|field| field.key == "tools.web_search.tavily.api_key")
+        .expect("managed Tavily API key field");
+
+    assert_eq!(field.env_name, "TAVILY_API_KEY");
+    assert_eq!(field.sensitivity, ManagedConfigSensitivity::Secret);
+    assert_eq!(field.apply_mode, ManagedConfigApplyMode::Restart);
+    assert!(field.web_editable);
+}
+
+#[test]
 fn compatibility_environment_alias_is_an_editable_fallback() {
     let (database, directory) =
         SqliteDatabase::open_temp_directory("qq-maid-config-alias", &[CONFIG_SECRET_SCHEMA_V1])
@@ -1191,6 +1205,8 @@ fn partial_agent_save_preserves_custom_provider_routes_profiles_scenes_and_tools
     assert!(text.contains("[providers.mimo]"));
     assert!(text.contains("[model_routes.custom_route]"));
     assert!(text.contains("[profiles.custom_profile]"));
+    assert!(text.contains("[tools.web_search.routes.private_search]"));
+    assert!(!text.contains("[search_routes.private_search]"));
     assert!(text.contains("list_todos"));
     let reloaded = AgentRuntimeConfig::from_toml(
         &text,
@@ -1201,6 +1217,37 @@ fn partial_agent_save_preserves_custom_provider_routes_profiles_scenes_and_tools
         reloaded.resolve(ChatScene::Private).unwrap().search_model,
         "gpt-after-partial-save"
     );
+}
+
+#[test]
+fn agent_save_migrates_all_legacy_search_routes_to_unified_section() {
+    let (_file, _running, database, path) = test_agent_file();
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("[tools.web_search.routes.", "[search_routes.");
+    std::fs::write(&path, &text).unwrap();
+    let running = AgentRuntimeConfig::from_toml(
+        &text,
+        AgentConfigSource::File(path.to_string_lossy().into_owned()),
+    )
+    .unwrap();
+    let file = AgentConfigFile::new(running).unwrap();
+    let snapshot = file.snapshot().unwrap();
+
+    file.update(
+        &snapshot.revision,
+        &[AgentConfigChange::SetSearchRoute {
+            name: "private_search".to_owned(),
+            model: "gpt-migrated".to_owned(),
+        }],
+    )
+    .unwrap();
+
+    let saved = std::fs::read_to_string(path).unwrap();
+    assert!(saved.contains("[tools.web_search.routes.private_search]"));
+    assert!(saved.contains("[tools.web_search.routes.group_search]"));
+    assert!(!saved.contains("[search_routes."));
+    drop(database);
 }
 
 #[cfg(unix)]
