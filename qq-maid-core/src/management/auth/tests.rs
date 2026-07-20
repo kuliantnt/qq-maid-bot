@@ -8,13 +8,15 @@ fn auth(name: &str) -> (AdminAuth, PathBuf) {
 }
 
 fn bootstrap_token(path: &Path) -> String {
-    fs::read_to_string(path)
-        .unwrap()
-        .trim()
+    bootstrap_token_text(path)
         .splitn(3, ':')
         .nth(2)
         .unwrap()
         .to_owned()
+}
+
+fn bootstrap_token_text(path: &Path) -> String {
+    fs::read_to_string(path).unwrap().trim().to_owned()
 }
 
 fn bootstrap_prefix(path: &Path) -> String {
@@ -25,6 +27,138 @@ fn bootstrap_prefix(path: &Path) -> String {
         .next()
         .unwrap()
         .to_owned()
+}
+
+#[test]
+fn bootstrap_token_input_normalizes_only_supported_complete_formats() {
+    const TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAA";
+
+    assert_eq!(
+        normalize_bootstrap_token_input(&format!(" \n{TOKEN}\n ")).unwrap(),
+        BootstrapTokenInput {
+            purpose: None,
+            token: TOKEN,
+        }
+    );
+    assert_eq!(
+        normalize_bootstrap_token_input(&format!(" \n{BOOTSTRAP_PREFIX}:123:{TOKEN}\n ")).unwrap(),
+        BootstrapTokenInput {
+            purpose: Some(BootstrapTokenPurpose::Initialize),
+            token: TOKEN,
+        }
+    );
+    assert_eq!(
+        normalize_bootstrap_token_input(&format!("{PASSWORD_RESET_PREFIX}:456:{TOKEN}")).unwrap(),
+        BootstrapTokenInput {
+            purpose: Some(BootstrapTokenPurpose::PasswordReset),
+            token: TOKEN,
+        }
+    );
+
+    for invalid in [
+        format!("unknown-prefix:123:{TOKEN}"),
+        format!("{BOOTSTRAP_PREFIX}:123"),
+        "random:text".to_owned(),
+        format!("{BOOTSTRAP_PREFIX}:123:{TOKEN}:extra"),
+        format!("{BOOTSTRAP_PREFIX}:not-a-time:{TOKEN}"),
+    ] {
+        assert_eq!(
+            normalize_bootstrap_token_input(&invalid)
+                .unwrap_err()
+                .code(),
+            "invalid_bootstrap_token_format"
+        );
+    }
+}
+
+#[test]
+fn complete_token_input_preserves_purpose_and_expiry_checks() {
+    let (admin_auth, directory) = auth("qq-maid-admin-complete-token-input");
+    let path = directory.join("config/secrets/bootstrap.token");
+    let bootstrap = bootstrap_token_text(&path);
+    let wrong_reset = bootstrap.replacen(BOOTSTRAP_PREFIX, PASSWORD_RESET_PREFIX, 1);
+    let setup = admin_auth.issue_preauth_for("operator").unwrap();
+    assert_eq!(
+        admin_auth
+            .initialize_for(
+                &setup.cookie_value,
+                &setup.session.csrf_token,
+                &wrong_reset,
+                "admin",
+                "123456",
+                "operator",
+            )
+            .unwrap_err()
+            .code(),
+        "invalid_bootstrap_token"
+    );
+    admin_auth
+        .initialize_for(
+            &setup.cookie_value,
+            &setup.session.csrf_token,
+            &format!(" \n{bootstrap}\n "),
+            "admin",
+            "123456",
+            "operator",
+        )
+        .unwrap();
+
+    let reset = admin_auth.issue_preauth_for("reset-operator").unwrap();
+    admin_auth
+        .request_password_reset_for(
+            &reset.cookie_value,
+            &reset.session.csrf_token,
+            "reset-operator",
+        )
+        .unwrap();
+    let password_reset = bootstrap_token_text(&path);
+    let wrong_bootstrap = password_reset.replacen(PASSWORD_RESET_PREFIX, BOOTSTRAP_PREFIX, 1);
+    assert_eq!(
+        admin_auth
+            .reset_password_for(
+                &reset.cookie_value,
+                &reset.session.csrf_token,
+                &wrong_bootstrap,
+                "654321",
+                "reset-operator",
+            )
+            .unwrap_err()
+            .code(),
+        "invalid_bootstrap_token"
+    );
+    admin_auth
+        .reset_password_for(
+            &reset.cookie_value,
+            &reset.session.csrf_token,
+            &password_reset,
+            "654321",
+            "reset-operator",
+        )
+        .unwrap();
+
+    let (expired_auth, expired_directory) = auth("qq-maid-admin-expired-complete-token");
+    let expired_path = expired_directory.join("config/secrets/bootstrap.token");
+    let token = bootstrap_token(&expired_path);
+    let expired = format!(
+        "{BOOTSTRAP_PREFIX}:{}:{token}\n",
+        unix_seconds() - BOOTSTRAP_TTL.as_secs() as i64 - 1
+    );
+    fs::write(&expired_path, &expired).unwrap();
+    let expired_setup = expired_auth.issue_preauth_for("expired-operator").unwrap();
+    assert_eq!(
+        expired_auth
+            .initialize_for(
+                &expired_setup.cookie_value,
+                &expired_setup.session.csrf_token,
+                &expired,
+                "admin",
+                "123456",
+                "expired-operator",
+            )
+            .unwrap_err()
+            .code(),
+        "invalid_bootstrap_token"
+    );
 }
 
 fn audit_count(auth: &AdminAuth, event_type: &str, outcome: &str) -> i64 {

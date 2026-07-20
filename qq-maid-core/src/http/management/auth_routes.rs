@@ -699,7 +699,7 @@ pub(super) fn auth_error(error: AdminAuthError) -> Response {
         "rate_limited" => StatusCode::TOO_MANY_REQUESTS,
         "not_initialized" => StatusCode::CONFLICT,
         "session_capacity_reached" => StatusCode::SERVICE_UNAVAILABLE,
-        "validation_error" => StatusCode::BAD_REQUEST,
+        "validation_error" | "invalid_bootstrap_token_format" => StatusCode::BAD_REQUEST,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     api_error(status, error.code(), error.message())

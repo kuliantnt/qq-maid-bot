@@ -398,10 +398,20 @@ impl AdminAuth {
                 "deployment administrator has already been initialized",
             ));
         }
+        let provided = match normalize_bootstrap_token_input(bootstrap_token) {
+            Ok(provided) => provided,
+            Err(error) => {
+                self.audit(None, "admin.initialize", "denied")?;
+                return Err(error);
+            }
+        };
         let expected = self.read_bootstrap_token()?;
         if expected.purpose != BootstrapTokenPurpose::Initialize
             || !token_is_valid(&expected)
-            || !constant_time_token_eq(bootstrap_token.trim(), &expected.token)
+            || provided
+                .purpose
+                .is_some_and(|purpose| purpose != BootstrapTokenPurpose::Initialize)
+            || !constant_time_token_eq(provided.token, &expected.token)
         {
             self.audit(None, "admin.initialize", "denied")?;
             return Err(AdminAuthError::new(
@@ -523,10 +533,20 @@ impl AdminAuth {
             .bootstrap_lock
             .lock()
             .map_err(|_| AdminAuthError::storage("bootstrap token lock is poisoned"))?;
+        let provided = match normalize_bootstrap_token_input(bootstrap_token) {
+            Ok(provided) => provided,
+            Err(error) => {
+                self.audit(None, "admin.password_reset", "denied")?;
+                return Err(error);
+            }
+        };
         let expected = self.read_bootstrap_token()?;
         if expected.purpose != BootstrapTokenPurpose::PasswordReset
             || !token_is_valid(&expected)
-            || !constant_time_token_eq(bootstrap_token.trim(), &expected.token)
+            || provided
+                .purpose
+                .is_some_and(|purpose| purpose != BootstrapTokenPurpose::PasswordReset)
+            || !constant_time_token_eq(provided.token, &expected.token)
         {
             self.audit(None, "admin.password_reset", "denied")?;
             return Err(AdminAuthError::new(
@@ -1075,7 +1095,13 @@ struct BootstrapToken {
     token: String,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
+struct BootstrapTokenInput<'a> {
+    purpose: Option<BootstrapTokenPurpose>,
+    token: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BootstrapTokenPurpose {
     Initialize,
     PasswordReset,
@@ -1088,6 +1114,50 @@ impl BootstrapTokenPurpose {
             Self::PasswordReset => PASSWORD_RESET_PREFIX,
         }
     }
+}
+
+fn normalize_bootstrap_token_input(input: &str) -> Result<BootstrapTokenInput<'_>, AdminAuthError> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(invalid_bootstrap_token_format());
+    }
+    if !input.contains(':') {
+        return Ok(BootstrapTokenInput {
+            purpose: None,
+            token: input,
+        });
+    }
+
+    let mut parts = input.split(':');
+    let purpose = match parts.next() {
+        Some(BOOTSTRAP_PREFIX) => BootstrapTokenPurpose::Initialize,
+        Some(PASSWORD_RESET_PREFIX) => BootstrapTokenPurpose::PasswordReset,
+        _ => return Err(invalid_bootstrap_token_format()),
+    };
+    let issued_at = parts.next().ok_or_else(invalid_bootstrap_token_format)?;
+    let token = parts.next().ok_or_else(invalid_bootstrap_token_format)?;
+    // 完整输入只接受本项目实际生成的三段格式，避免把任意冒号文本误当成令牌。
+    if parts.next().is_some()
+        || issued_at.is_empty()
+        || !issued_at.bytes().all(|byte| byte.is_ascii_digit())
+        || issued_at.parse::<i64>().is_err()
+        || token.len() != 22
+        || !matches!(URL_SAFE_NO_PAD.decode(token), Ok(decoded) if decoded.len() == 16)
+    {
+        return Err(invalid_bootstrap_token_format());
+    }
+
+    Ok(BootstrapTokenInput {
+        purpose: Some(purpose),
+        token,
+    })
+}
+
+fn invalid_bootstrap_token_format() -> AdminAuthError {
+    AdminAuthError::new(
+        "invalid_bootstrap_token_format",
+        "bootstrap token input format is not recognized",
+    )
 }
 
 fn hash_password(password: &str) -> Result<String, AdminAuthError> {
