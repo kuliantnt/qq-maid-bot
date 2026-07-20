@@ -1,8 +1,6 @@
-use crate::{
-    gateway::outbound::RenderProfile, markdown::MarkdownPayload, media::ImagePayload,
-    respond::RespondResponse,
-};
-use qq_maid_core::service::{AssistantOutput, OutputPart};
+use crate::{gateway::outbound::RenderProfile, markdown::MarkdownPayload, media::ImagePayload};
+use qq_maid_common::output_part::{AssistantOutput, OutputMedia, OutputPart};
+use qq_maid_core::service::CoreResponse;
 
 const UNSUPPORTED_IMAGE_FALLBACK_TEXT: &str = "当前平台暂不支持发送这类图片内容。";
 const UNSUPPORTED_FILE_FALLBACK_TEXT: &str = "当前平台暂不支持发送这类文件内容。";
@@ -78,7 +76,7 @@ impl OutboundMessage {
 }
 
 pub(crate) fn render_respond_response_for_profile(
-    response: &RespondResponse,
+    response: &CoreResponse,
     profile: &RenderProfile,
 ) -> Option<OutboundMessage> {
     let rendered = render_respond_response_parts_for_profile(response, profile);
@@ -97,7 +95,7 @@ pub(crate) fn render_respond_response_for_profile(
 }
 
 pub(crate) fn render_respond_response_parts_for_profile(
-    response: &RespondResponse,
+    response: &CoreResponse,
     profile: &RenderProfile,
 ) -> Vec<OutboundMessage> {
     response
@@ -224,7 +222,7 @@ fn render_assistant_output_parts_for_profile(
         .collect()
 }
 
-fn image_payload(media: &qq_maid_core::service::OutputMedia) -> Option<ImagePayload> {
+fn image_payload(media: &OutputMedia) -> Option<ImagePayload> {
     if let Some(file_info) = media
         .media_id
         .as_deref()
@@ -270,7 +268,6 @@ fn output_has_markdown_channel(output: &AssistantOutput) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qq_maid_core::service::OutputMedia;
 
     fn render_profile(enable_markdown: bool, enable_image: bool) -> RenderProfile {
         RenderProfile {
@@ -282,16 +279,14 @@ mod tests {
         }
     }
 
-    fn response_with_body(text: Option<&str>, markdown: Option<&str>) -> RespondResponse {
+    fn response_with_body(text: Option<&str>, markdown: Option<&str>) -> CoreResponse {
         // 测试直接构造 Core->Gateway 的结构化 output，不再绕旧 text/markdown 字段。
         let output = match (text, markdown) {
-            (Some(text), Some(markdown)) => Some(qq_maid_core::service::AssistantOutput::markdown(
-                text, markdown,
-            )),
-            (Some(text), None) => Some(qq_maid_core::service::AssistantOutput::text(text)),
+            (Some(text), Some(markdown)) => Some(AssistantOutput::markdown(text, markdown)),
+            (Some(text), None) => Some(AssistantOutput::text(text)),
             _ => None,
         };
-        RespondResponse {
+        CoreResponse {
             output,
             handled: Some(true),
             session_id: None,
@@ -301,9 +296,9 @@ mod tests {
         }
     }
 
-    fn response_with_empty_output() -> RespondResponse {
+    fn response_with_empty_output() -> CoreResponse {
         // 渲染层在 output 缺失时返回 None，对应旧空正文路径。
-        RespondResponse {
+        CoreResponse {
             output: None,
             handled: Some(true),
             session_id: None,
@@ -423,7 +418,7 @@ mod tests {
 
     #[test]
     fn structured_output_parts_render_markdown_when_supported() {
-        let response = RespondResponse {
+        let response = CoreResponse {
             output: Some(AssistantOutput {
                 text_fallback: "plain fallback".to_owned(),
                 markdown: None,
@@ -455,7 +450,7 @@ mod tests {
 
     #[test]
     fn structured_output_degrades_to_text_for_text_only_profile() {
-        let response = RespondResponse {
+        let response = CoreResponse {
             output: Some(AssistantOutput {
                 text_fallback: String::new(),
                 markdown: None,
@@ -488,7 +483,7 @@ mod tests {
 
     #[test]
     fn structured_image_part_renders_real_image_when_supported() {
-        let response = RespondResponse {
+        let response = CoreResponse {
             output: Some(AssistantOutput {
                 text_fallback: String::new(),
                 markdown: None,
@@ -518,7 +513,7 @@ mod tests {
 
     #[test]
     fn unsupported_structured_part_uses_explicit_fallback_text() {
-        let response = RespondResponse {
+        let response = CoreResponse {
             output: Some(AssistantOutput {
                 text_fallback: String::new(),
                 markdown: None,
@@ -543,7 +538,7 @@ mod tests {
 
     #[test]
     fn output_with_empty_parts_falls_back_to_text_fallback_and_markdown() {
-        let response = RespondResponse {
+        let response = CoreResponse {
             output: Some(AssistantOutput {
                 text_fallback: "output fallback".to_owned(),
                 markdown: Some("**output markdown**".to_owned()),
@@ -567,7 +562,7 @@ mod tests {
 
     #[test]
     fn markdown_channel_wins_over_duplicate_text_parts() {
-        let response = RespondResponse {
+        let response = CoreResponse {
             output: Some(AssistantOutput {
                 text_fallback: "Markdown 测试".to_owned(),
                 markdown: Some("# Markdown 测试\n\n- **加粗**".to_owned()),

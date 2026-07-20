@@ -10,6 +10,7 @@ use std::{
 
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
+use qq_maid_common::output_part::AssistantOutput;
 use qq_maid_core::service::{
     CoreError, CoreHealthSnapshot, CoreInboundClassification, CoreInboundKind, CoreRequest,
     CoreRespondOutput, CoreResponse, CoreService, UpstreamStatusSnapshot,
@@ -161,9 +162,7 @@ impl CoreService for RecordingCore {
     async fn respond(&self, request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
         self.requests.lock().unwrap().push(request);
         Ok(CoreRespondOutput::Complete(Box::new(CoreResponse {
-            output: Some(qq_maid_core::service::AssistantOutput::text(
-                self.reply.clone(),
-            )),
+            output: Some(AssistantOutput::text(self.reply.clone())),
             handled: Some(true),
             session_id: Some("session-1".to_owned()),
             command: None,
@@ -226,10 +225,7 @@ impl CoreService for CoordinatedCore {
         self.active.fetch_sub(1, Ordering::SeqCst);
 
         Ok(CoreRespondOutput::Complete(Box::new(CoreResponse {
-            output: Some(qq_maid_core::service::AssistantOutput::text(format!(
-                "完成:{}",
-                request.text
-            ))),
+            output: Some(AssistantOutput::text(format!("完成:{}", request.text))),
             handled: Some(true),
             session_id: Some(format!("session-{call_index}")),
             command: request.text.starts_with("/new").then(|| "new".to_owned()),

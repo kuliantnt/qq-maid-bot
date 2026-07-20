@@ -1,8 +1,8 @@
 //! 请求响应路由与分派。
 //!
-//! 本模块是 LLM 响应的入口层，负责接收外部（HTTP facade 或内部子 flow）
-//! 发来的 `RespondRequest`，根据请求类型和会话状态将其分派到对应的子处理
-//! 模块（聊天、翻译、待办、记忆、天气、搜索、会话管理），最终返回 `RespondResponse`。
+//! 本模块是 Core 内部 LLM 响应编排入口，接收 service 层或内部子 flow 的请求，
+//! 按请求类型和会话状态分派到聊天、翻译、待办、记忆、天气、搜索和会话管理，
+//! 最终返回内部 `RespondResponse`，再由 service 层转换为稳定响应类型。
 
 use std::{future::Future, pin::Pin};
 
@@ -34,7 +34,7 @@ use crate::{
 };
 
 mod types;
-pub use types::{ChatResponse, RespondPurpose, RespondRequest, RespondResponse};
+pub use types::{RespondPurpose, RespondRequest, RespondResponse};
 
 pub(crate) mod agent_outcome;
 mod agent_route;

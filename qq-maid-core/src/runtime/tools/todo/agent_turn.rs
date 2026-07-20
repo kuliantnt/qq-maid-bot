@@ -7,7 +7,6 @@ use crate::{
     error::LlmError,
     runtime::{
         respond::{
-            ChatResponse,
             agent_outcome::{AgentTurnOutcome, ToolEffect, ToolOutcomeStatus},
             llm_service::RespondOutput,
         },
@@ -139,18 +138,15 @@ pub(crate) fn fallback_output_after_agent_failure(
         text: reply.clone(),
         markdown: None,
         parts: Vec::new(),
-        chat: ChatResponse::ok(
-            reply,
-            LlmMetrics {
-                provider: "rust".to_owned(),
-                model: format!("{model}:todo-tool-result-fallback"),
-                stream: false,
-                ttfe_ms: None,
-                ttft_ms: None,
-                total_latency_ms: 0,
-            },
-            None,
-        ),
+        metrics: LlmMetrics {
+            provider: "rust".to_owned(),
+            model: format!("{model}:todo-tool-result-fallback"),
+            stream: false,
+            ttfe_ms: None,
+            ttft_ms: None,
+            total_latency_ms: 0,
+        },
+        usage: None,
         agent: agent.clone(),
     })
 }
@@ -164,18 +160,15 @@ pub(crate) fn success_not_verified_output(output: RespondOutput) -> RespondOutpu
         text: reply.clone(),
         markdown: None,
         parts: Vec::new(),
-        chat: ChatResponse::ok(
-            reply,
-            LlmMetrics {
-                provider: "rust".to_owned(),
-                model: "tool-loop-guard".to_owned(),
-                stream: false,
-                ttfe_ms: None,
-                ttft_ms: None,
-                total_latency_ms: 0,
-            },
-            None,
-        ),
+        metrics: LlmMetrics {
+            provider: "rust".to_owned(),
+            model: "tool-loop-guard".to_owned(),
+            stream: false,
+            ttfe_ms: None,
+            ttft_ms: None,
+            total_latency_ms: 0,
+        },
+        usage: None,
         agent: output.agent,
     }
 }

@@ -243,7 +243,6 @@ fn apply_agent_turn_outcome(output: &mut RespondOutput, outcome: &AgentTurnOutco
     output.reply = body.markdown.clone().unwrap_or_else(|| body.text.clone());
     output.text = body.text;
     output.markdown = body.markdown;
-    output.chat.reply = Some(output.reply.clone());
 }
 
 fn apply_agent_turn_outcome_with_model_reply(
@@ -270,7 +269,6 @@ fn apply_agent_turn_outcome_with_model_reply(
     output.reply = markdown.clone().unwrap_or_else(|| text.clone());
     output.text = text;
     output.markdown = markdown;
-    output.chat.reply = Some(output.reply.clone());
 }
 
 fn apply_agent_turn_compat_output(output: &mut RespondOutput, outcome: &AgentTurnOutcome) {
@@ -278,5 +276,4 @@ fn apply_agent_turn_compat_output(output: &mut RespondOutput, outcome: &AgentTur
     output.reply = body.markdown.clone().unwrap_or_else(|| body.text.clone());
     output.text = body.text;
     output.markdown = body.markdown;
-    output.chat.reply = Some(output.reply.clone());
 }

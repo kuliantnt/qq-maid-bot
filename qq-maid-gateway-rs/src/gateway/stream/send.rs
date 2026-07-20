@@ -2,13 +2,14 @@ use super::event_stream::C2cStreamSender;
 use crate::{
     api::{C2cStreamState, StreamSendResult},
     markdown::MarkdownPayload,
-    respond::RespondResponse,
 };
+use qq_maid_common::output_part::AssistantOutput;
+use qq_maid_core::service::CoreResponse;
 
 /// QQ 结束帧要求 Markdown content 非空；零宽空格满足非空校验，且不会把完整正文再次追加到已发送内容后。
 pub(crate) const STREAM_FINAL_MARKER: &str = "\u{200B}";
 
-pub(crate) fn completed_response_content(response: &RespondResponse) -> Option<&str> {
+pub(crate) fn completed_response_content(response: &CoreResponse) -> Option<&str> {
     response.markdown_content().or(response.text_content())
 }
 
@@ -20,11 +21,9 @@ pub(crate) fn stream_final_packet_content(pending_delta: &str) -> &str {
     }
 }
 
-pub(crate) fn response_from_incomplete_stream_text(content: &str) -> RespondResponse {
-    RespondResponse {
-        output: Some(qq_maid_core::service::AssistantOutput::markdown(
-            content, content,
-        )),
+pub(crate) fn response_from_incomplete_stream_text(content: &str) -> CoreResponse {
+    CoreResponse {
+        output: Some(AssistantOutput::markdown(content, content)),
         handled: Some(true),
         session_id: None,
         command: None,

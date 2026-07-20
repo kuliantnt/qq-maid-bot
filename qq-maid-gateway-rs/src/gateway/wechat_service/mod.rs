@@ -17,6 +17,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use qq_maid_core::service::CoreRespondOutput;
 use serde::Deserialize;
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -41,7 +42,7 @@ use crate::{
     },
     logging::mask_openid,
     render::render_respond_response_for_profile,
-    respond::{RespondClient, RespondError, RespondTransport, respond_error_to_qq_text},
+    respond::{RespondClient, RespondError, respond_error_to_qq_text},
 };
 
 mod customer;
@@ -309,8 +310,8 @@ async fn build_reply_text(
     let content = platform::render_text_for_core(inbound);
     let capability = ReplyCapability::wechat_service_text_sync(reply_timeout);
     let response = match respond.respond_inbound(inbound, content).await {
-        Ok(RespondTransport::Complete(response)) => Some(response),
-        Ok(RespondTransport::Stream(mut stream)) => {
+        Ok(CoreRespondOutput::Complete(response)) => Some(response),
+        Ok(CoreRespondOutput::Stream(mut stream)) => {
             // 微信服务号同步回复不支持流式；这里只消费到 Completed，超时由外层统一处理。
             let mut completed = None;
             while let Some(event) = stream.recv().await {

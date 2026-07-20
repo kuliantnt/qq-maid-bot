@@ -14,7 +14,7 @@ fn local_group_hints_use_configured_bot_display_name() {
 
 #[tokio::test]
 async fn group_stream_timeout_sends_core_safe_failure_text() {
-    let stream = FakeGroupEventStream::new([RespondEvent::Failed(CoreRespondFailure {
+    let stream = FakeGroupEventStream::new([CoreResponseEvent::Failed(CoreRespondFailure {
         kind: CoreFailureKind::LlmTimeout,
         message: "LLM 服务处理超时，请稍后再试。".to_owned(),
         retryable: true,
@@ -73,11 +73,11 @@ use tokio::net::TcpListener;
 
 #[derive(Debug)]
 struct FakeGroupEventStream {
-    events: VecDeque<RespondEvent>,
+    events: VecDeque<CoreResponseEvent>,
 }
 
 impl FakeGroupEventStream {
-    fn new(events: impl IntoIterator<Item = RespondEvent>) -> Self {
+    fn new(events: impl IntoIterator<Item = CoreResponseEvent>) -> Self {
         Self {
             events: events.into_iter().collect(),
         }
@@ -157,7 +157,7 @@ fn qq_group_capability() -> ReplyCapability {
 }
 
 struct MockCore {
-    response: RespondResponse,
+    response: CoreResponse,
     respond_calls: Arc<AtomicUsize>,
     classify_calls: Arc<AtomicUsize>,
     immediate_inputs: Vec<String>,
@@ -220,7 +220,7 @@ fn respond_client_with_classification(
         respond_calls,
         classify_calls,
         immediate_inputs,
-        RespondResponse {
+        CoreResponse {
             output: None,
             handled: Some(true),
             session_id: None,
@@ -235,7 +235,7 @@ fn respond_client_with_response(
     respond_calls: Arc<AtomicUsize>,
     classify_calls: Arc<AtomicUsize>,
     immediate_inputs: Vec<&str>,
-    response: RespondResponse,
+    response: CoreResponse,
 ) -> RespondClient {
     RespondClient::new(Arc::new(MockCore {
         response,

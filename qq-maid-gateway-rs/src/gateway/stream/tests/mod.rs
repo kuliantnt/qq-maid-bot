@@ -17,11 +17,11 @@ use crate::{
     },
     markdown::MarkdownPayload,
     media::ImagePayload,
-    respond::RespondEvent,
 };
+use qq_maid_common::output_part::{AssistantOutput, OutputMedia, OutputPart};
 use qq_maid_core::service::{
-    AssistantOutput, CoreFailureKind, CoreOutputPolicy, CoreRespondFailure, CoreResponseStatus,
-    CoreResponseStatusKind, OutputMedia, OutputPart,
+    CoreFailureKind, CoreOutputPolicy, CoreRespondFailure, CoreResponseEvent, CoreResponseStatus,
+    CoreResponseStatusKind,
 };
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 
@@ -33,12 +33,12 @@ fn test_config() -> AppConfig {
 
 #[derive(Debug)]
 struct FakeEventStream {
-    events: VecDeque<(Duration, RespondEvent)>,
+    events: VecDeque<(Duration, CoreResponseEvent)>,
     output_policy: CoreOutputPolicy,
 }
 
 impl FakeEventStream {
-    fn new(events: impl IntoIterator<Item = RespondEvent>) -> Self {
+    fn new(events: impl IntoIterator<Item = CoreResponseEvent>) -> Self {
         Self {
             events: events
                 .into_iter()
@@ -48,7 +48,7 @@ impl FakeEventStream {
         }
     }
 
-    fn with_delays(events: impl IntoIterator<Item = (Duration, RespondEvent)>) -> Self {
+    fn with_delays(events: impl IntoIterator<Item = (Duration, CoreResponseEvent)>) -> Self {
         Self {
             events: events.into_iter().collect(),
             output_policy: CoreOutputPolicy::DirectStream,
@@ -228,9 +228,9 @@ fn quoted_lookup_found(
 #[tokio::test]
 async fn stream_first_send_error_falls_back_to_completed_response() {
     let events = FakeEventStream::new([
-        RespondEvent::TextDelta("晚上".to_owned()),
-        RespondEvent::TextDelta("好".to_owned()),
-        RespondEvent::Completed(Box::new(respond_response("晚上好"))),
+        CoreResponseEvent::TextDelta("晚上".to_owned()),
+        CoreResponseEvent::TextDelta("好".to_owned()),
+        CoreResponseEvent::Completed(Box::new(respond_response("晚上好"))),
     ]);
     let sender = FakeStreamSender::new([Err(ApiError::Unsupported("stream"))]);
 
@@ -261,8 +261,8 @@ async fn stream_first_send_error_falls_back_to_completed_response() {
 async fn stream_pending_fallback_records_ref_index() {
     let config = test_config();
     let events = FakeEventStream::new([
-        RespondEvent::TextDelta("晚上".to_owned()),
-        RespondEvent::Completed(Box::new(respond_response("晚上好"))),
+        CoreResponseEvent::TextDelta("晚上".to_owned()),
+        CoreResponseEvent::Completed(Box::new(respond_response("晚上好"))),
     ]);
     let sender = FakeStreamSender::new([Err(ApiError::Unsupported("stream"))]);
     let ref_index = crate::gateway::ref_index::ref_index();
@@ -291,8 +291,8 @@ async fn stream_pending_fallback_records_ref_index() {
 async fn active_stream_does_not_fake_ref_index_from_stream_id() {
     let config = test_config();
     let events = FakeEventStream::new([
-        RespondEvent::TextDelta("晚上好".to_owned()),
-        RespondEvent::Completed(Box::new(respond_response("晚上好"))),
+        CoreResponseEvent::TextDelta("晚上好".to_owned()),
+        CoreResponseEvent::Completed(Box::new(respond_response("晚上好"))),
     ]);
     let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None)]);
     let ref_index = crate::gateway::ref_index::ref_index();
@@ -314,11 +314,11 @@ async fn active_stream_does_not_fake_ref_index_from_stream_id() {
 #[tokio::test]
 async fn stream_status_event_does_not_start_qq_stream_or_extra_send() {
     let events = FakeEventStream::new([
-        RespondEvent::Status(CoreResponseStatus {
+        CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentStarted,
             text: "正在处理".to_owned(),
         }),
-        RespondEvent::Completed(Box::new(respond_response("最终回复"))),
+        CoreResponseEvent::Completed(Box::new(respond_response("最终回复"))),
     ]);
     let sender = FakeStreamSender::new([]);
 
@@ -338,15 +338,15 @@ async fn stream_status_event_does_not_start_qq_stream_or_extra_send() {
 #[tokio::test]
 async fn progress_policy_status_sends_one_visible_hint_then_final_reply() {
     let events = FakeEventStream::new([
-        RespondEvent::Status(CoreResponseStatus {
+        CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentStarted,
             text: "小女仆正在处理…".to_owned(),
         }),
-        RespondEvent::Status(CoreResponseStatus {
+        CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentFinalizing,
             text: "小女仆正在确认结果…".to_owned(),
         }),
-        RespondEvent::Completed(Box::new(respond_response("最终回复"))),
+        CoreResponseEvent::Completed(Box::new(respond_response("最终回复"))),
     ])
     .with_policy(CoreOutputPolicy::ProgressThenComplete);
     let sender = FakeStreamSender::new([]);
@@ -373,16 +373,16 @@ async fn progress_policy_status_sends_one_visible_hint_then_final_reply() {
 #[tokio::test]
 async fn progress_then_stream_sends_one_visible_hint_then_streams_final_answer() {
     let events = FakeEventStream::new([
-        RespondEvent::Status(CoreResponseStatus {
+        CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentStarted,
             text: "小女仆正在处理…".to_owned(),
         }),
-        RespondEvent::Status(CoreResponseStatus {
+        CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentFinalizing,
             text: "小女仆正在确认结果…".to_owned(),
         }),
-        RespondEvent::TextDelta("最终".to_owned()),
-        RespondEvent::Completed(Box::new(respond_response("最终回复"))),
+        CoreResponseEvent::TextDelta("最终".to_owned()),
+        CoreResponseEvent::Completed(Box::new(respond_response("最终回复"))),
     ])
     .with_policy(CoreOutputPolicy::ProgressThenStream);
     let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None)]);
@@ -421,9 +421,9 @@ async fn progress_then_stream_sends_one_visible_hint_then_streams_final_answer()
 #[tokio::test]
 async fn stream_first_send_without_id_falls_back_to_completed_response() {
     let events = FakeEventStream::new([
-        RespondEvent::TextDelta("晚上".to_owned()),
-        RespondEvent::TextDelta("好".to_owned()),
-        RespondEvent::Completed(Box::new(respond_response("晚上好"))),
+        CoreResponseEvent::TextDelta("晚上".to_owned()),
+        CoreResponseEvent::TextDelta("好".to_owned()),
+        CoreResponseEvent::Completed(Box::new(respond_response("晚上好"))),
     ]);
     let sender = FakeStreamSender::new([Ok(None)]);
 
@@ -453,11 +453,11 @@ async fn stream_first_send_without_id_falls_back_to_completed_response() {
 #[tokio::test]
 async fn progress_policy_status_respects_visible_progress_config() {
     let events = FakeEventStream::new([
-        RespondEvent::Status(CoreResponseStatus {
+        CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentStarted,
             text: "小女仆正在处理…".to_owned(),
         }),
-        RespondEvent::Completed(Box::new(respond_response("最终回复"))),
+        CoreResponseEvent::Completed(Box::new(respond_response("最终回复"))),
     ])
     .with_policy(CoreOutputPolicy::ProgressThenComplete);
     let sender = FakeStreamSender::new([]);
@@ -480,8 +480,8 @@ async fn progress_policy_status_respects_visible_progress_config() {
 #[tokio::test]
 async fn stream_single_content_packet_then_final_keeps_stream_id() {
     let events = FakeEventStream::new([
-        RespondEvent::TextDelta("测试成功".to_owned()),
-        RespondEvent::Completed(Box::new(respond_response("测试成功"))),
+        CoreResponseEvent::TextDelta("测试成功".to_owned()),
+        CoreResponseEvent::Completed(Box::new(respond_response("测试成功"))),
     ]);
     let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None)]);
 
@@ -516,14 +516,17 @@ async fn stream_single_content_packet_then_final_keeps_stream_id() {
 #[tokio::test]
 async fn stream_active_path_reuses_id_and_increments_content_index() {
     let events = FakeEventStream::with_delays([
-        (Duration::ZERO, RespondEvent::TextDelta("晚上".to_owned())),
+        (
+            Duration::ZERO,
+            CoreResponseEvent::TextDelta("晚上".to_owned()),
+        ),
         (
             Duration::from_millis(STREAM_THROTTLE_MS + 50),
-            RespondEvent::TextDelta("好".to_owned()),
+            CoreResponseEvent::TextDelta("好".to_owned()),
         ),
         (
             Duration::ZERO,
-            RespondEvent::Completed(Box::new(respond_response("晚上好"))),
+            CoreResponseEvent::Completed(Box::new(respond_response("晚上好"))),
         ),
     ]);
     let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None), Ok(None)]);
@@ -566,9 +569,9 @@ async fn stream_active_path_reuses_id_and_increments_content_index() {
 #[tokio::test]
 async fn stream_empty_delta_does_not_consume_index() {
     let events = FakeEventStream::new([
-        RespondEvent::TextDelta(String::new()),
-        RespondEvent::TextDelta("好".to_owned()),
-        RespondEvent::Completed(Box::new(respond_response("好"))),
+        CoreResponseEvent::TextDelta(String::new()),
+        CoreResponseEvent::TextDelta("好".to_owned()),
+        CoreResponseEvent::Completed(Box::new(respond_response("好"))),
     ]);
     let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None)]);
 
@@ -602,14 +605,17 @@ async fn stream_empty_delta_does_not_consume_index() {
 #[tokio::test]
 async fn stream_middle_returned_id_does_not_replace_first_stream_id() {
     let events = FakeEventStream::with_delays([
-        (Duration::ZERO, RespondEvent::TextDelta("晚".to_owned())),
+        (
+            Duration::ZERO,
+            CoreResponseEvent::TextDelta("晚".to_owned()),
+        ),
         (
             Duration::from_millis(STREAM_THROTTLE_MS + 50),
-            RespondEvent::TextDelta("上".to_owned()),
+            CoreResponseEvent::TextDelta("上".to_owned()),
         ),
         (
             Duration::ZERO,
-            RespondEvent::Completed(Box::new(respond_response("晚上"))),
+            CoreResponseEvent::Completed(Box::new(respond_response("晚上"))),
         ),
     ]);
     let sender = FakeStreamSender::new([
@@ -656,15 +662,21 @@ async fn stream_middle_returned_id_does_not_replace_first_stream_id() {
 #[tokio::test]
 async fn stream_middle_chunks_coalesce_only_unsent_delta() {
     let events = FakeEventStream::with_delays([
-        (Duration::ZERO, RespondEvent::TextDelta("晚".to_owned())),
-        (Duration::ZERO, RespondEvent::TextDelta("上".to_owned())),
         (
-            Duration::from_millis(STREAM_THROTTLE_MS + 50),
-            RespondEvent::TextDelta("好".to_owned()),
+            Duration::ZERO,
+            CoreResponseEvent::TextDelta("晚".to_owned()),
         ),
         (
             Duration::ZERO,
-            RespondEvent::Completed(Box::new(respond_response("晚上好"))),
+            CoreResponseEvent::TextDelta("上".to_owned()),
+        ),
+        (
+            Duration::from_millis(STREAM_THROTTLE_MS + 50),
+            CoreResponseEvent::TextDelta("好".to_owned()),
+        ),
+        (
+            Duration::ZERO,
+            CoreResponseEvent::Completed(Box::new(respond_response("晚上好"))),
         ),
     ]);
     let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None), Ok(None)]);
@@ -707,8 +719,8 @@ async fn stream_middle_chunks_coalesce_only_unsent_delta() {
 #[tokio::test]
 async fn stream_final_failure_does_not_send_ordinary_fallback_after_active() {
     let events = FakeEventStream::new([
-        RespondEvent::TextDelta("晚上".to_owned()),
-        RespondEvent::Completed(Box::new(respond_response("晚上好"))),
+        CoreResponseEvent::TextDelta("晚上".to_owned()),
+        CoreResponseEvent::Completed(Box::new(respond_response("晚上好"))),
     ]);
     let sender = FakeStreamSender::new([
         Ok(Some("stream-1".to_owned())),
@@ -808,7 +820,7 @@ async fn stream_final_success_commits_next_index() {
 
 #[tokio::test]
 async fn stream_closed_before_completed_is_not_silent_success() {
-    let events = FakeEventStream::new([RespondEvent::TextDelta("晚上".to_owned())]);
+    let events = FakeEventStream::new([CoreResponseEvent::TextDelta("晚上".to_owned())]);
     let sender = FakeStreamSender::new([Err(ApiError::Unsupported("stream"))]);
 
     let result =
@@ -831,14 +843,17 @@ async fn stream_closed_before_completed_is_not_silent_success() {
 #[tokio::test]
 async fn stream_middle_failure_does_not_send_ordinary_fallback_on_completed() {
     let events = FakeEventStream::with_delays([
-        (Duration::ZERO, RespondEvent::TextDelta("晚".to_owned())),
+        (
+            Duration::ZERO,
+            CoreResponseEvent::TextDelta("晚".to_owned()),
+        ),
         (
             Duration::from_millis(STREAM_THROTTLE_MS + 50),
-            RespondEvent::TextDelta("上".to_owned()),
+            CoreResponseEvent::TextDelta("上".to_owned()),
         ),
         (
             Duration::ZERO,
-            RespondEvent::Completed(Box::new(respond_response("晚上"))),
+            CoreResponseEvent::Completed(Box::new(respond_response("晚上"))),
         ),
     ]);
     let sender = FakeStreamSender::new([
@@ -884,7 +899,7 @@ async fn stream_middle_failure_does_not_send_ordinary_fallback_on_completed() {
 
 #[tokio::test]
 async fn pending_core_failure_sends_safe_ordinary_failure_reply() {
-    let events = FakeEventStream::new([RespondEvent::Failed(CoreRespondFailure {
+    let events = FakeEventStream::new([CoreResponseEvent::Failed(CoreRespondFailure {
         kind: CoreFailureKind::Internal,
         message: "处理失败，请稍后再试。".to_owned(),
         retryable: false,
@@ -907,7 +922,7 @@ async fn pending_core_failure_sends_safe_ordinary_failure_reply() {
 
 #[tokio::test]
 async fn stream_timeout_failure_stops_typing_with_timeout_reason() {
-    let events = FakeEventStream::new([RespondEvent::Failed(CoreRespondFailure {
+    let events = FakeEventStream::new([CoreResponseEvent::Failed(CoreRespondFailure {
         kind: CoreFailureKind::LlmTimeout,
         message: "LLM 服务处理超时，请稍后再试。".to_owned(),
         retryable: true,
@@ -952,8 +967,8 @@ async fn stream_timeout_failure_stops_typing_with_timeout_reason() {
 #[tokio::test]
 async fn active_core_failure_finalizes_stream_without_ordinary_failure_reply() {
     let events = FakeEventStream::new([
-        RespondEvent::TextDelta("已发送".to_owned()),
-        RespondEvent::Failed(CoreRespondFailure {
+        CoreResponseEvent::TextDelta("已发送".to_owned()),
+        CoreResponseEvent::Failed(CoreRespondFailure {
             kind: CoreFailureKind::LlmTimeout,
             message: "LLM 服务处理超时，请稍后再试。".to_owned(),
             retryable: true,

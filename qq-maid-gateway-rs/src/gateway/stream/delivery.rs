@@ -26,9 +26,10 @@ use crate::{
         typing::{C2cTypingStatusGuard, TypingStopReason},
     },
     render::{OutboundMessage, render_respond_response_parts_for_profile},
-    respond::RespondEvent,
 };
-use qq_maid_core::service::{CoreOutputPolicy, CoreResponseStatus};
+use qq_maid_core::service::{
+    CoreOutputPolicy, CoreResponse, CoreResponseEvent, CoreResponseStatus,
+};
 
 /// QQ C2C 流式发送的节流间隔（毫秒）。
 ///
@@ -38,7 +39,7 @@ pub(crate) const STREAM_THROTTLE_MS: u64 = 500;
 async fn send_completed_media_after_stream<S: C2cStreamSender + ?Sized>(
     sender: &S,
     message: &C2cMessage,
-    response: &crate::respond::RespondResponse,
+    response: &CoreResponse,
     config: &AppConfig,
 ) -> anyhow::Result<()> {
     let capability = ReplyCapability::qq_official_c2c(config);
@@ -199,7 +200,7 @@ where
 
     while let Some(event) = stream.recv_event().await {
         match event {
-            RespondEvent::Status(status) => {
+            CoreResponseEvent::Status(status) => {
                 status_event_count += 1;
                 trace!(
                     user = %masked_user,
@@ -228,7 +229,7 @@ where
                     .await;
                 }
             }
-            RespondEvent::TextDelta(delta) => {
+            CoreResponseEvent::TextDelta(delta) => {
                 if delta.is_empty() {
                     continue;
                 }
@@ -396,7 +397,7 @@ where
                     C2cStreamingPhase::Completed => {}
                 }
             }
-            RespondEvent::Completed(response) => {
+            CoreResponseEvent::Completed(response) => {
                 if let Some(typing) = typing.as_mut() {
                     typing.stop(TypingStopReason::FinalReply);
                 }
@@ -754,7 +755,7 @@ where
                     }
                 }
             }
-            RespondEvent::Failed(failure) => {
+            CoreResponseEvent::Failed(failure) => {
                 if let Some(typing) = typing.as_mut() {
                     typing.stop(failure_stop_reason(&failure));
                 }

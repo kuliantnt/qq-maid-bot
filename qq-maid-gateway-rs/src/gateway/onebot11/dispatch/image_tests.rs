@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use qq_maid_core::service::{AssistantOutput, CoreResponse, OutputMedia, OutputPart};
+use qq_maid_common::output_part::{AssistantOutput, OutputMedia, OutputPart};
+use qq_maid_core::service::CoreResponse;
 
 use super::OneBotCoreTransport;
 use super::tests::{FakeSender, dispatcher, inbound};

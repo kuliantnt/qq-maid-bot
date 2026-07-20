@@ -12,6 +12,7 @@ use crate::{
 use async_trait::async_trait;
 use qq_maid_common::{
     command_prefix::CommandPrefix, identity_context::IdentitySource, input_part::MessageInputPart,
+    output_part::AssistantOutput,
 };
 use qq_maid_core::service::{
     CoreActor, CoreConversation, CoreError, CoreHealthSnapshot, CoreInboundClassification,
@@ -42,7 +43,7 @@ struct MockCore {
 impl CoreService for MockCore {
     async fn respond(&self, _request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
         Ok(CoreRespondOutput::Complete(Box::new(CoreResponse {
-            output: Some(qq_maid_core::service::AssistantOutput::text("ok")),
+            output: Some(AssistantOutput::text("ok")),
             handled: Some(true),
             session_id: None,
             command: None,
