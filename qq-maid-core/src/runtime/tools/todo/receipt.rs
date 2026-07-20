@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use chrono::NaiveDate;
-use qq_maid_llm::provider::ToolExecutionResult;
+use qq_maid_llm::provider::{ToolExecutionAttempt, ToolExecutionResult};
 use serde_json::Value;
 
 use crate::{
@@ -21,11 +21,15 @@ use crate::{
             common::{CommandBody, todo_error, truncate_chars},
         },
         session::{SessionMeta, SessionRecord},
-        tools::todo::{
-            ReminderFieldMode, TodoCardOptions, TodoItem, TodoListDateField, TodoListDateFilter,
-            TodoOwner, TodoQuery, TodoQueryStatus, TodoQueryTimeFilter, TodoRecurrenceKind,
-            TodoRecurrenceUnit, TodoRenderItem, TodoStatus, TodoStore, format_todo_cards,
-            todo_last_action_visible_entity_snapshot, todo_visible_entity_snapshot,
+        tools::{
+            agent_turn::is_retry_superseded_result,
+            todo::{
+                ReminderFieldMode, TodoCardOptions, TodoItem, TodoListDateField,
+                TodoListDateFilter, TodoOwner, TodoQuery, TodoQueryStatus, TodoQueryTimeFilter,
+                TodoRecurrenceKind, TodoRecurrenceUnit, TodoRenderItem, TodoStatus, TodoStore,
+                format_todo_cards, remember_todo_query_snapshot, replay_todo_query,
+                todo_last_action_visible_entity_snapshot, todo_visible_entity_snapshot,
+            },
         },
     },
     service::VisibleEntitySnapshot,
@@ -35,6 +39,7 @@ use super::format::{
     append_todo_collapse_hint, format_todo_natural_list_item, todo_due_chip, todo_timestamp_chip,
     visible_todo_all_board_items, visible_todo_items,
 };
+use super::scope::TodoToolScope;
 
 const LIST_TODOS_TOOL_NAME: &str = "list_todos";
 const GET_TODO_TOOL_NAME: &str = "get_todo";
@@ -69,6 +74,8 @@ struct RelatedListSpec {
     date_field: TodoListDateField,
     keyword: Option<String>,
     special_time_filter: Option<String>,
+    /// `Some(true)` 只展示周期待办，`Some(false)` 只展示一次性待办。
+    recurring: Option<bool>,
     shared_query: bool,
     title: &'static str,
     empty_text: &'static str,
@@ -135,6 +142,7 @@ pub(crate) fn aggregate_todo_tool_results(
     session: &mut SessionRecord,
     owner: &TodoOwner,
     results: &[ToolExecutionResult],
+    attempts: &[ToolExecutionAttempt],
 ) -> Result<TodoTurnAggregation, LlmError> {
     let todo_indexes = results
         .iter()
@@ -145,10 +153,30 @@ pub(crate) fn aggregate_todo_tool_results(
     let mut outcomes = Vec::new();
     for index in todo_indexes.iter().copied() {
         let result = &results[index];
+        let pending_query = if result.name == LIST_TODOS_TOOL_NAME {
+            if is_retry_superseded_result(index, attempts) {
+                None
+            } else {
+                attempts
+                    .iter()
+                    .find(|attempt| attempt.result_index == index)
+                    .and_then(|attempt| {
+                        TodoToolScope::consume_internal_query(session, &owner.key, &attempt.call_id)
+                    })
+            }
+        } else {
+            None
+        };
         if result.name == LIST_TODOS_TOOL_NAME && !is_user_visible_list_query(results, index) {
             continue;
         }
-        if let Some(outcome) = tool_outcome_from_todo_result(todo_store, session, owner, result)? {
+        if let Some(outcome) = tool_outcome_from_todo_result(
+            todo_store,
+            session,
+            owner,
+            result,
+            pending_query.as_ref(),
+        )? {
             outcomes.push((index, outcome));
         }
     }
@@ -176,9 +204,10 @@ fn tool_outcome_from_todo_result(
     session: &mut SessionRecord,
     owner: &TodoOwner,
     result: &ToolExecutionResult,
+    pending_query: Option<&crate::runtime::session::LastTodoQuery>,
 ) -> Result<Option<ToolExecutionOutcome>, LlmError> {
     if result.name == LIST_TODOS_TOOL_NAME {
-        return list_todos_outcome(todo_store, session, owner, result).map(Some);
+        return list_todos_outcome(todo_store, session, owner, result, pending_query).map(Some);
     }
     if result.name == GET_TODO_TOOL_NAME {
         return Ok(Some(get_todo_outcome(result)));
@@ -231,7 +260,7 @@ fn refresh_todo_snapshot_for_turn(
         return Ok(());
     }
     let spec = merge_related_list_specs(&specs);
-    remember_related_list_snapshot(todo_store, session, owner, &spec)?;
+    remember_related_list_snapshot(todo_store, session, owner, &spec, None)?;
     Ok(())
 }
 
@@ -268,6 +297,7 @@ fn list_todos_outcome(
     session: &mut SessionRecord,
     owner: &TodoOwner,
     result: &ToolExecutionResult,
+    pending_query: Option<&crate::runtime::session::LastTodoQuery>,
 ) -> Result<ToolExecutionOutcome, LlmError> {
     let status = ToolOutcomeStatus::from_tool_result(result);
     let error_code = structured_error_code(&result.output);
@@ -299,12 +329,37 @@ fn list_todos_outcome(
             command: Some("todo_tool_skipped".to_owned()),
         });
     }
+    if pending_query.is_none()
+        && result
+            .output
+            .get("truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
+        return Ok(ToolExecutionOutcome {
+            tool_name: result.name.clone(),
+            domain: "todo".to_owned(),
+            status: ToolOutcomeStatus::RequiresClarification,
+            effect: ToolEffect::ReadOnly,
+            presentation: OutcomePresentation::Trusted,
+            blocks: vec![ResponseBlock::Warning(CommandBody::plain(
+                "待办查询结果已截断，且筛选上下文无法恢复，请重新输入查询条件。",
+            ))],
+            error_code: Some("todo_query_context_unavailable".to_owned()),
+            command: Some("todo_full_result_unavailable".to_owned()),
+        });
+    }
 
-    let spec = list_spec_from_output(&result.output);
+    let spec = pending_query
+        .and_then(|pending| {
+            replay_todo_query(pending)
+                .map(|query| list_spec_from_replay(&query, &pending.condition, &result.output))
+        })
+        .unwrap_or_else(|| list_spec_from_output(&result.output));
     // `list_todos` 若成为最终用户可见结果，必须同步写入真实可见快照；
     // 仅在 Tool 内部执行但未展示时，原有内部查询上下文仍由 TodoToolScope 保持。
     let (shown, total_count, truncated) =
-        remember_related_list_snapshot(todo_store, session, owner, &spec)?;
+        remember_related_list_snapshot(todo_store, session, owner, &spec, pending_query)?;
 
     let mut lines = Vec::new();
     let mut markdown_lines = Vec::new();
@@ -594,7 +649,7 @@ fn receipt_with_related_list(
     } = draft;
     // 写操作默认只返回轻量确认，但仍后台刷新同一范围的可见快照，
     // 保证下一轮“第一条 / 刚刚那条”等指代继续落到最新列表。
-    remember_related_list_snapshot(todo_store, session, owner, &spec)?;
+    remember_related_list_snapshot(todo_store, session, owner, &spec, None)?;
     let mut text = lines.join("\n");
     let mut markdown = markdown_lines.join("\n");
     if let Some(hint) = trailing_hint {
@@ -616,41 +671,21 @@ fn remember_related_list_snapshot(
     session: &mut SessionRecord,
     owner: &TodoOwner,
     spec: &RelatedListSpec,
+    pending_query: Option<&crate::runtime::session::LastTodoQuery>,
 ) -> Result<(Vec<TodoItem>, usize, bool), LlmError> {
     if spec.shared_query {
-        let mut query = TodoQuery {
-            status: spec.query_status,
-            keyword: spec.keyword.clone(),
-            ..TodoQuery::default()
-        };
-        query.time = match spec.special_time_filter.as_deref() {
-            Some("overdue") => Some(TodoQueryTimeFilter::Overdue {
-                now: qq_maid_common::time_context::parse_local_datetime_for_comparison(
-                    qq_maid_common::time_context::request_time_context().current_time(),
-                )
-                .expect("request time context must contain a valid local datetime"),
-            }),
-            Some("no_due_date") => Some(TodoQueryTimeFilter::NoDueDate),
-            _ => spec
-                .due_range
-                .map(|(start, end)| TodoQueryTimeFilter::DateRange {
-                    start,
-                    end,
-                    field: spec.date_field,
-                })
-                .or_else(|| {
-                    spec.due_date.map(|date| TodoQueryTimeFilter::DateRange {
-                        start: date,
-                        end: date,
-                        field: spec.date_field,
-                    })
-                }),
-        };
+        let mut query = pending_query
+            .and_then(replay_todo_query)
+            .unwrap_or_else(|| query_from_related_spec(spec));
+        query.limit = crate::runtime::tools::todo::TODO_QUERY_DEFAULT_LIMIT;
+        query.offset = 0;
         let page = todo_store.query_todos(owner, &query).map_err(todo_error)?;
-        session.remember_last_todo_query(
-            &owner.key,
+        remember_todo_query_snapshot(
+            session,
+            owner,
             spec.query_type,
             spec.condition.clone(),
+            &query,
             page.items.iter().map(|item| item.id.clone()).collect(),
         );
         let truncated = page.offset + page.items.len() < page.total_count;
@@ -669,6 +704,39 @@ fn remember_related_list_snapshot(
         shown.iter().map(|item| item.id.clone()).collect(),
     );
     Ok((shown, total_count, truncated))
+}
+
+fn query_from_related_spec(spec: &RelatedListSpec) -> TodoQuery {
+    let mut query = TodoQuery {
+        status: spec.query_status,
+        keyword: spec.keyword.clone(),
+        recurring: spec.recurring,
+        ..TodoQuery::default()
+    };
+    query.time = match spec.special_time_filter.as_deref() {
+        Some("overdue") => Some(TodoQueryTimeFilter::Overdue {
+            now: qq_maid_common::time_context::parse_local_datetime_for_comparison(
+                qq_maid_common::time_context::request_time_context().current_time(),
+            )
+            .expect("request time context must contain a valid local datetime"),
+        }),
+        Some("no_due_date") => Some(TodoQueryTimeFilter::NoDueDate),
+        _ => spec
+            .due_range
+            .map(|(start, end)| TodoQueryTimeFilter::DateRange {
+                start,
+                end,
+                field: spec.date_field,
+            })
+            .or_else(|| {
+                spec.due_date.map(|date| TodoQueryTimeFilter::DateRange {
+                    start: date,
+                    end: date,
+                    field: spec.date_field,
+                })
+            }),
+    };
+    query
 }
 
 fn visible_related_items<'a>(items: &'a [TodoItem], spec: &RelatedListSpec) -> &'a [TodoItem] {
@@ -893,6 +961,7 @@ fn pending_list_spec() -> RelatedListSpec {
         date_field: TodoListDateField::Planned,
         keyword: None,
         special_time_filter: None,
+        recurring: None,
         shared_query: false,
         title: "🚧 当前进行中",
         empty_text: "当前没有进行中的待办。",
@@ -911,6 +980,7 @@ fn completed_list_spec() -> RelatedListSpec {
         date_field: TodoListDateField::Planned,
         keyword: None,
         special_time_filter: None,
+        recurring: None,
         shared_query: false,
         title: "✅ 当前已完成",
         empty_text: "当前没有已完成待办。",
@@ -934,6 +1004,7 @@ fn list_spec_from_output(output: &Value) -> RelatedListSpec {
     spec.condition = string_field(output, "condition").unwrap_or_default();
     spec.keyword = string_field(output, "keyword");
     spec.special_time_filter = string_field(output, "time_filter");
+    spec.recurring = bool_field(output, "recurring");
     if let Some(due_date) = string_field(output, "due_date")
         .and_then(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d").ok())
     {
@@ -955,10 +1026,49 @@ fn list_spec_from_output(output: &Value) -> RelatedListSpec {
         Some("all") => "all",
         Some("completed") => "completed-list",
         _ if spec.due_date.is_some() || spec.due_range.is_some() => "due-date",
-        _ if spec.keyword.is_some() => "search",
+        _ if spec.keyword.is_some() || spec.recurring.is_some() => "search",
         _ => "list",
     };
     spec
+}
+
+fn list_spec_from_replay(query: &TodoQuery, condition: &str, output: &Value) -> RelatedListSpec {
+    let mut spec = match query.status {
+        TodoQueryStatus::Pending => pending_list_spec(),
+        TodoQueryStatus::Completed => completed_list_spec(),
+        TodoQueryStatus::All => all_list_spec(),
+    };
+    spec.query_status = query.status;
+    spec.query_type = crate::runtime::tools::todo::todo_query_type(query);
+    spec.condition = condition.to_owned();
+    spec.keyword = query.keyword.clone();
+    spec.recurring = query.recurring;
+    spec.shared_query = true;
+    match query.time.as_ref() {
+        Some(TodoQueryTimeFilter::DateRange { start, end, field }) => {
+            if start == end {
+                spec.due_date = Some(*start);
+            } else {
+                spec.due_range = Some((*start, *end));
+            }
+            spec.date_field = *field;
+        }
+        Some(TodoQueryTimeFilter::Overdue { .. }) => {
+            spec.special_time_filter = Some("overdue".to_owned())
+        }
+        Some(TodoQueryTimeFilter::NoDueDate) => {
+            spec.special_time_filter = Some("no_due_date".to_owned())
+        }
+        None => {}
+    }
+    if spec.condition.is_empty() {
+        spec.condition = string_field(output, "condition").unwrap_or_default();
+    }
+    spec
+}
+
+fn bool_field(value: &Value, key: &str) -> Option<bool> {
+    value.get(key).and_then(Value::as_bool)
 }
 
 fn all_list_spec() -> RelatedListSpec {
@@ -972,6 +1082,7 @@ fn all_list_spec() -> RelatedListSpec {
         date_field: TodoListDateField::Planned,
         keyword: None,
         special_time_filter: None,
+        recurring: None,
         shared_query: false,
         title: "📋 全部待办",
         empty_text: "当前没有待办。",

@@ -7,7 +7,7 @@ use rusqlite::{params_from_iter, types::Value as SqlValue};
 
 use super::{
     TODO_QUERY_MAX_LIMIT, TodoError, TodoListDateField, TodoQuery, TodoQueryPage, TodoQueryStatus,
-    TodoQueryTimeFilter, TodoStatus, TodoStore, query::todo_item_from_row,
+    TodoQueryTimeFilter, TodoRecurrenceKind, TodoStatus, TodoStore, query::todo_item_from_row,
 };
 
 const SELECT_COLUMNS: &str = "id, user_id, scope_key, title, detail, raw_text,
@@ -95,6 +95,14 @@ fn build_where(owner: &super::TodoOwner, query: &TodoQuery) -> (String, Vec<SqlV
     }
     if let Some(time) = &query.time {
         append_time_filter(&mut clauses, &mut params, time);
+    }
+    if let Some(recurring) = query.recurring {
+        clauses.push(if recurring {
+            "recurrence_kind <> ?".to_owned()
+        } else {
+            "recurrence_kind = ?".to_owned()
+        });
+        params.push(SqlValue::Text(TodoRecurrenceKind::None.as_str().to_owned()));
     }
     if let Some(keyword) = query
         .keyword

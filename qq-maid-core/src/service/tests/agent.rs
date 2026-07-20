@@ -345,8 +345,8 @@ async fn core_agent_stream_cancel_marks_shared_agent_diagnostics() {
 }
 
 #[tokio::test]
-async fn core_private_simple_todo_queries_use_deterministic_path() {
-    let provider = TestProvider::replying("不应调用模型")
+async fn core_private_simple_todo_queries_use_agent_runtime_instead_of_deterministic_path() {
+    let provider = TestProvider::replying("模型整理后的待办回复")
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider.clone(), 5, true);
     let owner = TodoStore::owner(Some("u1"), private_scope());
@@ -371,21 +371,19 @@ async fn core_private_simple_todo_queries_use_deterministic_path() {
         .unwrap();
     let service = CoreHandle::new(state);
 
-    let mut responses = Vec::new();
     for input in ["看一下待办", "看一下代办"] {
-        let output = service.respond(private_request(input)).await.unwrap();
-        let CoreRespondOutput::Complete(response) = output else {
-            panic!("expected complete output for deterministic todo query");
-        };
-        let response = *response;
-        assert_eq!(response.command.as_deref(), Some("todo_list"), "{input}");
-        assert!(response.text_content().unwrap().contains("待查看项目"));
-        responses.push(response.text_content().map(str::to_owned));
+        let response =
+            collect_stream_completed(service.respond(private_request(input)).await).await;
+        // 自然语言查询不再被确定性 Todo flow 短路，必须进入模型链路。
+        assert_ne!(response.command.as_deref(), Some("todo_list"), "{input}");
+        assert_eq!(
+            response.text_content(),
+            Some("模型整理后的待办回复"),
+            "{input}"
+        );
     }
 
-    assert_eq!(responses[0], responses[1]);
-    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert!(provider.tool_calls.load(Ordering::SeqCst) >= 1);
 }
 
 #[tokio::test]

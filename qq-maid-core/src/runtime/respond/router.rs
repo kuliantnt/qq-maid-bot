@@ -92,8 +92,8 @@ impl<'a> RespondRouter<'a> {
             return self.plan_plain_chat(req);
         }
 
-        // 先保护已有确定性命令和自然语言 Todo 查询，避免简单列表查询绕过
-        // `handle_todo_flow()` 进入模型 Tool Loop，回归同义词和默认过滤语义。
+        // 只保护显式命令和“查看完整结果”等确定性入口；普通自然语言待办查询
+        // 统一进入后续 AgentRuntime / Tool Loop，由 `list_todos` 处理筛选。
         let classification = classify_inbound_with_active(
             &user_text,
             active_interaction_session.as_ref(),

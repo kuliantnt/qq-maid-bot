@@ -14,10 +14,13 @@ use crate::{
     error::LlmError,
     runtime::{
         freshness::query_is_fresh,
-        session::{LAST_QUERY_TTL_SECONDS, LastTodoQuery, SessionMeta, SessionStore, now_iso_cn},
+        session::{
+            LAST_QUERY_TTL_SECONDS, LastTodoQuery, SessionMeta, SessionRecord, SessionStore,
+            now_iso_cn,
+        },
         tools::todo::{
             ClarificationCandidate, PendingTodoClarification, TodoItem, TodoOwner,
-            TodoPendingPayload, TodoStatus, TodoStore, valid_last_visible_todo_query,
+            TodoPendingPayload, TodoQuery, TodoStatus, TodoStore, valid_last_visible_todo_query,
         },
     },
 };
@@ -39,9 +42,13 @@ const TODO_TASK_QUERY_HISTORY_LIMIT: usize = 16;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct TodoTaskQueryEntry {
     task_id: String,
+    #[serde(default)]
+    tool_call_id: String,
     owner_key: String,
     query_type: String,
     condition: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replay_context: Option<Value>,
     result_ids: Vec<String>,
     created_at: String,
 }
@@ -52,6 +59,7 @@ impl TodoTaskQueryEntry {
             owner_key: self.owner_key.clone(),
             query_type: self.query_type.clone(),
             condition: self.condition.clone(),
+            replay_context: self.replay_context.clone(),
             result_ids: self.result_ids.clone(),
             created_at: self.created_at.clone(),
         }
@@ -68,6 +76,8 @@ pub(in crate::runtime::tools::todo) struct TodoToolScope {
     pub session_store: SessionStore,
     /// 当前 Tool Loop 的任务 ID；内部 list_todos 结果只在同一 task 内复用。
     task_id: String,
+    /// 当前调用的稳定 ID；用于 receipt 精确消费查询上下文，避免同任务多次调用串台。
+    tool_call_id: String,
     /// 本次调用可选的请求级选择作用域覆盖；`None` 走默认 `last_todo_query` 解析。
     selection_scope: Option<SelectionScope>,
 }
@@ -236,6 +246,7 @@ impl TodoToolScope {
             session,
             session_store: session_store.clone(),
             task_id: context.task_id.clone(),
+            tool_call_id: context.tool_call_id.clone().unwrap_or_default(),
             selection_scope,
         })
     }
@@ -249,12 +260,14 @@ impl TodoToolScope {
         &mut self,
         query_type: &str,
         condition: &str,
+        replay_query: &TodoQuery,
         items: &[TodoItem],
     ) -> Result<(), LlmError> {
         let query = LastTodoQuery {
             owner_key: self.owner.key.clone(),
             query_type: query_type.to_owned(),
             condition: condition.to_owned(),
+            replay_context: super::query_snapshot::todo_query_replay_context(replay_query),
             result_ids: items.iter().map(|item| item.id.clone()).collect(),
             created_at: now_iso_cn(),
         };
@@ -423,12 +436,18 @@ impl TodoToolScope {
 
     fn remember_task_query(&mut self, query: &LastTodoQuery) -> Result<(), LlmError> {
         let mut entries = self.task_query_entries()?;
-        entries.retain(|entry| entry.task_id != self.task_id);
+        // 新任务开始查询时清理旧任务的 pending context；当前任务保留多次 list 调用，
+        // receipt 再按各自稳定 tool_call_id 逐条消费，避免 provider 重用 call ID 串台。
+        entries.retain(|entry| {
+            entry.task_id == self.task_id && entry.tool_call_id != self.tool_call_id
+        });
         entries.push(TodoTaskQueryEntry {
             task_id: self.task_id.clone(),
+            tool_call_id: self.tool_call_id.clone(),
             owner_key: query.owner_key.clone(),
             query_type: query.query_type.clone(),
             condition: query.condition.clone(),
+            replay_context: query.replay_context.clone(),
             result_ids: query.result_ids.clone(),
             created_at: query.created_at.clone(),
         });
@@ -447,6 +466,38 @@ impl TodoToolScope {
             })?,
         );
         self.save()
+    }
+
+    /// 按 Tool Loop 的原始 call ID 消费 pending 查询上下文；消费后立即从 session 清理。
+    pub(in crate::runtime::tools::todo) fn consume_internal_query(
+        session: &mut SessionRecord,
+        owner_key: &str,
+        call_id: &str,
+    ) -> Option<LastTodoQuery> {
+        let call_id = call_id.trim();
+        if call_id.is_empty() {
+            return None;
+        }
+        let mut entries = session
+            .extra
+            .get(TODO_TASK_QUERY_HISTORY_KEY)
+            .cloned()
+            .and_then(|value| serde_json::from_value::<Vec<TodoTaskQueryEntry>>(value).ok())?;
+        let position = entries.iter().position(|entry| {
+            entry.owner_key == owner_key
+                && query_is_fresh(&entry.created_at, LAST_QUERY_TTL_SECONDS)
+                && (entry.tool_call_id == call_id
+                    || entry.tool_call_id.ends_with(&format!(":{call_id}")))
+        })?;
+        let query = entries.remove(position).to_last_query();
+        if entries.is_empty() {
+            session.extra.remove(TODO_TASK_QUERY_HISTORY_KEY);
+        } else if let Ok(value) = serde_json::to_value(entries) {
+            session
+                .extra
+                .insert(TODO_TASK_QUERY_HISTORY_KEY.to_owned(), value);
+        }
+        Some(query)
     }
 
     fn valid_task_todo_query(&self) -> Result<Option<LastTodoQuery>, LlmError> {

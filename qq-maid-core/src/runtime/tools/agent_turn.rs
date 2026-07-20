@@ -190,19 +190,19 @@ fn project_tool_turn(
     meta: &SessionMeta,
     output: &RespondOutput,
 ) -> Result<AgentTurnOutcome, LlmError> {
-    let todo_projection =
-        todo::agent_turn::project_results(task_store, session, meta, &output.agent.tool_results)?;
+    let todo_projection = todo::agent_turn::project_results(
+        task_store,
+        session,
+        meta,
+        &output.agent.tool_results,
+        &output.agent.tool_attempts,
+    )?;
     let visible_entity_snapshot = todo_projection.visible_entity_snapshot;
     let mut outcomes = Vec::new();
     let mut todo_outcomes = todo_projection.outcomes.into_iter().peekable();
 
     for (index, result) in output.agent.tool_results.iter().enumerate() {
-        if output
-            .agent
-            .tool_attempts
-            .iter()
-            .any(|attempt| attempt.retry_of == Some(index))
-        {
+        if is_retry_superseded_result(index, &output.agent.tool_attempts) {
             // 旧尝试仍保留在 Agent diagnostics；这里只丢弃它对应的用户展示块。
             let mut discarded = Vec::new();
             drain_todo_outcomes_for_result(index, &mut todo_outcomes, &mut discarded);
@@ -232,6 +232,15 @@ fn project_tool_turn(
         outcomes,
         visible_entity_snapshot,
     ))
+}
+
+pub(crate) fn is_retry_superseded_result(
+    result_index: usize,
+    attempts: &[qq_maid_llm::provider::ToolExecutionAttempt],
+) -> bool {
+    attempts
+        .iter()
+        .any(|attempt| attempt.retry_of == Some(result_index))
 }
 
 fn drain_todo_outcomes_for_result(

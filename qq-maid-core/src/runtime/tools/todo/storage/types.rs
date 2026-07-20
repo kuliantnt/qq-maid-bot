@@ -196,6 +196,8 @@ pub struct TodoQuery {
     pub status: TodoQueryStatus,
     pub time: Option<TodoQueryTimeFilter>,
     pub keyword: Option<String>,
+    /// `Some(true)` 仅查询周期待办，`Some(false)` 仅查询一次性待办。
+    pub recurring: Option<bool>,
     pub limit: usize,
     pub offset: usize,
 }
@@ -206,6 +208,7 @@ impl Default for TodoQuery {
             status: TodoQueryStatus::Pending,
             time: None,
             keyword: None,
+            recurring: None,
             limit: TODO_QUERY_DEFAULT_LIMIT,
             offset: 0,
         }

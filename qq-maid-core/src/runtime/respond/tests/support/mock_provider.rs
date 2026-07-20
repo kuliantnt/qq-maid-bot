@@ -57,6 +57,10 @@ enum MockToolAction {
         arguments: String,
         reply: String,
     },
+    ExecuteTodoListRetry {
+        arguments: String,
+        reply: String,
+    },
     ExecuteTools {
         calls: Vec<(String, String)>,
         reply: String,
@@ -198,6 +202,21 @@ impl MockProvider {
             .unwrap()
             .push(MockToolAction::ExecuteTool {
                 name: name.into(),
+                arguments: arguments.into(),
+                reply: reply.into(),
+            });
+        self
+    }
+
+    pub(crate) fn with_todo_list_retry(
+        self,
+        arguments: impl Into<String>,
+        reply: impl Into<String>,
+    ) -> Self {
+        self.tool_actions
+            .lock()
+            .unwrap()
+            .push(MockToolAction::ExecuteTodoListRetry {
                 arguments: arguments.into(),
                 reply: reply.into(),
             });
@@ -540,9 +559,12 @@ impl LlmProvider for MockProvider {
                     arguments,
                     reply,
                 } => {
+                    let call_id = "mock-call-0";
+                    let mut tool_context = req.tool_context.clone();
+                    tool_context.tool_call_id = Some(format!("{}:{call_id}", tool_context.task_id));
                     let output = req
                         .tools
-                        .execute_json(&req.tool_context, &name, &arguments)
+                        .execute_json(&tool_context, &name, &arguments)
                         .await?;
                     let output = serde_json::from_str::<Value>(&output).unwrap_or_else(|_| {
                         json!({
@@ -556,6 +578,13 @@ impl LlmProvider for MockProvider {
                         output,
                         succeeded,
                     }];
+                    let mut agent = agent_tool_trace(vec![emitted_tool], tool_results);
+                    agent.tool_attempts.push(ToolExecutionAttempt {
+                        result_index: 0,
+                        call_id: call_id.to_owned(),
+                        round: 0,
+                        retry_of: None,
+                    });
                     return Ok(ChatOutcome {
                         reply,
                         output_parts: Vec::new(),
@@ -578,7 +607,87 @@ impl LlmProvider for MockProvider {
                             total_tokens: None,
                         }),
                         fallback_used: false,
-                        agent: agent_tool_trace(vec![emitted_tool], tool_results),
+                        agent,
+                    });
+                }
+                MockToolAction::ExecuteTodoListRetry { arguments, reply } => {
+                    let call_id = "mock-call-0";
+                    let mut tool_context = req.tool_context.clone();
+                    tool_context.tool_call_id = Some(format!("{}:{call_id}", tool_context.task_id));
+                    let output = req
+                        .tools
+                        .execute_json(&tool_context, "list_todos", &arguments)
+                        .await?;
+                    let output = serde_json::from_str::<Value>(&output).unwrap_or_else(|_| {
+                        json!({
+                            "raw": output,
+                        })
+                    });
+                    let results = vec![
+                        qq_maid_llm::provider::ToolExecutionResult {
+                            name: "list_todos".to_owned(),
+                            output: json!({
+                                "ok": false,
+                                "error": {
+                                    "code": "old_retry_failure",
+                                    "message": "旧失败结果不应展示"
+                                }
+                            }),
+                            succeeded: false,
+                        },
+                        qq_maid_llm::provider::ToolExecutionResult {
+                            name: "list_todos".to_owned(),
+                            succeeded: output.get("ok").and_then(Value::as_bool) != Some(false),
+                            output,
+                        },
+                    ];
+                    return Ok(ChatOutcome {
+                        reply,
+                        output_parts: Vec::new(),
+                        metrics: LlmMetrics {
+                            provider: "mock".to_owned(),
+                            model: req
+                                .chat
+                                .model
+                                .clone()
+                                .unwrap_or_else(|| "mock-model".to_owned()),
+                            stream: false,
+                            ttfe_ms: None,
+                            ttft_ms: None,
+                            total_latency_ms: 1,
+                        },
+                        usage: Some(TokenUsage {
+                            input_tokens: None,
+                            cached_input_tokens: None,
+                            output_tokens: None,
+                            total_tokens: None,
+                        }),
+                        fallback_used: false,
+                        agent: AgentRunDiagnostics {
+                            model_rounds: 3,
+                            emitted_tools: vec!["list_todos".to_owned(), "list_todos".to_owned()],
+                            tool_execution_attempted: true,
+                            executed_tools: vec!["list_todos".to_owned(), "list_todos".to_owned()],
+                            side_effecting_tools_started: Vec::new(),
+                            tool_results: results,
+                            tool_attempts: vec![
+                                ToolExecutionAttempt {
+                                    result_index: 0,
+                                    call_id: call_id.to_owned(),
+                                    round: 0,
+                                    retry_of: None,
+                                },
+                                ToolExecutionAttempt {
+                                    result_index: 1,
+                                    call_id: call_id.to_owned(),
+                                    round: 1,
+                                    retry_of: Some(0),
+                                },
+                            ],
+                            tools_with_unknown_result: Vec::new(),
+                            streaming_fallback_used: false,
+                            stop_reason: Some(AgentStopReason::ToolUsed),
+                        },
                     });
                 }
                 MockToolAction::ExecuteTools { calls, reply } => {

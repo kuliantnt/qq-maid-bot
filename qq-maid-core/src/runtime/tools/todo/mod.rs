@@ -23,6 +23,7 @@ mod json;
 pub(crate) mod ops;
 pub(crate) mod pending;
 pub(crate) mod query_filter;
+mod query_snapshot;
 pub(crate) mod receipt;
 pub(crate) mod recurrence;
 pub(crate) mod reminder;
@@ -60,6 +61,7 @@ pub(crate) use pending::{
     ClarificationCandidate, PendingTodoClarification, TODO_PENDING_DOMAIN, TodoPendingPayload,
     todo_lexicon,
 };
+pub(crate) use query_snapshot::{remember_todo_query_snapshot, replay_todo_query, todo_query_type};
 pub use recurring::ManageRecurringReminderTool;
 pub(crate) use reminder::{
     TodoReminderSentHook, cancel_reminder_task, cancel_reminder_task_by_id, sync_reminder_task,
