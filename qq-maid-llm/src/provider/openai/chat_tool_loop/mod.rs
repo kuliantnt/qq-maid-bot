@@ -29,7 +29,10 @@ use super::chat::{
     ChatCompletionsClient, chat_completions_messages, extract_chat_completion_text,
     extract_chat_completion_usage, send_chat_completions_request,
 };
-use super::responses::{incomplete_stream_eof_error, stream_transport_error};
+use super::{
+    responses::{incomplete_stream_eof_error, stream_transport_error},
+    tool_calls_disabled_error,
+};
 
 /// Chat Completions 协议的 Agent Loop 单步会话。
 ///
@@ -98,7 +101,7 @@ impl AgentStepSession for ChatCompletionsAgentSession {
             allow_tool_calls,
             false,
         );
-        let (payload, _tools_disabled) = enforce_tool_loop_budget(self.context_budget, payload)?;
+        let (payload, tools_disabled) = enforce_tool_loop_budget(self.context_budget, payload)?;
         let response = send_chat_completions_request(&self.client, &payload, false).await?;
         let body: Value = response.json().await.map_err(|err| {
             LlmError::provider(
@@ -108,6 +111,9 @@ impl AgentStepSession for ChatCompletionsAgentSession {
         })?;
         let step_usage = extract_chat_completion_usage(&body);
         let tool_rounds = extract_tool_call_rounds(&body)?;
+        if !tool_rounds.is_empty() && (!allow_tool_calls || tools_disabled) {
+            return Err(tool_calls_disabled_error());
+        }
         if tool_rounds.is_empty() {
             let reply = extract_chat_completion_text(&body).ok_or_else(|| {
                 LlmError::provider(
@@ -523,11 +529,7 @@ async fn finalize_chat_completions_tool_loop_stream(
     let calls = streaming_tool_calls_to_function_calls(tool_calls)?;
     if !calls.is_empty() {
         if !allow_tool_calls {
-            return Err(LlmError::new(
-                "tool_loop_limit",
-                "tool loop returned tool calls when tool calls are disabled",
-                "tool_loop",
-            ));
+            return Err(tool_calls_disabled_error());
         }
         let assistant_message = streaming_assistant_message(&calls);
         messages.push(assistant_message);

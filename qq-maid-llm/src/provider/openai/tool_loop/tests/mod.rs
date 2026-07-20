@@ -318,6 +318,21 @@ async fn mock_tool_loop_handler(
     }))
 }
 
+async fn mock_disabled_tools_function_call_handler(
+    State(state): State<Arc<Mutex<ToolLoopMockState>>>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    state.lock().await.requests.push(body);
+    Json(json!({
+        "output": [{
+            "type": "function_call",
+            "name": "ok_tool",
+            "call_id": "call_forbidden",
+            "arguments": "{\"value\":\"must-not-run\"}"
+        }]
+    }))
+}
+
 async fn mock_multi_tool_handler(
     State(state): State<Arc<Mutex<ToolLoopMockState>>>,
     Json(body): Json<Value>,
@@ -456,6 +471,24 @@ async fn spawn_tool_loop_mock() -> (String, Arc<Mutex<ToolLoopMockState>>) {
     }));
     let app = Router::new()
         .route("/v1/responses", post(mock_tool_loop_handler))
+        .with_state(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}/v1"), state)
+}
+
+async fn spawn_disabled_tools_function_call_mock() -> (String, Arc<Mutex<ToolLoopMockState>>) {
+    let state = Arc::new(Mutex::new(ToolLoopMockState {
+        requests: Vec::new(),
+    }));
+    let app = Router::new()
+        .route(
+            "/v1/responses",
+            post(mock_disabled_tools_function_call_handler),
+        )
         .with_state(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

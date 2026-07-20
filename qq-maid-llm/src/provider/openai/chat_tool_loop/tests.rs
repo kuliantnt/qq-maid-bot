@@ -441,6 +441,65 @@ async fn tool_loop_budget_before_first_request_disables_tools_for_answer() {
     assert!(requests[0].get("tool_choice").is_none());
 }
 
+#[tokio::test]
+async fn non_stream_budget_finalization_rejects_provider_tool_calls_without_execution() {
+    let (base_url, state) = spawn_mock_tool_loop(vec![json!({
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_forbidden",
+                    "type": "function",
+                    "function": {
+                        "name": "first_order_tool",
+                        "arguments": r#"{"value":"must-not-run"}"#
+                    }
+                }]
+            }
+        }]
+    })])
+    .await;
+    let client = ChatCompletionsClient::new(
+        "test-key",
+        Some(&base_url),
+        qq_maid_common::http_client::client(),
+    );
+    let sequence = Arc::new(StdMutex::new(Vec::new()));
+    let mut tools = ToolRegistry::new();
+    tools
+        .insert(Arc::new(PrepareOrderToolStub {
+            name: "first_order_tool",
+            sequence: sequence.clone(),
+        }))
+        .unwrap();
+
+    let err = run_session(
+        client,
+        "deepseek",
+        "deepseek-chat",
+        1200,
+        &[ChatMessage::user("杭州天气怎么样")],
+        tools,
+        Some(crate::context_budget::ContextBudgetConfig {
+            context_window_chars: 120,
+            output_reserve_chars: 20,
+            protected_recent_turns: 0,
+        }),
+        2,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.code, "tool_loop_limit");
+    assert_eq!(err.stage, "tool_loop");
+    assert!(sequence.lock().unwrap().is_empty());
+    let requests = &state.lock().await.requests;
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].get("tools").is_none());
+    assert!(requests[0].get("tool_choice").is_none());
+}
+
 #[test]
 fn tool_loop_budget_ignores_transport_only_payload_fields() {
     let messages = vec![json!({"role": "user", "content": "完成待办"})];

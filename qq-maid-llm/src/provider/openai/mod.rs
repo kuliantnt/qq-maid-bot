@@ -31,6 +31,15 @@ use crate::{
 
 const IMAGE_GENERATION_METADATA_KEY: &str = "image_generation";
 
+/// Provider 在强制最终回答阶段仍返回工具调用时的统一协议错误。
+pub(crate) fn tool_calls_disabled_error() -> LlmError {
+    LlmError::new(
+        "tool_loop_limit",
+        "tool loop returned tool calls when tool calls are disabled",
+        "tool_loop",
+    )
+}
+
 fn image_generation_enabled(req: &ChatRequest) -> bool {
     req.metadata
         .get(IMAGE_GENERATION_METADATA_KEY)
