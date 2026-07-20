@@ -36,6 +36,10 @@ pub struct ToolExecutionResult {
 ///
 /// 该轨迹不属于 LLM 工具返回 JSON，只用于 Core 在最终响应组装时选择重试链的
 /// 最后一次结果；原始 `tool_results` 仍完整保留，便于诊断和错误分析。
+///
+/// 写入累计 `AgentRunDiagnostics` 后，`result_index` 与 `retry_of` 都是相对整次
+/// 请求 `tool_results` 的全局下标；`ToolLoopExecutor` 内部短暂使用的局部下标
+/// 会在候选同步时按 baseline 偏移。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolExecutionAttempt {
     pub result_index: usize,
@@ -409,6 +413,8 @@ pub(crate) struct AgentAttemptBaseline {
     pub(crate) emitted_tools: usize,
     pub(crate) executed_tools: usize,
     pub(crate) tool_results: usize,
+    /// 与 `tool_results` 独立维护；两者长度在失败截断或历史兼容路径下可能不一致。
+    pub(crate) tool_attempts: usize,
 }
 
 impl AgentAttemptBaseline {
@@ -417,6 +423,7 @@ impl AgentAttemptBaseline {
             emitted_tools: diagnostics.emitted_tools.len(),
             executed_tools: diagnostics.executed_tools.len(),
             tool_results: diagnostics.tool_results.len(),
+            tool_attempts: diagnostics.tool_attempts.len(),
         }
     }
 }

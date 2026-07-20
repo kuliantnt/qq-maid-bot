@@ -164,6 +164,77 @@ async fn web_search_retry_renders_final_success_without_previous_failure() {
 }
 
 #[tokio::test]
+async fn cross_candidate_retry_projection_keeps_prior_result_and_hides_only_retried_failure() {
+    // 模拟累计 diagnostics：候选 A 成功一次，候选 B 失败后重试成功。
+    // retry_of 使用全局下标 1，不得把候选 A 的结果 0 误隐藏。
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results_and_attempts(
+            vec![
+                raw_tool_result(
+                    "web_search",
+                    serde_json::json!({"ok": true, "answer": "候选A结果"}),
+                    true,
+                ),
+                raw_tool_result(
+                    "web_search",
+                    serde_json::json!({
+                        "ok": false,
+                        "error": {"code": "empty_result", "stage": "web_search"}
+                    }),
+                    false,
+                ),
+                raw_tool_result(
+                    "web_search",
+                    serde_json::json!({"ok": true, "answer": "候选B最终结果"}),
+                    true,
+                ),
+            ],
+            vec![
+                ToolExecutionAttempt {
+                    result_index: 0,
+                    call_id: "a1".to_owned(),
+                    round: 0,
+                    retry_of: None,
+                },
+                ToolExecutionAttempt {
+                    result_index: 1,
+                    call_id: "b1".to_owned(),
+                    round: 0,
+                    retry_of: None,
+                },
+                ToolExecutionAttempt {
+                    result_index: 2,
+                    call_id: "b2".to_owned(),
+                    round: 1,
+                    retry_of: Some(1),
+                },
+            ],
+            "模型最终回复",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("搜索公开项目"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert_eq!(text.matches("【联网查询】").count(), 2);
+    assert!(text.contains("候选A结果"));
+    assert!(text.contains("候选B最终结果"));
+    assert!(!text.contains("联网查询服务暂时不可用"));
+    assert!(!text.contains("没查到明确结果"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(
+        diagnostics["agent_tool_results"].as_array().unwrap().len(),
+        3
+    );
+    assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 2);
+    assert_eq!(diagnostics["tool_retry_count"], 1);
+}
+
+#[tokio::test]
 async fn independent_web_search_results_are_rendered_separately() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
