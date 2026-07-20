@@ -44,7 +44,7 @@ use crate::{
 use qq_maid_common::output_part::OutputPart;
 
 pub use crate::agent_loop::{
-    AgentRunDiagnostics, AgentRunHandle, AgentStopReason, ToolExecutionResult,
+    AgentRunDiagnostics, AgentRunHandle, AgentStopReason, ToolExecutionAttempt, ToolExecutionResult,
 };
 
 // 候选链构建与 provider 预检 helper 来源于拆分后的子模块，这里 `use` 进来同时供

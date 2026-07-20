@@ -12,7 +12,7 @@ use tracing::debug;
 use crate::{
     agent_loop::{ToolLoopProgressEvent, ToolLoopProgressSink},
     error::LlmError,
-    provider::ToolExecutionResult,
+    provider::{ToolExecutionAttempt, ToolExecutionResult},
     tool::{PreparedToolCall, ToolCallDependency, ToolContext, ToolEffect, ToolRegistry},
 };
 
@@ -22,10 +22,13 @@ pub(crate) struct ToolLoopExecutor<'a> {
     previous_call_succeeded: bool,
     executed_tools: Vec<String>,
     tool_results: Vec<ToolExecutionResult>,
+    tool_attempts: Vec<ToolExecutionAttempt>,
     progress_sink: Option<ToolLoopProgressSink>,
     execution_attempted: bool,
     rejected_call: bool,
     completed_read_only_calls: HashMap<String, String>,
+    last_batch: Vec<BatchAttempt>,
+    current_batch: Vec<BatchAttempt>,
 }
 
 pub(crate) struct ToolLoopCall<'a> {
@@ -47,6 +50,20 @@ pub(crate) enum ToolCallStartDecision {
 pub(crate) struct PreparedToolLoopCall {
     tool_name: String,
     prepared: Result<PreparedToolCall, LlmError>,
+    call_id: String,
+    round: usize,
+    batch_len: usize,
+}
+
+#[derive(Debug, Clone)]
+struct BatchAttempt {
+    result_index: usize,
+    call_id: String,
+    name: String,
+    arguments: Value,
+    succeeded: bool,
+    executed: bool,
+    round: usize,
 }
 
 impl<'a> ToolLoopExecutor<'a> {
@@ -65,6 +82,9 @@ impl<'a> ToolLoopExecutor<'a> {
             execution_attempted: false,
             rejected_call: false,
             completed_read_only_calls: HashMap::new(),
+            tool_attempts: Vec::new(),
+            last_batch: Vec::new(),
+            current_batch: Vec::new(),
         }
     }
 
@@ -77,6 +97,7 @@ impl<'a> ToolLoopExecutor<'a> {
         call: ToolLoopCall<'_>,
         round: usize,
         index: usize,
+        batch_len: usize,
         execution_deadline: Option<tokio::time::Instant>,
     ) -> PreparedToolLoopCall {
         self.execution_attempted = true;
@@ -91,7 +112,18 @@ impl<'a> ToolLoopExecutor<'a> {
         PreparedToolLoopCall {
             tool_name: call.name.to_owned(),
             prepared: self.tools.prepare_json(&context, call.name, call.arguments),
+            call_id: call.call_id.to_owned(),
+            round,
+            batch_len,
         }
+    }
+
+    pub(crate) fn begin_batch(&mut self) {
+        self.current_batch.clear();
+    }
+
+    pub(crate) fn finish_batch(&mut self) {
+        self.last_batch = std::mem::take(&mut self.current_batch);
     }
 
     pub(crate) async fn execute_prepared_call(
@@ -104,8 +136,24 @@ impl<'a> ToolLoopExecutor<'a> {
         let PreparedToolLoopCall {
             tool_name: requested_tool_name,
             prepared,
+            call_id,
+            round,
+            batch_len,
         } = call;
         let mut skipped_for_finalization = false;
+        let mut tool_started = false;
+        let prepared_arguments = prepared
+            .as_ref()
+            .ok()
+            .map(|call| (call.name.clone(), call.arguments.clone()));
+        let retry_of = self.retry_parent(
+            &call_id,
+            round,
+            batch_len,
+            prepared_arguments
+                .as_ref()
+                .map(|(name, arguments)| (name.as_str(), arguments)),
+        );
         let (tool_name, output, succeeded) = match prepared {
             Ok(prepared) => {
                 let tool_name = prepared.name.clone();
@@ -140,6 +188,7 @@ impl<'a> ToolLoopExecutor<'a> {
                             )
                         }
                         ToolCallStartDecision::Execute => {
+                            tool_started = true;
                             self.emit_progress(ToolLoopProgressEvent::ToolCallStarted {
                                 tool_name: tool_name.clone(),
                             })
@@ -183,7 +232,25 @@ impl<'a> ToolLoopExecutor<'a> {
             }
         };
         let result = tool_execution_result(&tool_name, &output, succeeded);
+        let result_index = self.tool_results.len();
         self.tool_results.push(result.clone());
+        self.tool_attempts.push(ToolExecutionAttempt {
+            result_index,
+            call_id: call_id.clone(),
+            round,
+            retry_of,
+        });
+        if let Some((name, arguments)) = prepared_arguments {
+            self.current_batch.push(BatchAttempt {
+                result_index,
+                call_id,
+                name,
+                arguments,
+                succeeded,
+                executed: tool_started,
+                round,
+            });
+        }
         // 工具已经完成后先落可信轨迹，再通知上层；receiver 此时关闭不能抹掉结果。
         on_result(result);
         self.emit_progress(event).await?;
@@ -201,6 +268,10 @@ impl<'a> ToolLoopExecutor<'a> {
         self.tool_results.clone()
     }
 
+    pub(crate) fn tool_attempts(&self) -> Vec<ToolExecutionAttempt> {
+        self.tool_attempts.clone()
+    }
+
     pub(crate) fn execution_attempted(&self) -> bool {
         self.execution_attempted
     }
@@ -216,6 +287,38 @@ impl<'a> ToolLoopExecutor<'a> {
         // progress sink 是 Core stream 的取消边界：返回 Err 表示上层不再消费事件，
         // 继续执行工具可能产生无人接收的副作用，因此必须把错误向外传播。
         sink(event).await
+    }
+
+    fn retry_parent(
+        &self,
+        call_id: &str,
+        round: usize,
+        batch_len: usize,
+        prepared: Option<(&str, &Value)>,
+    ) -> Option<usize> {
+        // Provider 协议没有统一的 parent-call 字段。只有“上一轮单个调用失败、
+        // 当前轮仍是单个同工具调用”才建立保守的重试关系；没有复用 call_id 时还
+        // 要求参数完全一致。同轮多个调用和跨轮不同参数调用均保持独立，避免按
+        // 工具名或展示文本误合并。
+        if batch_len != 1 || self.last_batch.len() != 1 {
+            return None;
+        }
+        let previous = &self.last_batch[0];
+        let (name, arguments) = prepared?;
+        if previous.succeeded
+            || !previous.executed
+            || previous.round + 1 != round
+            || previous.name != name
+        {
+            return None;
+        }
+        // 优先使用 provider 复用的真实 call_id；不同协议的重试通常会生成新 ID，
+        // 此时才退回到严格的单例批次 + 同参数边界。
+        let same_call_id = !call_id.trim().is_empty() && previous.call_id == call_id;
+        if !same_call_id && previous.arguments != *arguments {
+            return None;
+        }
+        Some(previous.result_index)
     }
 }
 

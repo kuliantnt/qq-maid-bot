@@ -197,6 +197,17 @@ fn project_tool_turn(
     let mut todo_outcomes = todo_projection.outcomes.into_iter().peekable();
 
     for (index, result) in output.agent.tool_results.iter().enumerate() {
+        if output
+            .agent
+            .tool_attempts
+            .iter()
+            .any(|attempt| attempt.retry_of == Some(index))
+        {
+            // 旧尝试仍保留在 Agent diagnostics；这里只丢弃它对应的用户展示块。
+            let mut discarded = Vec::new();
+            drain_todo_outcomes_for_result(index, &mut todo_outcomes, &mut discarded);
+            continue;
+        }
         if todo_projection.consumed_result_indexes.contains(&index) {
             drain_todo_outcomes_for_result(index, &mut todo_outcomes, &mut outcomes);
         } else if let Some(outcome) = tool_outcome_from_weather_result(result) {
