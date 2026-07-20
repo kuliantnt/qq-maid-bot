@@ -9,6 +9,7 @@ use std::{
 
 use async_trait::async_trait;
 use axum::{Router, body::to_bytes, routing::get};
+use qq_maid_common::output_part::AssistantOutput;
 use qq_maid_core::service::{
     CoreError, CoreHealthSnapshot, CoreInboundClassification, CoreInboundKind, CoreRequest,
     CoreRespondOutput, CoreResponse, CoreService, UpstreamStatusSnapshot,
@@ -183,10 +184,7 @@ impl CoreService for MockCore {
             tokio::time::sleep(delay).await;
         }
         Ok(CoreRespondOutput::Complete(Box::new(CoreResponse {
-            output: Some(qq_maid_core::service::AssistantOutput::markdown(
-                "hello <wx> & user",
-                "**hello**",
-            )),
+            output: Some(AssistantOutput::markdown("hello <wx> & user", "**hello**")),
             handled: Some(true),
             session_id: None,
             command: None,

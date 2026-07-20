@@ -9,9 +9,10 @@ use qq_maid_common::{
     command_prefix::CommandPrefix,
     input_part::{MediaStatus, MessageInputPart},
 };
+#[cfg(test)]
+use qq_maid_core::service::CoreResponse;
 use qq_maid_core::service::{
-    CoreError, CoreInboundClassification, CoreRequest, CoreRespondOutput, CoreResponse,
-    CoreResponseEvent, CoreResponseStream, CoreService,
+    CoreError, CoreInboundClassification, CoreRequest, CoreRespondOutput, CoreService,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -27,16 +28,6 @@ pub struct RespondClient {
     core: Arc<dyn CoreService>,
     qq_official_account_id: Option<String>,
 }
-
-pub type RespondResponse = CoreResponse;
-
-#[derive(Debug)]
-pub enum RespondTransport {
-    Complete(Box<CoreResponse>),
-    Stream(CoreResponseStream),
-}
-
-pub type RespondEvent = CoreResponseEvent;
 
 #[derive(Debug, Error)]
 pub enum RespondError {
@@ -94,7 +85,7 @@ impl RespondClient {
         &self,
         message: &C2cMessage,
         content: String,
-    ) -> Result<RespondTransport, RespondError> {
+    ) -> Result<CoreRespondOutput, RespondError> {
         let request = self.core_request_from_c2c_message(message, content);
         let masked_user = mask_openid(&message.user_openid);
         let output = self.core.respond(request).await.map_err(|error| {
@@ -107,7 +98,7 @@ impl RespondClient {
             RespondError::Core(error)
         })?;
         log_core_output_success(&message.message_id, Some(&masked_user), None, &output);
-        Ok(output.into())
+        Ok(output)
     }
 
     pub async fn classify_c2c(
@@ -126,7 +117,7 @@ impl RespondClient {
         &self,
         message: &GroupMessage,
         content: String,
-    ) -> Result<RespondTransport, RespondError> {
+    ) -> Result<CoreRespondOutput, RespondError> {
         let request = self.core_request_from_group_message(message, content);
         let masked_group = mask_openid(&message.group_openid);
         let output = self.core.respond(request).await.map_err(|error| {
@@ -139,7 +130,7 @@ impl RespondClient {
             RespondError::Core(error)
         })?;
         log_core_output_success(&message.message_id, None, Some(&masked_group), &output);
-        Ok(output.into())
+        Ok(output)
     }
 
     pub async fn classify_group(
@@ -163,7 +154,7 @@ impl RespondClient {
         &self,
         inbound: &platform::InboundMessage,
         content: String,
-    ) -> Result<RespondTransport, RespondError> {
+    ) -> Result<CoreRespondOutput, RespondError> {
         let (masked_user, masked_group) = masked_log_context_from_inbound(inbound);
         let request = platform::to_core_request(inbound, content).map_err(|error| {
             warn!(
@@ -197,7 +188,7 @@ impl RespondClient {
             masked_group.as_deref(),
             &output,
         );
-        Ok(output.into())
+        Ok(output)
     }
 
     pub(crate) async fn classify_inbound(
@@ -266,15 +257,6 @@ impl RespondClient {
     }
 }
 
-impl From<CoreRespondOutput> for RespondTransport {
-    fn from(value: CoreRespondOutput) -> Self {
-        match value {
-            CoreRespondOutput::Complete(response) => Self::Complete(response),
-            CoreRespondOutput::Stream(stream) => Self::Stream(stream),
-        }
-    }
-}
-
 fn log_core_output_success(
     message_id: &str,
     masked_user: Option<&str>,
@@ -323,20 +305,6 @@ fn masked_log_context_from_inbound(
         "group" => (None, Some(mask_openid(inbound.conversation.target_id()))),
         _ => (None, None),
     }
-}
-
-pub fn core_request_from_c2c_message(message: &C2cMessage, content: String) -> CoreRequest {
-    let inbound = platform::qq_official::inbound_from_c2c(message);
-    log_inbound_media_diagnostics(&inbound);
-    platform::to_core_request(&inbound, content)
-        .expect("QQ C2C inbound message should map to CoreRequest")
-}
-
-pub fn core_request_from_group_message(message: &GroupMessage, content: String) -> CoreRequest {
-    let inbound = platform::qq_official::inbound_from_group(message);
-    log_inbound_media_diagnostics(&inbound);
-    platform::to_core_request(&inbound, content)
-        .expect("QQ group inbound message should map to CoreRequest")
 }
 
 /// Gateway 侧需要在入队前拿到与 Core 完全一致的 scope_key，用于会话串行调度和 reply cache 隔离。
@@ -857,6 +825,10 @@ mod tests {
         }
     }
 
+    fn mapping_client() -> RespondClient {
+        RespondClient::new(Arc::new(NoopCore))
+    }
+
     fn c2c_message(content: &str) -> C2cMessage {
         C2cMessage {
             message_id: "m1".to_owned(),
@@ -904,7 +876,8 @@ mod tests {
 
     #[test]
     fn c2c_message_maps_to_private_core_request() {
-        let request = core_request_from_c2c_message(&c2c_message("/todo"), "/todo".to_owned());
+        let request = mapping_client()
+            .core_request_from_c2c_message(&c2c_message("/todo"), "/todo".to_owned());
 
         assert_eq!(request.text, "/todo");
         assert_eq!(request.platform, Platform::QqOfficial);
@@ -919,7 +892,8 @@ mod tests {
 
     #[test]
     fn group_message_maps_to_group_scope_without_member_split() {
-        let request = core_request_from_group_message(
+        let client = mapping_client();
+        let request = client.core_request_from_group_message(
             &group_message("/rss", Some("member1")),
             "/rss".to_owned(),
         );
@@ -933,7 +907,7 @@ mod tests {
         );
 
         let missing_member =
-            core_request_from_group_message(&group_message("/rss", None), "/rss".to_owned());
+            client.core_request_from_group_message(&group_message("/rss", None), "/rss".to_owned());
         assert_eq!(missing_member.actor.user_id, None);
         assert_eq!(
             missing_member.scope_key(),
@@ -1013,7 +987,8 @@ mod tests {
         let mut message = group_message("/rss add https://example.test/feed.xml", Some("member1"));
         message.member_role = Some(GroupMemberRole::Admin);
 
-        let request = core_request_from_group_message(&message, message.content.clone());
+        let request =
+            mapping_client().core_request_from_group_message(&message, message.content.clone());
 
         assert_eq!(
             request.actor.group_member_role,
@@ -1457,7 +1432,7 @@ mod tests {
 
     #[test]
     fn unsafe_error_detail_is_not_shown_to_user() {
-        let _response = RespondResponse {
+        let _response = CoreResponse {
             output: None,
             handled: Some(false),
             session_id: None,

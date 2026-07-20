@@ -9,7 +9,9 @@ use std::{
 };
 
 use anyhow::Context;
-use qq_maid_core::service::{CoreInboundKind, CoreRespondFailure};
+use qq_maid_core::service::{
+    CoreInboundKind, CoreRespondFailure, CoreRespondOutput, CoreResponse, CoreResponseEvent,
+};
 use tracing::{debug, info, warn};
 
 fn empty_group_reply_fallback_text(bot_display_name: &str) -> String {
@@ -51,9 +53,7 @@ use crate::{
     config::AppConfig,
     message_chunk::{ChunkLimits, OutboundSendError, send_group_outbound_chunked},
     render::{OutboundMessage, render_respond_response_parts_for_profile},
-    respond::{
-        RespondClient, RespondEvent, RespondResponse, RespondTransport, respond_error_to_qq_text,
-    },
+    respond::{RespondClient, respond_error_to_qq_text},
 };
 
 fn group_reply_mention_prefix(
@@ -392,7 +392,7 @@ pub(crate) async fn handle_group_message(
     };
 
     match transport {
-        RespondTransport::Complete(response) => {
+        CoreRespondOutput::Complete(response) => {
             send_group_respond_response(
                 api,
                 runtime,
@@ -404,7 +404,7 @@ pub(crate) async fn handle_group_message(
             )
             .await?;
         }
-        RespondTransport::Stream(stream) => match consume_respond_stream(stream).await {
+        CoreRespondOutput::Stream(stream) => match consume_respond_stream(stream).await {
             GroupStreamOutcome::Completed(response) => {
                 send_group_respond_response(
                     api,
@@ -486,7 +486,7 @@ async fn send_group_respond_response(
     config: &AppConfig,
     group_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
     message: &GroupMessage,
-    response: &RespondResponse,
+    response: &CoreResponse,
     ref_index: &SharedRefIndex,
 ) -> anyhow::Result<()> {
     if response.suppresses_reply() {
@@ -559,7 +559,7 @@ fn record_group_bot_outbound_send(
     group_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
     ref_index: &SharedRefIndex,
     message: &GroupMessage,
-    response: &RespondResponse,
+    response: &CoreResponse,
     config: &AppConfig,
     sent_ids: &SendMessageIds,
     text: &str,
@@ -582,7 +582,7 @@ fn record_group_bot_outbound_send(
 
 #[derive(Debug)]
 enum GroupStreamOutcome {
-    Completed(RespondResponse),
+    Completed(CoreResponse),
     Failed(CoreRespondFailure),
     ClosedBeforeCompleted,
 }
@@ -596,7 +596,7 @@ where
     let mut text_delta_count = 0_usize;
     while let Some(event) = stream.recv_event().await {
         match event {
-            RespondEvent::Status(status) => {
+            CoreResponseEvent::Status(status) => {
                 status_event_count += 1;
                 debug!(
                     status_kind = status.kind.as_str(),
@@ -606,12 +606,12 @@ where
                     "group stream status event recorded without group progress send"
                 );
             }
-            RespondEvent::TextDelta(delta) => {
+            CoreResponseEvent::TextDelta(delta) => {
                 if !delta.is_empty() {
                     text_delta_count += 1;
                 }
             }
-            RespondEvent::Completed(response) => {
+            CoreResponseEvent::Completed(response) => {
                 debug!(
                     response_delivery_mode = output_policy.as_str(),
                     text_delta_count,
@@ -620,7 +620,7 @@ where
                 );
                 return GroupStreamOutcome::Completed(*response);
             }
-            RespondEvent::Failed(failure) => {
+            CoreResponseEvent::Failed(failure) => {
                 warn!(
                     kind = ?failure.kind,
                     retryable = failure.retryable,

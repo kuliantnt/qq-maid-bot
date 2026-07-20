@@ -22,19 +22,19 @@ use qq_maid_llm::{
     },
     provider::{
         AgentRunDiagnostics, ChatOutcome, DynLlmProvider, LlmStreamEvent, ToolChatRequest,
-        types::{ChatMessage, ChatRequest, ChatRole},
+        types::{ChatMessage, ChatRequest, ChatRole, TokenUsage},
     },
     tool::{ToolContext, ToolRegistry},
 };
 
 use crate::{
-    error::LlmError, runtime::session::redact_sensitive_text, util::metrics::MetricsRecorder,
+    error::LlmError,
+    runtime::session::redact_sensitive_text,
+    util::metrics::{LlmMetrics, MetricsRecorder},
 };
 use qq_maid_common::markdown::to_chat_text;
 
-use super::{
-    RespondPurpose, RespondRequest, RespondResponse, common::truncate_chars, types::ChatResponse,
-};
+use super::{RespondPurpose, RespondRequest, RespondResponse, common::truncate_chars};
 
 mod compact_messages;
 mod message_parts;
@@ -52,7 +52,7 @@ pub trait ChatService: Send + Sync {
 
 /// LLM 调用后的输出结果。
 ///
-/// 包含加工后的展示文本 `reply` 和原始 `ChatResponse`（含 Token 用量）。
+/// 包含加工后的展示通道、Provider 指标、Token 用量和 Agent 执行轨迹。
 #[derive(Debug, Clone)]
 pub struct RespondOutput {
     /// 内部主回复；聊天场景优先保留原始 Markdown 版，供会话历史继续使用。
@@ -63,8 +63,10 @@ pub struct RespondOutput {
     pub markdown: Option<String>,
     /// Provider 返回的顺序化富媒体结果。
     pub parts: Vec<OutputPart>,
-    /// 原始的 LLM 响应（含 Token 用量、指标等）
-    pub chat: ChatResponse,
+    /// Provider 调用指标。
+    pub metrics: LlmMetrics,
+    /// Provider Token 用量统计。
+    pub usage: Option<TokenUsage>,
     /// Agent Runtime 的结构化执行轨迹。
     pub agent: AgentRunDiagnostics,
 }
@@ -383,14 +385,13 @@ fn output_from_raw_reply(
         }
     };
     trace_chat_final_reply(req, &text);
-    let chat = ChatResponse::ok(raw_reply.clone(), outcome.metrics, outcome.usage);
-
     Ok(RespondOutput {
         reply,
         text,
         markdown,
         parts: outcome.output_parts,
-        chat,
+        metrics: outcome.metrics,
+        usage: outcome.usage,
         agent: outcome.agent,
     })
 }
@@ -478,7 +479,7 @@ fn trace_chat_raw_reply(req: &RespondRequest, raw_reply: &str) {
     );
 }
 
-/// 在 TRACE 级别输出最终返回给上层 facade 的回复。
+/// 在 TRACE 级别输出最终进入 Core 响应编排链路的回复。
 ///
 /// 这样可以直接比对“provider 原文”和“QQ 最终可见文本”之间是否被清洗、
 /// 截断或降级，从而快速判断问题是在上游模型还是在本地后处理。
@@ -899,13 +900,20 @@ fn build_todo_parse_messages(req: &RespondRequest) -> Vec<ChatMessage> {
 
 /// 将 `RespondOutput` 转换为统一的 `RespondResponse`。
 pub fn response_from_output(output: RespondOutput) -> RespondResponse {
-    let mut response = RespondResponse::from_chat(
-        output.chat,
-        (!output.text.trim().is_empty()).then_some(output.text),
-        output.markdown,
-    );
-    response.output_parts = output.parts;
-    response
+    RespondResponse {
+        ok: true,
+        text: (!output.text.trim().is_empty()).then_some(output.text),
+        markdown: output.markdown,
+        output_parts: output.parts,
+        handled: Some(true),
+        session_id: None,
+        command: None,
+        diagnostics: None,
+        metrics: output.metrics,
+        usage: output.usage,
+        error: None,
+        visible_entity_snapshot: None,
+    }
 }
 
 /// 构造聊天的纯文本 / Markdown 双通道。

@@ -29,13 +29,11 @@ use crate::{
     config::AppConfig,
     message_chunk::{ChunkLimits, OutboundSendError, send_c2c_outbound_chunked},
     render::{OutboundMessage, render_respond_response_parts_for_profile},
-    respond::{
-        RespondClient, RespondEvent, RespondResponse, RespondTransport, build_respond_content,
-        respond_error_to_qq_text,
-    },
+    respond::{RespondClient, build_respond_content, respond_error_to_qq_text},
 };
 use qq_maid_core::service::{
-    CoreFailureKind, CoreInboundKind, CoreOutputPolicy, CoreRespondFailure, CoreResponseStatus,
+    CoreFailureKind, CoreInboundKind, CoreOutputPolicy, CoreRespondFailure, CoreRespondOutput,
+    CoreResponse, CoreResponseEvent, CoreResponseStatus,
 };
 
 const CORE_STREAM_CLOSED_FALLBACK_TEXT: &str = "处理失败，请稍后再试。";
@@ -44,7 +42,7 @@ fn empty_reply_fallback_text(bot_display_name: &str) -> String {
     format!("唔，{bot_display_name}刚刚没整理出可用回复。可以再说一次。")
 }
 
-type RespondEventFuture<'a> = Pin<Box<dyn Future<Output = Option<RespondEvent>> + Send + 'a>>;
+type RespondEventFuture<'a> = Pin<Box<dyn Future<Output = Option<CoreResponseEvent>> + Send + 'a>>;
 
 trait RespondEventStream: Send {
     fn recv_event<'a>(&'a mut self) -> RespondEventFuture<'a>;
@@ -73,7 +71,7 @@ async fn send_c2c_respond_response(
     api: &QqApiClient,
     runtime: &GatewayRuntimeStatus,
     message: &C2cMessage,
-    response: &RespondResponse,
+    response: &CoreResponse,
     config: &AppConfig,
     ref_index: &SharedRefIndex,
 ) -> anyhow::Result<()> {
@@ -125,7 +123,7 @@ pub(crate) fn record_c2c_bot_outbound_refs(
 pub(crate) async fn send_c2c_respond_response_with_sender<S: OutboundSender + ?Sized>(
     sender: &S,
     message: &C2cMessage,
-    response: &RespondResponse,
+    response: &CoreResponse,
     config: &AppConfig,
     capability: &ReplyCapability,
 ) -> anyhow::Result<(Vec<SendMessageIds>, String)> {
@@ -362,11 +360,11 @@ pub(crate) async fn handle_c2c_message(
     };
 
     match transport {
-        RespondTransport::Complete(response) => {
+        CoreRespondOutput::Complete(response) => {
             stop_typing(&mut typing, TypingStopReason::FinalReply);
             send_c2c_respond_response(api, runtime, &message, &response, config, ref_index).await?;
         }
-        RespondTransport::Stream(stream) => {
+        CoreRespondOutput::Stream(stream) => {
             let capability = ReplyCapability::qq_official_c2c(config);
             if should_use_c2c_streaming(&capability) {
                 stream_respond_c2c(stream, api, runtime, &message, config, typing, ref_index)
@@ -451,7 +449,7 @@ where
     let mut progress_status_send_attempted = false;
     while let Some(event) = stream.recv_event().await {
         match event {
-            RespondEvent::Status(status) => {
+            CoreResponseEvent::Status(status) => {
                 status_event_count += 1;
                 debug!(
                     message_id = %message.message_id,
@@ -471,12 +469,12 @@ where
                     send_disabled_progress_status(sender, message, &status).await;
                 }
             }
-            RespondEvent::TextDelta(delta) => {
+            CoreResponseEvent::TextDelta(delta) => {
                 if !delta.is_empty() {
                     text_delta_count += 1;
                 }
             }
-            RespondEvent::Completed(response) => {
+            CoreResponseEvent::Completed(response) => {
                 stop_typing(typing, TypingStopReason::FinalReply);
                 let capability = ReplyCapability::qq_official_c2c(config);
                 let (sent_ids, fallback_text) = send_c2c_respond_response_with_sender(
@@ -522,7 +520,7 @@ where
                 }
                 return Ok(DisabledStreamOutcome::Completed);
             }
-            RespondEvent::Failed(failure) => {
+            CoreResponseEvent::Failed(failure) => {
                 stop_typing(typing, failure_stop_reason(&failure));
                 warn!(
                     message_id = %message.message_id,

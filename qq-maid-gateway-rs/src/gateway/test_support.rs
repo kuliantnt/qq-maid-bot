@@ -5,20 +5,18 @@
 
 use std::time::Duration;
 
-use qq_maid_core::service::AssistantOutput;
+use qq_maid_common::output_part::AssistantOutput;
+use qq_maid_core::service::CoreResponse;
 
 use super::event::C2cMessage;
-use crate::{
-    config::{
-        AgentTypingConfig, AppConfig, DEFAULT_CONVERSATION_QUEUE_CAPACITY,
-        DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT, DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS,
-        DEFAULT_MEDIA_MAX_BYTES, DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS,
-        DEFAULT_MESSAGE_AGGREGATION_MAX_CHARS, DEFAULT_MESSAGE_AGGREGATION_MAX_MESSAGES,
-        DEFAULT_MESSAGE_AGGREGATION_MAX_WAIT_MS, DEFAULT_MESSAGE_AGGREGATION_QUIET_MS,
-        DEFAULT_TEXT_CHUNK_SOFT_LIMIT, GroupMessageMode, MessageAggregationConfig, OneBot11Config,
-        WechatServiceConfig,
-    },
-    respond::RespondResponse,
+use crate::config::{
+    AgentTypingConfig, AppConfig, DEFAULT_CONVERSATION_QUEUE_CAPACITY,
+    DEFAULT_MARKDOWN_CHUNK_SOFT_LIMIT, DEFAULT_MAX_ACTIVE_CONVERSATION_WORKERS,
+    DEFAULT_MEDIA_MAX_BYTES, DEFAULT_MESSAGE_AGGREGATION_MAX_ACTIVE_KEYS,
+    DEFAULT_MESSAGE_AGGREGATION_MAX_CHARS, DEFAULT_MESSAGE_AGGREGATION_MAX_MESSAGES,
+    DEFAULT_MESSAGE_AGGREGATION_MAX_WAIT_MS, DEFAULT_MESSAGE_AGGREGATION_QUIET_MS,
+    DEFAULT_TEXT_CHUNK_SOFT_LIMIT, GroupMessageMode, MessageAggregationConfig, OneBot11Config,
+    WechatServiceConfig,
 };
 
 /// 返回已绑定 QQ 官方渠道的稳定测试基线。
@@ -88,8 +86,8 @@ pub(crate) fn c2c_message_fixture() -> C2cMessage {
     }
 }
 
-pub(crate) fn respond_response_fixture(text: &str) -> RespondResponse {
-    RespondResponse {
+pub(crate) fn respond_response_fixture(text: &str) -> CoreResponse {
+    CoreResponse {
         output: Some(AssistantOutput::markdown(text, text)),
         handled: Some(true),
         session_id: None,

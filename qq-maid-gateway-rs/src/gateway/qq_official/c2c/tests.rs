@@ -22,12 +22,12 @@ use std::{collections::VecDeque, sync::Mutex};
 
 #[derive(Debug)]
 struct FakeEventStream {
-    events: VecDeque<RespondEvent>,
+    events: VecDeque<CoreResponseEvent>,
     output_policy: CoreOutputPolicy,
 }
 
 impl FakeEventStream {
-    fn new(events: impl IntoIterator<Item = RespondEvent>) -> Self {
+    fn new(events: impl IntoIterator<Item = CoreResponseEvent>) -> Self {
         Self {
             events: events.into_iter().collect(),
             output_policy: CoreOutputPolicy::DirectStream,
@@ -206,8 +206,8 @@ fn complete_c2c_reply_does_not_record_message_id_as_ref_index() {
 #[tokio::test]
 async fn disabled_stream_completed_sends_single_ordinary_reply() {
     let events = FakeEventStream::new([
-        RespondEvent::TextDelta("不应外发".to_owned()),
-        RespondEvent::Completed(Box::new(respond_response("最终回复"))),
+        CoreResponseEvent::TextDelta("不应外发".to_owned()),
+        CoreResponseEvent::Completed(Box::new(respond_response("最终回复"))),
     ]);
     let sender = FakeOutboundSender::default();
     let mut typing = None;
@@ -236,7 +236,7 @@ async fn disabled_stream_completed_sends_single_ordinary_reply() {
 #[tokio::test]
 async fn disabled_stream_completed_records_ref_index() {
     let config = test_config();
-    let events = FakeEventStream::new([RespondEvent::Completed(Box::new(respond_response(
+    let events = FakeEventStream::new([CoreResponseEvent::Completed(Box::new(respond_response(
         "最终回复",
     )))]);
     let sender = FakeOutboundSender::default();
@@ -268,18 +268,18 @@ async fn disabled_stream_completed_records_ref_index() {
 #[tokio::test]
 async fn disabled_stream_completed_records_rendered_parts_fallback_ref_index() {
     let config = test_config();
-    let response = RespondResponse {
-        output: Some(qq_maid_core::service::AssistantOutput {
+    let response = CoreResponse {
+        output: Some(qq_maid_common::output_part::AssistantOutput {
             text_fallback: String::new(),
             markdown: None,
             parts: vec![
-                qq_maid_core::service::OutputPart::Markdown {
+                qq_maid_common::output_part::OutputPart::Markdown {
                     markdown: "# 标题".to_owned(),
                 },
-                qq_maid_core::service::OutputPart::Image {
-                    media: qq_maid_core::service::OutputMedia {
+                qq_maid_common::output_part::OutputPart::Image {
+                    media: qq_maid_common::output_part::OutputMedia {
                         fallback_text: Some("图片：天气雷达".to_owned()),
-                        ..qq_maid_core::service::OutputMedia::default()
+                        ..qq_maid_common::output_part::OutputMedia::default()
                     },
                 },
             ],
@@ -290,7 +290,7 @@ async fn disabled_stream_completed_records_rendered_parts_fallback_ref_index() {
         diagnostics: None,
         visible_entity_snapshot: None,
     };
-    let events = FakeEventStream::new([RespondEvent::Completed(Box::new(response))]);
+    let events = FakeEventStream::new([CoreResponseEvent::Completed(Box::new(response))]);
     let sender = FakeOutboundSender::default();
     let mut typing = None;
     let ref_index = crate::gateway::ref_index::ref_index();
@@ -316,11 +316,11 @@ async fn disabled_stream_completed_records_rendered_parts_fallback_ref_index() {
 #[tokio::test]
 async fn disabled_stream_status_does_not_create_extra_reply() {
     let events = FakeEventStream::new([
-        RespondEvent::Status(CoreResponseStatus {
+        CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentStarted,
             text: "正在处理".to_owned(),
         }),
-        RespondEvent::Completed(Box::new(respond_response("最终回复"))),
+        CoreResponseEvent::Completed(Box::new(respond_response("最终回复"))),
     ]);
     let sender = FakeOutboundSender::default();
     let mut typing = None;
@@ -349,15 +349,15 @@ async fn disabled_stream_status_does_not_create_extra_reply() {
 #[tokio::test]
 async fn disabled_stream_progress_policy_sends_one_visible_hint_then_final_reply() {
     let events = FakeEventStream::new([
-        RespondEvent::Status(CoreResponseStatus {
+        CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentStarted,
             text: "小女仆正在处理…".to_owned(),
         }),
-        RespondEvent::Status(CoreResponseStatus {
+        CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentFinalizing,
             text: "小女仆正在确认结果…".to_owned(),
         }),
-        RespondEvent::Completed(Box::new(respond_response("最终回复"))),
+        CoreResponseEvent::Completed(Box::new(respond_response("最终回复"))),
     ])
     .with_policy(CoreOutputPolicy::ProgressThenComplete);
     let sender = FakeOutboundSender::default();
@@ -393,16 +393,16 @@ async fn disabled_stream_progress_policy_sends_one_visible_hint_then_final_reply
 #[tokio::test]
 async fn disabled_stream_progress_then_stream_sends_one_visible_hint_then_final_reply() {
     let events = FakeEventStream::new([
-        RespondEvent::Status(CoreResponseStatus {
+        CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentStarted,
             text: "小女仆正在处理…".to_owned(),
         }),
-        RespondEvent::Status(CoreResponseStatus {
+        CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentFinalizing,
             text: "小女仆正在确认结果…".to_owned(),
         }),
-        RespondEvent::TextDelta("不应外发".to_owned()),
-        RespondEvent::Completed(Box::new(respond_response("最终回复"))),
+        CoreResponseEvent::TextDelta("不应外发".to_owned()),
+        CoreResponseEvent::Completed(Box::new(respond_response("最终回复"))),
     ])
     .with_policy(CoreOutputPolicy::ProgressThenStream);
     let sender = FakeOutboundSender::default();
@@ -438,11 +438,11 @@ async fn disabled_stream_progress_then_stream_sends_one_visible_hint_then_final_
 #[tokio::test]
 async fn disabled_stream_progress_status_respects_visible_progress_config() {
     let events = FakeEventStream::new([
-        RespondEvent::Status(CoreResponseStatus {
+        CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentStarted,
             text: "小女仆正在处理…".to_owned(),
         }),
-        RespondEvent::Completed(Box::new(respond_response("最终回复"))),
+        CoreResponseEvent::Completed(Box::new(respond_response("最终回复"))),
     ])
     .with_policy(CoreOutputPolicy::ProgressThenComplete);
     let sender = FakeOutboundSender::default();
@@ -468,8 +468,8 @@ async fn disabled_stream_progress_status_respects_visible_progress_config() {
 #[tokio::test]
 async fn disabled_stream_failed_sends_safe_failure_without_reinvoking_core() {
     let events = FakeEventStream::new([
-        RespondEvent::TextDelta("不完整".to_owned()),
-        RespondEvent::Failed(CoreRespondFailure {
+        CoreResponseEvent::TextDelta("不完整".to_owned()),
+        CoreResponseEvent::Failed(CoreRespondFailure {
             kind: CoreFailureKind::LlmFailed,
             message: "上游服务暂时不可用，请稍后再试。".to_owned(),
             retryable: true,
@@ -505,7 +505,7 @@ async fn disabled_stream_failed_sends_safe_failure_without_reinvoking_core() {
 
 #[tokio::test]
 async fn disabled_stream_closed_before_completed_sends_fixed_failure_not_delta() {
-    let events = FakeEventStream::new([RespondEvent::TextDelta("半截回复".to_owned())]);
+    let events = FakeEventStream::new([CoreResponseEvent::TextDelta("半截回复".to_owned())]);
     let sender = FakeOutboundSender::default();
     let mut typing = None;
 

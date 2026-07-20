@@ -264,7 +264,7 @@ async fn slash_candidates_reach_core_and_explicit_suppression_sends_nothing() {
         respond_calls.clone(),
         classify_calls.clone(),
         vec!["/help"],
-        RespondResponse {
+        CoreResponse {
             output: None,
             handled: Some(true),
             session_id: None,
@@ -596,8 +596,8 @@ fn group_send_records_message_id_for_cache_and_refidx_for_ref_index() {
     let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
     let ref_index = crate::gateway::ref_index::ref_index();
     let message = group_message("小女仆 你好", GroupEventType::GroupMessage);
-    let response = RespondResponse {
-        output: Some(qq_maid_core::service::AssistantOutput::markdown(
+    let response = CoreResponse {
+        output: Some(qq_maid_common::output_part::AssistantOutput::markdown(
             "机器人回复",
             "机器人回复",
         )),
@@ -658,14 +658,14 @@ fn group_send_records_rendered_fallback_when_output_text_field_is_empty() {
     let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
     let ref_index = crate::gateway::ref_index::ref_index();
     let message = group_message("小女仆 看图", GroupEventType::GroupMessage);
-    let response = RespondResponse {
-        output: Some(qq_maid_core::service::AssistantOutput {
+    let response = CoreResponse {
+        output: Some(qq_maid_common::output_part::AssistantOutput {
             text_fallback: String::new(),
             markdown: None,
-            parts: vec![qq_maid_core::service::OutputPart::Image {
-                media: qq_maid_core::service::OutputMedia {
+            parts: vec![qq_maid_common::output_part::OutputPart::Image {
+                media: qq_maid_common::output_part::OutputMedia {
                     fallback_text: Some("图片：天气雷达".to_owned()),
-                    ..qq_maid_core::service::OutputMedia::default()
+                    ..qq_maid_common::output_part::OutputMedia::default()
                 },
             }],
         }),
@@ -712,8 +712,10 @@ fn group_send_records_rendered_fallback_when_output_text_field_is_empty() {
 #[test]
 fn group_send_does_not_cross_use_message_id_and_refidx_when_one_is_missing() {
     let config = test_config();
-    let response = RespondResponse {
-        output: Some(qq_maid_core::service::AssistantOutput::text("机器人回复")),
+    let response = CoreResponse {
+        output: Some(qq_maid_common::output_part::AssistantOutput::text(
+            "机器人回复",
+        )),
         handled: Some(true),
         session_id: None,
         command: None,

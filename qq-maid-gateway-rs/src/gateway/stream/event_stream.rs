@@ -4,12 +4,13 @@ use super::super::{outbound::RuntimeRecordingSender, typing::TypingStopReason};
 use crate::{
     api::{C2cStreamState, OutboundSender, StreamSendResult},
     markdown::MarkdownPayload,
-    respond::RespondEvent,
 };
-use qq_maid_core::service::{CoreFailureKind, CoreOutputPolicy, CoreRespondFailure};
+use qq_maid_core::service::{
+    CoreFailureKind, CoreOutputPolicy, CoreRespondFailure, CoreResponseEvent,
+};
 
 pub(crate) type RespondEventFuture<'a> =
-    Pin<Box<dyn Future<Output = Option<RespondEvent>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Option<CoreResponseEvent>> + Send + 'a>>;
 pub(crate) type StreamSendFuture<'a> = Pin<Box<dyn Future<Output = StreamSendResult> + Send + 'a>>;
 
 /// Core 流事件来源抽象，用于把 QQ 流事件消费者与真实 Core channel 解耦，便于覆盖异常分支。

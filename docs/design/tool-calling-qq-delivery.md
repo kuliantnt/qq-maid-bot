@@ -113,8 +113,8 @@
 
 #### 私聊普通 complete 路径
 
-1. Tool Loop 或普通聊天最终都先变成 `RespondResponse` / `CoreResponse`。  
-  参考：`qq-maid-core/src/runtime/respond/llm_service/mod.rs::response_from_output`、`qq-maid-core/src/service/mod.rs::impl From<RespondResponse> for CoreResponse`
+1. Tool Loop 或普通聊天先在 Core 内部组装 `RespondResponse`，再于调用边界转换为 `CoreResponse`；两者的消息内容都复用 `qq-maid-common` 的统一内容类型。
+  参考：`qq-maid-core/src/runtime/respond/llm_service/mod.rs::response_from_output`、`qq-maid-core/src/service/handle.rs::impl From<RespondResponse> for CoreResponse`
 
 2. Gateway 在 `send_c2c_respond_response_with_sender` 中调用 `render_respond_response` 把 CoreResponse 渲染成：
    - `OutboundMessage::Text`
@@ -198,14 +198,14 @@
 
 - 只在文本 payload 中作为顶层字段生成。  
   参考：`qq-maid-gateway-rs/src/api/mod.rs::build_c2c_text_payload`、`build_group_text_payload`
-- 内容来源一般是 `RespondResponse.text`，由 `render_respond_response` 或 fallback 逻辑决定。  
+- 内容来源一般是 common `AssistantOutput` 经 `CoreResponse::text_content()` 暴露的纯文本 fallback，由 Gateway render 或 fallback 逻辑决定。
   参考：`qq-maid-gateway-rs/src/render.rs::render_respond_response`
 - Markdown/流式路径下，正文不走顶层 `content`，而走 `markdown.content`。  
   参考：`qq-maid-gateway-rs/src/markdown.rs`、`qq-maid-gateway-rs/src/api/mod.rs::build_c2c_markdown_stream_payload`
 
 ### `markdown`
 
-- `RespondResponse.markdown` 在 Gateway 渲染层被包装成 `MarkdownPayload`。  
+- common `AssistantOutput` 的 Markdown 通道经 `CoreResponse::markdown_content()` 读取，并在 Gateway 渲染层包装成 `MarkdownPayload`。
   参考：`qq-maid-gateway-rs/src/render.rs::render_respond_response`
 - 普通 Markdown payload 由 `build_c2c_markdown_payload` / `build_group_markdown_payload` 生成。  
   参考：`qq-maid-gateway-rs/src/markdown.rs`
@@ -315,7 +315,7 @@
 
 它的实际路径是：
 
-`WeatherTool.execute` / Todo Tool execute → `ToolRegistry::execute_json` → OpenAI `function_call_output` → 模型继续生成最终答案 → `ChatOutcome.reply` → `RespondResponse` → Gateway 渲染/发送。
+`WeatherTool.execute` / Todo Tool execute → `ToolRegistry::execute_json` → OpenAI `function_call_output` → 模型继续生成最终答案 → `ChatOutcome.reply` → Core 内部 `RespondResponse` → `CoreResponse` → Gateway 渲染/发送。
 
 也就是说，当前工具结果默认只作为**模型上下文的一部分**回到 LLM，不直接变成一条 QQ 中间消息。  
 参考：`qq-maid-core/src/runtime/tools/weather.rs::WeatherTool::execute`、`qq-maid-core/src/runtime/tools/todo/mod.rs`、`qq-maid-llm/src/tool.rs::ToolRegistry::execute_json`、`qq-maid-llm/src/provider/openai/tool_loop.rs::openai_responses_tool_loop`
@@ -346,7 +346,7 @@
   参考：`qq-maid-gateway-rs/src/gateway/qq_official/c2c/mod.rs::handle_c2c_message`
 - 私聊普通非 Tool Loop 流式聊天：最终收尾仍由 `gateway/stream/mod.rs` 发送结束帧。
   参考：`qq-maid-gateway-rs/src/gateway/stream/mod.rs::send_stream_end`
-- 群聊：统一在拿到 `RespondResponse` 后一次性发出。  
+- 群聊：统一在拿到 `CoreResponse` 后一次性发出。
   参考：`qq-maid-gateway-rs/src/gateway/qq_official/group/mod.rs::send_group_respond_response`
 
 ## 4.3 当前是否存在“Tool Calling 直接依赖 QQ 字段”或“QQ 层理解 Tool 协议”的问题
@@ -363,11 +363,11 @@
 
 2. **Gateway 不理解模型 Tool Call 协议**。  
    Gateway 只知道：
-   - `RespondTransport::Complete`
-   - `RespondTransport::Stream`
-   - `RespondEvent::TextDelta/Completed/Failed`  
+   - `CoreRespondOutput::Complete`
+   - `CoreRespondOutput::Stream`
+   - `CoreResponseEvent::TextDelta/Completed/Failed`
    它不解析 `function_call`、`function_call_output`、Tool schema。  
-   参考：`qq-maid-gateway-rs/src/respond.rs::RespondTransport`、`qq-maid-gateway-rs/src/gateway/stream/mod.rs`
+   参考：`qq-maid-core/src/service/types.rs::CoreRespondOutput`、`qq-maid-core/src/service/types.rs::CoreResponseEvent`、`qq-maid-gateway-rs/src/gateway/stream/mod.rs`
 
 3. **具体 QQ 提及语法、群回复前缀、msg_type/msg_seq、stream payload 都仍在 Gateway**。  
    Core 和 LLM 没有去理解 `<@member_openid>`、`/v2/users/{openid}/messages` 等平台细节。  
@@ -464,7 +464,7 @@
 - 工具失败发生在哪一步
 
 证据：当前没有任何 Tool status event 类型；Gateway 只消费 `TextDelta/Completed/Failed`。  
-参考：`qq-maid-core/src/service/mod.rs::CoreResponseEvent`、`qq-maid-gateway-rs/src/gateway/stream/mod.rs`
+参考：`qq-maid-core/src/service/types.rs::CoreResponseEvent`、`qq-maid-gateway-rs/src/gateway/stream/mod.rs`
 
 ### 2）`task_id` 还不是独立任务身份
 

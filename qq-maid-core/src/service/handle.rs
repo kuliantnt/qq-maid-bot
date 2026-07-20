@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use qq_maid_common::identity_context::ConversationKind;
+use qq_maid_common::{identity_context::ConversationKind, output_part::AssistantOutput};
 use qq_maid_llm::provider::types::{ChatMessage, ChatRequest, ChatRole};
 use tokio::time::timeout;
 use tracing::warn;
@@ -19,10 +19,10 @@ use crate::{
 };
 
 use super::{
-    AgentRequestBudget, AssistantOutput, CoreActor, CoreConversation, CoreError,
-    CoreGroupMemberRole, CoreHealthSnapshot, CoreInboundClassification, CoreRequest,
-    CoreRespondOutput, CoreResponse, CoreService, Platform, ProgressStatusConfig, error_core_error,
-    output_policy_for_stream, start_core_response_stream, warn_core_error,
+    AgentRequestBudget, CoreActor, CoreConversation, CoreError, CoreGroupMemberRole,
+    CoreHealthSnapshot, CoreInboundClassification, CoreRequest, CoreRespondOutput, CoreResponse,
+    CoreService, Platform, ProgressStatusConfig, error_core_error, output_policy_for_stream,
+    start_core_response_stream, warn_core_error,
 };
 
 #[derive(Clone)]

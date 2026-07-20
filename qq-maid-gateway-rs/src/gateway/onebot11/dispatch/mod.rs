@@ -8,8 +8,8 @@ use std::{future::Future, pin::Pin, sync::Arc};
 use async_trait::async_trait;
 use qq_maid_common::command_prefix::CommandPrefix;
 use qq_maid_core::service::{
-    CoreFailureKind, CoreRespondFailure, CoreResponse, CoreResponseEvent, CoreResponseStream,
-    VisibleEntitySnapshot,
+    CoreFailureKind, CoreRespondFailure, CoreRespondOutput, CoreResponse, CoreResponseEvent,
+    CoreResponseStream, VisibleEntitySnapshot,
 };
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -22,7 +22,7 @@ use crate::{
     },
     media::ImagePayload,
     render::{OutboundMessage, render_respond_response_parts_for_profile},
-    respond::{RespondClient, RespondError, RespondTransport, respond_error_to_qq_text},
+    respond::{RespondClient, RespondError, respond_error_to_qq_text},
 };
 
 use super::{OneBotSendError, OneBotSendResult, OneBotSender};
@@ -66,8 +66,8 @@ impl OneBotCoreResponder for RespondClient {
         content: String,
     ) -> Result<OneBotCoreTransport, RespondError> {
         match self.respond_inbound(inbound, content).await? {
-            RespondTransport::Complete(response) => Ok(OneBotCoreTransport::Complete(response)),
-            RespondTransport::Stream(stream) => Ok(OneBotCoreTransport::Stream(Box::new(stream))),
+            CoreRespondOutput::Complete(response) => Ok(OneBotCoreTransport::Complete(response)),
+            CoreRespondOutput::Stream(stream) => Ok(OneBotCoreTransport::Stream(Box::new(stream))),
         }
     }
 }
@@ -431,9 +431,10 @@ mod tests {
     use qq_maid_common::{
         identity_context::IdentitySource,
         input_part::{MessageInputPart, QuotedMessageContext},
+        output_part::AssistantOutput,
     };
     use qq_maid_core::service::{
-        AssistantOutput, CoreError, CoreResponseStatus, CoreResponseStatusKind, VisibleEntityItem,
+        CoreError, CoreResponseStatus, CoreResponseStatusKind, VisibleEntityItem,
     };
 
     use super::*;

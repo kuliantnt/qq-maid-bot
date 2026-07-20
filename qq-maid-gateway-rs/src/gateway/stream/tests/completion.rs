@@ -5,9 +5,9 @@ use super::*;
 #[tokio::test]
 async fn stream_completed_flushes_pending_delta_before_final() {
     let events = FakeEventStream::new([
-        RespondEvent::TextDelta("晚".to_owned()),
-        RespondEvent::TextDelta("上".to_owned()),
-        RespondEvent::Completed(Box::new(respond_response("晚上"))),
+        CoreResponseEvent::TextDelta("晚".to_owned()),
+        CoreResponseEvent::TextDelta("上".to_owned()),
+        CoreResponseEvent::Completed(Box::new(respond_response("晚上"))),
     ]);
     let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None), Ok(None)]);
 
@@ -48,7 +48,7 @@ async fn stream_completed_flushes_pending_delta_before_final() {
 
 #[tokio::test]
 async fn stream_completed_without_delta_uses_ordinary_reply_path() {
-    let events = FakeEventStream::new([RespondEvent::Completed(Box::new(respond_response(
+    let events = FakeEventStream::new([CoreResponseEvent::Completed(Box::new(respond_response(
         "晚上好",
     )))]);
     let sender = FakeStreamSender::new([]);
@@ -69,7 +69,7 @@ async fn stream_completed_without_delta_uses_ordinary_reply_path() {
 
 #[tokio::test]
 async fn stream_pending_completed_stops_typing_before_ordinary_reply() {
-    let events = FakeEventStream::new([RespondEvent::Completed(Box::new(respond_response(
+    let events = FakeEventStream::new([CoreResponseEvent::Completed(Box::new(respond_response(
         "晚上好",
     )))]);
     let sender = FakeStreamSender::new([]);
@@ -108,8 +108,8 @@ async fn stream_pending_completed_stops_typing_before_ordinary_reply() {
 #[tokio::test]
 async fn stream_pending_completed_sends_ordinary_reply_once() {
     let events = FakeEventStream::new([
-        RespondEvent::Completed(Box::new(respond_response("晚上好"))),
-        RespondEvent::Completed(Box::new(respond_response("不应重复发送"))),
+        CoreResponseEvent::Completed(Box::new(respond_response("晚上好"))),
+        CoreResponseEvent::Completed(Box::new(respond_response("不应重复发送"))),
     ]);
     let sender = FakeStreamSender::new([]);
 
@@ -129,9 +129,9 @@ async fn stream_pending_completed_sends_ordinary_reply_once() {
 #[tokio::test]
 async fn stream_completed_sends_single_final_chunk() {
     let events = FakeEventStream::new([
-        RespondEvent::TextDelta("好".to_owned()),
-        RespondEvent::Completed(Box::new(respond_response("好"))),
-        RespondEvent::Completed(Box::new(respond_response("好"))),
+        CoreResponseEvent::TextDelta("好".to_owned()),
+        CoreResponseEvent::Completed(Box::new(respond_response("好"))),
+        CoreResponseEvent::Completed(Box::new(respond_response("好"))),
     ]);
     let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None)]);
 
@@ -175,8 +175,8 @@ async fn active_text_stream_sends_completed_image_then_only_its_fallback() {
         ],
     });
     let events = FakeEventStream::new([
-        RespondEvent::TextDelta("说明".to_owned()),
-        RespondEvent::Completed(Box::new(response)),
+        CoreResponseEvent::TextDelta("说明".to_owned()),
+        CoreResponseEvent::Completed(Box::new(response)),
     ]);
     let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None)]);
     let config = test_config();

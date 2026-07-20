@@ -492,10 +492,19 @@ fn empty_chat_reply_uses_configured_bot_display_name() {
 }
 
 #[test]
-fn respond_response_only_exposes_text_for_python() {
-    let chat = ChatResponse::ok(
-        "raw",
-        LlmMetrics {
+fn respond_response_serialization_only_exposes_display_channels() {
+    let usage = TokenUsage {
+        input_tokens: Some(2),
+        cached_input_tokens: Some(1),
+        output_tokens: Some(3),
+        total_tokens: Some(5),
+    };
+    let output = RespondOutput {
+        reply: "reply".to_owned(),
+        text: "reply".to_owned(),
+        markdown: None,
+        parts: Vec::new(),
+        metrics: LlmMetrics {
             provider: "mock".to_owned(),
             model: "mock".to_owned(),
             stream: true,
@@ -503,14 +512,14 @@ fn respond_response_only_exposes_text_for_python() {
             ttft_ms: Some(2),
             total_latency_ms: 3,
         },
-        Some(TokenUsage {
-            input_tokens: None,
-            cached_input_tokens: None,
-            output_tokens: None,
-            total_tokens: None,
-        }),
-    );
-    let response = RespondResponse::from_chat(chat, Some("reply".to_owned()), None);
+        usage: Some(usage.clone()),
+        agent: Default::default(),
+    };
+    let response = response_from_output(output);
+    assert_eq!(response.metrics.provider, "mock");
+    assert_eq!(response.metrics.model, "mock");
+    assert_eq!(response.usage, Some(usage));
+
     let json = serde_json::to_value(response).unwrap();
     assert_eq!(json["text"], "reply");
     assert!(json.get("markdown").is_none());

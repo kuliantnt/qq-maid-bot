@@ -7,12 +7,9 @@ use async_trait::async_trait;
 use qq_maid_common::{
     identity_context::{ConversationContext, MentionIdentity, MessageActorContext, MessageContext},
     input_part::{MessageInputPart, QuotedMessageContext},
+    output_part::AssistantOutput,
 };
 use serde::{Deserialize, Serialize};
-
-// 平台无关出站内容模型已下沉到 common，这里重新导出以维持
-// `crate::service::{AssistantOutput, OutputPart, OutputMedia}` 的对外路径稳定。
-pub use qq_maid_common::output_part::{AssistantOutput, OutputMedia, OutputPart};
 use tokio::sync::mpsc;
 
 use crate::identity::conversation_scope_key;
@@ -135,13 +132,13 @@ pub enum CoreConversation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreResponse {
-    /// 结构化出站内容，Core → Gateway 完整回复的唯一正文契约。
+    /// Core → Gateway 完整回复 envelope 中的结构化正文。
     ///
     /// Gateway 出站渲染、ref_index 文本回填、流式收尾、日志等读取用户可见正文
     /// 时，应统一通过 [`CoreResponse::text_content`] / [`CoreResponse::markdown_content`]
     /// 访问，不再存在平行的旧 `text` / `markdown` 字段。Core 内部 `RespondResponse`
     /// 仍可按 text/markdown 双通道组装正文，但只在转换为 `CoreResponse` 时合成为
-    /// 该结构化 output，不外泄到 Core→Gateway 边界。
+    /// common 的 `AssistantOutput`，不再创建平行正文类型。
     pub output: Option<AssistantOutput>,
     pub handled: Option<bool>,
     pub session_id: Option<String>,
