@@ -7,7 +7,7 @@ async fn todo_deprecated_slash_write_prompts_preserve_visible_snapshot() {
     let first = service.task_store.create(&owner, draft("第一条")).unwrap();
     let second = service.task_store.create(&owner, draft("第二条")).unwrap();
 
-    service.respond(message("看一下待办")).await.unwrap();
+    service.respond(message("/todo")).await.unwrap();
     let original_snapshot = service
         .session_store
         .get_or_create_active(&test_meta())

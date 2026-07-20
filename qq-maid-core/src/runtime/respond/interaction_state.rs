@@ -142,8 +142,8 @@ pub(super) fn command_bypasses_pending(user_text: &str) -> bool {
 }
 
 pub(super) fn should_try_todo_flow(user_text: &str) -> bool {
+    // 普通自然语言待办查询不再进确定性 Todo flow，只保留显式命令与“查看完整结果”。
     todo_flow::parse_todo_command(user_text).is_some()
-        || todo_flow::is_natural_todo_query_text(user_text)
         || todo_flow::is_full_todo_result_request(user_text)
 }
 
@@ -215,7 +215,7 @@ pub(super) fn classify_inbound_with_active(
         || search_flow::parse_web_search_command(user_text).is_some()
         || rss_flow::parse_rss_command(user_text).is_some()
         || todo_flow::parse_todo_command(user_text).is_some()
-        || todo_flow::is_natural_todo_query_text(user_text)
+        || todo_flow::is_full_todo_result_request(user_text)
         || memory_flow::parse_memory_command(user_text).is_some();
 
     CoreInboundClassification {

@@ -154,6 +154,68 @@ async fn natural_language_tool_query_supports_fuzzy_keyword_search() {
 }
 
 #[tokio::test]
+async fn list_todos_recurring_receipt_preserves_filtered_visible_snapshot() {
+    let arguments = serde_json::json!({
+        "status": "pending",
+        "due_date": null,
+        "date_range_text": null,
+        "time_filter": null,
+        "keyword": null,
+        "recurring": true
+    })
+    .to_string();
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json("list_todos", arguments, "周期性待办");
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let tomorrow = (qq_maid_common::time_context::request_time_context().local_date()
+        + chrono::Duration::days(1))
+    .format("%Y-%m-%d")
+    .to_string();
+    let recurring = service
+        .task_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "吃药".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: Some(tomorrow),
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::Daily,
+                recurrence_interval_days: 1,
+                recurrence_interval: 1,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
+            },
+        )
+        .unwrap();
+    create_private_todo(&service, "买香薰");
+
+    let response = service
+        .respond(private_message("筛选出周期性待办"))
+        .await
+        .unwrap();
+    let text = response.text.unwrap();
+    assert!(text.contains("吃药"));
+    assert!(!text.contains("买香薰"));
+    assert_eq!(inspector.tool_call_count(), 1);
+
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    let snapshot = session
+        .last_todo_query
+        .expect("missing recurring filtered snapshot");
+    assert_eq!(snapshot.query_type, "search");
+    assert_eq!(snapshot.condition, "周期性待办");
+    assert_eq!(snapshot.result_ids, vec![recurring.id]);
+}
+
+#[tokio::test]
 async fn list_todos_due_date_receipt_preserves_filtered_visible_snapshot() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
@@ -368,58 +430,9 @@ async fn list_todos_completed_date_range_receipt_uses_completed_at_snapshot() {
 }
 
 #[tokio::test]
-async fn natural_language_todo_query_prefers_listing_over_todo_parse_creation_chain() {
+async fn explicit_todo_command_aliases_and_filters_stay_deterministic() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
-    // Tool Calling 关闭时仍保留确定性 Todo 查询路径；开启时由前置路由交给 Tool Loop。
-    let service = test_service_with_provider_and_tool_calling(inspector.clone(), false);
-    let owner = TodoStore::owner(Some("u1"), "private:u1");
-    service
-        .task_store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "待查看项目".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: None,
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::None,
-                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
-                recurrence_interval_days: 0,
-                recurrence_interval: 0,
-                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-
-    let response = service
-        .respond(private_message("看看我的待办"))
-        .await
-        .unwrap();
-
-    assert_eq!(response.command.as_deref(), Some("todo_list"));
-    assert!(
-        response
-            .text
-            .as_deref()
-            .unwrap()
-            .contains("🚧 进行中 · 共 1 项")
-    );
-    let session = service
-        .session_store
-        .get_or_create_active(&private_test_meta())
-        .unwrap();
-    assert!(session.pending_operation.is_none());
-    assert!(inspector.requests().is_empty());
-    assert_eq!(inspector.tool_call_count(), 0);
-}
-
-#[tokio::test]
-async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
-    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
-    // Tool Calling 关闭时仍保留确定性 Todo 查询路径；开启时由前置路由交给 Tool Loop。
-    let service = test_service_with_provider_and_tool_calling(inspector.clone(), false);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     let pending = service
         .task_store
@@ -460,62 +473,55 @@ async fn natural_language_todo_query_aliases_and_filters_stay_deterministic() {
         )
         .unwrap();
     service.task_store.complete(&owner, &completed.id).unwrap();
-    for input in ["看一下待办", "看一下代办", "查询待办", "查询代办"] {
+
+    for input in ["/todo", "/todo list", "/todo list 未完成"] {
         let response = service.respond(private_message(input)).await.unwrap();
         let text = response.text.unwrap();
         assert_eq!(response.command.as_deref(), Some("todo_list"), "{input}");
         assert!(text.contains("未完成条目"), "{input}");
         assert!(!text.contains("已完成条目"), "{input}");
-        assert!(!text.contains("已取消条目"), "{input}");
     }
 
-    for input in [
-        "查看未完成的待办",
-        "看看没做完的任务",
-        "查看还没做完的任务",
-        "查看未结束的待办",
-    ] {
-        let response = service.respond(private_message(input)).await.unwrap();
-        let text = response.text.unwrap();
-        assert_eq!(response.command.as_deref(), Some("todo_list"), "{input}");
-        assert!(text.contains("未完成条目"), "{input}");
-        assert!(!text.contains("已完成条目"), "{input}");
-        assert!(!text.contains("已取消条目"), "{input}");
-    }
-
-    for input in ["查看所有待办", "查看全部待办"] {
-        let all = service.respond(private_message(input)).await.unwrap();
-        let all_text = all.text.unwrap();
-        assert_eq!(all.command.as_deref(), Some("todo_all"), "{input}");
-        assert!(all_text.contains("全部待办"), "{input}");
-        assert!(all_text.contains("进行中"), "{input}");
-        assert!(all_text.contains("已完成"), "{input}");
-        assert!(all_text.contains("未完成条目"), "{input}");
-        assert!(all_text.contains("已完成条目"), "{input}");
-    }
+    let all = service.respond(private_message("/todo all")).await.unwrap();
+    let all_text = all.text.unwrap();
+    assert_eq!(all.command.as_deref(), Some("todo_all"));
+    assert!(all_text.contains("全部待办"));
+    assert!(all_text.contains("未完成条目"));
+    assert!(all_text.contains("已完成条目"));
 
     let completed_only = service
-        .respond(private_message("查看已完成待办"))
+        .respond(private_message("/todo done"))
         .await
         .unwrap();
     let completed_text = completed_only.text.unwrap();
     assert_eq!(completed_only.command.as_deref(), Some("todo_done"));
     assert!(!completed_text.contains("未完成条目"));
     assert!(completed_text.contains("已完成条目"));
-    assert!(!completed_text.contains("已取消条目"));
-
-    for input in ["查看完成的待办", "看看做完的任务"] {
-        let response = service.respond(private_message(input)).await.unwrap();
-        let text = response.text.unwrap();
-        assert_eq!(response.command.as_deref(), Some("todo_done"), "{input}");
-        assert!(!text.contains("未完成条目"), "{input}");
-        assert!(text.contains("已完成条目"), "{input}");
-        assert!(!text.contains("已取消条目"), "{input}");
-    }
 
     assert_eq!(pending.status, TodoStatus::Pending);
     assert!(inspector.requests().is_empty());
     assert_eq!(inspector.tool_call_count(), 0);
+}
+
+#[tokio::test]
+async fn natural_language_todo_queries_enter_tool_loop_instead_of_shortcut() {
+    let list_args = r#"{"status":"pending","due_date":null,"date_range_text":null,"time_filter":null,"keyword":null,"recurring":null}"#;
+    // MockProvider 的 tool action 按次消费，多轮自然语言查询要预置同样次数的 list_todos。
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json("list_todos", list_args, "查询完成")
+        .with_tool_call_json("list_todos", list_args, "查询完成")
+        .with_tool_call_json("list_todos", list_args, "查询完成");
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    create_private_todo(&service, "自然语言待办");
+
+    // route 层识别“看一下/查看 + 待办/代办”为 Todo 查询意图后进入 Tool Loop。
+    for input in ["看一下待办", "看一下代办", "查看待办"] {
+        let response = service.respond(private_message(input)).await.unwrap();
+        assert_eq!(response.command.as_deref(), Some("todo_list"), "{input}");
+        assert!(response.text.unwrap().contains("自然语言待办"), "{input}");
+    }
+    assert_eq!(inspector.tool_call_count(), 3);
 }
 
 #[tokio::test]
@@ -532,7 +538,7 @@ async fn todo_completed_lists_show_up_to_ten_without_old_five_item_collapse() {
     }
 
     let completed = service
-        .respond(private_message("查看已完成待办"))
+        .respond(private_message("/todo done"))
         .await
         .unwrap();
     let completed_text = completed.text.unwrap();
@@ -589,7 +595,7 @@ async fn todo_all_caps_at_ten_and_reports_real_total() {
             .unwrap();
     }
 
-    let collapsed = service.respond(private_message("全部待办")).await.unwrap();
+    let collapsed = service.respond(private_message("/todo all")).await.unwrap();
     let collapsed_text = collapsed.text.unwrap();
     assert_eq!(collapsed.command.as_deref(), Some("todo_all"));
     assert!(collapsed_text.contains("📋 全部待办 · 共 11 项"));
@@ -600,7 +606,7 @@ async fn todo_all_caps_at_ten_and_reports_real_total() {
 }
 
 #[tokio::test]
-async fn complete_todo_phrase_lists_all_statuses_fully_with_tool_loop_enabled() {
+async fn explicit_todo_and_full_result_restore_use_visible_snapshot() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
@@ -617,35 +623,20 @@ async fn complete_todo_phrase_lists_all_statuses_fully_with_tool_loop_enabled() 
             .unwrap();
         service.task_store.complete(&owner, &item.id).unwrap();
     }
-    let pending = service.respond(private_message("查看待办")).await.unwrap();
+    let pending = service.respond(private_message("/todo")).await.unwrap();
     let pending_text = pending.text.unwrap();
     assert_eq!(pending.command.as_deref(), Some("todo_list"));
     assert!(pending_text.contains("🚧 进行中 · 共 6 项"));
     assert!(!pending_text.contains("已完成待办 1"));
 
+    // 先建立可见快照，再请求完整结果；普通自然语言“查看完整待办”不再短路。
     let full = service
-        .respond(private_message("查看完整待办"))
+        .respond(private_message("查看完整结果"))
         .await
         .unwrap();
     let full_text = full.text.unwrap();
-
-    assert_eq!(full.command.as_deref(), Some("todo_all"));
-    assert!(full_text.contains("📋 全部待办 · 共 8 项"));
+    assert_eq!(full.command.as_deref(), Some("todo_list"));
     assert!(full_text.contains("进行中待办 6"));
-    assert!(full_text.contains("已完成待办 1"));
-    assert!(!full_text.contains("还有 5 项待办"));
-    assert_eq!(inspector.tool_call_count(), 0);
-}
-
-#[tokio::test]
-async fn todo_write_or_question_phrases_do_not_enter_natural_query_path() {
-    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
-    let service = test_service_with_provider_and_tool_calling(inspector.clone(), false);
-
-    for input in ["取消这个待办", "怎么取消待办", "帮我取消第一条", "不做了"]
-    {
-        let response = service.respond(private_message(input)).await.unwrap();
-        assert_ne!(response.command.as_deref(), Some("todo_list"), "{input}");
-    }
+    assert!(!full_text.contains("已完成待办 1"));
     assert_eq!(inspector.tool_call_count(), 0);
 }

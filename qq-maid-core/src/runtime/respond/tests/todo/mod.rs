@@ -46,22 +46,6 @@ fn draft_due_date(title: &str, due_date: &str) -> TodoItemDraft {
     }
 }
 
-fn draft_due_at(title: &str, due_at: &str) -> TodoItemDraft {
-    TodoItemDraft {
-        title: title.to_owned(),
-        detail: None,
-        raw_text: None,
-        due_date: None,
-        due_at: Some(due_at.to_owned()),
-        reminder_at: None,
-        time_precision: TodoTimePrecision::DateTime,
-        recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
-        recurrence_interval_days: 0,
-        recurrence_interval: 0,
-        recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
-    }
-}
-
 fn assert_in_order(text: &str, needles: &[&str]) {
     let mut cursor = 0;
     for needle in needles {

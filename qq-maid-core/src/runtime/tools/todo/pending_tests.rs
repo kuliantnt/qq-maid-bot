@@ -291,7 +291,23 @@ fn inbound_classification_marks_business_commands_immediate() {
 }
 
 #[test]
-fn inbound_classification_marks_natural_todo_queries_immediate() {
+fn inbound_classification_marks_explicit_todo_commands_immediate() {
+    let service = test_service();
+
+    for input in [
+        "/todo",
+        "/todo list",
+        "/todo all",
+        "/todo done",
+        "查看完整结果",
+    ] {
+        let classification = service.classify_inbound(message(input)).unwrap();
+        assert_eq!(classification.kind, CoreInboundKind::Immediate, "{input}");
+    }
+}
+
+#[test]
+fn inbound_classification_marks_natural_todo_queries_as_normal_chat() {
     let service = test_service();
 
     for input in [
@@ -301,9 +317,10 @@ fn inbound_classification_marks_natural_todo_queries_immediate() {
         "查询代办",
         "查看所有待办",
         "查看已完成待办",
+        "查看周期性待办",
     ] {
         let classification = service.classify_inbound(message(input)).unwrap();
-        assert_eq!(classification.kind, CoreInboundKind::Immediate, "{input}");
+        assert_eq!(classification.kind, CoreInboundKind::NormalChat, "{input}");
     }
 }
 
@@ -663,11 +680,11 @@ async fn stable_group_visible_todo_snapshots_are_isolated_by_actor() {
         .unwrap();
 
     service
-        .respond(stable_group_message("看一下待办", "u1"))
+        .respond(stable_group_message("/todo", "u1"))
         .await
         .unwrap();
     service
-        .respond(stable_group_message("看一下待办", "u2"))
+        .respond(stable_group_message("/todo", "u2"))
         .await
         .unwrap();
 

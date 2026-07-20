@@ -41,7 +41,7 @@ impl Tool for ListTodoTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
             name: LIST_TODOS_TOOL_NAME.to_owned(),
-            description: "查询当前私聊用户的待办列表。不会返回数据库内部 ID；visible_number 只供本轮 Tool Loop 内部推理和后续工具调用使用，不会覆盖用户跨轮次真正看到的列表编号。status=pending 查询未完成，completed 查询已完成，all 查询全部。查询今天、昨天、本周、上周、本月、最近 N 天等时间范围时，把用户原始中文范围传给 date_range_text；Rust 会按请求时间和时区归一化，模型不要自行换算绝对日期。".to_owned(),
+            description: "查询当前私聊用户的待办列表。不会返回数据库内部 ID；visible_number 只供本轮 Tool Loop 内部推理和后续工具调用使用，不会覆盖用户跨轮次真正看到的列表编号。status=pending 查询未完成，completed 查询已完成，all 查询全部。查询今天、昨天、本周、上周、本月、最近 N 天等时间范围时，把用户原始中文范围传给 date_range_text；Rust 会按请求时间和时区归一化，模型不要自行换算绝对日期。用户说“周期性/重复待办”时传 recurring=true；说“一次性/非周期待办”时传 recurring=false；不限周期类型时传 null。状态、日期、关键词和周期类型可组合使用。".to_owned(),
             parameters: json!({
                 "type": "object",
                 "properties": {

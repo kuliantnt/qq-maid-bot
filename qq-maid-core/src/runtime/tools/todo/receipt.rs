@@ -69,6 +69,8 @@ struct RelatedListSpec {
     date_field: TodoListDateField,
     keyword: Option<String>,
     special_time_filter: Option<String>,
+    /// `Some(true)` 只展示周期待办，`Some(false)` 只展示一次性待办。
+    recurring: Option<bool>,
     shared_query: bool,
     title: &'static str,
     empty_text: &'static str,
@@ -621,6 +623,7 @@ fn remember_related_list_snapshot(
         let mut query = TodoQuery {
             status: spec.query_status,
             keyword: spec.keyword.clone(),
+            recurring: spec.recurring,
             ..TodoQuery::default()
         };
         query.time = match spec.special_time_filter.as_deref() {
@@ -893,6 +896,7 @@ fn pending_list_spec() -> RelatedListSpec {
         date_field: TodoListDateField::Planned,
         keyword: None,
         special_time_filter: None,
+        recurring: None,
         shared_query: false,
         title: "🚧 当前进行中",
         empty_text: "当前没有进行中的待办。",
@@ -911,6 +915,7 @@ fn completed_list_spec() -> RelatedListSpec {
         date_field: TodoListDateField::Planned,
         keyword: None,
         special_time_filter: None,
+        recurring: None,
         shared_query: false,
         title: "✅ 当前已完成",
         empty_text: "当前没有已完成待办。",
@@ -934,6 +939,7 @@ fn list_spec_from_output(output: &Value) -> RelatedListSpec {
     spec.condition = string_field(output, "condition").unwrap_or_default();
     spec.keyword = string_field(output, "keyword");
     spec.special_time_filter = string_field(output, "time_filter");
+    spec.recurring = bool_field(output, "recurring");
     if let Some(due_date) = string_field(output, "due_date")
         .and_then(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d").ok())
     {
@@ -955,10 +961,14 @@ fn list_spec_from_output(output: &Value) -> RelatedListSpec {
         Some("all") => "all",
         Some("completed") => "completed-list",
         _ if spec.due_date.is_some() || spec.due_range.is_some() => "due-date",
-        _ if spec.keyword.is_some() => "search",
+        _ if spec.keyword.is_some() || spec.recurring.is_some() => "search",
         _ => "list",
     };
     spec
+}
+
+fn bool_field(value: &Value, key: &str) -> Option<bool> {
+    value.get(key).and_then(Value::as_bool)
 }
 
 fn all_list_spec() -> RelatedListSpec {
@@ -972,6 +982,7 @@ fn all_list_spec() -> RelatedListSpec {
         date_field: TodoListDateField::Planned,
         keyword: None,
         special_time_filter: None,
+        recurring: None,
         shared_query: false,
         title: "📋 全部待办",
         empty_text: "当前没有待办。",

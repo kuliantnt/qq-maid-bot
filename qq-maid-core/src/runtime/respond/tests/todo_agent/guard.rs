@@ -238,10 +238,7 @@ async fn todo_edit_guard_requires_successful_update_result() {
         )
         .unwrap();
 
-    service
-        .respond(private_message("看一下待办"))
-        .await
-        .unwrap();
+    service.respond(private_message("/todo")).await.unwrap();
     let response = service
         .respond(private_message("把第一条改成检查新版守卫"))
         .await
@@ -376,10 +373,7 @@ async fn todo_edit_tool_false_result_does_not_pass_success_guard() {
         )
         .unwrap();
 
-    service
-        .respond(private_message("看一下待办"))
-        .await
-        .unwrap();
+    service.respond(private_message("/todo")).await.unwrap();
     service.task_store.complete(&owner, &todo.id).unwrap();
     let response = service
         .respond(private_message("把第一条改成不应成功"))
@@ -436,10 +430,7 @@ async fn todo_delete_pending_item_false_deleted_text_does_not_pass_success_guard
         )
         .unwrap();
 
-    service
-        .respond(private_message("看一下待办"))
-        .await
-        .unwrap();
+    service.respond(private_message("/todo")).await.unwrap();
     let response = service
         .respond(private_message("永久删除第一条"))
         .await
@@ -499,7 +490,7 @@ async fn todo_delete_completed_tool_failure_cannot_be_reported_as_success() {
         .unwrap();
     service.task_store.complete(&owner, &todo.id).unwrap();
     service
-        .respond(private_message("查看已完成待办"))
+        .respond(private_message("/todo done"))
         .await
         .unwrap();
 
