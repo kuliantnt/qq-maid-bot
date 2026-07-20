@@ -2,6 +2,30 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.20.5] - 2026-07-20
+
+### Added
+
+* **Tavily 可选联网搜索后端**（PR #551）：`/查` 和自然语言 `web_search` 共用统一搜索后端配置，支持 Provider 原生搜索、Tavily Search 和关闭搜索；Tavily API Key 可通过配置中心的受管密钥或兼容环境变量 `TAVILY_API_KEY` 注入，不会写入 `agent.toml`。
+
+### Changed
+
+* **联网搜索配置统一**（PR #551）：将搜索后端、结果数量、搜索深度、主题、时间范围和超时收敛到 `agent.toml` 的 `[tools.web_search]`，WebUI 可维护搜索后端与参数，并保留原生 Provider 搜索 route。
+* **响应链路收口**（PR #548）：移除 Core、Gateway 和多入口发送链路中的冗余响应包装，统一响应状态与测试支持，保持现有平台发送语义。
+
+### Fixed
+
+* **多目标联网查询可信结果卡片**（PR #552）：多目标搜索逐项展示模型事实摘要和来源链接，保留最终综合回答；部分失败时显示成功/失败数量，不再把已有有效结果误报为“没查到明确结果”。
+* **Agent 工具重试结果聚合**（PR #554）：同一轮中工具失败后模型重试时只展示最终结果，避免重复显示失败卡片；跨 Provider 候选回退时将重试关系转为累计全局下标，不再误隐藏前一个候选的有效结果。
+* **未闭合 Markdown 反引号兼容**（PR #549）：消息中的未闭合代码标记不再破坏 Markdown 处理和后续回复链路。
+
+### Compatibility
+
+* 本版本无数据库 migration。默认联网搜索后端仍为 `provider_native`，不配置 Tavily 时原有 OpenAI / Gemini 原生搜索行为保持不变。
+* 旧版 `agent.toml` 中的顶层 `[search_routes.*]` 会由 Unix / Windows 更新脚本迁移到 `[tools.web_search.routes.*]`，并在迁移前生成备份；直接替换二进制而不经过更新脚本的部署需要手工完成该配置迁移。
+* Tavily 为可选能力；将 `[tools.web_search].backend` 设置为 `tavily` 时必须配置 `tools.web_search.tavily.api_key` 或 `TAVILY_API_KEY`，否则实际搜索会明确报告配置错误。
+* 根包 `qq-maid-bot` 版本号提升到 `0.20.5`，内部 crate 版本不统一提升。
+
 ## [v0.20.4] - 2026-07-20
 
 ### Fixed
