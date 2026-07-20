@@ -512,6 +512,8 @@ impl AppConfig {
             .agent_config
             .resolve(ChatScene::Private)
             .expect("agent config is validated when AppConfig is created");
+        let mut web_search = self.agent_config.web_search().clone();
+        web_search.default_model = private_policy.search_model.clone();
         qq_maid_llm::config::LlmConfig {
             provider: qq_maid_llm::config::ProviderMode::Auto,
             model_route: private_policy.main_route,
@@ -555,7 +557,8 @@ impl AppConfig {
             request_timeout_seconds: self.request_timeout_seconds,
             media_max_bytes: self.media_max_bytes,
             max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-            openai_search_model: private_policy.search_model,
+            web_search,
+            tavily_api_key: env_optional("TAVILY_API_KEY"),
         }
     }
 }

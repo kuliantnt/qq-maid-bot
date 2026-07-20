@@ -89,6 +89,12 @@ pub fn managed_config_fields() -> Vec<Field> {
             "core.provider",
             Apply::Restart,
         ),
+        Field::secret(
+            "tools.web_search.tavily.api_key",
+            "TAVILY_API_KEY",
+            "core.search",
+            Apply::Restart,
+        ),
         Field::public(
             "features.rss.enabled",
             "RSS_ENABLED",

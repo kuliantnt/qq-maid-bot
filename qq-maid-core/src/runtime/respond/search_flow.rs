@@ -46,7 +46,22 @@ const WEB_SEARCH_EMPTY_RESULT_REPLY: &str = "【联网查询】
 // 联网查询未配置时的回复
 const WEB_SEARCH_CONFIG_ERROR_REPLY: &str = "【联网查询】
 
-联网查询还没有配置好，请检查 OPENAI_API_KEY、OPENAI_BASE_URLS 和查询模型配置。";
+联网查询还没有配置好，请检查 tools.web_search 后端、搜索 route 和对应 Provider 配置。";
+const WEB_SEARCH_DISABLED_REPLY: &str = "【联网查询】
+
+联网查询已在 tools.web_search 配置中关闭。";
+const WEB_SEARCH_TAVILY_KEY_MISSING_REPLY: &str = "【联网查询】
+
+已选择 Tavily，但还没有配置 TAVILY_API_KEY。请在配置中心完成设置后重启。";
+const WEB_SEARCH_TAVILY_AUTH_REPLY: &str = "【联网查询】
+
+Tavily API Key 无效或已失效，请在配置中心检查后重启。";
+const WEB_SEARCH_RATE_LIMIT_REPLY: &str = "【联网查询】
+
+联网查询请求过于频繁，已被上游限流，请稍后再试。";
+const WEB_SEARCH_QUOTA_REPLY: &str = "【联网查询】
+
+Tavily 查询额度已用尽或账户不可用，请检查账户额度。";
 // 联网查询超时时的回复
 const WEB_SEARCH_TIMEOUT_REPLY: &str = "【联网查询】
 
@@ -126,6 +141,7 @@ impl RustRespondService {
             self.execute_web_search_tool_stream(
                 &search_query,
                 &raw_question,
+                policy.search_backend,
                 Some(policy.search_model.clone()),
                 on_delta.take(),
             )
@@ -134,6 +150,7 @@ impl RustRespondService {
             self.execute_web_search_tool(
                 &search_query,
                 &raw_question,
+                policy.search_backend,
                 Some(policy.search_model.clone()),
             )
             .await
@@ -188,6 +205,7 @@ impl RustRespondService {
         &self,
         query: &str,
         raw_question: &str,
+        backend_override: qq_maid_llm::web_search::WebSearchBackend,
         model_override: Option<String>,
     ) -> Result<WebSearchToolOutput, LlmError> {
         let tool =
@@ -199,6 +217,9 @@ impl RustRespondService {
                     raw_question: Some(raw_question.to_owned()),
                     max_results: None,
                     context_size: None,
+                    topic: None,
+                    time_range: None,
+                    backend_override: Some(backend_override),
                     model_override,
                 },
                 None,
@@ -211,6 +232,7 @@ impl RustRespondService {
         &self,
         query: &str,
         raw_question: &str,
+        backend_override: qq_maid_llm::web_search::WebSearchBackend,
         model_override: Option<String>,
         on_delta: Option<WebSearchDeltaHandler<'_>>,
     ) -> Result<WebSearchToolOutput, LlmError> {
@@ -223,6 +245,9 @@ impl RustRespondService {
                     raw_question: Some(raw_question.to_owned()),
                     max_results: None,
                     context_size: None,
+                    topic: None,
+                    time_range: None,
+                    backend_override: Some(backend_override),
                     model_override,
                 },
                 on_delta,
@@ -770,6 +795,12 @@ fn json_string_field(value: &Value, key: &str) -> Option<String> {
 pub(crate) fn format_web_search_error_reply(err: &LlmError) -> String {
     match err.code.as_str() {
         "config" => WEB_SEARCH_CONFIG_ERROR_REPLY.to_owned(),
+        "web_search_disabled" => WEB_SEARCH_DISABLED_REPLY.to_owned(),
+        "web_search_not_configured" => WEB_SEARCH_TAVILY_KEY_MISSING_REPLY.to_owned(),
+        "tavily_auth_error" => WEB_SEARCH_TAVILY_AUTH_REPLY.to_owned(),
+        "rate_limited" => WEB_SEARCH_RATE_LIMIT_REPLY.to_owned(),
+        "quota_exhausted" => WEB_SEARCH_QUOTA_REPLY.to_owned(),
+        "empty_result" => WEB_SEARCH_EMPTY_RESULT_REPLY.to_owned(),
         "timeout" => WEB_SEARCH_TIMEOUT_REPLY.to_owned(),
         _ => WEB_SEARCH_UPSTREAM_ERROR_REPLY.to_owned(),
     }

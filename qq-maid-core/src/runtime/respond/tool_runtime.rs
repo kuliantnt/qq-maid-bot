@@ -22,6 +22,7 @@ use crate::{
     storage::notification::NotificationOutboxStore,
 };
 use qq_maid_llm::tool::{DEFAULT_TOOL_TIMEOUT, ToolMetadata, ToolRegistry};
+use qq_maid_llm::web_search::WebSearchBackend;
 
 use super::{
     RespondExecutors, RespondRequest, RespondStores, agent_route::AgentToolMode,
@@ -168,6 +169,9 @@ impl ToolRuntime {
         if !self.weather_available {
             tool_names.retain(|name| *name != WEATHER_TOOL_NAME);
         }
+        if policy.search_backend == WebSearchBackend::Disabled {
+            tool_names.retain(|name| *name != WEB_SEARCH_TOOL_NAME);
+        }
         // image_generation 是 Provider 原生工具开关，不属于业务 Function Tool Registry。
         tool_names.retain(|name| *name != "image_generation");
         if policy.knowledge_mode == KnowledgeRetrievalMode::Auto {
@@ -183,6 +187,7 @@ impl ToolRuntime {
             registry.replace(Arc::new(
                 self.web_search_tool
                     .clone()
+                    .with_backend_override(policy.search_backend)
                     .with_model_override(policy.search_model.clone()),
             ))?;
         }

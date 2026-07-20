@@ -102,7 +102,7 @@ main() {
     [[ -f "${BUILD_DIR}/qq-maid-bot${EXE_SUFFIX}" ]] || die "missing ${BUILD_DIR}/qq-maid-bot${EXE_SUFFIX}; run cargo build --release first"
 
     rm -rf "${STAGING_DIR}" "${ARCHIVE_PATH}" "${SHA256_PATH}"
-    mkdir -p "${STAGING_DIR}/config" "${STAGING_DIR}/data/storage"
+    mkdir -p "${STAGING_DIR}/config" "${STAGING_DIR}/data/storage" "${STAGING_DIR}/lib"
 
     copy_executable "${BUILD_DIR}/qq-maid-bot${EXE_SUFFIX}" "${STAGING_DIR}/qq-maid-bot${EXE_SUFFIX}"
     copy_file runtime/README.md "${STAGING_DIR}/README.md"
@@ -110,10 +110,12 @@ main() {
     if [[ "${PAYLOAD_PROFILE}" == "windows" ]]; then
         copy_file scripts/qbot.ps1 "${STAGING_DIR}/qbot.ps1"
         copy_file scripts/qbot.cmd "${STAGING_DIR}/qbot.cmd"
+        copy_file scripts/lib/agent-config.ps1 "${STAGING_DIR}/lib/agent-config.ps1"
         copy_file scripts/botctl.ps1 "${STAGING_DIR}/botctl.ps1"
         copy_file scripts/botctl.cmd "${STAGING_DIR}/botctl.cmd"
         copy_file scripts/windows-startup-example.bat "${STAGING_DIR}/windows-startup-example.bat"
     else
+        copy_file scripts/lib/agent-config.sh "${STAGING_DIR}/lib/agent-config.sh"
         copy_executable scripts/botctl.sh "${STAGING_DIR}/botctl.sh"
         copy_executable scripts/botmon.sh "${STAGING_DIR}/botmon.sh"
         copy_executable scripts/diagnose-network.sh "${STAGING_DIR}/diagnose-network.sh"
@@ -191,6 +193,7 @@ if [[ "${PAYLOAD_PROFILE}" == "windows" ]]; then
         "config/runtime.example.toml"
         "qbot.ps1"
         "qbot.cmd"
+        "lib/agent-config.ps1"
         "botctl.ps1"
         "botctl.cmd"
         "windows-startup-example.bat"
@@ -202,6 +205,7 @@ else
         "config/ops.example.toml"
         "config/runtime.example.toml"
         "botctl.sh"
+        "lib/agent-config.sh"
         "botmon.sh"
         "diagnose-network.sh"
         "validate-runtime.sh"

@@ -99,7 +99,7 @@ jobs:
       - name: Check PowerShell syntax
         shell: powershell
         run: |
-          Get-ChildItem scripts -Filter *.ps1 | ForEach-Object {
+          Get-ChildItem scripts -Filter *.ps1 -Recurse | ForEach-Object {
             $tokens = $null
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null

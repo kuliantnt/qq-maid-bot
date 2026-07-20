@@ -24,6 +24,7 @@ const FIELD_LABELS: Record<string, string> = {
   "provider.gemini.base_url": "Gemini Base URL",
   "provider.gemini.api_key": "Gemini API Key",
   "provider.mimo.api_key": "MiMo API Key",
+  "tools.web_search.tavily.api_key": "Tavily API Key",
   "weather.qweather.api_key": "和风天气 API Key",
   "weather.qweather.api_host": "QWeather API Host",
   "weather.qweather.geo_host": "QWeather Geo Host",
@@ -71,6 +72,7 @@ const FIELD_GROUPS = [
   { label: "OneBot 11 入口", prefix: "platform.onebot11." },
   { label: "微信服务号入口", prefix: "platform.wechat_service." },
   { label: "功能开关", prefix: "features." },
+  { label: "联网搜索", prefix: "tools.web_search." },
   { label: "天气服务", prefix: "weather." },
   { label: "Web 控制台", prefix: "console." },
   { label: "基础运行", prefix: "bootstrap." },
@@ -83,6 +85,108 @@ const AGENT_ROUTE_LABELS: Record<string, string> = {
   private_search: "私聊搜索路线",
   group_search: "群聊搜索路线",
 };
+
+export type AgentWebSearchBackend = "provider_native" | "tavily" | "disabled";
+
+export interface AgentWebSearchConfig {
+  backend: AgentWebSearchBackend;
+  maxResults: number;
+  searchDepth: "basic" | "advanced";
+  topic: "general" | "news" | "finance";
+  timeRange: "day" | "week" | "month" | "year" | null;
+  connectTimeoutSeconds: number;
+  firstResponseTimeoutSeconds: number;
+  totalTimeoutSeconds: number;
+  routes: Record<string, string>;
+}
+
+const DEFAULT_WEB_SEARCH_CONFIG: AgentWebSearchConfig = {
+  backend: "provider_native",
+  maxResults: 5,
+  searchDepth: "basic",
+  topic: "general",
+  timeRange: null,
+  connectTimeoutSeconds: 10,
+  firstResponseTimeoutSeconds: 30,
+  totalTimeoutSeconds: 60,
+  routes: {},
+};
+
+/** 只识别统一的 tools.web_search；旧顶层 search_routes 不参与页面读取。 */
+export function readAgentWebSearchConfig(documentValue: unknown): AgentWebSearchConfig {
+  const webSearch = record(record(record(documentValue).tools).web_search);
+  const routes = Object.fromEntries(
+    Object.entries(record(webSearch.routes))
+      .map(([name, value]) => [name, string(record(value).model)] as const)
+      .filter(([, model]) => model.length > 0),
+  );
+  const backend = string(webSearch.backend);
+  const searchDepth = string(webSearch.search_depth);
+  const topic = string(webSearch.topic);
+  const timeRange = string(webSearch.time_range);
+  return {
+    backend: isWebSearchBackend(backend) ? backend : DEFAULT_WEB_SEARCH_CONFIG.backend,
+    maxResults: positiveNumber(webSearch.max_results, DEFAULT_WEB_SEARCH_CONFIG.maxResults),
+    searchDepth: searchDepth === "advanced" ? "advanced" : "basic",
+    topic: topic === "news" || topic === "finance" ? topic : "general",
+    timeRange: isWebSearchTimeRange(timeRange) ? timeRange : null,
+    connectTimeoutSeconds: positiveNumber(webSearch.connect_timeout_seconds, DEFAULT_WEB_SEARCH_CONFIG.connectTimeoutSeconds),
+    firstResponseTimeoutSeconds: positiveNumber(webSearch.first_response_timeout_seconds, DEFAULT_WEB_SEARCH_CONFIG.firstResponseTimeoutSeconds),
+    totalTimeoutSeconds: positiveNumber(webSearch.total_timeout_seconds, DEFAULT_WEB_SEARCH_CONFIG.totalTimeoutSeconds),
+    routes,
+  };
+}
+
+export function webSearchConfigChange(config: AgentWebSearchConfig): Record<string, unknown> {
+  if (!Number.isInteger(config.maxResults) || config.maxResults < 1 || config.maxResults > 10) {
+    throw new Error("Tavily 结果数必须是 1 到 10 之间的整数");
+  }
+  for (const [label, value] of [
+    ["连接超时", config.connectTimeoutSeconds],
+    ["首响应超时", config.firstResponseTimeoutSeconds],
+    ["总超时", config.totalTimeoutSeconds],
+  ] as const) {
+    if (!Number.isInteger(value) || value < 1) throw new Error(`${label}必须是大于 0 的整数秒数`);
+  }
+  if (config.connectTimeoutSeconds > config.firstResponseTimeoutSeconds) {
+    throw new Error("连接超时不能大于首响应超时");
+  }
+  if (config.firstResponseTimeoutSeconds > config.totalTimeoutSeconds) {
+    throw new Error("首响应超时不能大于总超时");
+  }
+  return {
+    action: "set_web_search",
+    backend: config.backend,
+    max_results: config.maxResults,
+    search_depth: config.searchDepth,
+    topic: config.topic,
+    time_range: config.timeRange,
+    connect_timeout_seconds: config.connectTimeoutSeconds,
+    first_response_timeout_seconds: config.firstResponseTimeoutSeconds,
+    total_timeout_seconds: config.totalTimeoutSeconds,
+  };
+}
+
+export function tavilyCredentialNotice(backend: AgentWebSearchBackend, configured: boolean): string {
+  return backend === "tavily" && !configured
+    ? "已选择 Tavily，但 Tavily API Key 尚未配置。请先在“敏感凭据”中保存 Key，重启后搜索才可用。"
+    : "";
+}
+
+export function webSearchRouteChanges(
+  savedRoutes: Record<string, string>,
+  formRoutes: Record<string, string>,
+): Array<Record<string, unknown>> {
+  const changes: Array<Record<string, unknown>> = [];
+  for (const name of ["private_search", "group_search"]) {
+    const model = (formRoutes[name] ?? "").trim();
+    // 后端切换只更新联网搜索参数；空输入或未改动路线都保留当前 agent.toml 内容。
+    if (model.length > 0 && model !== (savedRoutes[name] ?? "")) {
+      changes.push({ action: "set_search_route", name, model });
+    }
+  }
+  return changes;
+}
 
 let current: ConfigurationSnapshot | null = null;
 let toastTimer: number | undefined;
@@ -219,15 +323,67 @@ function renderAgent(snapshot: ConfigurationSnapshot): void {
       "首次开启会下载 BAAI/bge-small-zh-v1.5，并增加 CPU、内存占用；低配置服务器建议关闭。",
     ),
   ]));
+  const savedWebSearch = readAgentWebSearchConfig(documentValue);
+  const runningWebSearch = readAgentWebSearchConfig(agent.runningValue);
+  const tavilyKeyConfigured = snapshot.fields.some(
+    (field) => field.key === "tools.web_search.tavily.api_key" && field.configured,
+  );
+  const backendPendingRestart = savedWebSearch.backend !== runningWebSearch.backend;
+  const credentialStatus = statusField("Tavily 凭据", "");
+  credentialStatus.id = "agent-web-search-credential-status";
+  target.append(fieldGroup("联网搜索", [
+    statusField(
+      `当前生效后端：${webSearchBackendLabel(runningWebSearch.backend)}`,
+      `已保存后端：${webSearchBackendLabel(savedWebSearch.backend)} · ${backendPendingRestart ? "等待重启" : "当前已生效"}`,
+    ),
+    selectField("搜索后端", "agent-web-search-backend", savedWebSearch.backend, [
+      ["provider_native", "Provider 原生搜索"],
+      ["tavily", "Tavily"],
+      ["disabled", "关闭联网搜索"],
+    ], !agent.editable),
+    numberField("Tavily 结果数", "agent-web-search-max-results", savedWebSearch.maxResults, 1, 10, !agent.editable),
+    selectField("Tavily 搜索深度", "agent-web-search-depth", savedWebSearch.searchDepth, [
+      ["basic", "basic"],
+      ["advanced", "advanced"],
+    ], !agent.editable),
+    selectField("Tavily 主题", "agent-web-search-topic", savedWebSearch.topic, [
+      ["general", "通用"],
+      ["news", "新闻"],
+      ["finance", "金融"],
+    ], !agent.editable),
+    selectField("Tavily 时间范围", "agent-web-search-time-range", savedWebSearch.timeRange ?? "", [
+      ["", "不限"],
+      ["day", "最近一天"],
+      ["week", "最近一周"],
+      ["month", "最近一月"],
+      ["year", "最近一年"],
+    ], !agent.editable),
+    numberField("连接超时（秒）", "agent-web-search-connect-timeout", savedWebSearch.connectTimeoutSeconds, 1, 3600, !agent.editable),
+    numberField("首响应超时（秒）", "agent-web-search-first-response-timeout", savedWebSearch.firstResponseTimeoutSeconds, 1, 3600, !agent.editable),
+    numberField("总超时（秒）", "agent-web-search-total-timeout", savedWebSearch.totalTimeoutSeconds, 1, 3600, !agent.editable),
+    credentialStatus,
+  ]));
+  const backendSelect = element("agent-web-search-backend", HTMLSelectElement);
+  const refreshCredentialStatus = (): void => {
+    updateTavilyCredentialStatus(
+      isWebSearchBackend(backendSelect.value) ? backendSelect.value : "provider_native",
+      tavilyKeyConfigured,
+    );
+  };
+  backendSelect.addEventListener("change", refreshCredentialStatus);
+  refreshCredentialStatus();
   const modelRoutes = record(documentValue.model_routes);
   for (const routeName of ["private_main", "group_main", "aux"]) {
     const route = record(modelRoutes[routeName]);
     target.append(textField(AGENT_ROUTE_LABELS[routeName] ?? routeName, `agent-route-${routeName}`, array(route.candidates).join(", "), !agent.editable));
   }
-  const searchRoutes = record(documentValue.search_routes);
   for (const routeName of ["private_search", "group_search"]) {
-    const route = record(searchRoutes[routeName]);
-    target.append(textField(AGENT_ROUTE_LABELS[routeName] ?? routeName, `agent-search-${routeName}`, string(route.model), !agent.editable));
+    target.append(textField(
+      AGENT_ROUTE_LABELS[routeName] ?? routeName,
+      `agent-search-${routeName}`,
+      savedWebSearch.routes[routeName] ?? "",
+      !agent.editable,
+    ));
   }
   const scenes = record(documentValue.scenes);
   for (const sceneName of ["private", "group"]) {
@@ -346,6 +502,13 @@ async function saveSecrets(): Promise<void> {
 
 async function saveAgent(): Promise<void> {
   if (!current?.agent) return;
+  let webSearchChange: Record<string, unknown>;
+  try {
+    webSearchChange = webSearchConfigChange(webSearchFormConfig());
+  } catch (cause) {
+    showResult(errorMessage(cause), true);
+    return;
+  }
   const documentValue = record(current.agent.savedValue);
   const scenes = record(documentValue.scenes);
   const embedding = record(record(documentValue.knowledge).embedding);
@@ -356,15 +519,17 @@ async function saveAgent(): Promise<void> {
       enabled: element("agent-knowledge-embedding-enabled", HTMLInputElement).checked,
       cache_dir: string(embedding.cache_dir) || "cache/knowledge-embedding",
     },
-  }];
+  }, webSearchChange];
   for (const routeName of ["private_main", "group_main", "aux"]) {
     const candidates = element(`agent-route-${routeName}`, HTMLInputElement).value
       .split(",").map((value) => value.trim()).filter(Boolean);
     changes.push({ action: "set_model_route", name: routeName, candidates });
   }
-  for (const routeName of ["private_search", "group_search"]) {
-    changes.push({ action: "set_search_route", name: routeName, model: element(`agent-search-${routeName}`, HTMLInputElement).value.trim() });
-  }
+  const savedRoutes = readAgentWebSearchConfig(documentValue).routes;
+  changes.push(...webSearchRouteChanges(savedRoutes, {
+    private_search: element("agent-search-private_search", HTMLInputElement).value,
+    group_search: element("agent-search-group_search", HTMLInputElement).value,
+  }));
   for (const sceneName of ["private", "group"]) {
     changes.push({ action: "set_scene", scene: sceneName, config: agentSceneConfig(sceneName, scenes) });
   }
@@ -387,6 +552,25 @@ function agentSceneConfig(sceneName: string, scenes: Record<string, unknown>): R
     ...record(scenes[sceneName]),
     tool_calling_enabled: element(`agent-tool-${sceneName}`, HTMLInputElement).checked,
     enabled_tools: selectedAgentToolNames(toolInputs),
+  };
+}
+
+function webSearchFormConfig(): AgentWebSearchConfig {
+  const backend = element("agent-web-search-backend", HTMLSelectElement).value;
+  const searchDepth = element("agent-web-search-depth", HTMLSelectElement).value;
+  const topic = element("agent-web-search-topic", HTMLSelectElement).value;
+  const timeRange = element("agent-web-search-time-range", HTMLSelectElement).value;
+  if (!isWebSearchBackend(backend)) throw new Error("联网搜索后端无效");
+  return {
+    backend,
+    maxResults: integerInput("agent-web-search-max-results"),
+    searchDepth: searchDepth === "advanced" ? "advanced" : "basic",
+    topic: topic === "news" || topic === "finance" ? topic : "general",
+    timeRange: isWebSearchTimeRange(timeRange) ? timeRange : null,
+    connectTimeoutSeconds: integerInput("agent-web-search-connect-timeout"),
+    firstResponseTimeoutSeconds: integerInput("agent-web-search-first-response-timeout"),
+    totalTimeoutSeconds: integerInput("agent-web-search-total-timeout"),
+    routes: {},
   };
 }
 
@@ -561,6 +745,31 @@ function textField(labelText: string, id: string, value: string, disabled: boole
   return row;
 }
 
+function numberField(
+  labelText: string,
+  id: string,
+  value: number,
+  min: number,
+  max: number,
+  disabled: boolean,
+): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "config-row";
+  const label = document.createElement("label");
+  label.htmlFor = id;
+  label.textContent = labelText;
+  const input = document.createElement("input");
+  input.id = id;
+  input.type = "number";
+  input.min = String(min);
+  input.max = String(max);
+  input.step = "1";
+  input.value = String(value);
+  input.disabled = disabled;
+  row.append(label, input);
+  return row;
+}
+
 function selectField(
   labelText: string,
   id: string,
@@ -614,6 +823,19 @@ function statusField(summary: string, detail: string): HTMLElement {
   return row;
 }
 
+function updateTavilyCredentialStatus(backend: AgentWebSearchBackend, configured: boolean): void {
+  const row = element("agent-web-search-credential-status");
+  const summary = row.querySelector("strong");
+  const detail = row.querySelector(".field-meta");
+  if (!summary || !detail) throw new Error("缺少 Tavily 凭据状态元素");
+  const notice = tavilyCredentialNotice(backend, configured);
+  summary.textContent = configured ? "Tavily API Key：已配置" : "Tavily API Key：未配置";
+  detail.textContent = notice || (configured
+    ? "密钥保存在安全配置中心，不会写入 agent.toml 或回传浏览器。"
+    : "可在“敏感凭据”中配置；未选择 Tavily 时不影响其他搜索后端。");
+  row.classList.toggle("config-row-warning", notice.length > 0);
+}
+
 function badge(text: string, kind: string): HTMLElement {
   const value = document.createElement("span");
   value.className = `config-badge config-badge-${kind}`;
@@ -633,6 +855,13 @@ function inputId(key: string): string { return `config-${key.replaceAll(".", "-"
 function record(value: unknown): Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function array(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
 function string(value: unknown): string { return typeof value === "string" ? value : ""; }
+function positiveNumber(value: unknown, fallback: number): number { return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback; }
+function integerInput(id: string): number { return Number(element(id, HTMLInputElement).value); }
+function isWebSearchBackend(value: string): value is AgentWebSearchBackend { return value === "provider_native" || value === "tavily" || value === "disabled"; }
+function isWebSearchTimeRange(value: string): value is NonNullable<AgentWebSearchConfig["timeRange"]> { return value === "day" || value === "week" || value === "month" || value === "year"; }
+function webSearchBackendLabel(value: AgentWebSearchBackend): string {
+  return ({ provider_native: "Provider 原生搜索", tavily: "Tavily", disabled: "已关闭" } as const)[value];
+}
 
 function showResult(message: string, error: boolean): void {
   const target = element("configuration-result");
