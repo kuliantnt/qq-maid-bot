@@ -21,12 +21,15 @@ use crate::{
             common::{CommandBody, todo_error, truncate_chars},
         },
         session::{SessionMeta, SessionRecord},
-        tools::todo::{
-            ReminderFieldMode, TodoCardOptions, TodoItem, TodoListDateField, TodoListDateFilter,
-            TodoOwner, TodoQuery, TodoQueryStatus, TodoQueryTimeFilter, TodoRecurrenceKind,
-            TodoRecurrenceUnit, TodoRenderItem, TodoStatus, TodoStore, format_todo_cards,
-            remember_todo_query_snapshot, replay_todo_query,
-            todo_last_action_visible_entity_snapshot, todo_visible_entity_snapshot,
+        tools::{
+            agent_turn::is_retry_superseded_result,
+            todo::{
+                ReminderFieldMode, TodoCardOptions, TodoItem, TodoListDateField,
+                TodoListDateFilter, TodoOwner, TodoQuery, TodoQueryStatus, TodoQueryTimeFilter,
+                TodoRecurrenceKind, TodoRecurrenceUnit, TodoRenderItem, TodoStatus, TodoStore,
+                format_todo_cards, remember_todo_query_snapshot, replay_todo_query,
+                todo_last_action_visible_entity_snapshot, todo_visible_entity_snapshot,
+            },
         },
     },
     service::VisibleEntitySnapshot,
@@ -151,12 +154,16 @@ pub(crate) fn aggregate_todo_tool_results(
     for index in todo_indexes.iter().copied() {
         let result = &results[index];
         let pending_query = if result.name == LIST_TODOS_TOOL_NAME {
-            attempts
-                .iter()
-                .find(|attempt| attempt.result_index == index)
-                .and_then(|attempt| {
-                    TodoToolScope::consume_internal_query(session, &owner.key, &attempt.call_id)
-                })
+            if is_retry_superseded_result(index, attempts) {
+                None
+            } else {
+                attempts
+                    .iter()
+                    .find(|attempt| attempt.result_index == index)
+                    .and_then(|attempt| {
+                        TodoToolScope::consume_internal_query(session, &owner.key, &attempt.call_id)
+                    })
+            }
         } else {
             None
         };

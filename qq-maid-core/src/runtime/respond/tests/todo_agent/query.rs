@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use qq_maid_llm::provider::ToolCallingProtocol;
+use serde_json::Value;
 
 use crate::runtime::{
     respond::RustRespondService,
@@ -758,6 +759,88 @@ async fn full_result_replays_all_structured_todo_filter_combinations() {
         )
         .await;
     }
+}
+
+#[tokio::test]
+async fn todo_retry_keeps_replay_context_on_final_truncated_list_result() {
+    let today = qq_maid_common::time_context::request_time_context().local_date();
+    let target_date = (today + chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    let arguments = serde_json::json!({
+        "status": "pending",
+        "due_date": target_date,
+        "date_range_text": null,
+        "time_filter": null,
+        "keyword": null,
+        "recurring": true
+    })
+    .to_string();
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_todo_list_retry(arguments, "查询完成");
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let mut matching_ids = Vec::new();
+
+    for index in 1..=11 {
+        let mut draft = todo_draft(format!("周期查询匹配项 {index}"));
+        draft.due_date = Some(target_date.clone());
+        draft.time_precision = TodoTimePrecision::Date;
+        make_draft_recurring(&mut draft);
+        matching_ids.push(service.task_store.create(&owner, draft).unwrap().id);
+    }
+    let mut interference = todo_draft("周期查询一次性干扰项");
+    interference.due_date = Some(target_date);
+    interference.time_precision = TodoTimePrecision::Date;
+    service.task_store.create(&owner, interference).unwrap();
+
+    let collapsed = service
+        .respond(private_message("查询明天的周期性待办"))
+        .await
+        .unwrap();
+    let collapsed_text = collapsed.text.unwrap();
+    assert!(collapsed_text.contains("周期查询匹配项 1"));
+    assert!(collapsed_text.contains("周期查询匹配项 10"));
+    assert!(!collapsed_text.contains("周期查询匹配项 11"));
+    assert!(!collapsed_text.contains("周期查询一次性干扰项"));
+    assert!(!collapsed_text.contains("旧失败结果不应展示"));
+
+    let snapshot = last_todo_snapshot(&service, "retry collapsed");
+    assert_eq!(snapshot.result_ids.len(), 10);
+    assert!(
+        snapshot
+            .result_ids
+            .iter()
+            .all(|id| matching_ids.contains(id))
+    );
+    assert_eq!(
+        snapshot
+            .replay_context
+            .as_ref()
+            .and_then(|value| value.get("recurring"))
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        active_private_session(&service)
+            .extra
+            .get("tool_todo_task_query_history"),
+        None
+    );
+
+    let full = service
+        .respond(private_message("查看完整结果"))
+        .await
+        .unwrap();
+    let full_text = full.text.unwrap();
+    assert!(full_text.contains("周期查询匹配项 11"));
+    assert!(!full_text.contains("周期查询一次性干扰项"));
+    assert_eq!(
+        last_todo_snapshot(&service, "retry full").result_ids.len(),
+        11
+    );
+    assert_eq!(inspector.tool_call_count(), 1);
 }
 
 fn make_draft_recurring(draft: &mut TodoItemDraft) {
