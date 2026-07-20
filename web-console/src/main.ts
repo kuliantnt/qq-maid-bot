@@ -135,10 +135,10 @@ function renderAuth(status: BootstrapStatus): void {
   setText(
     "bootstrap-help",
     resetting
-      ? `请在运行目录读取 ${status.tokenFile}；可粘贴完整命令输出或仅粘贴 token。同一个短时单次重置令牌也只在新生成时输出一次到控制台。重置成功后令牌与旧管理员会话全部失效。`
+      ? `请在运行目录读取 ${status.tokenFile}；可粘贴完整令牌字符串或仅粘贴 token。同一个短时单次重置令牌也只在新生成时输出一次到控制台。重置成功后令牌与旧管理员会话全部失效。`
       : status.initialized
       ? "管理员会话与聊天 session 相互独立。"
-      : `请在运行目录读取 ${status.tokenFile}；可粘贴完整命令输出或仅粘贴 token。同一个短时单次令牌只在新生成时输出一次到控制台，使用成功后立即失效。`,
+      : `请在运行目录读取 ${status.tokenFile}；可粘贴完整令牌字符串或仅粘贴 token。同一个短时单次令牌只在新生成时输出一次到控制台，使用成功后立即失效。`,
   );
 }
 
