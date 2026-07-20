@@ -1,7 +1,7 @@
 //! 联网搜索 Tool。
 //!
-//! 该 Tool 复用 `qq-maid-llm` 的 WebSearchExecutor，把 OpenAI Responses web_search 能力纳入
-//! 服务端白名单 ToolRegistry。`/查` 只作为显式触发入口，仍在 respond/search_flow.rs
+//! 该 Tool 复用 `qq-maid-llm` 的统一 WebSearchExecutor，把 Provider 原生搜索与 Tavily
+//! 纳入服务端白名单 ToolRegistry。`/查` 只作为显式触发入口，仍在 respond/search_flow.rs
 //! 负责参数兼容、session 记录和用户可见错误文案。
 
 use std::{future::Future, pin::Pin, time::Duration};
@@ -20,8 +20,8 @@ use qq_maid_common::identity_context::{
 use qq_maid_llm::{
     tool::{Tool, ToolContext, ToolEffect, ToolMetadata, ToolOutput, ToolTimeoutPolicy},
     web_search::{
-        DEFAULT_MAX_RESULTS, DynWebSearchExecutor, WebSearchOutcome, WebSearchRequest,
-        WebSearchSource,
+        DEFAULT_MAX_RESULTS, DynWebSearchExecutor, WebSearchBackend, WebSearchOutcome,
+        WebSearchRequest, WebSearchSource,
     },
 };
 
@@ -137,6 +137,9 @@ pub struct WebSearchToolRequest {
     pub raw_question: Option<String>,
     pub max_results: Option<u8>,
     pub context_size: Option<String>,
+    pub topic: Option<String>,
+    pub time_range: Option<String>,
+    pub backend_override: Option<WebSearchBackend>,
     pub model_override: Option<String>,
 }
 
@@ -147,6 +150,7 @@ pub struct WebSearchTool {
     first_activity_timeout: Duration,
     idle_timeout: Duration,
     absolute_timeout: Duration,
+    backend_override: Option<WebSearchBackend>,
     model_override: Option<String>,
 }
 
@@ -158,6 +162,7 @@ impl WebSearchTool {
             first_activity_timeout: timeouts.first_activity,
             idle_timeout: timeouts.idle,
             absolute_timeout: timeouts.absolute,
+            backend_override: None,
             model_override: None,
         }
     }
@@ -173,6 +178,12 @@ impl WebSearchTool {
     /// 自然语言 Tool Loop 必须使用服务端解析后的场景搜索路线，模型参数不能覆盖。
     pub fn with_model_override(mut self, model: String) -> Self {
         self.model_override = Some(model);
+        self
+    }
+
+    /// 自然语言 Tool Loop 和显式 `/查` 只能使用服务端解析后的后端，模型参数不能覆盖。
+    pub fn with_backend_override(mut self, backend: WebSearchBackend) -> Self {
+        self.backend_override = Some(backend);
         self
     }
 
@@ -330,6 +341,16 @@ impl Tool for WebSearchTool {
                         "description": "搜索上下文大小，可选 low、medium、high；不确定时传 null",
                         "enum": ["low", "medium", "high", null]
                     },
+                    "topic": {
+                        "type": ["string", "null"],
+                        "description": "搜索主题，可选 general、news、finance；不确定时传 null",
+                        "enum": ["general", "news", "finance", null]
+                    },
+                    "time_range": {
+                        "type": ["string", "null"],
+                        "description": "相对时间范围，可选 day、week、month、year；不确定时传 null",
+                        "enum": ["day", "week", "month", "year", null]
+                    },
                     "comparison_dimensions": {
                         "type": ["array", "null"],
                         "description": "多实体模式下统一比较维度；单实体模式传 null",
@@ -353,7 +374,7 @@ impl Tool for WebSearchTool {
                         "maxItems": ops::WEB_SEARCH_RESEARCH_MAX_TARGETS
                     }
                 },
-                "required": ["query", "raw_question", "max_results", "context_size", "comparison_dimensions", "research_targets"],
+                "required": ["query", "raw_question", "max_results", "context_size", "topic", "time_range", "comparison_dimensions", "research_targets"],
                 "additionalProperties": false
             }),
         }
@@ -380,6 +401,8 @@ impl Tool for WebSearchTool {
                 ).ok()?,
                 "max_results": parse_max_results(arguments.get("max_results")).ok()?,
                 "context_size": parse_context_size(arguments.get("context_size")).ok()?,
+                "topic": parse_topic(arguments.get("topic")).ok()?,
+                "time_range": parse_time_range(arguments.get("time_range")).ok()?,
             }))
             .ok();
         }
@@ -387,6 +410,8 @@ impl Tool for WebSearchTool {
         let raw_question = optional_string_field(arguments, "raw_question");
         let max_results = parse_max_results(arguments.get("max_results")).ok()?;
         let context_size = parse_context_size(arguments.get("context_size")).ok()?;
+        let topic = parse_topic(arguments.get("topic")).ok()?;
+        let time_range = parse_time_range(arguments.get("time_range")).ok()?;
         let normalized_query = normalize_dedup_text(&query);
         (!normalized_query.is_empty()).then(|| {
             serde_json::to_string(&json!({
@@ -397,6 +422,8 @@ impl Tool for WebSearchTool {
                 ),
                 "max_results": max_results.unwrap_or(DEFAULT_MAX_RESULTS),
                 "context_size": context_size.as_deref().unwrap_or("low"),
+                "topic": topic.as_deref().unwrap_or("general"),
+                "time_range": time_range,
             }))
             .expect("web search deduplication key must serialize")
         })
@@ -414,7 +441,12 @@ impl Tool for WebSearchTool {
             // Agent 最终回复仍由模型统一生成，但搜索上游必须复用 `/查` 的 SSE 路径，
             // 不能因进入 Tool Loop 退化成完整非流请求。
             .query_stream_for_agent(
-                request_from_arguments(&context, &arguments, self.model_override.clone())?,
+                request_from_arguments(
+                    &context,
+                    &arguments,
+                    self.backend_override,
+                    self.model_override.clone(),
+                )?,
                 context.execution_deadline,
             )
             .await?;
@@ -433,6 +465,7 @@ fn normalize_dedup_text(value: &str) -> String {
 fn request_from_arguments(
     context: &ToolContext,
     arguments: &Value,
+    server_backend_override: Option<WebSearchBackend>,
     server_model_override: Option<String>,
 ) -> Result<WebSearchToolRequest, LlmError> {
     // 搜索模型路由只允许 `/查` 等服务端直接执行入口注入；模型 Tool Loop 调用
@@ -449,6 +482,9 @@ fn request_from_arguments(
         raw_question: optional_string_field(arguments, "raw_question"),
         max_results: parse_max_results(arguments.get("max_results"))?,
         context_size: parse_context_size(arguments.get("context_size"))?,
+        topic: parse_topic(arguments.get("topic"))?,
+        time_range: parse_time_range(arguments.get("time_range"))?,
+        backend_override: server_backend_override,
         model_override,
     })
 }
@@ -463,6 +499,9 @@ fn web_search_request(req: WebSearchToolRequest) -> WebSearchRequest {
         raw_question: req.raw_question,
         max_results: req.max_results,
         context_size: req.context_size,
+        topic: req.topic,
+        time_range: req.time_range,
+        backend_override: req.backend_override,
         model_override: req.model_override,
     }
 }
@@ -544,6 +583,41 @@ fn reject_invalid_context_size() -> Result<Option<String>, LlmError> {
         "context_size must be low, medium, high, or null",
         "tool",
     ))
+}
+
+fn parse_topic(value: Option<&Value>) -> Result<Option<String>, LlmError> {
+    parse_optional_enum(value, "topic", &["general", "news", "finance"])
+}
+
+fn parse_time_range(value: Option<&Value>) -> Result<Option<String>, LlmError> {
+    parse_optional_enum(value, "time_range", &["day", "week", "month", "year"])
+}
+
+fn parse_optional_enum(
+    value: Option<&Value>,
+    name: &str,
+    allowed: &[&str],
+) -> Result<Option<String>, LlmError> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => {
+            let text = text.trim().to_ascii_lowercase();
+            if allowed.contains(&text.as_str()) {
+                Ok(Some(text))
+            } else {
+                Err(LlmError::new(
+                    "bad_tool_arguments",
+                    format!("{name} must be one of {} or null", allowed.join(", ")),
+                    "tool",
+                ))
+            }
+        }
+        _ => Err(LlmError::new(
+            "bad_tool_arguments",
+            format!("{name} must be a string or null"),
+            "tool",
+        )),
+    }
 }
 
 fn optional_string_field(arguments: &Value, key: &str) -> Option<String> {

@@ -350,6 +350,9 @@ mod tests {
             raw_question: Some("/查 Gemini 搜索".to_owned()),
             max_results: Some(4),
             context_size: Some("high".to_owned()),
+            topic: None,
+            time_range: None,
+            backend_override: None,
             model_override: None,
         };
         let payload = gemini_web_search_payload(&req, &req.query, 4);

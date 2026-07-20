@@ -1995,6 +1995,9 @@ copy_release_into_app() {
 
     # v0.20 统一从 agent.toml 读取 Agent 策略；保留旧键会让新版本明确拒绝启动。
     migrate_obsolete_env_config
+    if declare -F migrate_agent_web_search_config >/dev/null; then
+        migrate_agent_web_search_config
+    fi
 
     # 仅清理旧混合平台 Release 遗留的 Windows 控制文件，不触碰用户运行数据。
     local obsolete_windows_file
@@ -2026,9 +2029,16 @@ install_or_update() {
     TMP_DIR_TO_CLEAN="${tmp_dir}"
 
     release_dir="$(download_release "${version}" "${target}" "${tmp_dir}")"
+    if [[ -f "${release_dir}/lib/agent-config.sh" ]]; then
+        # shellcheck source=scripts/lib/agent-config.sh
+        source "${release_dir}/lib/agent-config.sh"
+    fi
 
     if [[ "${command_name}" == "update" && -n "${current}" && "$(normalize_version "${current}")" == "${version}" ]]; then
         migrate_obsolete_env_config
+        if declare -F migrate_agent_web_search_config >/dev/null; then
+            migrate_agent_web_search_config
+        fi
         mark_agent_config_migration_complete "${current}" "${version}"
         rm -rf "${tmp_dir}"
         TMP_DIR_TO_CLEAN=""

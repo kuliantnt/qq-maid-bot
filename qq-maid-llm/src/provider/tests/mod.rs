@@ -394,7 +394,11 @@ fn app_config(provider: ProviderMode, model: &str) -> LlmConfig {
         provider,
         model_route: model_route.clone(),
         configured_model_routes: vec![("LLM_MODEL".to_owned(), model_route)],
-        openai_search_model: "gpt-5.5".to_owned(),
+        web_search: crate::web_search::WebSearchConfig {
+            default_model: "gpt-5.5".to_owned(),
+            ..crate::web_search::WebSearchConfig::default()
+        },
+        tavily_api_key: None,
         openai_api_key: Some("test-openai-key".to_owned()),
         openai_base_url: None,
         openai_api_mode: OpenAiApiMode::Auto,

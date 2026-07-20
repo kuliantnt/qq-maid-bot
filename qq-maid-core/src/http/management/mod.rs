@@ -265,6 +265,16 @@ enum AgentChangeRequest {
         name: String,
         model: String,
     },
+    SetWebSearch {
+        backend: String,
+        max_results: u8,
+        search_depth: String,
+        topic: String,
+        time_range: Option<String>,
+        connect_timeout_seconds: u64,
+        first_response_timeout_seconds: u64,
+        total_timeout_seconds: u64,
+    },
     RemoveSearchRoute {
         name: String,
     },
@@ -766,6 +776,25 @@ fn agent_change(change: AgentChangeRequest) -> Result<AgentConfigChange, BoxedRe
         AgentChangeRequest::SetSearchRoute { name, model } => {
             AgentConfigChange::SetSearchRoute { name, model }
         }
+        AgentChangeRequest::SetWebSearch {
+            backend,
+            max_results,
+            search_depth,
+            topic,
+            time_range,
+            connect_timeout_seconds,
+            first_response_timeout_seconds,
+            total_timeout_seconds,
+        } => AgentConfigChange::SetWebSearch {
+            backend,
+            max_results,
+            search_depth,
+            topic,
+            time_range,
+            connect_timeout_seconds,
+            first_response_timeout_seconds,
+            total_timeout_seconds,
+        },
         AgentChangeRequest::RemoveSearchRoute { name } => {
             AgentConfigChange::RemoveSearchRoute { name }
         }

@@ -88,6 +88,8 @@ async fn web_search_tool_reuses_query_executor() {
                 "raw_question": "/查 Rust 新闻",
                 "max_results": 3,
                 "context_size": "medium",
+                "topic": "news",
+                "time_range": "week",
                 "model_override": "gpt-search",
             }),
         )
@@ -100,6 +102,8 @@ async fn web_search_tool_reuses_query_executor() {
     assert_eq!(requests[0].raw_question.as_deref(), Some("/查 Rust 新闻"));
     assert_eq!(requests[0].max_results, Some(3));
     assert_eq!(requests[0].context_size.as_deref(), Some("medium"));
+    assert_eq!(requests[0].topic.as_deref(), Some("news"));
+    assert_eq!(requests[0].time_range.as_deref(), Some("week"));
     assert_eq!(requests[0].model_override.as_deref(), Some("gpt-search"));
     assert_eq!(stream_calls.load(Ordering::SeqCst), 1);
     assert_eq!(output.value["answer"], "answer: Rust 新闻");
@@ -304,6 +308,9 @@ async fn explicit_search_stream_times_out_when_idle_after_first_delta() {
                 raw_question: Some("/查 台风巴威".to_owned()),
                 max_results: None,
                 context_size: None,
+                topic: None,
+                time_range: None,
+                backend_override: None,
                 model_override: None,
             },
             Some(Box::new(move |delta| {
@@ -473,6 +480,13 @@ async fn web_search_tool_rejects_invalid_options() {
         .await
         .unwrap_err();
     assert_eq!(err.code, "bad_tool_arguments");
+
+    for (field, value) in [("topic", "sports"), ("time_range", "quarter")] {
+        let mut arguments = json!({"query": "Rust"});
+        arguments[field] = json!(value);
+        let err = tool.execute(test_context(), arguments).await.unwrap_err();
+        assert_eq!(err.code, "bad_tool_arguments");
+    }
 }
 
 #[derive(Clone, Default)]
@@ -565,6 +579,7 @@ async fn multi_entity_research_runs_independent_searches_with_bounded_concurrenc
     let requests = executor.requests.clone();
     let max_active = executor.max_active.clone();
     let tool = WebSearchTool::new(Arc::new(executor))
+        .with_backend_override(WebSearchBackend::Tavily)
         .with_model_override("gemini:server-search-model".to_owned())
         .with_timeouts(WebSearchTimeouts {
             first_activity: Duration::from_millis(50),
@@ -602,6 +617,11 @@ async fn multi_entity_research_runs_independent_searches_with_bounded_concurrenc
     assert!(requests.iter().all(|request| {
         request.model_override.as_deref() == Some("gemini:server-search-model")
     }));
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.backend_override == Some(WebSearchBackend::Tavily))
+    );
     assert!(requests.iter().all(|request| {
         request
             .raw_question

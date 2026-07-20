@@ -3,6 +3,8 @@ set -euo pipefail
 
 REPO_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${REPO_DIR}/scripts/qbot.sh"
+# 安装器在解压 Release 后加载同一内部模块；测试直接加载以覆盖迁移函数。
+source "${REPO_DIR}/scripts/lib/agent-config.sh"
 
 assert_target() {
     local system="$1"
@@ -39,6 +41,23 @@ fi
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
+
+APP_DIR="${tmp_dir}/web-search-migration"
+mkdir -p "${APP_DIR}/config"
+web_search_agent="${APP_DIR}/config/agent.toml"
+printf '%s\n' \
+    'version = 1' \
+    '' \
+    '[search_routes.private_search]' \
+    'model = "gpt-search"' > "${web_search_agent}"
+output="$(migrate_agent_web_search_config)"
+grep -Fqx '[tools.web_search]' "${web_search_agent}"
+grep -Fqx '[tools.web_search.routes.private_search]' "${web_search_agent}"
+! grep -Fqx '[search_routes.private_search]' "${web_search_agent}"
+grep -Fqx '[search_routes.private_search]' "${web_search_agent}.old"
+[[ "${output}" == *"旧配置备份: ${web_search_agent}.old"* ]]
+migrate_agent_web_search_config
+[[ ! -e "${web_search_agent}.old.1" ]]
 
 agent_template="${tmp_dir}/agent-template.toml"
 printf '%s\n' 'version = 1' '[scenes.private]' 'enabled_tools = ["new_tool"]' > "${agent_template}"

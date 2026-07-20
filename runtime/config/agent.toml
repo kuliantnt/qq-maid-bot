@@ -40,19 +40,26 @@ candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-flash", "mimo:mimo-v2.5"
 [model_routes.aux]
 candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-flash", "mimo:mimo-v2.5", "deepseek:deepseek-chat"]
 
-# /查 统一使用 GPT-5.6 Luna 的 OpenAI Responses web_search。
-[search_routes.private_search]
+# 联网搜索统一配置。provider_native 会根据 route 的模型前缀选择 OpenAI Responses
+# 或 Gemini Google Search；也可切换为 tavily / disabled。Tavily API Key 由配置中心保存。
+[tools.web_search]
+backend = "provider_native"
+max_results = 5
+search_depth = "basic"
+topic = "general"
+# time_range = "week"
+connect_timeout_seconds = 10
+first_response_timeout_seconds = 30
+total_timeout_seconds = 60
+
+[tools.web_search.routes.private_search]
 model = "gpt-5.6-luna"
 
-[search_routes.group_search]
+[tools.web_search.routes.group_search]
 model = "gpt-5.6-luna"
 
-# 如需将 /查 切换到 Gemini Google Search，可将上方同名 route 改为：
-# [search_routes.private_search]
-# model = "gemini:gemini-2.5-flash"
-#
-# [search_routes.group_search]
-# model = "gemini:gemini-2.5-flash"
+# Gemini 示例：将对应 route 的 model 改为 "gemini:gemini-2.5-flash"。
+# Tavily 示例：将 backend 改为 "tavily"，并在配置中心设置 TAVILY_API_KEY。
 
 # fast / balanced / deep 是可复用档位；main_route 引用内置或显式声明的模型路线。
 # aux_route 是标题、Memory 草稿、会话压缩和翻译共用的辅助模型路线；省略时继承 main_route。

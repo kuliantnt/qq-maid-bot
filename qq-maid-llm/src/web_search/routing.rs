@@ -3,25 +3,39 @@ use tokio::sync::mpsc;
 
 use crate::{error::LlmError, provider::types::ModelId};
 
-use super::{DynWebSearchExecutor, WebSearchExecutor, WebSearchOutcome, WebSearchRequest};
+use super::{
+    DynWebSearchExecutor, WebSearchBackend, WebSearchExecutor, WebSearchOutcome, WebSearchRequest,
+};
 
-/// 按搜索模型前缀路由 `/查`：无前缀或 `openai:` 仍走 OpenAI，`gemini:` 走 Gemini 官方 Google Search。
+/// 先按统一后端配置分流；provider_native 再按模型前缀选择 OpenAI 或 Gemini。
 pub(super) struct RoutedWebSearchExecutor {
+    default_backend: WebSearchBackend,
     default_model: String,
+    default_max_results: u8,
     openai: DynWebSearchExecutor,
     gemini: DynWebSearchExecutor,
+    tavily: DynWebSearchExecutor,
+    disabled: DynWebSearchExecutor,
 }
 
 impl RoutedWebSearchExecutor {
     pub(super) fn new(
+        default_backend: WebSearchBackend,
         default_model: String,
+        default_max_results: u8,
         openai: DynWebSearchExecutor,
         gemini: DynWebSearchExecutor,
+        tavily: DynWebSearchExecutor,
+        disabled: DynWebSearchExecutor,
     ) -> Self {
         Self {
+            default_backend,
             default_model,
+            default_max_results,
             openai,
             gemini,
+            tavily,
+            disabled,
         }
     }
 
@@ -29,27 +43,42 @@ impl RoutedWebSearchExecutor {
         &self,
         mut req: WebSearchRequest,
     ) -> Result<(DynWebSearchExecutor, WebSearchRequest), LlmError> {
+        let backend = req.backend_override.unwrap_or(self.default_backend);
+        if req.max_results.is_none() {
+            req.max_results = Some(self.default_max_results);
+        }
         let configured_model = req
             .model_override
             .as_deref()
             .unwrap_or(self.default_model.as_str());
-        let model = ModelId::parse(configured_model, "request")?;
-        req.model_override = Some(model.name);
-        match model.provider {
-            Some(crate::provider::types::ModelProvider::Gemini) => Ok((self.gemini.clone(), req)),
-            Some(crate::provider::types::ModelProvider::OpenAi) | None => {
-                Ok((self.openai.clone(), req))
+        match backend {
+            WebSearchBackend::Tavily => Ok((self.tavily.clone(), req)),
+            WebSearchBackend::Disabled => Ok((self.disabled.clone(), req)),
+            WebSearchBackend::ProviderNative => {
+                let model = ModelId::parse(configured_model, "request")?;
+                req.model_override = Some(model.name);
+                match model.provider {
+                    Some(crate::provider::types::ModelProvider::Gemini) => {
+                        Ok((self.gemini.clone(), req))
+                    }
+                    Some(crate::provider::types::ModelProvider::OpenAi) | None => {
+                        Ok((self.openai.clone(), req))
+                    }
+                    Some(provider) => Err(unsupported_provider_error(provider.as_str())),
+                }
             }
-            Some(provider) => Err(LlmError::new(
-                "bad_request",
-                format!(
-                    "search model provider `{}` is not supported by /查; supported: openai, gemini",
-                    provider.as_str()
-                ),
-                "request",
-            )),
         }
     }
+}
+
+fn unsupported_provider_error(provider: &str) -> LlmError {
+    LlmError::new(
+        "bad_request",
+        format!(
+            "search model provider `{provider}` is not supported by /查; supported: openai, gemini"
+        ),
+        "request",
+    )
 }
 
 #[async_trait]
@@ -85,21 +114,29 @@ mod tests {
     #[test]
     fn routed_web_search_executor_selects_provider_by_model_prefix() {
         let executor = RoutedWebSearchExecutor::new(
+            WebSearchBackend::ProviderNative,
             "openai:gpt-search".to_owned(),
+            8,
             Arc::new(MissingWebSearchExecutor),
             Arc::new(MissingGeminiWebSearchExecutor),
+            Arc::new(MissingWebSearchExecutor),
+            Arc::new(MissingWebSearchExecutor),
         );
         let base_req = WebSearchRequest {
             query: "测试".to_owned(),
             raw_question: None,
             max_results: None,
             context_size: None,
+            topic: None,
+            time_range: None,
+            backend_override: None,
             model_override: None,
         };
 
         let (provider, routed_req) = executor.route_request(base_req.clone()).unwrap();
         assert_eq!(provider.provider_name(), "openai");
         assert_eq!(routed_req.model_override.as_deref(), Some("gpt-search"));
+        assert_eq!(routed_req.max_results, Some(8));
 
         let (provider, routed_req) = executor
             .route_request(WebSearchRequest {

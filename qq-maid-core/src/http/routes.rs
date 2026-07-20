@@ -637,12 +637,23 @@ mod tests {
         state.config.web_console_enabled = true;
         let (database, directory) =
             SqliteDatabase::open_temp_directory("qq-maid-config-http", APP_MIGRATIONS).unwrap();
-        let external = HashMap::from([(
-            "OPENAI_API_KEY".to_owned(),
-            "must-never-reach-response".to_owned(),
-        )]);
-        let agent_path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime/config/agent.toml");
+        let external = HashMap::from([
+            (
+                "OPENAI_API_KEY".to_owned(),
+                "must-never-reach-response".to_owned(),
+            ),
+            (
+                "TAVILY_API_KEY".to_owned(),
+                "tavily-must-never-reach-response".to_owned(),
+            ),
+        ]);
+        let agent_path = directory.join("config/agent.toml");
+        std::fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &agent_path,
+            include_str!("../../../runtime/config/agent.toml"),
+        )
+        .unwrap();
         let agent_environment = HashMap::from([(
             crate::config::agent::AGENT_CONFIG_FILE_ENV.to_owned(),
             agent_path.to_string_lossy().into_owned(),
@@ -686,6 +697,7 @@ mod tests {
         assert_eq!(json["ok"], true);
         let serialized = json.to_string();
         assert!(!serialized.contains("must-never-reach-response"));
+        assert!(!serialized.contains("tavily-must-never-reach-response"));
         let secret = json["configuration"]["fields"]
             .as_array()
             .unwrap()
@@ -695,11 +707,60 @@ mod tests {
         assert_eq!(secret["configured"], true);
         assert_eq!(secret["source"], "environment");
         assert!(secret["effective_value"].is_null());
+        let tavily_secret = json["configuration"]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["key"] == "tools.web_search.tavily.api_key")
+            .unwrap();
+        assert_eq!(tavily_secret["configured"], true);
+        assert!(tavily_secret["effective_value"].is_null());
         assert_eq!(json["configuration"]["agent"]["source"], "agent_toml");
         assert_eq!(json["configuration"]["agent"]["pending_restart"], false);
         assert_eq!(json["registered_tools"][0]["name"], "web_search");
         assert_eq!(json["registered_tools"][0]["description"], "受控搜索");
         assert_eq!(json["restart"]["available"], false);
+
+        let agent_revision = json["configuration"]["agent"]["revision"].as_str().unwrap();
+        let agent_mutation = json!({
+            "expected_revision": agent_revision,
+            "changes": [{
+                "action": "set_web_search",
+                "backend": "disabled",
+                "max_results": 8,
+                "search_depth": "advanced",
+                "topic": "news",
+                "time_range": "week",
+                "connect_timeout_seconds": 5,
+                "first_response_timeout_seconds": 15,
+                "total_timeout_seconds": 45
+            }]
+        });
+        let (agent_saved, agent_saved_json) = request_response_with_cookie(
+            state.clone(),
+            "PATCH",
+            "/api/v1/console/configuration/agent",
+            Some(agent_mutation),
+            &cookie,
+            Some(&csrf),
+        )
+        .await;
+        assert_eq!(agent_saved, StatusCode::OK);
+        assert_eq!(agent_saved_json["persisted"], true);
+        assert_eq!(
+            agent_saved_json["configuration"]["agent"]["saved_value"]["tools"]["web_search"]["backend"],
+            "disabled"
+        );
+        assert!(
+            agent_saved_json["configuration"]["agent"]["saved_value"]["tools"]
+                ["web_search"]["routes"]["private_search"]
+                .is_object()
+        );
+        assert!(
+            !agent_saved_json
+                .to_string()
+                .contains("tavily-must-never-reach-response")
+        );
 
         let revision = json["configuration"]["revision"].as_str().unwrap();
         let mutation = json!({

@@ -30,6 +30,27 @@ impl RecordingWebSearchExecutor {
     }
 }
 
+#[test]
+fn web_search_errors_have_actionable_user_replies() {
+    let cases = [
+        ("web_search_disabled", "配置中关闭"),
+        ("web_search_not_configured", "TAVILY_API_KEY"),
+        ("tavily_auth_error", "API Key 无效"),
+        ("rate_limited", "上游限流"),
+        ("quota_exhausted", "额度已用尽"),
+        ("empty_result", "没查到明确结果"),
+    ];
+
+    for (code, expected) in cases {
+        let error = LlmError::new(code, "test error", "test");
+        let reply = crate::runtime::respond::search_flow::format_web_search_error_reply(&error);
+        assert!(
+            reply.contains(expected),
+            "unexpected reply for {code}: {reply}"
+        );
+    }
+}
+
 #[async_trait]
 impl WebSearchExecutor for LongAnswerWebSearchExecutor {
     async fn query(&self, req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
