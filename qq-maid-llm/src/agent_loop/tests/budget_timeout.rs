@@ -460,7 +460,8 @@ async fn read_only_cache_hit_replays_at_budget_boundary_without_real_execution()
     assert_eq!(outcome.agent.executed_tools, ["search"]);
     assert_eq!(outcome.agent.tool_results.len(), 2);
     let observed = observed.lock().unwrap();
-    assert_eq!(observed[1].0[0].output, observed[2].0[0].output);
+    assert_ne!(observed[1].0[0].output, observed[2].0[0].output);
+    assert!(observed[2].0[0].output.contains("deduplicated"));
     assert!(!observed[2].1);
 }
 

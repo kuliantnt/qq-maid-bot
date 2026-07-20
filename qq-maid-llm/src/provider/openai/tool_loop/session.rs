@@ -31,6 +31,7 @@ use crate::provider::openai::{
     extract::{
         extract_response_output_parts, extract_response_output_text, extract_response_usage,
     },
+    tool_calls_disabled_error,
     transport::send_openai_responses_request,
 };
 
@@ -161,7 +162,7 @@ impl AgentStepSession for ResponsesAgentSession {
             allow_tool_calls,
             false,
         );
-        enforce_tool_loop_budget(self.context_budget, &payload)?;
+        let (payload, tools_disabled) = enforce_tool_loop_budget(self.context_budget, payload)?;
         let response = send_openai_responses_request(
             &self.client,
             &self.api_key,
@@ -175,6 +176,9 @@ impl AgentStepSession for ResponsesAgentSession {
         })?;
         let step_usage = extract_response_usage(&body);
         let calls = extract_function_calls(&body)?;
+        if !calls.is_empty() && (!allow_tool_calls || tools_disabled) {
+            return Err(tool_calls_disabled_error());
+        }
         if calls.is_empty() {
             let output_parts = extract_response_output_parts(&body);
             let reply = extract_response_output_text(&body).unwrap_or_default();
@@ -229,7 +233,7 @@ impl AgentStepSession for ResponsesAgentSession {
             allow_tool_calls,
             true,
         );
-        enforce_tool_loop_budget(self.context_budget, &payload)?;
+        let (payload, tools_disabled) = enforce_tool_loop_budget(self.context_budget, payload)?;
         let response = send_openai_responses_request(
             &self.client,
             &self.api_key,
@@ -241,7 +245,7 @@ impl AgentStepSession for ResponsesAgentSession {
         let step = collect_responses_tool_loop_stream(
             response,
             &mut input,
-            allow_tool_calls,
+            allow_tool_calls && !tools_disabled,
             text_delta_sink,
             self.streaming_diagnostics.clone(),
             self.streaming_activity_counter.clone(),

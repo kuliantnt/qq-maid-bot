@@ -415,9 +415,10 @@ fn stream_failure_text(failure: &CoreRespondFailure) -> &'static str {
     match failure.kind {
         CoreFailureKind::SearchTimeout | CoreFailureKind::LlmTimeout => STREAM_TIMEOUT_TEXT,
         CoreFailureKind::Cancelled => STREAM_CANCELLED_TEXT,
-        CoreFailureKind::SearchFailed | CoreFailureKind::LlmFailed | CoreFailureKind::Internal => {
-            STREAM_FAILED_TEXT
-        }
+        CoreFailureKind::SearchFailed
+        | CoreFailureKind::LlmFailed
+        | CoreFailureKind::ContextBudgetExceeded
+        | CoreFailureKind::Internal => STREAM_FAILED_TEXT,
     }
 }
 

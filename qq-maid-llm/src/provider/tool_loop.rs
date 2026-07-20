@@ -27,6 +27,7 @@ pub(crate) struct ToolLoopExecutor<'a> {
     execution_attempted: bool,
     rejected_call: bool,
     completed_read_only_calls: HashMap<String, String>,
+    execution_counts: HashMap<String, usize>,
     last_batch: Vec<BatchAttempt>,
     current_batch: Vec<BatchAttempt>,
 }
@@ -40,6 +41,8 @@ pub(crate) struct ToolLoopCall<'a> {
 pub(crate) struct ToolLoopCallOutput {
     pub(crate) output: String,
     pub(crate) skipped_for_finalization: bool,
+    /// 预算保护才会阻止同批次后续调用；单个工具达到请求上限不能影响其他工具。
+    pub(crate) stop_remaining_batch: bool,
 }
 
 pub(crate) enum ToolCallStartDecision {
@@ -82,6 +85,7 @@ impl<'a> ToolLoopExecutor<'a> {
             execution_attempted: false,
             rejected_call: false,
             completed_read_only_calls: HashMap::new(),
+            execution_counts: HashMap::new(),
             tool_attempts: Vec::new(),
             last_batch: Vec::new(),
             current_batch: Vec::new(),
@@ -141,6 +145,7 @@ impl<'a> ToolLoopExecutor<'a> {
             batch_len,
         } = call;
         let mut skipped_for_finalization = false;
+        let mut stop_remaining_batch = false;
         let mut tool_started = false;
         let prepared_arguments = prepared
             .as_ref()
@@ -165,10 +170,28 @@ impl<'a> ToolLoopExecutor<'a> {
                     .as_ref()
                     .and_then(|key| self.completed_read_only_calls.get(key))
                 {
-                    // 缓存只保存已明确成功的只读结果；回放原始输出，避免模型把去重
-                    // 误判为失败，也不能把缓存命中计作一次真实工具执行。
+                    // 缓存只保存已明确成功的只读结果；命中只回传紧凑引用，避免把
+                    // 完整证据再次写入上下文。缓存命中不增加真实执行次数。
                     debug!(tool = %tool_name, "agent read-only tool cache hit");
-                    (tool_name, cached_output.clone(), true)
+                    (tool_name, compact_cached_output(cached_output), true)
+                } else if prepared.max_calls_per_request.is_some_and(|limit| {
+                    self.execution_counts.get(&tool_name).copied().unwrap_or(0) >= limit
+                }) {
+                    // 达到请求级上限只拒绝当前工具调用；同批次其他工具仍需执行。
+                    // 下一轮由上层根据该标记切换到无工具最终回答。
+                    tracing::warn!(
+                        tool = %tool_name,
+                        executions = self.execution_counts.get(&tool_name).copied().unwrap_or(0),
+                        max_executions = prepared.max_calls_per_request,
+                        force_finalization = true,
+                        "tool execution limit reached"
+                    );
+                    skipped_for_finalization = true;
+                    (
+                        tool_name,
+                        tool_limit_output(prepared.max_calls_per_request.unwrap_or(0)),
+                        false,
+                    )
                 } else if prepared.dependency == ToolCallDependency::PreviousCallSuccess
                     && !self.previous_call_succeeded
                 {
@@ -181,6 +204,7 @@ impl<'a> ToolLoopExecutor<'a> {
                     match before_start(&tool_name, prepared.effect)? {
                         ToolCallStartDecision::SkipForFinalAnswer => {
                             skipped_for_finalization = true;
+                            stop_remaining_batch = true;
                             (
                                 tool_name,
                                 tool_skip_output("request_budget_reserved_for_final_answer"),
@@ -196,6 +220,7 @@ impl<'a> ToolLoopExecutor<'a> {
                             // progress await 返回后仍需在共享生命周期锁内重新检查取消；只有
                             // 原子启动转换成功，才创建工具 future 并越过副作用边界。
                             on_started(&tool_name, prepared.effect)?;
+                            *self.execution_counts.entry(tool_name.clone()).or_default() += 1;
                             if prepared.effect == ToolEffect::SideEffecting {
                                 // 写操作可能改变后续查询结果；只读去重只能跨越没有状态变化的
                                 // 连续查询段，不能让“查询 -> 修改 -> 再查询”复用旧判断。
@@ -257,6 +282,7 @@ impl<'a> ToolLoopExecutor<'a> {
         Ok(ToolLoopCallOutput {
             output,
             skipped_for_finalization,
+            stop_remaining_batch,
         })
     }
 
@@ -371,4 +397,24 @@ fn tool_execution_result(name: &str, output: &str, succeeded: bool) -> ToolExecu
         output,
         succeeded,
     }
+}
+
+fn compact_cached_output(output: &str) -> String {
+    // 保留成功语义和去重标记，不重复注入首次检索的完整证据。
+    serde_json::to_string(&json!({
+        "ok": true,
+        "deduplicated": true,
+        "message": "已使用本次请求中相同检索的已有证据。",
+    }))
+    .unwrap_or_else(|_| output.to_owned())
+}
+
+fn tool_limit_output(limit: usize) -> String {
+    serde_json::to_string(&json!({
+        "ok": false,
+        "error_code": "tool_call_limit",
+        "limit": limit,
+        "message": "本次请求的知识检索次数已达上限，请基于已有证据直接回答。",
+    }))
+    .unwrap_or_else(|_| r#"{"ok":false,"error_code":"tool_call_limit"}"#.to_owned())
 }

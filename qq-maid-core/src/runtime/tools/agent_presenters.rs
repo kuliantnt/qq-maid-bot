@@ -208,6 +208,16 @@ pub(crate) fn tool_outcome_from_knowledge_result(
 
     let evidence_status = string_field(&result.output, "status");
     let (status, presentation, blocks, error_code) = match evidence_status.as_deref() {
+        _ if result.output.get("deduplicated").and_then(Value::as_bool) == Some(true)
+            || structured_error_code(&result.output).as_deref() == Some("tool_call_limit") =>
+        {
+            (
+                ToolOutcomeStatus::Skipped,
+                OutcomePresentation::Internal,
+                Vec::new(),
+                None,
+            )
+        }
         Some("ok" | "truncated") if result.succeeded => (
             ToolOutcomeStatus::Succeeded,
             OutcomePresentation::Internal,

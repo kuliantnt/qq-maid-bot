@@ -24,6 +24,7 @@ use crate::provider::openai::{
         handle_openai_chat_stream_event, is_openai_responses_done_sentinel,
         responses_stream_is_complete,
     },
+    tool_calls_disabled_error,
 };
 
 use super::{
@@ -299,11 +300,7 @@ pub(super) async fn finalize_responses_tool_loop_stream(
     let calls = extract_function_calls(&body)?;
     if !calls.is_empty() {
         if !allow_tool_calls {
-            return Err(LlmError::new(
-                "tool_loop_limit",
-                "tool loop returned tool calls when tool calls are disabled",
-                "tool_loop",
-            ));
+            return Err(tool_calls_disabled_error());
         }
         append_response_output_items(input, &body)?;
         return Ok(AgentStep::ToolCalls {

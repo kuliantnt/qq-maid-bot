@@ -15,6 +15,7 @@ pub const KNOWLEDGE_SEARCH_TOOL_NAME: &str = "knowledge_search";
 const MAX_QUERY_CHARS: usize = 2_000;
 const MAX_QUERIES: usize = 4;
 const MAX_RESULTS: usize = 8;
+const MAX_CALLS_PER_REQUEST: usize = 2;
 const BODY_TRUNCATION_MARKER: &str = "\n[正文因字符预算已裁剪]";
 
 /// 只读知识证据查询，不负责生成最终答案或写入知识文件。
@@ -70,6 +71,42 @@ impl Tool for KnowledgeSearchTool {
         ToolEffect::ReadOnly
     }
 
+    fn max_calls_per_request(&self) -> Option<usize> {
+        Some(MAX_CALLS_PER_REQUEST)
+    }
+
+    fn deduplication_key(&self, arguments: &Value) -> Option<String> {
+        // 查询语义对大小写、连续空白和 additional_queries 顺序不敏感；使用规范化
+        // 参数复用 ToolLoopExecutor 的统一只读缓存，避免重复执行和重复注入证据。
+        let query = arguments
+            .get("query")
+            .and_then(Value::as_str)
+            .map(normalize_query)?;
+        let mut additional = arguments
+            .get("additional_queries")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(normalize_query)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        additional.sort();
+        additional.dedup();
+        let max_results = arguments
+            .get("max_results")
+            .and_then(Value::as_u64)
+            .unwrap_or(MAX_RESULTS as u64);
+        serde_json::to_string(&json!({
+            "query": query,
+            "additional_queries": additional,
+            "max_results": max_results,
+        }))
+        .ok()
+    }
+
     async fn execute(
         &self,
         _context: ToolContext,
@@ -123,6 +160,14 @@ impl Tool for KnowledgeSearchTool {
             self.output_max_chars,
         )))
     }
+}
+
+fn normalize_query(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 fn parse_max_results(value: Option<&Value>) -> Result<usize, LlmError> {
@@ -379,6 +424,22 @@ mod tests {
         assert_eq!(tool.effect(), ToolEffect::ReadOnly);
         assert!(tool.metadata().description.contains("只读"));
         assert!(!tool.metadata().parameters.to_string().contains("path"));
+    }
+
+    #[test]
+    fn equivalent_queries_share_normalized_deduplication_key() {
+        let tool = tool();
+        let left = tool.deduplication_key(&json!({
+            "query": " RAG-504  是什么 ",
+            "max_results": null,
+            "additional_queries": ["超时", "错误码"]
+        }));
+        let right = tool.deduplication_key(&json!({
+            "query": "rag-504 是什么",
+            "max_results": 8,
+            "additional_queries": ["错误码", "超时"]
+        }));
+        assert_eq!(left, right);
     }
 
     #[tokio::test]

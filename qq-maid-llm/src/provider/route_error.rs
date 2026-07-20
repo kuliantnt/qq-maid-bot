@@ -125,6 +125,16 @@ pub(crate) fn aggregate_route_error(task: &str, failures: Vec<ModelAttemptFailur
             .expect("unsupported_input_part failures should not be empty")
             .error;
     }
+    if failures
+        .iter()
+        .all(|failure| failure.error.code == "context_budget_exceeded")
+    {
+        return failures
+            .into_iter()
+            .next()
+            .expect("context budget failures should not be empty")
+            .error;
+    }
     let details = failures
         .into_iter()
         .map(|failure| {

@@ -398,7 +398,7 @@ async fn tool_loop_prepares_same_round_calls_before_executing_any_tool() {
 }
 
 #[tokio::test]
-async fn tool_loop_budget_exceeded_before_first_provider_request() {
+async fn tool_loop_budget_before_first_request_disables_tools_for_answer() {
     let (base_url, state) = spawn_mock_tool_loop(vec![json!({
         "choices": [{
             "message": {
@@ -415,6 +415,63 @@ async fn tool_loop_budget_exceeded_before_first_provider_request() {
     );
     let tools = ToolRegistry::new()
         .register(WeatherToolStub::new("小雨"))
+        .unwrap();
+
+    let outcome = run_session(
+        client,
+        "deepseek",
+        "deepseek-chat",
+        1200,
+        &[ChatMessage::user("杭州天气怎么样")],
+        tools,
+        Some(crate::context_budget::ContextBudgetConfig {
+            context_window_chars: 120,
+            output_reserve_chars: 20,
+            protected_recent_turns: 0,
+        }),
+        2,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.reply, "should not be requested");
+    let requests = &state.lock().await.requests;
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].get("tools").is_none());
+    assert!(requests[0].get("tool_choice").is_none());
+}
+
+#[tokio::test]
+async fn non_stream_budget_finalization_rejects_provider_tool_calls_without_execution() {
+    let (base_url, state) = spawn_mock_tool_loop(vec![json!({
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_forbidden",
+                    "type": "function",
+                    "function": {
+                        "name": "first_order_tool",
+                        "arguments": r#"{"value":"must-not-run"}"#
+                    }
+                }]
+            }
+        }]
+    })])
+    .await;
+    let client = ChatCompletionsClient::new(
+        "test-key",
+        Some(&base_url),
+        qq_maid_common::http_client::client(),
+    );
+    let sequence = Arc::new(StdMutex::new(Vec::new()));
+    let mut tools = ToolRegistry::new();
+    tools
+        .insert(Arc::new(PrepareOrderToolStub {
+            name: "first_order_tool",
+            sequence: sequence.clone(),
+        }))
         .unwrap();
 
     let err = run_session(
@@ -434,9 +491,13 @@ async fn tool_loop_budget_exceeded_before_first_provider_request() {
     .await
     .unwrap_err();
 
-    assert_eq!(err.code, "context_budget_exceeded");
+    assert_eq!(err.code, "tool_loop_limit");
     assert_eq!(err.stage, "tool_loop");
-    assert!(state.lock().await.requests.is_empty());
+    assert!(sequence.lock().unwrap().is_empty());
+    let requests = &state.lock().await.requests;
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].get("tools").is_none());
+    assert!(requests[0].get("tool_choice").is_none());
 }
 
 #[test]
@@ -484,11 +545,24 @@ fn payload_disables_tool_calls_explicitly() {
         false,
     );
 
-    assert_eq!(payload["tool_choice"], "none");
+    assert!(payload.get("tools").is_none());
+    assert!(payload.get("tool_choice").is_none());
+
+    let streaming_payload = chat_completions_tool_loop_payload(
+        &[json!({"role": "user", "content": "总结已有结果"})],
+        &[json!({"type": "function", "function": {"name": "search"}})],
+        "test-model",
+        1200,
+        false,
+        true,
+    );
+    assert!(streaming_payload.get("tools").is_none());
+    assert!(streaming_payload.get("tool_choice").is_none());
+    assert_eq!(streaming_payload["stream"], true);
 }
 
 #[tokio::test]
-async fn tool_loop_budget_exceeded_after_tool_result_skips_next_provider_request() {
+async fn tool_loop_budget_after_tool_result_disables_tools_for_final_answer() {
     let (base_url, state) = spawn_mock_tool_loop(vec![
         json!({
             "choices": [{
@@ -525,7 +599,7 @@ async fn tool_loop_budget_exceeded_after_tool_result_skips_next_provider_request
         .register(WeatherToolStub::new("小雨"))
         .unwrap();
 
-    let err = run_session(
+    let outcome = run_session(
         client,
         "deepseek",
         "deepseek-chat",
@@ -540,13 +614,14 @@ async fn tool_loop_budget_exceeded_after_tool_result_skips_next_provider_request
         2,
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(err.code, "context_budget_exceeded");
-    assert_eq!(err.stage, "tool_loop");
+    assert_eq!(outcome.reply, "should not be requested");
     let requests = &state.lock().await.requests;
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     assert_eq!(requests[0]["tools"][0]["function"]["name"], "get_weather");
+    assert!(requests[1].get("tools").is_none());
+    assert!(requests[1].get("tool_choice").is_none());
 }
 
 #[tokio::test]
