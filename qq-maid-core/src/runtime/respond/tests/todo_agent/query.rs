@@ -1,10 +1,16 @@
 //! Todo 查询、过滤、折叠结果和用户可见快照的 Respond 集成测试。
 
+use std::collections::HashSet;
+
 use qq_maid_llm::provider::ToolCallingProtocol;
 
 use crate::runtime::{
+    respond::RustRespondService,
     session::SessionMeta,
-    tools::todo::{TodoItemDraft, TodoStatus, TodoStore, TodoTimePrecision},
+    tools::todo::{
+        TodoItemDraft, TodoRecurrenceKind, TodoRecurrenceUnit, TodoStatus, TodoStore,
+        TodoTimePrecision,
+    },
 };
 
 use super::super::support::*;
@@ -151,68 +157,6 @@ async fn natural_language_tool_query_supports_fuzzy_keyword_search() {
     assert_eq!(snapshot.query_type, "search");
     assert_eq!(snapshot.condition, "关键词“报销”");
     assert_eq!(snapshot.result_ids, vec![matched.id]);
-}
-
-#[tokio::test]
-async fn list_todos_recurring_receipt_preserves_filtered_visible_snapshot() {
-    let arguments = serde_json::json!({
-        "status": "pending",
-        "due_date": null,
-        "date_range_text": null,
-        "time_filter": null,
-        "keyword": null,
-        "recurring": true
-    })
-    .to_string();
-    let inspector = MockProvider::new()
-        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
-        .with_tool_call_json("list_todos", arguments, "周期性待办");
-    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
-    let owner = TodoStore::owner(Some("u1"), "private:u1");
-    let tomorrow = (qq_maid_common::time_context::request_time_context().local_date()
-        + chrono::Duration::days(1))
-    .format("%Y-%m-%d")
-    .to_string();
-    let recurring = service
-        .task_store
-        .create(
-            &owner,
-            TodoItemDraft {
-                title: "吃药".to_owned(),
-                detail: None,
-                raw_text: None,
-                due_date: Some(tomorrow),
-                due_at: None,
-                reminder_at: None,
-                time_precision: TodoTimePrecision::Date,
-                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::Daily,
-                recurrence_interval_days: 1,
-                recurrence_interval: 1,
-                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
-            },
-        )
-        .unwrap();
-    create_private_todo(&service, "买香薰");
-
-    let response = service
-        .respond(private_message("筛选出周期性待办"))
-        .await
-        .unwrap();
-    let text = response.text.unwrap();
-    assert!(text.contains("吃药"));
-    assert!(!text.contains("买香薰"));
-    assert_eq!(inspector.tool_call_count(), 1);
-
-    let session = service
-        .session_store
-        .get_or_create_active(&private_test_meta())
-        .unwrap();
-    let snapshot = session
-        .last_todo_query
-        .expect("missing recurring filtered snapshot");
-    assert_eq!(snapshot.query_type, "search");
-    assert_eq!(snapshot.condition, "周期性待办");
-    assert_eq!(snapshot.result_ids, vec![recurring.id]);
 }
 
 #[tokio::test]
@@ -639,4 +583,261 @@ async fn explicit_todo_and_full_result_restore_use_visible_snapshot() {
     assert!(full_text.contains("进行中待办 6"));
     assert!(!full_text.contains("已完成待办 1"));
     assert_eq!(inspector.tool_call_count(), 0);
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ReplayCombination {
+    PendingDateRecurring,
+    CompletedRecurring,
+    AllOneOff,
+    PendingKeywordRecurring,
+    PendingOverdueOneOff,
+}
+
+impl ReplayCombination {
+    fn name(self) -> &'static str {
+        match self {
+            Self::PendingDateRecurring => "pending-date-recurring",
+            Self::CompletedRecurring => "completed-recurring",
+            Self::AllOneOff => "all-one-off",
+            Self::PendingKeywordRecurring => "pending-keyword-recurring",
+            Self::PendingOverdueOneOff => "pending-overdue-one-off",
+        }
+    }
+
+    fn arguments(self, target_date: &str) -> String {
+        let value = match self {
+            Self::PendingDateRecurring => serde_json::json!({
+                "status": "pending",
+                "due_date": target_date,
+                "date_range_text": null,
+                "time_filter": null,
+                "keyword": null,
+                "recurring": true
+            }),
+            Self::CompletedRecurring => serde_json::json!({
+                "status": "completed",
+                "due_date": null,
+                "date_range_text": null,
+                "time_filter": null,
+                "keyword": null,
+                "recurring": true
+            }),
+            Self::AllOneOff => serde_json::json!({
+                "status": "all",
+                "due_date": null,
+                "date_range_text": null,
+                "time_filter": null,
+                "keyword": null,
+                "recurring": false
+            }),
+            Self::PendingKeywordRecurring => serde_json::json!({
+                "status": "pending",
+                "due_date": null,
+                "date_range_text": null,
+                "time_filter": null,
+                "keyword": "专项",
+                "recurring": true
+            }),
+            Self::PendingOverdueOneOff => serde_json::json!({
+                "status": "pending",
+                "due_date": null,
+                "date_range_text": null,
+                "time_filter": "overdue",
+                "keyword": null,
+                "recurring": false
+            }),
+        };
+        value.to_string()
+    }
+}
+
+#[tokio::test]
+async fn full_result_replays_all_structured_todo_filter_combinations() {
+    let today = qq_maid_common::time_context::request_time_context().local_date();
+    let target_date = (today + chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    let overdue_date = (today - chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    let future_date = (today + chrono::Duration::days(2))
+        .format("%Y-%m-%d")
+        .to_string();
+
+    for combination in [
+        ReplayCombination::PendingDateRecurring,
+        ReplayCombination::CompletedRecurring,
+        ReplayCombination::AllOneOff,
+        ReplayCombination::PendingKeywordRecurring,
+        ReplayCombination::PendingOverdueOneOff,
+    ] {
+        let inspector = MockProvider::new()
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+            .with_tool_call_json(
+                "list_todos",
+                combination.arguments(&target_date),
+                "查询完成",
+            );
+        let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+        let owner = TodoStore::owner(Some("u1"), "private:u1");
+        let mut expected_ids = Vec::new();
+
+        for index in 1..=11 {
+            let title = format!("{} 匹配项 {index}", combination.name());
+            let mut draft = todo_draft(title);
+            match combination {
+                ReplayCombination::PendingDateRecurring => {
+                    draft.due_date = Some(target_date.clone());
+                    draft.time_precision = TodoTimePrecision::Date;
+                    make_draft_recurring(&mut draft);
+                }
+                ReplayCombination::CompletedRecurring => {
+                    draft.due_date = Some(target_date.clone());
+                    draft.time_precision = TodoTimePrecision::Date;
+                    make_draft_recurring(&mut draft);
+                }
+                ReplayCombination::AllOneOff => {}
+                ReplayCombination::PendingKeywordRecurring => {
+                    draft.title = format!("专项周期匹配项 {index}");
+                    draft.due_date = Some(target_date.clone());
+                    draft.time_precision = TodoTimePrecision::Date;
+                    make_draft_recurring(&mut draft);
+                }
+                ReplayCombination::PendingOverdueOneOff => {
+                    draft.due_date = Some(overdue_date.clone());
+                    draft.time_precision = TodoTimePrecision::Date;
+                }
+            }
+            let item = service.task_store.create(&owner, draft).unwrap();
+            if matches!(combination, ReplayCombination::CompletedRecurring)
+                || matches!(combination, ReplayCombination::AllOneOff) && index > 6
+            {
+                service.task_store.complete(&owner, &item.id).unwrap();
+            }
+            expected_ids.push(item.id);
+        }
+
+        let interference_title = format!("{} 干扰项", combination.name());
+        let mut interference = todo_draft(interference_title.clone());
+        match combination {
+            ReplayCombination::PendingDateRecurring => {
+                interference.due_date = Some(target_date.clone());
+                interference.time_precision = TodoTimePrecision::Date;
+            }
+            ReplayCombination::CompletedRecurring => {
+                let item = service.task_store.create(&owner, interference).unwrap();
+                service.task_store.complete(&owner, &item.id).unwrap();
+                assert_combination_replay(
+                    &service,
+                    &inspector,
+                    combination,
+                    &expected_ids,
+                    &interference_title,
+                )
+                .await;
+                continue;
+            }
+            ReplayCombination::AllOneOff | ReplayCombination::PendingKeywordRecurring => {
+                interference.due_date = Some(target_date.clone());
+                interference.time_precision = TodoTimePrecision::Date;
+                make_draft_recurring(&mut interference);
+            }
+            ReplayCombination::PendingOverdueOneOff => {
+                interference.due_date = Some(future_date.clone());
+                interference.time_precision = TodoTimePrecision::Date;
+            }
+        }
+        service.task_store.create(&owner, interference).unwrap();
+        assert_combination_replay(
+            &service,
+            &inspector,
+            combination,
+            &expected_ids,
+            &interference_title,
+        )
+        .await;
+    }
+}
+
+fn make_draft_recurring(draft: &mut TodoItemDraft) {
+    draft.recurrence_kind = TodoRecurrenceKind::Daily;
+    draft.recurrence_interval_days = 1;
+    draft.recurrence_interval = 1;
+    draft.recurrence_unit = TodoRecurrenceUnit::Day;
+}
+
+async fn assert_combination_replay(
+    service: &RustRespondService,
+    inspector: &MockProvider,
+    combination: ReplayCombination,
+    expected_ids: &[String],
+    interference_title: &str,
+) {
+    let collapsed = service
+        .respond(private_message(&format!("查询 {}", combination.name())))
+        .await
+        .unwrap();
+    let collapsed_text = collapsed.text.unwrap();
+    assert!(
+        !collapsed_text.contains(interference_title),
+        "{} collapsed result contains interference: {collapsed_text}",
+        combination.name()
+    );
+    let collapsed_snapshot = last_todo_snapshot(service, "collapsed combination");
+    let replay_context = collapsed_snapshot
+        .replay_context
+        .as_ref()
+        .expect("structured replay context");
+    let expected_recurring = match combination {
+        ReplayCombination::PendingDateRecurring
+        | ReplayCombination::CompletedRecurring
+        | ReplayCombination::PendingKeywordRecurring => Some(true),
+        ReplayCombination::AllOneOff | ReplayCombination::PendingOverdueOneOff => Some(false),
+    };
+    assert_eq!(
+        replay_context
+            .get("recurring")
+            .and_then(serde_json::Value::as_bool),
+        expected_recurring,
+        "{} replay context: {replay_context}",
+        combination.name()
+    );
+    let replayed = crate::runtime::tools::todo::replay_todo_query(&collapsed_snapshot)
+        .unwrap_or_else(|| panic!("{} replay context should decode", combination.name()));
+    assert_eq!(replayed.recurring, expected_recurring);
+    assert!(
+        active_private_session(service)
+            .extra
+            .get("tool_todo_task_query_history")
+            .is_none(),
+        "{} pending query context should be consumed by receipt",
+        combination.name()
+    );
+    assert_eq!(collapsed_snapshot.result_ids.len(), 10);
+    assert!(
+        collapsed_snapshot
+            .result_ids
+            .iter()
+            .all(|id| expected_ids.contains(id))
+    );
+
+    let full = service
+        .respond(private_message("查看完整结果"))
+        .await
+        .unwrap();
+    let full_text = full.text.unwrap();
+    assert!(
+        !full_text.contains(interference_title),
+        "{} full result contains interference: {full_text}",
+        combination.name()
+    );
+    let full_snapshot = last_todo_snapshot(service, "full combination");
+    assert!(full_snapshot.replay_context.is_some());
+    assert_eq!(full_snapshot.result_ids.len(), 11);
+    assert_eq!(
+        full_snapshot.result_ids.into_iter().collect::<HashSet<_>>(),
+        expected_ids.iter().cloned().collect::<HashSet<_>>()
+    );
+    assert_eq!(inspector.tool_call_count(), 1);
 }

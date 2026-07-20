@@ -190,8 +190,13 @@ fn project_tool_turn(
     meta: &SessionMeta,
     output: &RespondOutput,
 ) -> Result<AgentTurnOutcome, LlmError> {
-    let todo_projection =
-        todo::agent_turn::project_results(task_store, session, meta, &output.agent.tool_results)?;
+    let todo_projection = todo::agent_turn::project_results(
+        task_store,
+        session,
+        meta,
+        &output.agent.tool_results,
+        &output.agent.tool_attempts,
+    )?;
     let visible_entity_snapshot = todo_projection.visible_entity_snapshot;
     let mut outcomes = Vec::new();
     let mut todo_outcomes = todo_projection.outcomes.into_iter().peekable();

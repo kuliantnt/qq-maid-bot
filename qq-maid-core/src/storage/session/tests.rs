@@ -346,6 +346,7 @@ fn sqlite_reopen_restores_pending_and_last_queries() {
         owner_key: "u1".to_owned(),
         query_type: "pending".to_owned(),
         condition: "全部".to_owned(),
+        replay_context: None,
         result_ids: vec!["1".to_owned(), "2".to_owned()],
         created_at: now_iso_cn(),
     });
@@ -560,6 +561,7 @@ fn session_schema_migrations_keep_legacy_rows_compatible() {
         owner_key: "u1".to_owned(),
         query_type: "list".to_owned(),
         condition: String::new(),
+        replay_context: None,
         result_ids: vec!["1".to_owned()],
         created_at: now_iso_cn(),
     };

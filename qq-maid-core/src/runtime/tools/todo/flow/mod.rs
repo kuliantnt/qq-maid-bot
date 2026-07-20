@@ -18,9 +18,9 @@ use crate::{
         },
         session::{SessionMeta, SessionRecord},
         tools::todo::{
-            TodoItem, TodoOwner, TodoQuery, TodoQueryStatus, TodoStatus, TodoStore,
-            query_filter::parse_todo_list_query, todo_visible_entity_snapshot,
-            valid_last_visible_todo_query,
+            TodoItem, TodoOwner, TodoQueryStatus, TodoStatus, TodoStore,
+            query_filter::parse_todo_list_query, remember_todo_query_snapshot, replay_todo_query,
+            todo_visible_entity_snapshot, valid_last_visible_todo_query,
         },
     },
 };
@@ -145,10 +145,12 @@ impl RustRespondService {
                             TodoQueryStatus::Pending if parsed.query.time.is_some() => "due-date",
                             TodoQueryStatus::Pending => "list",
                         };
-                        session.remember_last_todo_query(
-                            &owner.key,
+                        remember_todo_query_snapshot(
+                            session,
+                            &owner,
                             query_type,
                             parsed.condition.clone(),
+                            &parsed.query,
                             page.items.iter().map(|item| item.id.clone()).collect(),
                         );
                         let title = match parsed.query.status {
@@ -433,6 +435,29 @@ impl RustRespondService {
                 "todo_full_result_unavailable".to_owned(),
             ));
         };
+        if let Some(replay_query) = replay_todo_query(&query) {
+            let page = self
+                .task_store
+                .query_todos(owner, &replay_query)
+                .map_err(todo_error)?;
+            remember_todo_query_snapshot(
+                session,
+                owner,
+                query.query_type.clone(),
+                query.condition.clone(),
+                &replay_query,
+                page.items.iter().map(|item| item.id.clone()).collect(),
+            );
+            let (title, empty_text) = match replay_query.status {
+                TodoQueryStatus::Pending => ("🚧 进行中", "没有找到匹配的待办。"),
+                TodoQueryStatus::Completed => ("✅ 已完成", "没有找到匹配的待办。"),
+                TodoQueryStatus::All => ("📋 全部待办", "当前没有待办。"),
+            };
+            return Ok((
+                format_todo_query_page_reply(&page, title, empty_text, query.condition.trim()),
+                "todo_list".to_owned(),
+            ));
+        }
         match query.query_type.as_str() {
             "list" => {
                 let items = self.task_store.list_pending(owner).map_err(todo_error)?;
@@ -457,50 +482,18 @@ impl RustRespondService {
             }
             "search" => {
                 let condition = query.condition.trim();
-                // 周期类型筛选的 condition 是展示标签，不是关键词；恢复完整结果时必须复用 TodoQuery。
-                if matches!(condition, "周期性待办" | "一次性待办") {
-                    let recurring = condition == "周期性待办";
-                    let page = self
-                        .task_store
-                        .query_todos(
-                            owner,
-                            &TodoQuery {
-                                status: TodoQueryStatus::Pending,
-                                recurring: Some(recurring),
-                                limit: crate::runtime::tools::todo::TODO_QUERY_MAX_LIMIT,
-                                ..TodoQuery::default()
-                            },
-                        )
-                        .map_err(todo_error)?;
-                    session.remember_last_todo_query(
-                        &owner.key,
-                        "search",
-                        condition.to_owned(),
-                        page.items.iter().map(|item| item.id.clone()).collect(),
-                    );
-                    Ok((
-                        format_todo_query_page_reply(
-                            &page,
-                            "🚧 进行中",
-                            "没有找到匹配的待办。",
-                            condition,
-                        ),
-                        "todo_list".to_owned(),
-                    ))
+                let items = if condition.is_empty() {
+                    self.task_store.list_pending(owner).map_err(todo_error)?
                 } else {
-                    let items = if condition.is_empty() {
-                        self.task_store.list_pending(owner).map_err(todo_error)?
-                    } else {
-                        self.task_store
-                            .search_pending(owner, condition)
-                            .map_err(todo_error)?
-                    };
-                    remember_todo_query(session, owner, "search", condition, &items, true);
-                    Ok((
-                        format_todo_search_reply(&items, condition, true),
-                        "todo_search".to_owned(),
-                    ))
-                }
+                    self.task_store
+                        .search_pending(owner, condition)
+                        .map_err(todo_error)?
+                };
+                remember_todo_query(session, owner, "search", condition, &items, true);
+                Ok((
+                    format_todo_search_reply(&items, condition, true),
+                    "todo_search".to_owned(),
+                ))
             }
             "completed-time" => {
                 let Some(completed_query) = parse_completed_todo_time_query(&query.condition)

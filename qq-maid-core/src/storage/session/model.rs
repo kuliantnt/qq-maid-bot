@@ -108,6 +108,9 @@ pub struct LastTodoQuery {
     pub owner_key: String,
     pub query_type: String,
     pub condition: String,
+    /// 由所属业务域解释的不透明查询重放上下文；session 层不得解析其内部字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_context: Option<Value>,
     #[serde(default)]
     pub result_ids: Vec<String>,
     pub created_at: String,
@@ -245,6 +248,7 @@ impl SessionRecord {
             owner_key: owner_key.to_owned(),
             query_type: query_type.into(),
             condition: condition.into(),
+            replay_context: None,
             result_ids,
             created_at: now_iso_cn(),
         });

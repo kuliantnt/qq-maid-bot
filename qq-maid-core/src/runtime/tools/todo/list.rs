@@ -10,7 +10,7 @@ use chrono::NaiveDate;
 use crate::error::LlmError;
 use crate::runtime::tools::todo::{
     TodoQuery, TodoQueryStatus, TodoQueryTimeFilter, resolve_todo_list_date_filter,
-    storage::validate_todo_query,
+    storage::validate_todo_query, todo_query_type,
 };
 
 use super::common::{
@@ -196,7 +196,7 @@ impl Tool for ListTodoTool {
         } else {
             conditions.join("、")
         };
-        scope.remember_internal_query("list-query", &condition, &page.items)?;
+        scope.remember_internal_query(todo_query_type(&query), &condition, &query, &page.items)?;
 
         Ok(ToolOutput::json(json!({
             "status": status.as_str(),

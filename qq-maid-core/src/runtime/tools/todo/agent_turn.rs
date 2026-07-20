@@ -32,10 +32,11 @@ pub(crate) fn project_results(
     session: &mut SessionRecord,
     meta: &SessionMeta,
     results: &[ToolExecutionResult],
+    attempts: &[qq_maid_llm::provider::ToolExecutionAttempt],
 ) -> Result<TodoAgentProjection, LlmError> {
     let owner = TaskStore::owner(meta.user_id.as_deref(), &meta.scope_key);
     let aggregation =
-        todo::flow::aggregate_todo_tool_results(task_store, session, &owner, results)?;
+        todo::flow::aggregate_todo_tool_results(task_store, session, &owner, results, attempts)?;
     let visible_entity_snapshot = aggregation.visible_entity_snapshot(session, meta);
     Ok(TodoAgentProjection {
         consumed_result_indexes: aggregation.consumed_result_indexes,

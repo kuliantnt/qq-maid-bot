@@ -540,9 +540,12 @@ impl LlmProvider for MockProvider {
                     arguments,
                     reply,
                 } => {
+                    let call_id = "mock-call-0";
+                    let mut tool_context = req.tool_context.clone();
+                    tool_context.tool_call_id = Some(format!("{}:{call_id}", tool_context.task_id));
                     let output = req
                         .tools
-                        .execute_json(&req.tool_context, &name, &arguments)
+                        .execute_json(&tool_context, &name, &arguments)
                         .await?;
                     let output = serde_json::from_str::<Value>(&output).unwrap_or_else(|_| {
                         json!({
@@ -556,6 +559,13 @@ impl LlmProvider for MockProvider {
                         output,
                         succeeded,
                     }];
+                    let mut agent = agent_tool_trace(vec![emitted_tool], tool_results);
+                    agent.tool_attempts.push(ToolExecutionAttempt {
+                        result_index: 0,
+                        call_id: call_id.to_owned(),
+                        round: 0,
+                        retry_of: None,
+                    });
                     return Ok(ChatOutcome {
                         reply,
                         output_parts: Vec::new(),
@@ -578,7 +588,7 @@ impl LlmProvider for MockProvider {
                             total_tokens: None,
                         }),
                         fallback_used: false,
-                        agent: agent_tool_trace(vec![emitted_tool], tool_results),
+                        agent,
                     });
                 }
                 MockToolAction::ExecuteTools { calls, reply } => {
