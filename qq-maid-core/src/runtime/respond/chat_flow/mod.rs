@@ -342,6 +342,12 @@ impl RustRespondService {
                 })
             })
             .collect::<Vec<_>>();
+        let tool_retry_count = output
+            .agent
+            .tool_attempts
+            .iter()
+            .filter(|attempt| attempt.retry_of.is_some())
+            .count();
         let agent_result = output
             .agent
             .stop_reason
@@ -407,7 +413,7 @@ impl RustRespondService {
             "agent_tool_results": agent_tool_results,
             "agent_turn_status": agent_diagnostics["agent_turn_status"].clone(),
             "tool_outcomes": agent_diagnostics["tool_outcomes"].clone(),
-            "tool_retry_count": 0,
+            "tool_retry_count": tool_retry_count,
             "error_code": if let Some(error_code) = agent_turn_outcome
                 .as_ref()
                 .and_then(AgentTurnOutcome::primary_error_code)

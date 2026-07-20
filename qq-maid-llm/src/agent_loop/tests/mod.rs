@@ -306,6 +306,42 @@ struct NamedSlowReadOnlyTool {
     delay: std::time::Duration,
 }
 
+struct FailOnceReadOnlyTool {
+    calls: Arc<StdMutex<usize>>,
+}
+
+#[async_trait]
+impl crate::tool::Tool for FailOnceReadOnlyTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "search".to_owned(),
+            description: "fails once then returns a read-only result".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    async fn execute(&self, _ctx: ToolContext, arguments: Value) -> Result<ToolOutput, LlmError> {
+        let mut calls = self.calls.lock().unwrap();
+        *calls += 1;
+        if *calls == 1 {
+            return Err(LlmError::new("tool_failed", "simulated failure", "tool"));
+        }
+        Ok(ToolOutput::json(json!({
+            "ok": true,
+            "value": arguments["value"],
+        })))
+    }
+}
+
 #[async_trait]
 impl crate::tool::Tool for NamedSlowReadOnlyTool {
     fn metadata(&self) -> ToolMetadata {

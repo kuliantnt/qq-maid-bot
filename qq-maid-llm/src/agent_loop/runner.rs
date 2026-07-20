@@ -660,6 +660,19 @@ fn sync_diagnostics(
         diagnostics.executed_tools.extend(executor.executed_tools());
         diagnostics.tool_results.truncate(baseline.tool_results);
         diagnostics.tool_results.extend(executor.tool_results());
+        // ToolLoopExecutor 内 result_index / retry_of 是候选局部下标；累计
+        // diagnostics 需要换成全局下标，否则跨 Provider 候选时会误指向前一个
+        // 候选的结果。tool_attempts 长度也独立截断，不假设与 tool_results 相等。
+        diagnostics.tool_attempts.truncate(baseline.tool_attempts);
+        diagnostics
+            .tool_attempts
+            .extend(executor.tool_attempts().into_iter().map(|mut attempt| {
+                attempt.result_index += baseline.tool_results;
+                if let Some(retry_of) = attempt.retry_of.as_mut() {
+                    *retry_of += baseline.tool_results;
+                }
+                attempt
+            }));
     });
 }
 
@@ -737,10 +750,12 @@ async fn execute_tool_batch(
                 },
                 round,
                 index,
+                calls.len(),
                 run_handle.tool_execution_deadline(),
             )
         })
         .collect::<Vec<_>>();
+    executor.begin_batch();
     let mut results = Vec::with_capacity(calls.len());
     let mut skipped_for_finalization = false;
     for (call, prepared) in calls.iter().zip(prepared_calls) {
@@ -792,6 +807,7 @@ async fn execute_tool_batch(
             output: output.output,
         });
     }
+    executor.finish_batch();
     Ok(ToolBatchOutcome {
         results,
         skipped_for_finalization,

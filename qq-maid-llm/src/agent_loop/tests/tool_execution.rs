@@ -53,6 +53,151 @@ async fn duplicate_read_only_tool_call_replays_success_and_keeps_dependency_chai
 }
 
 #[tokio::test]
+async fn failed_tool_followed_by_same_singleton_call_is_recorded_as_retry() {
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(FailOnceReadOnlyTool {
+        calls: calls.clone(),
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("search", "c1", r#"{"value":"rust"}"#)]),
+            tool_calls(vec![tool_call("search", "c2", r#"{"value":"rust"}"#)]),
+            final_reply("done"),
+        ],
+    ));
+
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(*calls.lock().unwrap(), 2);
+    assert_eq!(outcome.agent.tool_results.len(), 2);
+    assert!(!outcome.agent.tool_results[0].succeeded);
+    assert!(outcome.agent.tool_results[1].succeeded);
+    assert_eq!(outcome.agent.tool_attempts.len(), 2);
+    assert_eq!(outcome.agent.tool_attempts[0].retry_of, None);
+    assert_eq!(outcome.agent.tool_attempts[1].retry_of, Some(0));
+}
+
+#[tokio::test]
+async fn cross_candidate_retry_indexes_are_offset_to_global() {
+    let handle = AgentRunHandle::default();
+
+    // 候选 A：先产生一个成功工具结果，再因模型错误退出。
+    handle.begin_candidate_attempt().unwrap();
+    let calls_a = Arc::new(StdMutex::new(0));
+    let registry_a = registry_with(vec![Arc::new(SlowReadOnlyTool {
+        calls: calls_a.clone(),
+        delay: std::time::Duration::ZERO,
+    }) as _]);
+    let err = run_agent_loop_with_handle(
+        Box::new(ErrorScriptSession {
+            script: VecDeque::from([
+                Ok(tool_calls(vec![tool_call(
+                    "search",
+                    "a1",
+                    r#"{"value":"a"}"#,
+                )])),
+                Err(LlmError::provider("candidate a failed", "provider")),
+            ]),
+        }),
+        registry_a,
+        test_context(),
+        3,
+        None,
+        None,
+        Some(handle.clone()),
+    )
+    .await
+    .unwrap_err();
+    let after_a = err.agent.expect("candidate a diagnostics");
+    assert_eq!(after_a.tool_results.len(), 1);
+    assert!(after_a.tool_results[0].succeeded);
+    assert_eq!(after_a.tool_attempts.len(), 1);
+    assert_eq!(after_a.tool_attempts[0].result_index, 0);
+    assert_eq!(after_a.tool_attempts[0].retry_of, None);
+
+    // 候选 B：同一 AgentRunHandle 上失败后重试成功。
+    handle.begin_candidate_attempt().unwrap();
+    let calls_b = Arc::new(StdMutex::new(0));
+    let registry_b = registry_with(vec![Arc::new(FailOnceReadOnlyTool {
+        calls: calls_b.clone(),
+    }) as _]);
+    let outcome = run_agent_loop_with_handle(
+        Box::new(ScriptedSession::new(
+            "mock",
+            "m",
+            vec![
+                tool_calls(vec![tool_call("search", "b1", r#"{"value":"rust"}"#)]),
+                tool_calls(vec![tool_call("search", "b2", r#"{"value":"rust"}"#)]),
+                final_reply("done"),
+            ],
+        )),
+        registry_b,
+        test_context(),
+        3,
+        None,
+        None,
+        Some(handle.clone()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(*calls_a.lock().unwrap(), 1);
+    assert_eq!(*calls_b.lock().unwrap(), 2);
+    assert_eq!(outcome.agent.tool_results.len(), 3);
+    assert_eq!(outcome.agent.tool_attempts.len(), 3);
+
+    // 候选 A 的全局下标保持不变。
+    assert_eq!(outcome.agent.tool_attempts[0].result_index, 0);
+    assert_eq!(outcome.agent.tool_attempts[0].retry_of, None);
+    assert!(outcome.agent.tool_results[0].succeeded);
+
+    // 候选 B 的局部 0/1 应偏移为全局 1/2，retry_of 指向 B 的失败结果而非 A。
+    assert_eq!(outcome.agent.tool_attempts[1].result_index, 1);
+    assert_eq!(outcome.agent.tool_attempts[1].retry_of, None);
+    assert!(!outcome.agent.tool_results[1].succeeded);
+    assert_eq!(outcome.agent.tool_attempts[2].result_index, 2);
+    assert_eq!(outcome.agent.tool_attempts[2].retry_of, Some(1));
+    assert!(outcome.agent.tool_results[2].succeeded);
+}
+
+#[tokio::test]
+async fn independent_same_round_calls_are_not_recorded_as_retry() {
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(FailOnceReadOnlyTool {
+        calls: calls.clone(),
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![
+                tool_call("search", "c1", r#"{"value":"rust"}"#),
+                tool_call("search", "c2", r#"{"value":"rust"}"#),
+            ]),
+            final_reply("done"),
+        ],
+    ));
+
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(*calls.lock().unwrap(), 2);
+    assert_eq!(outcome.agent.tool_attempts.len(), 2);
+    assert!(
+        outcome
+            .agent
+            .tool_attempts
+            .iter()
+            .all(|attempt| attempt.retry_of.is_none())
+    );
+}
+
+#[tokio::test]
 async fn side_effecting_tool_invalidates_read_only_deduplication() {
     let search_calls = Arc::new(StdMutex::new(0));
     let write_calls = Arc::new(StdMutex::new(0));
