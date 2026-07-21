@@ -131,7 +131,10 @@ pub struct RespondRequest {
     /// 会话状态上下文
     #[serde(default)]
     pub session_context: String,
-    /// 最近 N 条历史消息
+    /// 已持久化的会话摘要锚点；与每轮变化的 session_context 分离以保持缓存前缀。
+    #[serde(default)]
+    pub history_summary: String,
+    /// 当前 Compact 批次内按时间追加的历史消息
     #[serde(default)]
     pub history_messages: Vec<ChatMessage>,
     /// 当前会话的完整序列化状态（用于压缩、待办修订等场景）
@@ -235,6 +238,7 @@ impl Default for RespondRequest {
             memory_context: String::new(),
             knowledge_context: String::new(),
             session_context: String::new(),
+            history_summary: String::new(),
             history_messages: Vec::new(),
             session: serde_json::Value::Null,
             metadata: HashMap::new(),

@@ -171,6 +171,10 @@ impl MockProvider {
         self.compact_replies.lock().unwrap().push(Ok(reply.into()));
     }
 
+    pub(crate) fn push_compact_error(&self, error: LlmError) {
+        self.compact_replies.lock().unwrap().push(Err(error));
+    }
+
     pub(crate) fn with_tool_protocol(mut self, protocol: ToolCallingProtocol) -> Self {
         self.tool_protocol = Some(protocol);
         self

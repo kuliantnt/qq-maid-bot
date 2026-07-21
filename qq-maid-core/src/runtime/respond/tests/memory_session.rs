@@ -2,13 +2,12 @@ use std::fs;
 
 use qq_maid_llm::provider::{ToolCallingProtocol, types::ChatRole};
 
+use crate::error::LlmError;
 use crate::runtime::{
     respond::{
         RespondRequest,
-        chat_flow::recent_session_messages,
-        common::{
-            COMPACT_KEEP_MESSAGE_LIMIT, SESSION_HISTORY_MESSAGE_LIMIT, empty_respond_request,
-        },
+        chat_flow::session_messages_for_model,
+        common::{COMPACT_KEEP_MESSAGE_LIMIT, empty_respond_request},
     },
     tools::memory::{MemoryScopeType, MemoryTarget, MemoryVisibility},
 };
@@ -596,7 +595,7 @@ async fn chat_does_not_inject_member_id_mapping_or_speaker_hint() {
 }
 
 #[test]
-fn recent_session_messages_uses_30_message_window() {
+fn active_session_messages_remain_append_only_before_compact() {
     let (service, _) = test_service_with_base();
     let mut session = service
         .session_store
@@ -606,10 +605,10 @@ fn recent_session_messages_uses_30_message_window() {
         session.append_message("user", &format!("msg {index}"));
     }
 
-    let messages = recent_session_messages(&session, SESSION_HISTORY_MESSAGE_LIMIT);
+    let messages = session_messages_for_model(&session);
 
-    assert_eq!(messages.len(), 30);
-    assert!(messages.first().unwrap().content.ends_with("msg 10"));
+    assert_eq!(messages.len(), 40);
+    assert!(messages.first().unwrap().content.ends_with("msg 0"));
     assert!(messages.last().unwrap().content.ends_with("msg 39"));
     assert!(
         messages
@@ -637,4 +636,82 @@ fn compact_history_keeps_16_recent_messages() {
     assert_eq!(session.history.len(), 16);
     assert_eq!(session.history.first().unwrap().content, "msg 8");
     assert_eq!(session.history.last().unwrap().content, "msg 23");
+}
+
+#[tokio::test]
+async fn automatic_compact_updates_summary_only_at_batch_boundaries() {
+    let provider = MockProvider::new();
+    provider.push_compact_reply("第一版稳定摘要");
+    let (service, _) = test_service_with_provider_and_base(provider.clone());
+    let mut session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    for index in 0..30 {
+        session.append_message("user", &format!("msg {index}"));
+    }
+    service.session_store.save(&mut session).unwrap();
+
+    assert!(
+        service
+            .compact_session_history_if_needed(&mut session, None)
+            .await
+    );
+    assert_eq!(session.summary, "第一版稳定摘要");
+    assert_eq!(session.summary_revision(), 1);
+    assert_eq!(session.history.len(), COMPACT_KEEP_MESSAGE_LIMIT);
+
+    session.append_message("user", "普通追加一");
+    session.append_message("assistant", "普通追加二");
+    assert!(
+        !service
+            .compact_session_history_if_needed(&mut session, None)
+            .await
+    );
+    assert_eq!(session.summary_revision(), 1);
+    assert_eq!(session.summary, "第一版稳定摘要");
+
+    for index in 0..12 {
+        session.append_message("user", &format!("next {index}"));
+    }
+    service.session_store.save(&mut session).unwrap();
+    provider.push_compact_reply("第二版稳定摘要");
+    assert!(
+        service
+            .compact_session_history_if_needed(&mut session, None)
+            .await
+    );
+    assert_eq!(session.summary_revision(), 2);
+    assert_eq!(session.summary, "第二版稳定摘要");
+    assert_eq!(session.history.len(), COMPACT_KEEP_MESSAGE_LIMIT);
+}
+
+#[tokio::test]
+async fn failed_automatic_compact_keeps_history_and_current_chat() {
+    let provider = MockProvider::new();
+    provider.push_compact_error(LlmError::provider("compact unavailable", "provider"));
+    let (service, _) = test_service_with_provider_and_base(provider);
+    let mut session = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    for index in 0..30 {
+        session.append_message("user", &format!("msg {index}"));
+    }
+    service.session_store.save(&mut session).unwrap();
+
+    let response = service
+        .respond(message("压缩失败后的当前消息"))
+        .await
+        .unwrap();
+    assert!(response.ok);
+
+    let reloaded = service
+        .session_store
+        .get_or_create_active(&test_meta())
+        .unwrap();
+    assert_eq!(reloaded.summary_revision(), 0);
+    assert!(reloaded.summary.is_empty());
+    assert_eq!(reloaded.history.len(), 32);
+    assert_eq!(reloaded.history[30].content, "压缩失败后的当前消息");
 }

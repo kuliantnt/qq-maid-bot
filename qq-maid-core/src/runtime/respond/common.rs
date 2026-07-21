@@ -70,7 +70,7 @@ impl From<&str> for CommandBody {
     }
 }
 
-/// 从会话历史中截取给 LLM 的最大消息条数
+/// 触发批次 Compact 的活跃历史消息条数
 pub(super) const SESSION_HISTORY_MESSAGE_LIMIT: usize = 30;
 /// 压缩后保留的最新消息条数
 pub(super) const COMPACT_KEEP_MESSAGE_LIMIT: usize = 16;
@@ -117,6 +117,7 @@ pub(super) fn empty_respond_request() -> RespondRequest {
         memory_context: String::new(),
         knowledge_context: String::new(),
         session_context: String::new(),
+        history_summary: String::new(),
         history_messages: Vec::new(),
         session: Value::Null,
         metadata: HashMap::new(),

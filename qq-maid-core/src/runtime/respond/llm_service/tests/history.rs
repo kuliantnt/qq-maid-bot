@@ -141,14 +141,187 @@ fn budgeted_chat_messages_handles_non_standard_history_sequences() {
         message_contents_with_time_marker(&messages),
         vec![
             "固定 prompt",
-            "<time_context>",
             "孤立助手",
             "连续用户一",
             "连续用户二",
             "连续用户后的助手",
+            "<time_context>",
             "当前问题",
         ]
     );
+}
+
+fn cache_layout_request() -> RespondRequest {
+    RespondRequest {
+        purpose: RespondPurpose::Chat,
+        user_text: "当前问题".to_owned(),
+        system_prompts: vec!["固定 prompt".to_owned()],
+        history_summary: "稳定摘要".to_owned(),
+        history_messages: vec![
+            ChatMessage::user("历史用户"),
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: "历史助手".to_owned(),
+                content_parts: Vec::new(),
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn different_request_times_only_change_bytes_after_stable_history_prefix() {
+    let req = cache_layout_request();
+    let offset = qq_maid_common::time_context::shanghai_offset();
+    let first_time =
+        RequestTimeContext::from_datetime(offset.with_ymd_and_hms(2026, 7, 21, 10, 0, 0).unwrap());
+    let second_time =
+        RequestTimeContext::from_datetime(offset.with_ymd_and_hms(2026, 7, 21, 10, 1, 0).unwrap());
+
+    let first = build_chat_messages_with_time_context(&req, true, &first_time);
+    let second = build_chat_messages_with_time_context(&req, true, &second_time);
+
+    assert_eq!(
+        serde_json::to_vec(&first[..4]).unwrap(),
+        serde_json::to_vec(&second[..4]).unwrap()
+    );
+    assert_ne!(first[4].content, second[4].content);
+}
+
+#[test]
+fn dynamic_context_changes_do_not_rewrite_summary_or_history_prefix() {
+    let baseline = cache_layout_request();
+    let offset = qq_maid_common::time_context::shanghai_offset();
+    let time =
+        RequestTimeContext::from_datetime(offset.with_ymd_and_hms(2026, 7, 21, 10, 0, 0).unwrap());
+
+    for mutate in [
+        |req: &mut RespondRequest| req.knowledge_context = "新知识".to_owned(),
+        |req: &mut RespondRequest| req.memory_context = "新记忆".to_owned(),
+        |req: &mut RespondRequest| req.session_context = "新 session 状态".to_owned(),
+    ] {
+        let mut changed = baseline.clone();
+        mutate(&mut changed);
+        let first = build_chat_messages_with_time_context(&baseline, true, &time);
+        let second = build_chat_messages_with_time_context(&changed, true, &time);
+
+        assert_eq!(
+            serde_json::to_vec(&first[..4]).unwrap(),
+            serde_json::to_vec(&second[..4]).unwrap()
+        );
+        assert_ne!(first, second);
+    }
+}
+
+#[test]
+fn budgeted_chat_messages_protect_stable_summary_while_evicting_dynamic_context() {
+    let long_text = "预算淘汰内容".repeat(80);
+    let baseline = RespondRequest {
+        purpose: RespondPurpose::Chat,
+        user_text: "当前问题".to_owned(),
+        system_prompts: vec!["稳定 system".to_owned()],
+        history_summary: "稳定历史摘要".to_owned(),
+        knowledge_context: format!("动态知识 {long_text}"),
+        memory_context: format!("动态记忆 {long_text}"),
+        session_context: format!("动态 session {long_text}"),
+        history_messages: vec![
+            ChatMessage::user(format!("可淘汰旧用户 {long_text}")),
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: format!("可淘汰旧助手 {long_text}"),
+                content_parts: Vec::new(),
+            },
+            ChatMessage::user("受保护最近用户"),
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: "受保护最近助手".to_owned(),
+                content_parts: Vec::new(),
+            },
+        ],
+        ..Default::default()
+    };
+    let protected_groups = [
+        vec![ChatMessage::system("稳定 system")],
+        vec![ChatMessage::system("稳定历史摘要")],
+        vec![
+            normalize_user_message_for_provider(ChatMessage::user("受保护最近用户")),
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: "受保护最近助手".to_owned(),
+                content_parts: Vec::new(),
+            },
+        ],
+        vec![ChatMessage::system(llm_time_context_prompt(
+            &request_time_context(),
+        ))],
+        vec![normalize_user_message_for_provider(
+            ChatMessage::user_with_parts("当前问题", current_user_parts_for_model(&baseline, true)),
+        )],
+    ];
+    let protected_chars = protected_groups
+        .iter()
+        .map(|messages| estimated_json_chars(messages, "context_budget").unwrap())
+        .sum::<usize>();
+    let config = ContextBudgetConfig {
+        context_window_chars: protected_chars + 50,
+        output_reserve_chars: 50,
+        protected_recent_turns: 1,
+    };
+
+    for (kind, changed_context) in [
+        ("knowledge", "变化后的动态知识".repeat(90)),
+        ("memory", "变化后的动态记忆".repeat(90)),
+        ("session", "变化后的动态 session".repeat(90)),
+    ] {
+        let mut req = baseline.clone();
+        match kind {
+            "knowledge" => req.knowledge_context = changed_context,
+            "memory" => req.memory_context = changed_context,
+            "session" => req.session_context = changed_context,
+            _ => unreachable!(),
+        }
+
+        let messages = budget_chat_messages(&req, config, true).unwrap();
+        let contents = message_contents_with_time_marker(&messages);
+
+        assert_eq!(&contents[..2], ["稳定 system", "稳定历史摘要"]);
+        assert!(contents.iter().any(|content| content == "受保护最近用户"));
+        assert!(contents.iter().any(|content| content == "受保护最近助手"));
+        assert!(!contents.iter().any(|content| content.contains("可淘汰旧")));
+        assert!(!contents.iter().any(|content| content.contains("动态知识")));
+        assert!(!contents.iter().any(|content| content.contains("动态记忆")));
+        assert!(
+            !contents
+                .iter()
+                .any(|content| content.contains("动态 session"))
+        );
+    }
+}
+
+#[test]
+fn cache_diagnostics_never_retain_prompt_or_context_bodies() {
+    let mut req = cache_layout_request();
+    req.history_summary = "私密摘要正文".to_owned();
+    req.knowledge_context = "知识正文不能进日志".to_owned();
+    req.memory_context = "记忆正文不能进日志".to_owned();
+    req.session_context = "session 正文不能进日志".to_owned();
+    let messages = build_respond_messages(&req);
+
+    let diagnostics = prompt_cache_diagnostics(&req, &messages, None).unwrap();
+    let debug = format!("{diagnostics:?}");
+
+    for secret in [
+        "固定 prompt",
+        "历史用户",
+        "历史助手",
+        "当前问题",
+        "私密摘要正文",
+        "知识正文不能进日志",
+        "记忆正文不能进日志",
+        "session 正文不能进日志",
+    ] {
+        assert!(!debug.contains(secret), "diagnostics leaked `{secret}`");
+    }
 }
 
 #[test]

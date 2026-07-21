@@ -228,6 +228,7 @@ fn compact_history_persists_summary_and_archive() {
     let reloaded = store.get_or_create_active(&meta).unwrap();
 
     assert_eq!(reloaded.summary, "摘要");
+    assert_eq!(reloaded.summary_revision(), 1);
     assert_eq!(reloaded.history.len(), 2);
     assert!(
         reloaded
@@ -254,6 +255,29 @@ fn compact_history_persists_summary_and_archive() {
             .iter()
             .all(|message| message.message_id.is_some())
     );
+}
+
+#[test]
+fn compact_history_if_current_rejects_stale_snapshot() {
+    let store = test_store();
+    let meta = test_meta();
+    let mut stale = store.get_or_create_active(&meta).unwrap();
+    stale.append_message("user", "旧快照消息");
+    store.save(&mut stale).unwrap();
+
+    let mut latest = stale.clone();
+    latest.append_message("assistant", "并发追加消息");
+    store.save(&mut latest).unwrap();
+
+    assert!(
+        !store
+            .compact_history_if_current(&mut stale, "不应写入的摘要", 1)
+            .unwrap()
+    );
+    let reloaded = store.get(&latest.session_id).unwrap().unwrap();
+    assert_eq!(reloaded.history, latest.history);
+    assert!(reloaded.summary.is_empty());
+    assert_eq!(reloaded.summary_revision(), 0);
 }
 
 #[test]

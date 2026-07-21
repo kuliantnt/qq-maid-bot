@@ -554,11 +554,12 @@ fn respond_messages_include_request_time_context_once() {
 }
 
 #[test]
-fn chat_messages_keep_stable_system_prefix_before_time_context() {
+fn chat_messages_keep_summary_and_history_before_dynamic_context() {
     let req = RespondRequest {
         purpose: RespondPurpose::Chat,
         user_text: "继续".to_owned(),
         system_prompts: vec!["固定 prompt".to_owned(), "固定补充规则".to_owned()],
+        history_summary: "稳定摘要锚点".to_owned(),
         knowledge_context: "知识片段".to_owned(),
         memory_context: "长期记忆".to_owned(),
         session_context: "会话上下文".to_owned(),
@@ -584,16 +585,17 @@ fn chat_messages_keep_stable_system_prefix_before_time_context() {
         vec![
             "固定 prompt",
             "固定补充规则",
-            messages[2].content.as_str(),
+            "稳定摘要锚点",
+            "上一轮用户",
+            "上一轮助手",
             "知识片段",
             "长期记忆",
             "会话上下文",
-            "上一轮用户",
-            "上一轮助手",
+            messages[8].content.as_str(),
             "继续",
         ]
     );
-    assert!(messages[2].content.contains("请求时间上下文："));
+    assert!(messages[8].content.contains("请求时间上下文："));
 }
 
 #[test]
@@ -631,12 +633,12 @@ fn budgeted_chat_messages_keep_order_when_under_limit() {
         message_contents_with_time_marker(&messages),
         vec![
             "固定 prompt",
-            "<time_context>",
+            "历史用户",
+            "历史助手",
             "知识片段",
             "长期记忆",
             "会话摘要",
-            "历史用户",
-            "历史助手",
+            "<time_context>",
             "当前问题",
         ]
     );
@@ -878,12 +880,12 @@ fn build_respond_messages_without_context_budget_keeps_unbudgeted_order() {
         message_contents_with_time_marker(&messages),
         vec![
             "固定 prompt",
-            "<time_context>",
+            "连续用户一",
+            "连续用户二",
             "知识片段",
             "长期记忆",
             "会话摘要",
-            "连续用户一",
-            "连续用户二",
+            "<time_context>",
             "当前问题",
         ]
     );

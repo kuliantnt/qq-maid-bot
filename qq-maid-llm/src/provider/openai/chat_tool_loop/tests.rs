@@ -245,6 +245,13 @@ async fn tool_loop_executes_function_call_and_returns_output_to_model() {
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0]["tool_choice"], "auto");
     assert_eq!(requests[0]["tools"][0]["function"]["name"], "get_weather");
+    let first_messages = requests[0]["messages"].as_array().unwrap();
+    let second_messages = requests[1]["messages"].as_array().unwrap();
+    assert_eq!(
+        first_messages.as_slice(),
+        &second_messages[..first_messages.len()]
+    );
+    assert_eq!(requests[0]["tools"], requests[1]["tools"]);
     assert_eq!(requests[1]["messages"][1]["tool_calls"][0]["id"], "call_1");
     assert_eq!(requests[1]["messages"][2]["role"], "tool");
     assert_eq!(requests[1]["messages"][2]["tool_call_id"], "call_1");
