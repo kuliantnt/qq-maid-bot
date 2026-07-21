@@ -8,7 +8,7 @@ BOT_BIN := qq-maid-bot
 # 不统计 target/、脚本、配置、README、Makefile。
 STATUS_RUST_PATHS := ':(glob)$(COMMON_DIR)/**/*.rs' ':(glob)$(LLM_DIR)/**/*.rs' ':(glob)$(CORE_DIR)/**/*.rs' ':(glob)$(GATEWAY_DIR)/**/*.rs'
 
-.PHONY: help status build release install deploy local remote deploy-local deploy-remote run test test-common test-llm test-core test-gateway knowledge-eval knowledge-eval-v3 common-fmt common-test common-check llm-fmt llm-test llm-check core-fmt core-test core-check gateway-fmt gateway-test gateway-check clean doctor diagnose
+.PHONY: help status build release install deploy local remote deploy-local deploy-remote run test test-common test-llm test-core test-gateway test-docker docker-build docker-config knowledge-eval knowledge-eval-v3 common-fmt common-test common-check llm-fmt llm-test llm-check core-fmt core-test core-check gateway-fmt gateway-test gateway-check clean doctor diagnose
 
 help:
 	@echo "make status        查看项目状态和 Rust 源码行数"
@@ -25,6 +25,9 @@ help:
 	@echo "make test-llm      运行 Rust LLM fmt check、测试和 check"
 	@echo "make test-core     运行 Rust common 和 Core fmt check、测试和 check"
 	@echo "make test-gateway  运行 Rust common 和 QQ C2C gateway fmt、测试和 check"
+	@echo "make docker-build  构建本机架构的 qq-maid-bot:dev 容器镜像"
+	@echo "make docker-config 校验默认 Compose 与端口覆盖配置"
+	@echo "make test-docker   运行容器部署脚本测试与 Compose 校验"
 	@echo "make knowledge-eval 运行可复跑的 Knowledge FTS5 基线评测"
 	@echo "make knowledge-eval-v3 运行 Knowledge 混合召回与 preflight F2 评测"
 	@echo "make diagnose      运行网络和环境诊断脚本"
@@ -98,6 +101,22 @@ test-llm: common-fmt llm-fmt common-test llm-test common-check llm-check
 test-core: common-fmt llm-fmt core-fmt common-test llm-test core-test common-check llm-check core-check
 
 test-gateway: common-fmt gateway-fmt common-test gateway-test common-check gateway-check
+
+docker-build:
+	docker build \
+		--build-arg QQ_MAID_BUILD_COMMIT="$$(git rev-parse HEAD)" \
+		--build-arg QQ_MAID_BUILD_VERSION="dev" \
+		--build-arg QQ_MAID_BUILD_DATE="$$(git show -s --format=%cI HEAD)" \
+		-t qq-maid-bot:dev .
+
+docker-config:
+	QQ_MAID_ENV_FILE=./runtime/config/.env.example docker compose --env-file compose.env.example config --quiet
+	QQ_MAID_ENV_FILE=./runtime/config/.env.example docker compose --env-file compose.env.example -f compose.yaml -f compose.console.yaml config --quiet
+	QQ_MAID_ENV_FILE=./runtime/config/.env.example docker compose --env-file compose.env.example -f compose.yaml -f compose.wechat.yaml config --quiet
+	QQ_MAID_ENV_FILE=./runtime/config/.env.example docker compose --env-file compose.env.example -f compose.yaml -f compose.onebot.yaml config --quiet
+
+test-docker: docker-config
+	bash scripts/tests/test-docker-deploy.sh
 
 knowledge-eval:
 	cargo run -p qq-maid-core --bin knowledge-eval -- qq-maid-core/src/runtime/tools/knowledge/fixtures/knowledge_eval_v1.json

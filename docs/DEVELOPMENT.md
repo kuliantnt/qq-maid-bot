@@ -4,6 +4,10 @@
 
 如果只是第一次了解项目，请先阅读 [README.md](../README.md)。
 
+容器镜像、Compose、GHCR 标签、测试环境自动部署与回滚约定见
+[Docker 与 Compose 部署](./deployment/docker.md)。本地有 Docker 时可运行 `make docker-build`、
+`make docker-config` 和 `make test-docker`；容器构建必须从根 Workspace 使用唯一 `Cargo.lock`。
+
 ## 架构边界
 
 - `qq-maid-gateway-rs/`：QQ 官方 C2C / 群 at 和可选微信服务号接入层，负责平台事件接收、统一入站转换、`/ping` 诊断、回复发送和主动推送出口。

@@ -82,9 +82,10 @@ jobs:
           bash scripts/test-package-release.sh
           bash scripts/test-prepare-project-docs-kb.sh
           bash scripts/test-botctl-guidance.sh
+          bash scripts/tests/test-docker-deploy.sh
 
       - name: Check shell syntax
-        run: bash -n scripts/*.sh
+        run: find scripts -type f -name '*.sh' -print0 | xargs -0 bash -n
 
   windows-botctl:
     name: Windows botctl smoke test

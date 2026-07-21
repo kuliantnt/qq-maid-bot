@@ -1,0 +1,320 @@
+name: Container
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+      - "qq-maid-common/**"
+      - "qq-maid-llm/**"
+      - "qq-maid-core/**"
+      - "qq-maid-gateway-rs/**"
+      - "runtime/**"
+      - "web-console/dist/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "compose*.yaml"
+      - "compose.env.example"
+      - "scripts/docker-*.sh"
+      - "scripts/tests/test-docker-deploy.sh"
+      - ".github/workflows/container.yml"
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: container-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_REPOSITORY: ghcr.io/kuliantnt/qq-maid-bot
+
+jobs:
+  validate:
+    name: Validate Compose and deployment scripts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Validate shell scripts
+        run: |
+          find scripts -type f -name '*.sh' -print0 | xargs -0 bash -n
+          bash scripts/tests/test-docker-deploy.sh
+
+      - name: Validate Compose templates
+        env:
+          QQ_MAID_ENV_FILE: ./runtime/config/.env.example
+        run: |
+          docker compose --env-file compose.env.example config --quiet
+          docker compose --env-file compose.env.example -f compose.yaml -f compose.console.yaml config --quiet
+          docker compose --env-file compose.env.example -f compose.yaml -f compose.wechat.yaml config --quiet
+          docker compose --env-file compose.env.example -f compose.yaml -f compose.onebot.yaml config --quiet
+
+  build-platform:
+    name: Build ${{ matrix.platform }}
+    needs: validate
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up crane
+        if: github.event_name == 'push'
+        uses: imjasonh/setup-crane@v0.4
+
+      - name: Select immutable platform tag
+        id: metadata
+        shell: bash
+        run: |
+          echo "tag=${IMAGE_REPOSITORY}:sha-${GITHUB_SHA}-${{ matrix.suffix }}" >> "${GITHUB_OUTPUT}"
+          echo "created=$(git show -s --format=%cI HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Reuse existing immutable platform image
+        id: existing
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          if digest="$(crane digest "${IMAGE_TAG}" 2>/dev/null)"; then
+            revision="$(crane config "${IMAGE_TAG}" | jq -r '.config.Labels["org.opencontainers.image.revision"] // ""')"
+            if [[ "${revision}" != "${GITHUB_SHA}" ]]; then
+              echo "::error::不可变平台标签已存在，但 revision=${revision} 与 ${GITHUB_SHA} 不一致"
+              exit 1
+            fi
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+            echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Build and optionally push platform image
+        id: build
+        if: github.event_name != 'push' || steps.existing.outputs.exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.metadata.outputs.tag }}
+          build-args: |
+            QQ_MAID_BUILD_COMMIT=${{ github.sha }}
+            QQ_MAID_BUILD_VERSION=sha-${{ github.sha }}
+            QQ_MAID_BUILD_DATE=${{ steps.metadata.outputs.created }}
+          cache-from: type=gha,scope=container-${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=container-${{ matrix.suffix }}
+          # 单架构标签必须直接指向 image manifest，便于后续无嵌套地合成多架构索引。
+          provenance: false
+          sbom: false
+
+      - name: Record platform digest
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          EXISTING_DIGEST: ${{ steps.existing.outputs.digest }}
+          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          digest="${EXISTING_DIGEST:-${BUILT_DIGEST:-}}"
+          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::未获得合法平台镜像 digest"
+            exit 1
+          }
+          printf '%s\n' "${digest}" > "digest-${{ matrix.suffix }}"
+
+      - name: Upload platform digest
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v7
+        with:
+          name: container-digest-${{ matrix.suffix }}
+          path: digest-${{ matrix.suffix }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-manifest:
+    name: Publish commit manifest
+    if: github.event_name == 'push'
+    needs: build-platform
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+
+    steps:
+      - name: Download platform digests
+        uses: actions/download-artifact@v8
+        with:
+          pattern: container-digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up crane
+        uses: imjasonh/setup-crane@v0.4
+
+      - name: Publish or reuse immutable commit manifest
+        id: publish
+        shell: bash
+        run: |
+          amd64_digest="$(cat digest-amd64)"
+          arm64_digest="$(cat digest-arm64)"
+          commit_tag="${IMAGE_REPOSITORY}:sha-${GITHUB_SHA}"
+
+          if commit_digest="$(crane digest "${commit_tag}" 2>/dev/null)"; then
+            manifest="$(crane manifest "${commit_tag}")"
+            # shellcheck disable=SC2016 # $digest 是 jq --arg 变量，不是 Shell 变量。
+            printf '%s' "${manifest}" | jq -e --arg digest "${amd64_digest}" \
+              '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64" and .digest == $digest)' >/dev/null
+            # shellcheck disable=SC2016 # $digest 是 jq --arg 变量，不是 Shell 变量。
+            printf '%s' "${manifest}" | jq -e --arg digest "${arm64_digest}" \
+              '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64" and .digest == $digest)' >/dev/null
+          else
+            docker buildx imagetools create \
+              --tag "${commit_tag}" \
+              "${IMAGE_REPOSITORY}@${amd64_digest}" \
+              "${IMAGE_REPOSITORY}@${arm64_digest}"
+            commit_digest="$(crane digest "${commit_tag}")"
+          fi
+
+          for platform in linux/amd64 linux/arm64; do
+            revision="$(crane config --platform "${platform}" "${IMAGE_REPOSITORY}@${commit_digest}" \
+              | jq -r '.config.Labels["org.opencontainers.image.revision"] // ""')"
+            [[ "${revision}" == "${GITHUB_SHA}" ]] || {
+              echo "::error::${platform} 镜像 revision=${revision} 与 ${GITHUB_SHA} 不一致"
+              exit 1
+            }
+            size="$(crane manifest --platform "${platform}" "${IMAGE_REPOSITORY}@${commit_digest}" \
+              | jq '[.config.size, (.layers[].size)] | add')"
+            printf '%s image bytes: %s\n' "${platform}" "${size}" >> "${GITHUB_STEP_SUMMARY}"
+          done
+
+          crane tag "${IMAGE_REPOSITORY}@${commit_digest}" master
+          [[ "$(crane digest "${IMAGE_REPOSITORY}:master")" == "${commit_digest}" ]]
+          echo "digest=${commit_digest}" >> "${GITHUB_OUTPUT}"
+          printf '%s\n' "commit image: \`${IMAGE_REPOSITORY}@${commit_digest}\`" >> "${GITHUB_STEP_SUMMARY}"
+
+  deploy-test:
+    name: Deploy test environment
+    if: github.event_name == 'push'
+    needs: publish-manifest
+    runs-on: ubuntu-latest
+    environment: test
+    concurrency:
+      group: qq-maid-bot-test-deploy
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout deployment files
+        uses: actions/checkout@v7
+
+      - name: Configure dedicated SSH identity
+        shell: bash
+        env:
+          TEST_DEPLOY_HOST: ${{ secrets.TEST_DEPLOY_HOST }}
+          TEST_DEPLOY_PORT: ${{ secrets.TEST_DEPLOY_PORT }}
+          TEST_DEPLOY_USER: ${{ secrets.TEST_DEPLOY_USER }}
+          TEST_DEPLOY_SSH_KEY: ${{ secrets.TEST_DEPLOY_SSH_KEY }}
+          TEST_DEPLOY_KNOWN_HOSTS: ${{ secrets.TEST_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          for name in TEST_DEPLOY_HOST TEST_DEPLOY_PORT TEST_DEPLOY_USER TEST_DEPLOY_SSH_KEY TEST_DEPLOY_KNOWN_HOSTS; do
+            [[ -n "${!name}" ]] || { echo "::error::缺少 test Environment secret: ${name}"; exit 1; }
+          done
+          [[ "${TEST_DEPLOY_PORT}" =~ ^[0-9]+$ ]] || { echo "::error::TEST_DEPLOY_PORT 必须是数字"; exit 1; }
+          ssh_dir="${RUNNER_TEMP}/qq-maid-ssh"
+          install -d -m 0700 "${ssh_dir}"
+          printf '%s\n' "${TEST_DEPLOY_SSH_KEY}" > "${ssh_dir}/id_key"
+          printf '%s\n' "${TEST_DEPLOY_KNOWN_HOSTS}" > "${ssh_dir}/known_hosts"
+          chmod 0600 "${ssh_dir}/id_key" "${ssh_dir}/known_hosts"
+          echo "ssh_dir=${ssh_dir}" >> "${GITHUB_ENV}"
+
+      - name: Upload deployment controller
+        shell: bash
+        env:
+          TEST_DEPLOY_HOST: ${{ secrets.TEST_DEPLOY_HOST }}
+          TEST_DEPLOY_PORT: ${{ secrets.TEST_DEPLOY_PORT }}
+          TEST_DEPLOY_USER: ${{ secrets.TEST_DEPLOY_USER }}
+          TEST_DEPLOY_DIR: ${{ vars.TEST_DEPLOY_DIR || '/opt/qq-maid-bot-test' }}
+        run: |
+          [[ "${TEST_DEPLOY_DIR}" =~ ^/opt/[A-Za-z0-9._/-]+$ ]] \
+            || { echo "::error::TEST_DEPLOY_DIR 必须是 /opt 下的具体目录"; exit 1; }
+          [[ ! "${TEST_DEPLOY_DIR}" =~ (^|/)\.{1,2}(/|$) ]] \
+            || { echo "::error::TEST_DEPLOY_DIR 不能包含 . 或 .. 路径段"; exit 1; }
+          scp -P "${TEST_DEPLOY_PORT}" \
+            -i "${ssh_dir}/id_key" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o UserKnownHostsFile="${ssh_dir}/known_hosts" \
+            compose.yaml "${TEST_DEPLOY_USER}@${TEST_DEPLOY_HOST}:${TEST_DEPLOY_DIR}/compose.yaml.new"
+          scp -P "${TEST_DEPLOY_PORT}" \
+            -i "${ssh_dir}/id_key" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o UserKnownHostsFile="${ssh_dir}/known_hosts" \
+            scripts/docker-deploy.sh "${TEST_DEPLOY_USER}@${TEST_DEPLOY_HOST}:${TEST_DEPLOY_DIR}/docker-deploy.sh.new"
+          ssh -p "${TEST_DEPLOY_PORT}" \
+            -i "${ssh_dir}/id_key" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o UserKnownHostsFile="${ssh_dir}/known_hosts" \
+            "${TEST_DEPLOY_USER}@${TEST_DEPLOY_HOST}" \
+            "cd '${TEST_DEPLOY_DIR}' && chmod 0755 docker-deploy.sh.new && mv -f compose.yaml.new compose.yaml && mv -f docker-deploy.sh.new docker-deploy.sh"
+
+      - name: Deploy exact image digest
+        shell: bash
+        env:
+          TEST_DEPLOY_HOST: ${{ secrets.TEST_DEPLOY_HOST }}
+          TEST_DEPLOY_PORT: ${{ secrets.TEST_DEPLOY_PORT }}
+          TEST_DEPLOY_USER: ${{ secrets.TEST_DEPLOY_USER }}
+          TEST_DEPLOY_DIR: ${{ vars.TEST_DEPLOY_DIR || '/opt/qq-maid-bot-test' }}
+          IMAGE_DIGEST: ${{ needs.publish-manifest.outputs.digest }}
+        run: |
+          image_ref="${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"
+          ssh -p "${TEST_DEPLOY_PORT}" \
+            -i "${ssh_dir}/id_key" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o UserKnownHostsFile="${ssh_dir}/known_hosts" \
+            "${TEST_DEPLOY_USER}@${TEST_DEPLOY_HOST}" \
+            "cd '${TEST_DEPLOY_DIR}' && ./docker-deploy.sh deploy --image '${image_ref}' --commit '${GITHUB_SHA}'"

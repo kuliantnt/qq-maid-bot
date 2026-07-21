@@ -105,6 +105,12 @@ notepad "$HOME\qq-maid-bot\config\.env"
 
 当前 Windows Release 仅提供 x86_64 版本。更完整的安装与排障说明见 Wiki [安装手册](https://github.com/kuliantnt/qq-maid-bot/wiki/安装手册)；手动下载 Release、开机启动和更新细节也可对照 [runtime 运行文档](./runtime/README.md#release-包)。
 
+### Docker Compose
+
+服务器推荐使用 GHCR 镜像与 Docker Compose：运行镜像不包含 Rust 或 Node.js，默认不映射
+管理端口，并以非 root 用户运行。首次启动、持久化目录、按 digest 升级回滚、多实例和
+测试环境自动部署见 [Docker 与 Compose 部署](./docs/deployment/docker.md)。
+
 ### 从源码运行
 
 需要已安装 Rust 工具链：
@@ -256,6 +262,7 @@ flowchart LR
 | Wiki [用 `/ops codex` 跑长任务](https://github.com/kuliantnt/qq-maid-bot/wiki/ops-codex) | 配置 Codex、NVM 环境和专项排障 |
 | Wiki [插件开发](https://github.com/kuliantnt/qq-maid-bot/wiki/插件开发) | 自己写一个 Tool / 插件 |
 | [runtime/README.md](./runtime/README.md) | 运行目录、环境变量、控制脚本和诊断细节 |
+| [Docker 与 Compose 部署](./docs/deployment/docker.md) | GHCR、容器首次启动、持久化、多实例、测试部署和回滚 |
 | [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | 开发环境、架构边界、常用命令和检查要求 |
 | [自定义 Tool 指南](./docs/development/custom-tools.md) | 新增或接入业务工具的技术版 |
 | [OneBot 11 接入文档](./docs/development/onebot11-napcat.md) | NapCat / OneBot 11 技术版 |
