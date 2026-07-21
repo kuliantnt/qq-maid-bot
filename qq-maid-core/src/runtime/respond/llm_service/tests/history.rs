@@ -141,14 +141,102 @@ fn budgeted_chat_messages_handles_non_standard_history_sequences() {
         message_contents_with_time_marker(&messages),
         vec![
             "固定 prompt",
-            "<time_context>",
             "孤立助手",
             "连续用户一",
             "连续用户二",
             "连续用户后的助手",
+            "<time_context>",
             "当前问题",
         ]
     );
+}
+
+fn cache_layout_request() -> RespondRequest {
+    RespondRequest {
+        purpose: RespondPurpose::Chat,
+        user_text: "当前问题".to_owned(),
+        system_prompts: vec!["固定 prompt".to_owned()],
+        history_summary: "稳定摘要".to_owned(),
+        history_messages: vec![
+            ChatMessage::user("历史用户"),
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: "历史助手".to_owned(),
+                content_parts: Vec::new(),
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn different_request_times_only_change_bytes_after_stable_history_prefix() {
+    let req = cache_layout_request();
+    let offset = qq_maid_common::time_context::shanghai_offset();
+    let first_time =
+        RequestTimeContext::from_datetime(offset.with_ymd_and_hms(2026, 7, 21, 10, 0, 0).unwrap());
+    let second_time =
+        RequestTimeContext::from_datetime(offset.with_ymd_and_hms(2026, 7, 21, 10, 1, 0).unwrap());
+
+    let first = build_chat_messages_with_time_context(&req, true, &first_time);
+    let second = build_chat_messages_with_time_context(&req, true, &second_time);
+
+    assert_eq!(
+        serde_json::to_vec(&first[..4]).unwrap(),
+        serde_json::to_vec(&second[..4]).unwrap()
+    );
+    assert_ne!(first[4].content, second[4].content);
+}
+
+#[test]
+fn dynamic_context_changes_do_not_rewrite_summary_or_history_prefix() {
+    let baseline = cache_layout_request();
+    let offset = qq_maid_common::time_context::shanghai_offset();
+    let time =
+        RequestTimeContext::from_datetime(offset.with_ymd_and_hms(2026, 7, 21, 10, 0, 0).unwrap());
+
+    for mutate in [
+        |req: &mut RespondRequest| req.knowledge_context = "新知识".to_owned(),
+        |req: &mut RespondRequest| req.memory_context = "新记忆".to_owned(),
+        |req: &mut RespondRequest| req.session_context = "新 session 状态".to_owned(),
+    ] {
+        let mut changed = baseline.clone();
+        mutate(&mut changed);
+        let first = build_chat_messages_with_time_context(&baseline, true, &time);
+        let second = build_chat_messages_with_time_context(&changed, true, &time);
+
+        assert_eq!(
+            serde_json::to_vec(&first[..4]).unwrap(),
+            serde_json::to_vec(&second[..4]).unwrap()
+        );
+        assert_ne!(first, second);
+    }
+}
+
+#[test]
+fn cache_diagnostics_never_retain_prompt_or_context_bodies() {
+    let mut req = cache_layout_request();
+    req.history_summary = "私密摘要正文".to_owned();
+    req.knowledge_context = "知识正文不能进日志".to_owned();
+    req.memory_context = "记忆正文不能进日志".to_owned();
+    req.session_context = "session 正文不能进日志".to_owned();
+    let messages = build_respond_messages(&req);
+
+    let diagnostics = prompt_cache_diagnostics(&req, &messages, None).unwrap();
+    let debug = format!("{diagnostics:?}");
+
+    for secret in [
+        "固定 prompt",
+        "历史用户",
+        "历史助手",
+        "当前问题",
+        "私密摘要正文",
+        "知识正文不能进日志",
+        "记忆正文不能进日志",
+        "session 正文不能进日志",
+    ] {
+        assert!(!debug.contains(secret), "diagnostics leaked `{secret}`");
+    }
 }
 
 #[test]

@@ -179,6 +179,64 @@ mod tests {
     use crate::provider::types::ChatMessage;
     use qq_maid_common::input_part::{MessageInputPart, MessageMedia};
 
+    fn common_prefix_len(left: &[u8], right: &[u8]) -> usize {
+        left.iter()
+            .zip(right)
+            .take_while(|(left, right)| left == right)
+            .count()
+    }
+
+    #[test]
+    fn responses_payload_keeps_byte_prefix_stable_between_compactions() {
+        let stable = vec![
+            ChatMessage::system("固定 system"),
+            ChatMessage::system("摘要 revision 3"),
+            ChatMessage::user("历史用户"),
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: "历史助手".to_owned(),
+                content_parts: Vec::new(),
+            },
+        ];
+        let mut first_messages = stable.clone();
+        first_messages.extend([
+            ChatMessage::system("动态时间一"),
+            ChatMessage::user("本轮一"),
+        ]);
+        let mut second_messages = stable;
+        second_messages.extend([
+            ChatMessage::user("本轮一"),
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: "回复一".to_owned(),
+                content_parts: Vec::new(),
+            },
+            ChatMessage::system("动态时间二"),
+            ChatMessage::user("本轮二"),
+        ]);
+
+        let first =
+            openai_responses_payload(&first_messages, "gpt-5.5", 1024, 1200, None, false, false)
+                .unwrap();
+        let second =
+            openai_responses_payload(&second_messages, "gpt-5.5", 1024, 1200, None, false, false)
+                .unwrap();
+        let first_bytes = serde_json::to_vec(&first).unwrap();
+        let second_bytes = serde_json::to_vec(&second).unwrap();
+        let history_end = first_bytes
+            .windows("历史助手".len())
+            .position(|window| window == "历史助手".as_bytes())
+            .unwrap()
+            + "历史助手".len();
+
+        assert!(common_prefix_len(&first_bytes, &second_bytes) >= history_end);
+
+        let streaming =
+            openai_responses_payload(&first_messages, "gpt-5.5", 1024, 1200, None, true, false)
+                .unwrap();
+        assert_eq!(first["input"], streaming["input"]);
+    }
+
     #[test]
     fn openai_responses_payload_replays_assistant_history_as_output_text() {
         let messages = vec![

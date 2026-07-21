@@ -64,6 +64,26 @@ fn streaming_payload_enables_responses_stream() {
 }
 
 #[test]
+fn later_tool_round_only_appends_to_existing_input_prefix() {
+    let first_input = vec![
+        json!({"type": "message", "role": "system", "content": [{"type": "input_text", "text": "固定前缀"}]}),
+        json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "当前问题"}]}),
+    ];
+    let mut later_input = first_input.clone();
+    later_input.extend([
+        json!({"type": "function_call", "name": "get_weather", "call_id": "call-1", "arguments": "{}"}),
+        json!({"type": "function_call_output", "call_id": "call-1", "output": "{\"ok\":true}"}),
+    ]);
+
+    let first_bytes = serde_json::to_vec(&first_input).unwrap();
+    let later_bytes = serde_json::to_vec(&later_input).unwrap();
+    assert_eq!(
+        &first_bytes[..first_bytes.len() - 1],
+        &later_bytes[..first_bytes.len() - 1]
+    );
+}
+
+#[test]
 fn payload_includes_reasoning_effort_for_reasoning_models() {
     let payload = openai_tool_loop_payload(
         &[json!({"role": "user", "content": "复杂问题"})],

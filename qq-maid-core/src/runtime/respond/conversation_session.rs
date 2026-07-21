@@ -3,6 +3,8 @@
 //! 本模块负责聊天历史向 LLM 消息的转换，以及聊天完成后的异步标题生成。
 //! 它只操作 conversation session，不处理群内 actor-aware interaction 状态。
 
+use std::collections::HashMap;
+
 use qq_maid_llm::provider::types::{ChatMessage, ChatRole};
 
 use crate::runtime::session::{
@@ -10,9 +12,108 @@ use crate::runtime::session::{
     is_shared_conversation_scope,
 };
 
-use super::{RustRespondService, title::generate_session_title};
+use super::{
+    RespondPurpose, RespondRequest, RustRespondService,
+    common::{COMPACT_KEEP_MESSAGE_LIMIT, SESSION_HISTORY_MESSAGE_LIMIT, empty_respond_request},
+    llm_service::{ChatService, LlmChatService},
+    title::generate_session_title,
+};
 
 impl RustRespondService {
+    /// 在固定批次边界自动压缩活跃历史。
+    ///
+    /// 压缩失败只记录诊断并保留原会话，当前聊天仍由上下文预算保护继续执行。
+    pub(super) async fn compact_session_history_if_needed(
+        &self,
+        session: &mut SessionRecord,
+        model: Option<String>,
+    ) -> bool {
+        if session.history.len() < SESSION_HISTORY_MESSAGE_LIMIT {
+            return false;
+        }
+
+        let session_value = match serde_json::to_value(&*session) {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    session_id = %session.session_id,
+                    "automatic session compaction could not serialize the session"
+                );
+                return false;
+            }
+        };
+        let service = LlmChatService::new(self.provider.clone());
+        let output = match service
+            .respond(RespondRequest {
+                session_id: session.session_id.clone(),
+                model,
+                purpose: RespondPurpose::Compact,
+                session: session_value,
+                metadata: HashMap::from([
+                    ("purpose".to_owned(), "compact".to_owned()),
+                    ("compact_trigger".to_owned(), "automatic".to_owned()),
+                ]),
+                ..empty_respond_request()
+            })
+            .await
+        {
+            Ok(output) if !output.reply.trim().is_empty() => output,
+            Ok(_) => {
+                tracing::warn!(
+                    session_id = %session.session_id,
+                    history_messages = session.history.len(),
+                    "automatic session compaction returned an empty summary"
+                );
+                return false;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error_code = %err.code,
+                    error_stage = %err.stage,
+                    session_id = %session.session_id,
+                    history_messages = session.history.len(),
+                    "automatic session compaction failed; keeping append-only history"
+                );
+                return false;
+            }
+        };
+
+        // 存储失败时不能让内存快照假装已经完成 Compact。
+        let mut compacted = session.clone();
+        let persisted = match self.session_store.compact_history_if_current(
+            &mut compacted,
+            output.reply.trim(),
+            COMPACT_KEEP_MESSAGE_LIMIT,
+        ) {
+            Ok(persisted) => persisted,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    session_id = %session.session_id,
+                    history_messages = session.history.len(),
+                    "automatic session compaction could not be persisted"
+                );
+                return false;
+            }
+        };
+        if !persisted {
+            tracing::info!(
+                session_id = %session.session_id,
+                "automatic session compaction skipped because the session changed"
+            );
+            return false;
+        }
+        tracing::info!(
+            session_id = %compacted.session_id,
+            retained_history_messages = compacted.history.len(),
+            summary_revision = compacted.summary_revision(),
+            "automatic session compaction completed"
+        );
+        *session = compacted;
+        true
+    }
+
     /// 如果会话标题还是默认值，且用户消息轮数在 2~4 之间，则后台尝试生成标题。
     ///
     /// 主聊天回复已经完成落库，标题只是展示增强；不能让标题模型的慢响应、
@@ -74,15 +175,14 @@ impl RustRespondService {
     }
 }
 
-/// 从会话历史中截取最近的 N 条消息，转换为 LLM `ChatMessage` 格式。
+/// 将当前批次内的追加式活跃历史转换为 LLM `ChatMessage` 格式。
 ///
-/// 仅保留 user 和 assistant 角色，按时间正序返回。
-pub(super) fn recent_session_messages(session: &SessionRecord, limit: usize) -> Vec<ChatMessage> {
+/// 达到阈值后的批次裁剪由 Compact 负责；这里不再逐轮滑动窗口，避免每轮改写前缀。
+pub(super) fn session_messages_for_model(session: &SessionRecord) -> Vec<ChatMessage> {
     let actor_aware = is_shared_conversation_scope(&session.scope);
     session
         .history
         .iter()
-        .rev()
         .filter(|message| !message.content.trim().is_empty())
         .filter_map(|message| match message.role.as_str() {
             "user" => Some(ChatMessage {
@@ -97,11 +197,7 @@ pub(super) fn recent_session_messages(session: &SessionRecord, limit: usize) -> 
             }),
             _ => None,
         })
-        .take(limit)
         .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
 }
 
 /// 把 Session 原始正文转换为模型可见文本。

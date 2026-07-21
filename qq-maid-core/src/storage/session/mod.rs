@@ -388,36 +388,37 @@ impl SessionStore {
         summary: impl Into<String>,
         keep_messages: usize,
     ) -> Result<(), SessionError> {
-        normalize_session(session);
-        session.updated_at = now_iso_cn();
-        let summary = redact_sensitive_text(summary.into().trim());
         let mut conn = self.connection()?;
         let tx = conn.transaction().map_err(SessionError::from_sql)?;
-        // 压缩前先让所有消息取得稳定 ID；随后归档 JSON 和活跃消息表复用同一 ID。
-        upsert_session_tx(&tx, session)?;
-        replace_messages_tx(&tx, session)?;
-        if session.history.len() > keep_messages {
-            let archived = session
-                .history
-                .drain(..session.history.len() - keep_messages)
-                .collect::<Vec<_>>();
-            let archive = serde_json::json!({
-                "archived_at": now_iso_cn(),
-                "summary_before": session.summary,
-                "history": archived,
-            });
-            let archived_history = session
-                .extra
-                .entry("archived_history")
-                .or_insert_with(|| Value::Array(Vec::new()));
-            if let Some(items) = archived_history.as_array_mut() {
-                items.push(archive);
-            }
-        }
-        session.summary = summary;
-        upsert_session_tx(&tx, session)?;
-        replace_messages_tx(&tx, session)?;
+        compact_history_tx(&tx, session, summary.into(), keep_messages)?;
         tx.commit().map_err(SessionError::from_sql)
+    }
+
+    /// 仅当数据库仍与模型调用前的快照一致时压缩历史。
+    ///
+    /// 自动 Compact 会在模型请求期间释放数据库连接；这里用 IMMEDIATE 事务重新校验，
+    /// 避免并发聊天恰好在校验与写入之间追加消息后被旧快照覆盖。
+    pub fn compact_history_if_current(
+        &self,
+        session: &mut SessionRecord,
+        summary: impl Into<String>,
+        keep_messages: usize,
+    ) -> Result<bool, SessionError> {
+        let mut conn = self.connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(SessionError::from_sql)?;
+        let Some(latest) = load_session_unlocked(&tx, &session.session_id)? else {
+            tx.commit().map_err(SessionError::from_sql)?;
+            return Ok(false);
+        };
+        if !latest.persistent_snapshot_matches(session) {
+            tx.commit().map_err(SessionError::from_sql)?;
+            return Ok(false);
+        }
+        compact_history_tx(&tx, session, summary.into(), keep_messages)?;
+        tx.commit().map_err(SessionError::from_sql)?;
+        Ok(true)
     }
 
     fn connection(&self) -> Result<crate::storage::database::PooledSqliteConnection, SessionError> {
@@ -506,6 +507,43 @@ impl SessionStore {
         replace_messages_tx(&tx, session)?;
         tx.commit().map_err(SessionError::from_sql)
     }
+}
+
+fn compact_history_tx(
+    tx: &rusqlite::Transaction<'_>,
+    session: &mut SessionRecord,
+    summary: String,
+    keep_messages: usize,
+) -> Result<(), SessionError> {
+    normalize_session(session);
+    session.updated_at = now_iso_cn();
+    let summary = redact_sensitive_text(summary.trim());
+    // 压缩前先让所有消息取得稳定 ID；随后归档 JSON 和活跃消息表复用同一 ID。
+    upsert_session_tx(tx, session)?;
+    replace_messages_tx(tx, session)?;
+    if session.history.len() > keep_messages {
+        let archived = session
+            .history
+            .drain(..session.history.len() - keep_messages)
+            .collect::<Vec<_>>();
+        let archive = serde_json::json!({
+            "archived_at": now_iso_cn(),
+            "summary_before": session.summary,
+            "history": archived,
+        });
+        let archived_history = session
+            .extra
+            .entry("archived_history")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(items) = archived_history.as_array_mut() {
+            items.push(archive);
+        }
+    }
+    session.summary = summary;
+    session.advance_summary_revision();
+    upsert_session_tx(tx, session)?;
+    replace_messages_tx(tx, session)?;
+    Ok(())
 }
 
 /// 获取当前北京时间 ISO8601 字符串。

@@ -3,8 +3,6 @@
 //! 将 `RespondRequest` 按 `RespondPurpose` 组装成不同的消息模板，
 //! 调用 `LlmProvider` 获取 LLM 回复，并对原始输出做必要后处理。
 //!
-use std::env;
-
 use async_trait::async_trait;
 use uuid::Uuid;
 
@@ -31,18 +29,25 @@ use qq_maid_llm::{
 
 use crate::{
     error::LlmError,
-    runtime::session::redact_sensitive_text,
     util::metrics::{LlmMetrics, MetricsRecorder},
 };
 use qq_maid_common::markdown::to_chat_text;
 
-use super::{RespondPurpose, RespondRequest, RespondResponse, common::truncate_chars};
+use super::{RespondPurpose, RespondRequest, RespondResponse};
 
+mod cache_diagnostics;
 mod compact_messages;
 mod message_parts;
+mod trace;
 
+use cache_diagnostics::{PromptCacheDiagnostics, prompt_cache_diagnostics};
 use compact_messages::build_compact_messages;
 use message_parts::current_user_parts_for_model;
+#[cfg(test)]
+use trace::{CHAT_TRACE_TEXT_LIMIT, trace_text};
+use trace::{
+    respond_purpose_name, trace_chat_final_reply, trace_chat_messages, trace_chat_raw_reply,
+};
 
 /// LLM 聊天服务 trait。
 ///
@@ -127,6 +132,7 @@ impl LlmChatService {
     {
         let messages = self.build_messages_for_request(&req)?;
         trace_chat_messages(&req, &messages);
+        let cache_diagnostics = prompt_cache_diagnostics(&req, &messages, None)?;
         let chat_req = self.chat_request(&req, messages);
         let mut stream = self.provider.stream_chat(chat_req).await?;
         let mut recorder = MetricsRecorder::start();
@@ -179,7 +185,7 @@ impl LlmChatService {
             fallback_used,
             agent: Default::default(),
         };
-        log_llm_request_completed(&req, &outcome);
+        log_llm_request_completed(&req, &outcome, &cache_diagnostics);
         output_from_raw_reply(&req, raw_reply, outcome, &self.bot_display_name)
     }
 
@@ -198,6 +204,7 @@ impl LlmChatService {
     ) -> Result<RespondOutput, LlmError> {
         let messages = self.build_messages_for_request(&req)?;
         trace_chat_messages(&req, &messages);
+        let cache_diagnostics = prompt_cache_diagnostics(&req, &messages, Some(&tools))?;
         let chat_req = self.chat_request(&req, messages);
         let outcome = if self.supports_tool_calling(chat_req.model.as_deref()) {
             self.provider
@@ -214,7 +221,7 @@ impl LlmChatService {
         } else {
             self.provider.chat(chat_req).await?
         };
-        log_llm_request_completed(&req, &outcome);
+        log_llm_request_completed(&req, &outcome, &cache_diagnostics);
         let raw_reply = outcome.reply.trim().to_owned();
         output_from_raw_reply(&req, raw_reply, outcome, &self.bot_display_name)
     }
@@ -339,9 +346,10 @@ impl ChatService for LlmChatService {
     async fn respond(&self, req: RespondRequest) -> Result<RespondOutput, LlmError> {
         let messages = self.build_messages_for_request(&req)?;
         trace_chat_messages(&req, &messages);
+        let cache_diagnostics = prompt_cache_diagnostics(&req, &messages, None)?;
         let chat_req = self.chat_request(&req, messages);
         let outcome = self.provider.chat(chat_req).await?;
-        log_llm_request_completed(&req, &outcome);
+        log_llm_request_completed(&req, &outcome, &cache_diagnostics);
         let raw_reply = outcome.reply.trim().to_owned();
         output_from_raw_reply(&req, raw_reply, outcome, &self.bot_display_name)
     }
@@ -399,171 +407,46 @@ fn output_from_raw_reply(
 }
 
 /// 在请求完成后记录统一的脱敏结构化摘要，便于观察真实 token usage 与缓存命中。
-fn log_llm_request_completed(req: &RespondRequest, outcome: &ChatOutcome) {
+fn log_llm_request_completed(
+    req: &RespondRequest,
+    outcome: &ChatOutcome,
+    cache: &PromptCacheDiagnostics,
+) {
     let usage = outcome.usage.as_ref();
+    let cache_ratio = usage.and_then(|item| match (item.input_tokens, item.cached_input_tokens) {
+        (Some(input), Some(cached)) if input > 0 => Some(cached as f64 / input as f64),
+        _ => None,
+    });
     tracing::info!(
         provider = %outcome.metrics.provider,
         model = %outcome.metrics.model,
         purpose = %respond_purpose_name(&req.purpose),
         input_tokens = usage.and_then(|item| item.input_tokens),
         cached_input_tokens = usage.and_then(|item| item.cached_input_tokens),
+        cache_ratio,
         output_tokens = usage.and_then(|item| item.output_tokens),
+        agent_scene = cache.agent_scene.as_str(),
+        stable_system_chars = cache.stable_system.chars,
+        stable_system_hash = cache.stable_system.hash.as_str(),
+        summary_chars = cache.summary.chars,
+        summary_hash = cache.summary.hash.as_str(),
+        history_chars = cache.history.chars,
+        history_hash = cache.history.hash.as_str(),
+        time_context_chars = cache.time.chars,
+        time_context_hash = cache.time.hash.as_str(),
+        knowledge_context_chars = cache.knowledge.chars,
+        knowledge_context_hash = cache.knowledge.hash.as_str(),
+        memory_context_chars = cache.memory.chars,
+        memory_context_hash = cache.memory.hash.as_str(),
+        session_context_chars = cache.session.chars,
+        session_context_hash = cache.session.hash.as_str(),
+        tool_schema_hash = cache.tool_schema_hash.as_str(),
+        current_message_chars = cache.current_message_chars,
+        history_compacted = cache.history_compacted,
+        summary_revision = cache.summary_revision,
         fallback_used = outcome.fallback_used,
         "llm request completed"
     );
-}
-
-/// 聊天 verbose trace 的正文截断上限。
-///
-/// 这里保守限制长度，避免排障时把过长 prompt 或回复整段刷进日志。
-const CHAT_TRACE_TEXT_LIMIT: usize = 600;
-
-/// 在 TRACE 级别输出发给上游 provider 的消息摘要。
-///
-/// 默认只打印角色、条数、用途等摘要；只有显式开启 `LLM_TRACE_CHAT_INPUT`
-/// 时，才输出逐条脱敏后的 message 内容，便于排查“聊天回空/回短句”问题。
-fn trace_chat_messages(req: &RespondRequest, messages: &[ChatMessage]) {
-    if !tracing::enabled!(tracing::Level::TRACE) {
-        return;
-    }
-
-    let session_id = trace_session_id(req);
-    let roles = messages
-        .iter()
-        .map(|message| chat_role_name(&message.role))
-        .collect::<Vec<_>>()
-        .join(",");
-    tracing::trace!(
-        purpose = %respond_purpose_name(&req.purpose),
-        session_id = %session_id,
-        scope_key = %trace_scope_key(req),
-        message_count = messages.len(),
-        roles = %roles,
-        model_override = %req.model.as_deref().unwrap_or("-"),
-        user_text_chars = req.user_text.trim().chars().count(),
-        "llm chat request summary"
-    );
-
-    if !trace_chat_input_enabled() {
-        return;
-    }
-
-    let payload = messages
-        .iter()
-        .enumerate()
-        .map(|(index, message)| format_chat_message_trace(index, message))
-        .collect::<Vec<_>>()
-        .join("\n");
-    tracing::trace!(
-        purpose = %respond_purpose_name(&req.purpose),
-        session_id = %session_id,
-        scope_key = %trace_scope_key(req),
-        messages = %payload,
-        "llm chat request messages"
-    );
-}
-
-/// 在 TRACE 级别输出 provider 原始回复。
-///
-/// 只在 `LLM_TRACE_CHAT_OUTPUT` 开启时输出，并先做脱敏和截断，避免日志泄露。
-fn trace_chat_raw_reply(req: &RespondRequest, raw_reply: &str) {
-    if !tracing::enabled!(tracing::Level::TRACE) || !trace_chat_output_enabled() {
-        return;
-    }
-
-    tracing::trace!(
-        purpose = %respond_purpose_name(&req.purpose),
-        session_id = %trace_session_id(req),
-        scope_key = %trace_scope_key(req),
-        raw_reply_chars = raw_reply.chars().count(),
-        raw_reply = %trace_text(raw_reply),
-        "llm chat raw reply"
-    );
-}
-
-/// 在 TRACE 级别输出最终进入 Core 响应编排链路的回复。
-///
-/// 这样可以直接比对“provider 原文”和“QQ 最终可见文本”之间是否被清洗、
-/// 截断或降级，从而快速判断问题是在上游模型还是在本地后处理。
-fn trace_chat_final_reply(req: &RespondRequest, final_reply: &str) {
-    if !tracing::enabled!(tracing::Level::TRACE) || !trace_chat_output_enabled() {
-        return;
-    }
-
-    tracing::trace!(
-        purpose = %respond_purpose_name(&req.purpose),
-        session_id = %trace_session_id(req),
-        scope_key = %trace_scope_key(req),
-        final_reply_chars = final_reply.chars().count(),
-        final_reply = %trace_text(final_reply),
-        "llm chat final reply"
-    );
-}
-
-/// 检查是否启用了聊天输入追踪（环境变量 `LLM_TRACE_CHAT_INPUT`）。
-fn trace_chat_input_enabled() -> bool {
-    trace_chat_flag("LLM_TRACE_CHAT_INPUT")
-}
-
-/// 检查是否启用了聊天输出追踪（环境变量 `LLM_TRACE_CHAT_OUTPUT`）。
-fn trace_chat_output_enabled() -> bool {
-    trace_chat_flag("LLM_TRACE_CHAT_OUTPUT")
-}
-
-fn trace_chat_flag(name: &str) -> bool {
-    env::var(name)
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "on" | "yes" | "enabled"
-            )
-        })
-        .unwrap_or(false)
-}
-
-fn format_chat_message_trace(index: usize, message: &ChatMessage) -> String {
-    format!(
-        "#{index} [{}] {}",
-        chat_role_name(&message.role),
-        trace_text(&message.content)
-    )
-}
-
-fn chat_role_name(role: &ChatRole) -> &'static str {
-    match role {
-        ChatRole::System => "system",
-        ChatRole::User => "user",
-        ChatRole::Assistant => "assistant",
-    }
-}
-
-fn respond_purpose_name(purpose: &RespondPurpose) -> &'static str {
-    match purpose {
-        RespondPurpose::Chat => "chat",
-        RespondPurpose::MemoryDraft => "memory_draft",
-        RespondPurpose::TodoParse => "todo_parse",
-        RespondPurpose::Compact => "compact",
-    }
-}
-
-fn trace_session_id(req: &RespondRequest) -> &str {
-    let session_id = req.session_id.trim();
-    if session_id.is_empty() {
-        "-"
-    } else {
-        session_id
-    }
-}
-
-fn trace_scope_key(req: &RespondRequest) -> &str {
-    let scope_key = req.scope_key.trim();
-    if scope_key.is_empty() { "-" } else { scope_key }
-}
-
-/// 聊天 trace 使用统一脱敏与截断策略，默认不打印过长原文。
-fn trace_text(text: &str) -> String {
-    truncate_chars(&redact_sensitive_text(text), CHAT_TRACE_TEXT_LIMIT)
 }
 
 /// 根据 `RespondPurpose` 构建 LLM 请求的消息列表。
@@ -665,24 +548,24 @@ fn has_request_time_context(messages: &[ChatMessage]) -> bool {
 
 /// 构建普通聊天消息列表。
 ///
-/// 顺序：稳定系统提示词 → 请求时间上下文 → 知识检索上下文 → 记忆上下文 → 会话上下文 → 历史消息 → 当前用户消息。
+/// 顺序：稳定系统提示词 → 稳定摘要锚点 → 追加式历史 → 本轮动态上下文 → 当前用户消息。
 fn build_chat_messages_for_model(req: &RespondRequest, supports_vision: bool) -> Vec<ChatMessage> {
+    build_chat_messages_with_time_context(req, supports_vision, &request_time_context())
+}
+
+fn build_chat_messages_with_time_context(
+    req: &RespondRequest,
+    supports_vision: bool,
+    time_context: &RequestTimeContext,
+) -> Vec<ChatMessage> {
     let mut messages = Vec::new();
     for prompt in &req.system_prompts {
         if !prompt.trim().is_empty() {
             messages.push(ChatMessage::system(prompt.clone()));
         }
     }
-    let stable_prompt_count = messages.len();
-    messages = with_request_time_context_after_system_prefix(messages, stable_prompt_count);
-    if !req.knowledge_context.trim().is_empty() {
-        messages.push(ChatMessage::system(req.knowledge_context.clone()));
-    }
-    if !req.memory_context.trim().is_empty() {
-        messages.push(ChatMessage::system(req.memory_context.clone()));
-    }
-    if !req.session_context.trim().is_empty() {
-        messages.push(ChatMessage::system(req.session_context.clone()));
+    if !req.history_summary.trim().is_empty() {
+        messages.push(ChatMessage::system(req.history_summary.clone()));
     }
     messages.extend(
         req.history_messages
@@ -691,6 +574,7 @@ fn build_chat_messages_for_model(req: &RespondRequest, supports_vision: bool) ->
             .cloned()
             .map(normalize_user_message_for_provider),
     );
+    append_dynamic_chat_context(req, time_context, &mut messages);
     messages.push(normalize_user_message_for_provider(
         ChatMessage::user_with_parts(
             req.user_text.clone(),
@@ -715,31 +599,11 @@ fn budget_chat_messages(
             )?;
         }
     }
-    // 时间上下文是当前请求语义的一部分，不能被旧历史或检索内容挤掉。
-    push_message_item(
-        &mut items,
-        BudgetItemKind::Required,
-        ChatMessage::system(llm_time_context_prompt(&request_time_context())),
-    )?;
-    if !req.knowledge_context.trim().is_empty() {
-        push_message_item(
-            &mut items,
-            BudgetItemKind::Knowledge,
-            ChatMessage::system(req.knowledge_context.clone()),
-        )?;
-    }
-    if !req.memory_context.trim().is_empty() {
-        push_message_item(
-            &mut items,
-            BudgetItemKind::Memory,
-            ChatMessage::system(req.memory_context.clone()),
-        )?;
-    }
-    if !req.session_context.trim().is_empty() {
+    if !req.history_summary.trim().is_empty() {
         push_message_item(
             &mut items,
             BudgetItemKind::Session,
-            ChatMessage::system(req.session_context.clone()),
+            ChatMessage::system(req.history_summary.clone()),
         )?;
     }
 
@@ -763,6 +627,33 @@ fn budget_chat_messages(
             messages,
         )?;
     }
+    // 动态可信上下文统一位于历史后；时间紧邻当前消息且不可淘汰，其余子段沿用既有预算优先级。
+    if !req.knowledge_context.trim().is_empty() {
+        push_message_item(
+            &mut items,
+            BudgetItemKind::Knowledge,
+            ChatMessage::system(req.knowledge_context.clone()),
+        )?;
+    }
+    if !req.memory_context.trim().is_empty() {
+        push_message_item(
+            &mut items,
+            BudgetItemKind::Memory,
+            ChatMessage::system(req.memory_context.clone()),
+        )?;
+    }
+    if !req.session_context.trim().is_empty() {
+        push_message_item(
+            &mut items,
+            BudgetItemKind::Session,
+            ChatMessage::system(req.session_context.clone()),
+        )?;
+    }
+    push_message_item(
+        &mut items,
+        BudgetItemKind::Required,
+        ChatMessage::system(llm_time_context_prompt(&request_time_context())),
+    )?;
     push_message_item(
         &mut items,
         BudgetItemKind::Required,
@@ -775,6 +666,23 @@ fn budget_chat_messages(
     let budgeted = apply_context_budget(items, config)?;
     log_budget_report("initial_chat_context", &budgeted.report);
     Ok(budgeted.items.into_iter().flatten().collect())
+}
+
+fn append_dynamic_chat_context(
+    req: &RespondRequest,
+    time_context: &RequestTimeContext,
+    messages: &mut Vec<ChatMessage>,
+) {
+    if !req.knowledge_context.trim().is_empty() {
+        messages.push(ChatMessage::system(req.knowledge_context.clone()));
+    }
+    if !req.memory_context.trim().is_empty() {
+        messages.push(ChatMessage::system(req.memory_context.clone()));
+    }
+    if !req.session_context.trim().is_empty() {
+        messages.push(ChatMessage::system(req.session_context.clone()));
+    }
+    messages.push(ChatMessage::system(llm_time_context_prompt(time_context)));
 }
 
 fn push_message_item(

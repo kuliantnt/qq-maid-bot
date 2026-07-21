@@ -448,7 +448,7 @@ pub(super) fn datetime_for_display(value: &str) -> String {
 
 /// 构建会话上下文的系统提示文本，供 LLM 理解当前会话状态。
 ///
-/// 包含：会话标题、已持久化的正式会话状态、会话摘要和理解要求。
+/// 包含：会话标题、已持久化的正式会话状态和理解要求。
 /// 普通聊天不再按关键词推断场景、模式或修正状态；历史启发式状态由 migration 清理。
 pub(super) fn build_session_context(session: &SessionRecord) -> String {
     let mut rows = vec!["以下是当前 QQ 会话上下文，只用于理解本轮普通聊天：".to_owned()];
@@ -467,14 +467,21 @@ pub(super) fn build_session_context(session: &SessionRecord) -> String {
     } else {
         rows.push(format!("[当前会话状态]\n{}", state_rows.join("\n")));
     }
-    if session.summary.trim().is_empty() {
-        rows.push("[会话摘要]\n暂无。".to_owned());
-    } else {
-        rows.push(format!("[会话摘要]\n{}", session.summary.trim()));
-    }
     rows.push(
         "[理解要求]\n如果当前用户消息是短句、补充句、纠正句或“继续/给 codex”一类指代句，优先结合最近对话和当前会话状态理解，不要当成孤立单轮问答。"
             .to_owned(),
     );
     rows.join("\n\n")
+}
+
+/// 构建独立的稳定摘要锚点。
+///
+/// 摘要只在明确的批次 Compact 后更新，不能混入标题、临时状态或时间等每轮动态内容。
+pub(super) fn build_session_summary_anchor(session: &SessionRecord) -> String {
+    let summary = session.summary.trim();
+    if summary.is_empty() {
+        String::new()
+    } else {
+        format!("以下是此前会话的稳定摘要，只用于继承已确认上下文：\n{summary}")
+    }
 }

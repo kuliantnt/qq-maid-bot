@@ -278,10 +278,36 @@ impl ToolRegistry {
         let mut items = self
             .tools
             .values()
-            .map(|tool| tool.metadata())
+            .map(|tool| {
+                let mut metadata = tool.metadata();
+                metadata.parameters = canonical_json(metadata.parameters);
+                metadata
+            })
             .collect::<Vec<_>>();
         items.sort_by(|left, right| left.name.cmp(&right.name));
         items
+    }
+
+    /// 返回与注册顺序和 JSON 对象插入顺序无关的工具 schema 字节。
+    pub fn stable_schema_json(&self) -> Result<String, LlmError> {
+        let schema = self
+            .metadata()
+            .into_iter()
+            .map(|item| {
+                json!({
+                    "name": item.name,
+                    "description": item.description,
+                    "parameters": item.parameters,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string(&schema).map_err(|err| {
+            LlmError::new(
+                "tool_schema_serialize_failed",
+                format!("failed to serialize tool schema: {err}"),
+                "tool",
+            )
+        })
     }
 
     pub async fn execute_json(
@@ -347,6 +373,23 @@ impl ToolRegistry {
             )
         })?;
         Ok(truncate_tool_output(&serialized, self.output_max_chars))
+    }
+}
+
+fn canonical_json(value: Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut entries = object.into_iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonical_json(value)))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(canonical_json).collect()),
+        value => value,
     }
 }
 
@@ -520,6 +563,32 @@ mod tests {
         };
 
         assert_eq!(err.code, "config");
+    }
+
+    #[test]
+    fn stable_tool_schema_ignores_registration_order() {
+        let first = ToolRegistry::new()
+            .register(TaggedEcho {
+                name: "beta".to_owned(),
+                tag: "b",
+            })
+            .unwrap()
+            .register(EchoTool)
+            .unwrap();
+        let second = ToolRegistry::new()
+            .register(EchoTool)
+            .unwrap()
+            .register(TaggedEcho {
+                name: "beta".to_owned(),
+                tag: "b",
+            })
+            .unwrap();
+
+        assert_eq!(
+            first.stable_schema_json().unwrap(),
+            second.stable_schema_json().unwrap()
+        );
+        assert_eq!(first.metadata()[0].name, "beta");
     }
 
     struct BigTool;

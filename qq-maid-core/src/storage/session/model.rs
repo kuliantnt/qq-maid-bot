@@ -169,6 +169,43 @@ pub struct SessionMeta {
 }
 
 impl SessionRecord {
+    /// 返回稳定摘要锚点的修订号；旧会话没有该字段时按 0 处理。
+    pub fn summary_revision(&self) -> u64 {
+        self.extra
+            .get("summary_revision")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    }
+
+    pub(super) fn advance_summary_revision(&mut self) {
+        let revision = self.summary_revision().saturating_add(1);
+        self.extra
+            .insert("summary_revision".to_owned(), Value::from(revision));
+    }
+
+    /// 比较两个会话的持久化快照，忽略仅在当前请求内使用的 turn actor。
+    pub(super) fn persistent_snapshot_matches(&self, other: &Self) -> bool {
+        self.session_id == other.session_id
+            && self.scope == other.scope
+            && self.scope_key == other.scope_key
+            && self.user_id == other.user_id
+            && self.group_id == other.group_id
+            && self.guild_id == other.guild_id
+            && self.channel_id == other.channel_id
+            && self.platform == other.platform
+            && self.created_at == other.created_at
+            && self.updated_at == other.updated_at
+            && self.title == other.title
+            && self.state == other.state
+            && self.summary == other.summary
+            && self.history == other.history
+            && self.pending_operation == other.pending_operation
+            && self.last_todo_query == other.last_todo_query
+            && self.last_todo_action == other.last_todo_action
+            && self.last_memory_query == other.last_memory_query
+            && self.extra == other.extra
+    }
+
     /// 追加一条消息到会话历史（仅允许 user 和 assistant 角色），内容自动脱敏。
     pub fn append_message(&mut self, role: &str, content: &str) {
         if !matches!(role, "user" | "assistant") {
@@ -213,6 +250,7 @@ impl SessionRecord {
     /// 清空上下文相关状态，保留会话元信息。
     pub fn reset(&mut self) {
         self.summary.clear();
+        self.extra.remove("summary_revision");
         self.state.clear();
         self.history.clear();
         self.pending_operation = None;
