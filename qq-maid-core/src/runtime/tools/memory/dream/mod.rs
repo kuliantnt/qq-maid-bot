@@ -21,7 +21,7 @@ use super::{
     MemoryActor, MemoryOperations, contains_sensitive_text, normalize_explicit_memory_content,
     storage::{
         DreamCandidate, DreamCompletion, DreamContext, DreamFinalizeStats, DreamLimits,
-        DreamMessage, MemoryCategory, MemoryStore, MemoryTarget,
+        DreamMessage, DreamTriggerPolicy, MemoryCategory, MemoryStore, MemoryTarget,
     },
 };
 
@@ -73,6 +73,7 @@ pub(crate) struct MemoryDreamWorker {
     provider: DynLlmProvider,
     store: MemoryStore,
     config: MemoryDreamConfig,
+    trigger_policy: DreamTriggerPolicy,
 }
 
 #[derive(Debug)]
@@ -108,11 +109,19 @@ impl MemoryDreamWorker {
         store: MemoryStore,
         config: MemoryDreamConfig,
     ) -> Self {
+        let trigger_policy = DreamTriggerPolicy::production(config.min_new_sessions);
         Self {
             provider,
             store,
             config,
+            trigger_policy,
         }
+    }
+
+    #[cfg(test)]
+    fn with_trigger_policy(mut self, trigger_policy: DreamTriggerPolicy) -> Self {
+        self.trigger_policy = trigger_policy;
+        self
     }
 
     pub(crate) fn schedule(&self, context: MemoryDreamContext) {
@@ -151,8 +160,8 @@ impl MemoryDreamWorker {
                 &storage_context,
                 DreamLimits {
                     min_interval_seconds: self.config.min_interval_seconds,
-                    min_new_sessions: self.config.min_new_sessions,
                     max_sessions: self.config.max_sessions,
+                    trigger_policy: self.trigger_policy,
                 },
                 now,
             )

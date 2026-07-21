@@ -1,5 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
+use rusqlite::{OptionalExtension, params};
+
 use crate::{
     error::LlmError,
     runtime::{
@@ -26,12 +28,16 @@ fn test_config() -> MemoryDreamConfig {
 }
 
 fn test_stores() -> (MemoryStore, SessionStore) {
+    let (_, store, sessions) = test_stores_with_database();
+    (store, sessions)
+}
+
+fn test_stores_with_database() -> (SqliteDatabase, MemoryStore, SessionStore) {
     let database =
         SqliteDatabase::open_temp("memory-dream", APP_MIGRATIONS).expect("open database");
-    (
-        MemoryStore::new(database.clone()),
-        SessionStore::new(database),
-    )
+    let store = MemoryStore::new(database.clone());
+    let sessions = SessionStore::new(database.clone());
+    (database, store, sessions)
 }
 
 fn private_actor(user: &str) -> MemoryActor {
@@ -71,6 +77,103 @@ fn add_private_session_with_id(store: &SessionStore, user: &str, text: &str) -> 
         .append_exchange(&mut session, text, "assistant reply not used by Dream")
         .expect("append exchange");
     session.session_id
+}
+
+fn repeated_timestamps(count: usize, values: &[&str]) -> Vec<String> {
+    assert!(!values.is_empty());
+    (0..count)
+        .map(|index| values[index % values.len()].to_owned())
+        .collect()
+}
+
+fn add_private_messages_with_timestamps(
+    store: &SessionStore,
+    user: &str,
+    session_count: usize,
+    timestamps: &[String],
+) {
+    assert!(session_count > 0);
+    assert!(timestamps.len() >= session_count);
+    let meta = SessionMeta::new(
+        format!("private:{user}"),
+        Some(user.to_owned()),
+        None,
+        None,
+        None,
+        "test",
+    );
+    for session_index in 0..session_count {
+        let mut session = store.create(&meta, "", false).expect("create session");
+        for message_index in (session_index..timestamps.len()).step_by(session_count) {
+            session.append_message("user", &format!("有效用户消息 {message_index}"));
+            session.history.last_mut().unwrap().ts = timestamps[message_index].clone();
+        }
+        store.save(&mut session).expect("save session messages");
+    }
+}
+
+fn private_storage_context(user: &str) -> DreamContext {
+    DreamContext {
+        actor_scope_id: user.to_owned(),
+        target: MemoryTarget::personal(user),
+        conversation_scope_key: format!("private:{user}"),
+        actor_ref: None,
+    }
+}
+
+fn production_dream_limits() -> DreamLimits {
+    DreamLimits {
+        min_interval_seconds: 0,
+        max_sessions: 20,
+        trigger_policy: DreamTriggerPolicy::production(5),
+    }
+}
+
+fn seed_successful_dream_state(
+    database: &SqliteDatabase,
+    user: &str,
+    last_processed_message_id: i64,
+    last_run_at_epoch: i64,
+) {
+    let target = MemoryTarget::personal(user);
+    database
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO memory_dream_state (
+                scope_type, scope_id, memory_kind, subject_key,
+                conversation_scope_key, actor_ref,
+                last_processed_message_id, last_processed_updated_at,
+                last_processed_session_id, last_run_at_epoch, last_status
+             ) VALUES (?1, ?2, ?3, ?4, ?5, '', ?6, ?7, 'checkpoint', ?8, 'success')",
+            params![
+                target.scope_type().as_str(),
+                target.scope_id(),
+                target.memory_kind().as_str(),
+                target.subject_id().unwrap_or(""),
+                format!("private:{user}"),
+                last_processed_message_id,
+                "2026-07-01T00:00:00+08:00",
+                last_run_at_epoch,
+            ],
+        )
+        .unwrap();
+}
+
+fn dream_checkpoint(database: &SqliteDatabase, user: &str) -> Option<(i64, i64, Option<String>)> {
+    database
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT last_processed_message_id, last_run_at_epoch, lock_token
+             FROM memory_dream_state
+             WHERE scope_type = 'personal' AND scope_id = ?1
+               AND memory_kind = 'personal' AND subject_key = ''",
+            params![user],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .unwrap()
 }
 
 fn group_context(group: &str, user: &str) -> MemoryDreamContext {
@@ -130,7 +233,9 @@ fn worker(
     provider: MockProvider,
     config: MemoryDreamConfig,
 ) -> MemoryDreamWorker {
+    let trigger_policy = DreamTriggerPolicy::permissive();
     MemoryDreamWorker::new(Arc::new(provider), store.clone(), config)
+        .with_trigger_policy(trigger_policy)
 }
 
 #[test]
@@ -146,6 +251,318 @@ fn model_output_rejects_permission_fields() {
     assert_eq!(
         parse_model_output(raw, 2).unwrap_err(),
         "dream_output_invalid_json"
+    );
+}
+
+#[test]
+fn dream_trigger_accepts_each_production_path_at_threshold() {
+    let now = 2_000_000_000_i64;
+
+    let (_, store, sessions) = test_stores_with_database();
+    add_private_messages_with_timestamps(
+        &sessions,
+        "session-path",
+        5,
+        &repeated_timestamps(30, &["2026-07-20T10:00:00+08:00"]),
+    );
+    let claim = store
+        .claim_dream(
+            &private_storage_context("session-path"),
+            production_dream_limits(),
+            now,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.messages.len(), 30);
+
+    let (_, store, sessions) = test_stores_with_database();
+    add_private_messages_with_timestamps(
+        &sessions,
+        "active-date-path",
+        1,
+        &repeated_timestamps(
+            50,
+            &[
+                "2026-07-18T10:00:00+08:00",
+                "2026-07-19T10:00:00+08:00",
+                "2026-07-20T10:00:00+08:00",
+            ],
+        ),
+    );
+    let claim = store
+        .claim_dream(
+            &private_storage_context("active-date-path"),
+            production_dream_limits(),
+            now,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.messages.len(), 50);
+
+    let (database, store, sessions) = test_stores_with_database();
+    add_private_messages_with_timestamps(
+        &sessions,
+        "interval-path",
+        1,
+        &repeated_timestamps(60, &["2026-07-20T10:00:00+08:00"]),
+    );
+    seed_successful_dream_state(&database, "interval-path", 0, now - 7 * 24 * 60 * 60);
+    let claim = store
+        .claim_dream(
+            &private_storage_context("interval-path"),
+            production_dream_limits(),
+            now,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.messages.len(), 60);
+}
+
+#[test]
+fn dream_trigger_rejects_each_threshold_one_below_without_advancing_checkpoint() {
+    let now = 2_000_000_000_i64;
+    let cases = [
+        (
+            "session-count-minus-one",
+            4,
+            repeated_timestamps(30, &["2026-07-20T10:00:00+08:00"]),
+            None,
+        ),
+        (
+            "session-message-minus-one",
+            5,
+            repeated_timestamps(29, &["2026-07-20T10:00:00+08:00"]),
+            None,
+        ),
+        (
+            "active-date-minus-one",
+            1,
+            repeated_timestamps(
+                50,
+                &["2026-07-19T10:00:00+08:00", "2026-07-20T10:00:00+08:00"],
+            ),
+            None,
+        ),
+        (
+            "active-date-message-minus-one",
+            1,
+            repeated_timestamps(
+                49,
+                &[
+                    "2026-07-18T10:00:00+08:00",
+                    "2026-07-19T10:00:00+08:00",
+                    "2026-07-20T10:00:00+08:00",
+                ],
+            ),
+            None,
+        ),
+        (
+            "interval-minus-one",
+            1,
+            repeated_timestamps(60, &["2026-07-20T10:00:00+08:00"]),
+            Some(7 * 24 * 60 * 60 - 1),
+        ),
+        (
+            "interval-message-minus-one",
+            1,
+            repeated_timestamps(59, &["2026-07-20T10:00:00+08:00"]),
+            Some(7 * 24 * 60 * 60),
+        ),
+    ];
+
+    for (user, session_count, timestamps, checkpoint_age) in cases {
+        let (database, store, sessions) = test_stores_with_database();
+        add_private_messages_with_timestamps(&sessions, user, session_count, &timestamps);
+        let expected_checkpoint = checkpoint_age.map(|age| {
+            let last_run_at_epoch = now - age;
+            seed_successful_dream_state(&database, user, 0, last_run_at_epoch);
+            (0, last_run_at_epoch, None)
+        });
+
+        assert!(
+            store
+                .claim_dream(
+                    &private_storage_context(user),
+                    production_dream_limits(),
+                    now,
+                )
+                .unwrap()
+                .is_none(),
+            "{user} should not trigger"
+        );
+        assert_eq!(dream_checkpoint(&database, user), expected_checkpoint);
+    }
+}
+
+#[test]
+fn truncated_state_does_not_bypass_production_trigger_thresholds() {
+    let now = 2_000_000_000_i64;
+    let user = "truncated-below-threshold";
+    let (database, store, sessions) = test_stores_with_database();
+    add_private_messages_with_timestamps(
+        &sessions,
+        user,
+        5,
+        &repeated_timestamps(29, &["2026-07-20T10:00:00+08:00"]),
+    );
+    let last_run_at_epoch = now - 24 * 60 * 60;
+    seed_successful_dream_state(&database, user, 0, last_run_at_epoch);
+    database
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE memory_dream_state SET truncated = 1
+             WHERE scope_type = 'personal' AND scope_id = ?1
+               AND memory_kind = 'personal' AND subject_key = ''",
+            params![user],
+        )
+        .unwrap();
+
+    assert!(
+        store
+            .claim_dream(
+                &private_storage_context(user),
+                production_dream_limits(),
+                now,
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        dream_checkpoint(&database, user),
+        Some((0, last_run_at_epoch, None))
+    );
+}
+
+#[test]
+fn base_cooldown_still_blocks_otherwise_matching_trigger() {
+    let now = 2_000_000_000_i64;
+    let user = "cooldown";
+    let (database, store, sessions) = test_stores_with_database();
+    add_private_messages_with_timestamps(
+        &sessions,
+        user,
+        5,
+        &repeated_timestamps(30, &["2026-07-20T10:00:00+08:00"]),
+    );
+    let last_run_at_epoch = now - 60 * 60;
+    seed_successful_dream_state(&database, user, 0, last_run_at_epoch);
+    let mut limits = production_dream_limits();
+    limits.min_interval_seconds = 24 * 60 * 60;
+
+    assert!(
+        store
+            .claim_dream(&private_storage_context(user), limits, now)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        dream_checkpoint(&database, user),
+        Some((0, last_run_at_epoch, None))
+    );
+}
+
+#[test]
+fn multiple_trigger_paths_still_allow_only_one_concurrent_claim() {
+    let now = 2_000_000_000_i64;
+    let user = "all-paths";
+    let (database, store, sessions) = test_stores_with_database();
+    add_private_messages_with_timestamps(
+        &sessions,
+        user,
+        5,
+        &repeated_timestamps(
+            60,
+            &[
+                "2026-07-18T10:00:00+08:00",
+                "2026-07-19T10:00:00+08:00",
+                "2026-07-20T10:00:00+08:00",
+            ],
+        ),
+    );
+    let last_run_at_epoch = now - 7 * 24 * 60 * 60;
+    seed_successful_dream_state(&database, user, 0, last_run_at_epoch);
+
+    let context = private_storage_context(user);
+    let first = store
+        .claim_dream(&context, production_dream_limits(), now)
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .claim_dream(&context, production_dream_limits(), now)
+            .unwrap()
+            .is_none()
+    );
+    let state = dream_checkpoint(&database, user).unwrap();
+    assert_eq!((state.0, state.1), (0, last_run_at_epoch));
+    assert_eq!(state.2.as_deref(), Some(first.token.as_str()));
+
+    store.release_dream(&context, &first.token).unwrap();
+    assert_eq!(
+        dream_checkpoint(&database, user),
+        Some((0, last_run_at_epoch, None))
+    );
+    assert!(
+        store
+            .claim_dream(&context, production_dream_limits(), now)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn seventy_two_messages_across_four_sessions_trigger_after_seven_days() {
+    let now = 2_000_000_000_i64;
+    let user = "seventy-two-regression";
+    let (database, store, sessions) = test_stores_with_database();
+    add_private_messages_with_timestamps(
+        &sessions,
+        user,
+        4,
+        &repeated_timestamps(72, &["2026-07-20T10:00:00+08:00"]),
+    );
+    seed_successful_dream_state(&database, user, 0, now - 8 * 24 * 60 * 60);
+
+    let claim = store
+        .claim_dream(
+            &private_storage_context(user),
+            production_dream_limits(),
+            now,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.messages.len(), 72);
+}
+
+#[test]
+fn active_dates_use_shanghai_boundaries_instead_of_utc_dates() {
+    let now = 2_000_000_000_i64;
+    let user = "timezone-boundary";
+    let (_, store, sessions) = test_stores_with_database();
+    add_private_messages_with_timestamps(
+        &sessions,
+        user,
+        1,
+        &repeated_timestamps(
+            50,
+            &[
+                "2026-07-20T15:30:00Z",
+                "2026-07-20T16:30:00Z",
+                "2026-07-21T16:30:00Z",
+            ],
+        ),
+    );
+
+    assert!(
+        store
+            .claim_dream(
+                &private_storage_context(user),
+                production_dream_limits(),
+                now,
+            )
+            .unwrap()
+            .is_some()
     );
 }
 
@@ -279,7 +696,7 @@ async fn duplicate_and_user_confirmed_conflict_do_not_replace_confirmed_memory()
 
 #[tokio::test]
 async fn invalid_output_and_model_failure_leave_batch_retryable() {
-    let (store, sessions) = test_stores();
+    let (database, store, sessions) = test_stores_with_database();
     add_private_session(&sessions, "u1", "我长期喜欢结构化回答");
     let invalid = MockProvider::with_dream_replies(vec![Ok("not-json")]);
     assert_eq!(
@@ -289,6 +706,7 @@ async fn invalid_output_and_model_failure_leave_batch_retryable() {
             .unwrap_err(),
         "dream_output_invalid_json"
     );
+    assert_eq!(dream_checkpoint(&database, "u1"), Some((i64::MIN, 0, None)));
     let failed = MockProvider::with_dream_replies(vec![Err(LlmError::provider(
         "dream unavailable",
         "test",
@@ -300,6 +718,7 @@ async fn invalid_output_and_model_failure_leave_batch_retryable() {
             .unwrap_err(),
         "dream_model_failed"
     );
+    assert_eq!(dream_checkpoint(&database, "u1"), Some((i64::MIN, 0, None)));
     let retry = MockProvider::with_dream_replies(vec![Ok("NO_REPLY")]);
     assert!(
         worker(&store, retry, test_config())
@@ -378,8 +797,8 @@ async fn database_failure_rolls_back_memory_and_checkpoint() {
                 &storage_context,
                 DreamLimits {
                     min_interval_seconds: 0,
-                    min_new_sessions: 1,
                     max_sessions: 20,
+                    trigger_policy: DreamTriggerPolicy::permissive(),
                 },
                 unix_epoch(),
             )
