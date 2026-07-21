@@ -17,12 +17,13 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.20.6`，项目处于 `20.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.20.7`，项目处于 `20.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
 ## 20.x 版本线更新
-- **配置与部署升级**（v0.20.0 - v0.20.6）：新增安全配置中心、`/console/` 管理入口、Agent 配置迁移和工具白名单，支持在网页中配置 Provider、QQ / OneBot / 微信入口及主要运行能力；管理员初始化和密码重置可直接粘贴完整令牌字符串。
+- **配置与部署升级**（v0.20.0 - v0.20.7）：新增安全配置中心、`/console/` 管理入口、Agent 配置迁移和工具白名单，支持在网页中配置 Provider、QQ / OneBot / 微信入口及主要运行能力；管理员初始化和密码重置可直接粘贴完整令牌字符串。
+- **Session Dream 触发与续批稳定性**（v0.20.7）：按新增 Session、活跃日期或成功检查点间隔触发记忆整理，字符或 Session 截断后可继续处理尾部批次，模型或数据库失败时保留检查点以便重试。
 - **待办查询与 Agent 稳定性**（v0.20.6）：自然语言待办查询统一进入受控 Tool Loop，支持周期类型与组合筛选；知识工具超出上下文预算时会压缩结果并收尾，Prompt Cache 会话前缀保持稳定。
 - **知识库 Agent 化**（PR #528、#534）：知识检索改为按需调用的受控工具，支持结构化证据、混合召回和相关性评测。
 - **联网搜索后端与结果展示**（v0.20.5，PR #551、#552）：`/查` 和自然语言搜索可统一选择 Provider 原生搜索、Tavily 或关闭，并为多目标查询展示带来源的可信结果卡片和成功/失败统计。
