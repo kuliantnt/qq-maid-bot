@@ -9,8 +9,10 @@
 
 use std::collections::HashSet;
 
+use qq_maid_common::time_context::local_date_from_timestamp;
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde_json::Value;
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::runtime::session::{SessionMessage, SessionTurnActor};
@@ -22,6 +24,11 @@ use super::{
 };
 
 const DREAM_LEASE_SECONDS: i64 = 600;
+const DREAM_SESSION_PATH_MIN_MESSAGES: usize = 30;
+const DREAM_ACTIVE_DATE_PATH_MIN_DATES: usize = 3;
+const DREAM_ACTIVE_DATE_PATH_MIN_MESSAGES: usize = 50;
+const DREAM_INTERVAL_PATH_MIN_SECONDS: u64 = 7 * 24 * 60 * 60;
+const DREAM_INTERVAL_PATH_MIN_MESSAGES: usize = 60;
 
 #[derive(Debug, Clone)]
 pub(crate) struct DreamContext {
@@ -34,8 +41,43 @@ pub(crate) struct DreamContext {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DreamLimits {
     pub min_interval_seconds: u64,
-    pub min_new_sessions: usize,
     pub max_sessions: usize,
+    pub trigger_policy: DreamTriggerPolicy,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DreamTriggerPolicy {
+    min_new_sessions: usize,
+    min_session_path_messages: usize,
+    min_active_dates: usize,
+    min_active_date_path_messages: usize,
+    min_checkpoint_interval_seconds: u64,
+    min_interval_path_messages: usize,
+}
+
+impl DreamTriggerPolicy {
+    pub(crate) const fn production(min_new_sessions: usize) -> Self {
+        Self {
+            min_new_sessions,
+            min_session_path_messages: DREAM_SESSION_PATH_MIN_MESSAGES,
+            min_active_dates: DREAM_ACTIVE_DATE_PATH_MIN_DATES,
+            min_active_date_path_messages: DREAM_ACTIVE_DATE_PATH_MIN_MESSAGES,
+            min_checkpoint_interval_seconds: DREAM_INTERVAL_PATH_MIN_SECONDS,
+            min_interval_path_messages: DREAM_INTERVAL_PATH_MIN_MESSAGES,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn permissive() -> Self {
+        Self {
+            min_new_sessions: 1,
+            min_session_path_messages: 1,
+            min_active_dates: usize::MAX,
+            min_active_date_path_messages: usize::MAX,
+            min_checkpoint_interval_seconds: u64::MAX,
+            min_interval_path_messages: usize::MAX,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +85,7 @@ pub(crate) struct DreamMessage {
     pub message_id: i64,
     pub session_id: String,
     pub updated_at: String,
+    pub timestamp: String,
     pub content: String,
 }
 
@@ -94,6 +137,15 @@ struct SessionHeader {
     extra_json: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DreamTriggerStats {
+    message_count: usize,
+    session_count: usize,
+    active_date_count: usize,
+    checkpoint_interval_seconds: u64,
+    has_successful_checkpoint: bool,
+}
+
 impl MemoryStore {
     /// 抢占一个 target 的 Dream 批次。事务在返回前已经提交，模型调用必须发生在返回后。
     pub(crate) fn claim_dream(
@@ -143,15 +195,28 @@ impl MemoryStore {
         backfill_legacy_archived_message_ids(&tx, &mut headers)?;
         let messages =
             load_dream_messages(&tx, &headers, context.actor_ref.as_deref(), last_message_id)?;
-        let new_session_count = messages
-            .iter()
-            .map(|message| message.session_id.as_str())
-            .collect::<HashSet<_>>()
-            .len();
-        let prior_truncated = state.as_ref().is_some_and(|state| state.truncated);
-        if messages.is_empty()
-            || (!prior_truncated && new_session_count < limits.min_new_sessions.max(1))
-        {
+        // 统计只基于检查点后的稳定 user 消息；assistant、重复 ID 和其他群成员已在读取层排除。
+        let trigger_stats = dream_trigger_stats(&messages, state.as_ref(), now_epoch);
+        // 三路门槛只控制首次批次。成功批次若因字符或 Session 上限截断，truncated 会把
+        // 连续尾部标记为待续批；后续调度仍经过冷却和租约检查，但不重新累计消息门槛。
+        let pending_continuation = state.as_ref().is_some_and(|state| state.truncated);
+        let initial_trigger_matches = dream_trigger_matches(trigger_stats, limits.trigger_policy);
+        if messages.is_empty() || (!pending_continuation && !initial_trigger_matches) {
+            let reason = if messages.is_empty() {
+                "no_pending_messages".to_owned()
+            } else {
+                dream_trigger_miss_reason(trigger_stats, limits.trigger_policy)
+            };
+            debug!(
+                message_count = trigger_stats.message_count,
+                session_count = trigger_stats.session_count,
+                active_date_count = trigger_stats.active_date_count,
+                checkpoint_interval_seconds = trigger_stats.checkpoint_interval_seconds,
+                has_successful_checkpoint = trigger_stats.has_successful_checkpoint,
+                pending_continuation,
+                reason = %reason,
+                "memory Dream trigger skipped"
+            );
             return Ok(None);
         }
 
@@ -509,13 +574,14 @@ fn load_dream_messages(
                     message_id,
                     session_id: header.session_id.clone(),
                     updated_at: header.updated_at.clone(),
+                    timestamp: message.ts,
                     content: message.content,
                 });
             }
         }
         let mut stmt = conn
             .prepare(
-                "SELECT id, content, turn_actor_json FROM session_messages
+                "SELECT id, content, ts, turn_actor_json FROM session_messages
                  WHERE session_id = ?1 AND role = 'user' AND id > ?2
                  ORDER BY id ASC",
             )
@@ -525,12 +591,14 @@ fn load_dream_messages(
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             })
             .map_err(MemoryError::from_sql)?;
         for row in rows {
-            let (message_id, content, turn_actor_json) = row.map_err(MemoryError::from_sql)?;
+            let (message_id, content, timestamp, turn_actor_json) =
+                row.map_err(MemoryError::from_sql)?;
             if actor_matches(turn_actor_json.as_deref(), actor_ref)
                 && seen_message_ids.insert(message_id)
             {
@@ -538,6 +606,7 @@ fn load_dream_messages(
                     message_id,
                     session_id: header.session_id.clone(),
                     updated_at: header.updated_at.clone(),
+                    timestamp,
                     content,
                 });
             }
@@ -545,6 +614,82 @@ fn load_dream_messages(
     }
     result.sort_by_key(|message| message.message_id);
     Ok(result)
+}
+
+fn dream_trigger_stats(
+    messages: &[DreamMessage],
+    state: Option<&StoredDreamState>,
+    now_epoch: i64,
+) -> DreamTriggerStats {
+    let session_count = messages
+        .iter()
+        .map(|message| message.session_id.as_str())
+        .collect::<HashSet<_>>()
+        .len();
+    // Session 消息时间戳可能携带 UTC 或其他偏移；统一按项目北京时间策略换算自然日。
+    let active_date_count = messages
+        .iter()
+        .filter_map(|message| local_date_from_timestamp(&message.timestamp))
+        .collect::<HashSet<_>>()
+        .len();
+    let last_run_at_epoch = state.map_or(0, |state| state.last_run_at_epoch);
+    let has_successful_checkpoint = last_run_at_epoch > 0;
+    let checkpoint_interval_seconds = if has_successful_checkpoint {
+        now_epoch.saturating_sub(last_run_at_epoch).max(0) as u64
+    } else {
+        0
+    };
+    DreamTriggerStats {
+        message_count: messages.len(),
+        session_count,
+        active_date_count,
+        checkpoint_interval_seconds,
+        has_successful_checkpoint,
+    }
+}
+
+fn dream_trigger_matches(stats: DreamTriggerStats, policy: DreamTriggerPolicy) -> bool {
+    let session_path = stats.session_count >= policy.min_new_sessions.max(1)
+        && stats.message_count >= policy.min_session_path_messages.max(1);
+    let active_date_path = stats.active_date_count >= policy.min_active_dates.max(1)
+        && stats.message_count >= policy.min_active_date_path_messages.max(1);
+    let interval_path = stats.has_successful_checkpoint
+        && stats.checkpoint_interval_seconds >= policy.min_checkpoint_interval_seconds
+        && stats.message_count >= policy.min_interval_path_messages.max(1);
+    session_path || active_date_path || interval_path
+}
+
+fn dream_trigger_miss_reason(stats: DreamTriggerStats, policy: DreamTriggerPolicy) -> String {
+    let session_reason = format!(
+        "session_path(messages={}/{},sessions={}/{})",
+        stats.message_count,
+        policy.min_session_path_messages.max(1),
+        stats.session_count,
+        policy.min_new_sessions.max(1)
+    );
+    let active_date_reason = format!(
+        "active_date_path(messages={}/{},dates={}/{})",
+        stats.message_count,
+        policy.min_active_date_path_messages.max(1),
+        stats.active_date_count,
+        policy.min_active_dates.max(1)
+    );
+    let interval_reason = if stats.has_successful_checkpoint {
+        format!(
+            "interval_path(messages={}/{},seconds={}/{})",
+            stats.message_count,
+            policy.min_interval_path_messages.max(1),
+            stats.checkpoint_interval_seconds,
+            policy.min_checkpoint_interval_seconds
+        )
+    } else {
+        format!(
+            "interval_path(messages={}/{},checkpoint=missing)",
+            stats.message_count,
+            policy.min_interval_path_messages.max(1)
+        )
+    };
+    format!("{session_reason};{active_date_reason};{interval_reason}")
 }
 
 fn archived_user_messages(extra_json: &str, actor_ref: Option<&str>) -> Vec<SessionMessage> {

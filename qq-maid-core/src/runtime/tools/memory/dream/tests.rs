@@ -1,5 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
+use rusqlite::{OptionalExtension, params};
+
 use crate::{
     error::LlmError,
     runtime::{
@@ -14,6 +16,9 @@ use super::super::{
 };
 use super::*;
 
+mod continuation;
+mod trigger;
+
 fn test_config() -> MemoryDreamConfig {
     MemoryDreamConfig {
         enabled: true,
@@ -26,12 +31,16 @@ fn test_config() -> MemoryDreamConfig {
 }
 
 fn test_stores() -> (MemoryStore, SessionStore) {
+    let (_, store, sessions) = test_stores_with_database();
+    (store, sessions)
+}
+
+fn test_stores_with_database() -> (SqliteDatabase, MemoryStore, SessionStore) {
     let database =
         SqliteDatabase::open_temp("memory-dream", APP_MIGRATIONS).expect("open database");
-    (
-        MemoryStore::new(database.clone()),
-        SessionStore::new(database),
-    )
+    let store = MemoryStore::new(database.clone());
+    let sessions = SessionStore::new(database.clone());
+    (database, store, sessions)
 }
 
 fn private_actor(user: &str) -> MemoryActor {
@@ -71,6 +80,138 @@ fn add_private_session_with_id(store: &SessionStore, user: &str, text: &str) -> 
         .append_exchange(&mut session, text, "assistant reply not used by Dream")
         .expect("append exchange");
     session.session_id
+}
+
+fn repeated_timestamps(count: usize, values: &[&str]) -> Vec<String> {
+    assert!(!values.is_empty());
+    (0..count)
+        .map(|index| values[index % values.len()].to_owned())
+        .collect()
+}
+
+fn add_private_messages_with_timestamps(
+    store: &SessionStore,
+    user: &str,
+    session_count: usize,
+    timestamps: &[String],
+) {
+    let messages = timestamps
+        .iter()
+        .enumerate()
+        .map(|(index, timestamp)| (format!("有效用户消息 {index}"), timestamp.clone()))
+        .collect::<Vec<_>>();
+    add_private_message_batch(store, user, session_count, &messages);
+}
+
+fn add_private_message_batch(
+    store: &SessionStore,
+    user: &str,
+    session_count: usize,
+    messages: &[(String, String)],
+) {
+    assert!(session_count > 0);
+    assert!(messages.len() >= session_count);
+    let meta = SessionMeta::new(
+        format!("private:{user}"),
+        Some(user.to_owned()),
+        None,
+        None,
+        None,
+        "test",
+    );
+    for session_index in 0..session_count {
+        let mut session = store.create(&meta, "", false).expect("create session");
+        for message_index in (session_index..messages.len()).step_by(session_count) {
+            session.append_message("user", &messages[message_index].0);
+            session.history.last_mut().unwrap().ts = messages[message_index].1.clone();
+        }
+        store.save(&mut session).expect("save session messages");
+    }
+}
+
+fn character_truncation_backlog(store: &SessionStore, user: &str) {
+    let timestamp = "2026-07-20T10:00:00+08:00".to_owned();
+    let mut messages = (0..30)
+        .map(|index| (format!("续批短消息 {index}"), timestamp.clone()))
+        .collect::<Vec<_>>();
+    messages[0].0 = format!("首批超长消息-{}", "甲".repeat(1_200));
+    add_private_message_batch(store, user, 5, &messages);
+}
+
+fn private_storage_context(user: &str) -> DreamContext {
+    DreamContext {
+        actor_scope_id: user.to_owned(),
+        target: MemoryTarget::personal(user),
+        conversation_scope_key: format!("private:{user}"),
+        actor_ref: None,
+    }
+}
+
+fn production_dream_limits() -> DreamLimits {
+    DreamLimits {
+        min_interval_seconds: 0,
+        max_sessions: 20,
+        trigger_policy: DreamTriggerPolicy::production(5),
+    }
+}
+
+fn production_dream_config() -> MemoryDreamConfig {
+    let mut config = test_config();
+    config.min_new_sessions = 5;
+    config
+}
+
+fn seed_successful_dream_state(
+    database: &SqliteDatabase,
+    user: &str,
+    last_processed_message_id: i64,
+    last_run_at_epoch: i64,
+) {
+    let target = MemoryTarget::personal(user);
+    database
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO memory_dream_state (
+                scope_type, scope_id, memory_kind, subject_key,
+                conversation_scope_key, actor_ref,
+                last_processed_message_id, last_processed_updated_at,
+                last_processed_session_id, last_run_at_epoch, last_status
+             ) VALUES (?1, ?2, ?3, ?4, ?5, '', ?6, ?7, 'checkpoint', ?8, 'success')",
+            params![
+                target.scope_type().as_str(),
+                target.scope_id(),
+                target.memory_kind().as_str(),
+                target.subject_id().unwrap_or(""),
+                format!("private:{user}"),
+                last_processed_message_id,
+                "2026-07-01T00:00:00+08:00",
+                last_run_at_epoch,
+            ],
+        )
+        .unwrap();
+}
+
+fn dream_checkpoint(database: &SqliteDatabase, user: &str) -> Option<(i64, i64, Option<String>)> {
+    dream_state(database, user).map(|(message_id, last_run_at_epoch, _, lock_token)| {
+        (message_id, last_run_at_epoch, lock_token)
+    })
+}
+
+fn dream_state(database: &SqliteDatabase, user: &str) -> Option<(i64, i64, bool, Option<String>)> {
+    database
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT last_processed_message_id, last_run_at_epoch, truncated, lock_token
+             FROM memory_dream_state
+             WHERE scope_type = 'personal' AND scope_id = ?1
+               AND memory_kind = 'personal' AND subject_key = ''",
+            params![user],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .unwrap()
 }
 
 fn group_context(group: &str, user: &str) -> MemoryDreamContext {
@@ -126,6 +267,16 @@ fn active_memories(
 }
 
 fn worker(
+    store: &MemoryStore,
+    provider: MockProvider,
+    config: MemoryDreamConfig,
+) -> MemoryDreamWorker {
+    let trigger_policy = DreamTriggerPolicy::permissive();
+    MemoryDreamWorker::new(Arc::new(provider), store.clone(), config)
+        .with_trigger_policy(trigger_policy)
+}
+
+fn production_worker(
     store: &MemoryStore,
     provider: MockProvider,
     config: MemoryDreamConfig,
@@ -279,7 +430,7 @@ async fn duplicate_and_user_confirmed_conflict_do_not_replace_confirmed_memory()
 
 #[tokio::test]
 async fn invalid_output_and_model_failure_leave_batch_retryable() {
-    let (store, sessions) = test_stores();
+    let (database, store, sessions) = test_stores_with_database();
     add_private_session(&sessions, "u1", "我长期喜欢结构化回答");
     let invalid = MockProvider::with_dream_replies(vec![Ok("not-json")]);
     assert_eq!(
@@ -289,6 +440,7 @@ async fn invalid_output_and_model_failure_leave_batch_retryable() {
             .unwrap_err(),
         "dream_output_invalid_json"
     );
+    assert_eq!(dream_checkpoint(&database, "u1"), Some((i64::MIN, 0, None)));
     let failed = MockProvider::with_dream_replies(vec![Err(LlmError::provider(
         "dream unavailable",
         "test",
@@ -300,6 +452,7 @@ async fn invalid_output_and_model_failure_leave_batch_retryable() {
             .unwrap_err(),
         "dream_model_failed"
     );
+    assert_eq!(dream_checkpoint(&database, "u1"), Some((i64::MIN, 0, None)));
     let retry = MockProvider::with_dream_replies(vec![Ok("NO_REPLY")]);
     assert!(
         worker(&store, retry, test_config())
@@ -378,42 +531,14 @@ async fn database_failure_rolls_back_memory_and_checkpoint() {
                 &storage_context,
                 DreamLimits {
                     min_interval_seconds: 0,
-                    min_new_sessions: 1,
                     max_sessions: 20,
+                    trigger_policy: DreamTriggerPolicy::permissive(),
                 },
                 unix_epoch(),
             )
             .unwrap()
             .is_some()
     );
-}
-
-#[tokio::test]
-async fn truncated_input_processes_tail_in_later_batch() {
-    let (store, sessions) = test_stores();
-    add_private_session(&sessions, "u1", &"长期偏好甲".repeat(500));
-    add_private_session(&sessions, "u1", "长期偏好乙");
-    let provider = MockProvider::with_dream_replies(vec![Ok("NO_REPLY"), Ok("NO_REPLY")]);
-    let observable = provider.clone();
-    let mut config = test_config();
-    config.max_input_chars = 1000;
-    config.min_new_sessions = 2;
-    let worker = worker(&store, provider, config);
-    let first = worker
-        .run_once(private_context("u1"))
-        .await
-        .unwrap()
-        .unwrap();
-    let second = worker
-        .run_once(private_context("u1"))
-        .await
-        .unwrap()
-        .unwrap();
-
-    assert!(first.truncated);
-    assert_eq!(first.input_sessions, 1);
-    assert_eq!(second.input_sessions, 1);
-    assert_eq!(observable.requests().len(), 2);
 }
 
 #[tokio::test]
