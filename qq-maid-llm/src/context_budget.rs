@@ -54,6 +54,7 @@ pub enum BudgetUnit {
 #[serde(rename_all = "snake_case")]
 pub enum BudgetItemKind {
     Required,
+    HistorySummary,
     RecentHistoryProtected,
     OldHistory,
     Knowledge,
@@ -76,7 +77,7 @@ impl BudgetItemKind {
             Self::Required | Self::ToolSchema | Self::ToolLoopAtomicTurn => {
                 RetentionPolicy::Required
             }
-            Self::RecentHistoryProtected => RetentionPolicy::Protected,
+            Self::HistorySummary | Self::RecentHistoryProtected => RetentionPolicy::Protected,
             Self::OldHistory => RetentionPolicy::Evictable { priority: 0 },
             Self::Knowledge => RetentionPolicy::Evictable { priority: 1 },
             Self::Session => RetentionPolicy::Evictable { priority: 2 },

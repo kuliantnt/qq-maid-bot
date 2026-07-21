@@ -602,7 +602,7 @@ fn budget_chat_messages(
     if !req.history_summary.trim().is_empty() {
         push_message_item(
             &mut items,
-            BudgetItemKind::Session,
+            BudgetItemKind::HistorySummary,
             ChatMessage::system(req.history_summary.clone()),
         )?;
     }
