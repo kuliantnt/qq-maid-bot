@@ -126,6 +126,7 @@ struct StoredDreamState {
     actor_ref: String,
     last_processed_message_id: i64,
     last_run_at_epoch: i64,
+    truncated: bool,
     lock_until_epoch: i64,
 }
 
@@ -196,14 +197,24 @@ impl MemoryStore {
             load_dream_messages(&tx, &headers, context.actor_ref.as_deref(), last_message_id)?;
         // 统计只基于检查点后的稳定 user 消息；assistant、重复 ID 和其他群成员已在读取层排除。
         let trigger_stats = dream_trigger_stats(&messages, state.as_ref(), now_epoch);
-        if !dream_trigger_matches(trigger_stats, limits.trigger_policy) {
+        // 三路门槛只控制首次批次。成功批次若因字符或 Session 上限截断，truncated 会把
+        // 连续尾部标记为待续批；后续调度仍经过冷却和租约检查，但不重新累计消息门槛。
+        let pending_continuation = state.as_ref().is_some_and(|state| state.truncated);
+        let initial_trigger_matches = dream_trigger_matches(trigger_stats, limits.trigger_policy);
+        if messages.is_empty() || (!pending_continuation && !initial_trigger_matches) {
+            let reason = if messages.is_empty() {
+                "no_pending_messages".to_owned()
+            } else {
+                dream_trigger_miss_reason(trigger_stats, limits.trigger_policy)
+            };
             debug!(
                 message_count = trigger_stats.message_count,
                 session_count = trigger_stats.session_count,
                 active_date_count = trigger_stats.active_date_count,
                 checkpoint_interval_seconds = trigger_stats.checkpoint_interval_seconds,
                 has_successful_checkpoint = trigger_stats.has_successful_checkpoint,
-                reason = %dream_trigger_miss_reason(trigger_stats, limits.trigger_policy),
+                pending_continuation,
+                reason = %reason,
                 "memory Dream trigger skipped"
             );
             return Ok(None);
@@ -421,7 +432,7 @@ fn load_state(
 ) -> Result<Option<StoredDreamState>, MemoryError> {
     conn.query_row(
         "SELECT conversation_scope_key, actor_ref, last_processed_message_id,
-                last_run_at_epoch, lock_until_epoch
+                last_run_at_epoch, truncated, lock_until_epoch
          FROM memory_dream_state
          WHERE scope_type = ?1 AND scope_id = ?2 AND memory_kind = ?3 AND subject_key = ?4",
         params![
@@ -436,7 +447,8 @@ fn load_state(
                 actor_ref: row.get(1)?,
                 last_processed_message_id: row.get(2)?,
                 last_run_at_epoch: row.get(3)?,
-                lock_until_epoch: row.get(4)?,
+                truncated: row.get(4)?,
+                lock_until_epoch: row.get(5)?,
             })
         },
     )

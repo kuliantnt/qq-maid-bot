@@ -141,7 +141,7 @@ runtime/.env
 - `APP_DB_FILE`：统一 SQLite 文件，承载业务数据和知识检索索引。
 - `QQ_MAID_DB_POOL_MAX_SIZE`：本地 SQLite 连接池大小，默认 8，合法范围 1～32；独立于 `MAX_CONCURRENT_RESPONSES`。
 - `MEMORY_CONSOLIDATION_*`：确定性长期记忆整理开关与时间、数量、来源、单次记录数和字符门槛；默认关闭，只归档同一完整作用域内正文与语义键完全相同的重复项，不读取聊天正文、不调用模型。
-- `MEMORY_DREAM_*`：独立于确定性整理的 Session Dream 开关、冷却、首条触发路径的 Session 数、单批 Session 数、输入字符软上限和输出候选数门槛；默认关闭。检查点后满足“Session 数与 30 条消息”“3 个本地活跃日期与 50 条消息”或“距上次成功 7 天与 60 条消息”之一才领取，只读取带稳定消息 ID 的活跃及归档用户消息，不读取 Session Summary。
+- `MEMORY_DREAM_*`：独立于确定性整理的 Session Dream 开关、冷却、首次触发路径的 Session 数、单批 Session 数、输入字符软上限和输出候选数门槛；默认关闭。首次批次需满足“Session 数与 30 条消息”“3 个本地活跃日期与 50 条消息”或“距上次成功 7 天与 60 条消息”之一；成功批次若被字符或 Session 上限截断，后续普通聊天调度每次只续处理一批，不重新累计首次门槛。Dream 只读取带稳定消息 ID 的活跃及归档用户消息，不读取 Session Summary。
 - `PROMPT_DIR`：固定 prompt 目录。
 - `KNOWLEDGE_DIR`：Markdown 知识目录；留空时使用 `config/knowledge`，启动时自动同步到 SQLite FTS5，普通聊天按需检索片段。
 - `RSS_*`：RSS / Atom 轮询、去重、推送和 SSRF 防护相关配置。

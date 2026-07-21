@@ -207,9 +207,9 @@ pub struct AppConfig {
     pub memory_consolidation_max_input_chars: u64,
     /// 是否启用模型 Session Dream 与自动长期记忆；与确定性整理独立控制。
     pub memory_dream_enabled: bool,
-    /// 以下参数控制 Dream 基础冷却、Session 路径门槛和单批处理上限。
+    /// 以下参数控制 Dream 基础冷却、首次 Session 路径门槛和单批处理上限。
     pub memory_dream_min_interval_seconds: u64,
-    /// 首条触发路径所需的不同 Session 数；消息、活跃日期和七天兜底门槛由业务规则固定。
+    /// 首次触发路径所需的不同 Session 数；消息、活跃日期和七天兜底门槛由业务规则固定。
     pub memory_dream_min_new_sessions: u64,
     pub memory_dream_max_sessions: u64,
     pub memory_dream_max_input_chars: u64,
