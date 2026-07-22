@@ -152,7 +152,8 @@ GHCR 镜像为 `ghcr.io/kuliantnt/qq-maid-bot`；Docker Hub 正式镜像为
 `docker.io/kuliantnt/qq-maid-bot`。Docker Hub 不接收 `sha-*` 或 `master`。`master` 和
 `latest` 都是可变标签，不能作为回滚依据。测试服和正式环境均应把完整
 `仓库@sha256:digest` 记录为部署事实。tag 对应的 commit 镜像不存在时 Release workflow
-明确失败，不会在 tag 阶段补建另一份镜像。任一 Registry 登录、复制、打标签或 digest
+会等待最多 10 分钟，让并发触发的 master Container workflow 完成；超时后明确失败，
+不会在 tag 阶段补建另一份镜像。任一 Registry 登录、复制、打标签或 digest
 校验失败，正式发布 job 都会失败，不能视为双渠道发布成功。现有 GitHub Release 原生包仍由
 同一个 tag 工作流生成；创建 tag 不会自动更新正式服务器。
 
