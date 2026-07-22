@@ -13,6 +13,7 @@ INSTANCE_ENV="${SCRIPT_DIR}/compose.env"
 IMAGE_ENV="${SCRIPT_DIR}/.image.env"
 STATE_DIR="${SCRIPT_DIR}/deployments"
 CURRENT_STATE="${STATE_DIR}/current.env"
+PRE_UPGRADE_BACKUP=""
 
 usage() {
     cat <<'EOF'
@@ -158,8 +159,28 @@ record_state() {
         printf 'build_version_label=%s\n' "${build_version_label}"
         printf 'deployed_at=%s\n' "${deployed_at}"
         printf 'container_id=%s\n' "${container}"
+        printf 'pre_upgrade_backup=%s\n' "${PRE_UPGRADE_BACKUP:-none}"
     } > "${tmp}"
     mv -f "${tmp}" "${CURRENT_STATE}"
+}
+
+create_pre_upgrade_backup() {
+    local target_env="$1"
+    local commit="$2"
+    local stamp backup
+    if [[ "${DEPLOY_BACKUP_BEFORE_UPGRADE:-true}" == "false" ]]; then
+        printf 'warning: 已显式关闭升级前备份；schema 变化后镜像回滚可能不可用\n' >&2
+        return 0
+    fi
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    backup="/app/runtime/data/backups/pre-upgrade-${stamp}-${commit:0:12}"
+    printf '==> 创建升级前一致性完整备份 %s\n' "${backup}" >&2
+    if ! compose_with_image_env "${target_env}" run --rm --no-deps bot \
+        backup create --output "${backup}" --include-secrets >&2; then
+        printf 'error: 升级前备份失败，保持当前镜像和数据不变\n' >&2
+        return 1
+    fi
+    PRE_UPGRADE_BACKUP="${backup}"
 }
 
 show_status() {
@@ -246,6 +267,10 @@ deploy() {
     [[ "${target_revision}" == "${commit}" ]] \
         || fail "镜像 revision label (${target_revision}) 与部署 commit (${commit}) 不一致"
 
+    if [[ -n "${current_image}" ]]; then
+        create_pre_upgrade_backup "${target_env}" "${commit}" || return 1
+    fi
+
     mv -f "${target_env}" "${IMAGE_ENV}"
     printf '==> 使用目标 digest 重建容器\n'
     if ! compose_with_image_env "${IMAGE_ENV}" up -d --remove-orphans --pull never bot; then
@@ -257,6 +282,10 @@ deploy() {
     if ! new_container="$(wait_until_healthy "${IMAGE_ENV}")"; then
         printf 'error: 目标镜像未通过健康检查，开始回滚\n' >&2
         rollback "${current_image}" || true
+        if [[ -n "${PRE_UPGRADE_BACKUP}" ]]; then
+            printf 'error: 若旧镜像因新 schema 无法启动，请从备份 %s 恢复到干净实例目录\n' \
+                "${PRE_UPGRADE_BACKUP}" >&2
+        fi
         return 1
     fi
 

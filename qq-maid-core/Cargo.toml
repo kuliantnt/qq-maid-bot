@@ -44,7 +44,7 @@ qq-maid-common = { path = "../qq-maid-common" }
 # LLM Provider、路由、SSE、usage、健康状态和 Web Search 协议由独立 crate 承载。
 qq-maid-llm = { path = "../qq-maid-llm" }
 # SQLite 存储，当前承载 Session、Todo、Memory、RSS 订阅和去重状态
-rusqlite = { version = "0.40.1", default-features = false, features = ["bundled", "functions"] }
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "bundled", "functions"] }
 # 序列化/反序列化
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

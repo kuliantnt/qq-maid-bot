@@ -94,6 +94,9 @@ try {
     Assert-True (-not $guideOutput.Contains("/console/")) "disabled console printed a URL"
     Assert-True (-not $guideOutput.Contains("disabled-secret")) "disabled token leaked"
     & $ctl stop | Out-Null
+    $consoleOutput = (& $ctl console) -join "`n"
+    Assert-True ($consoleOutput.Contains("web console is disabled")) "disabled console still attempted Web access"
+    Assert-True (-not $consoleOutput.Contains("HTTP")) "disabled console unexpectedly requested the Web route"
 
     $helpOutput = (& (Join-Path $runtimeDir "botctl.cmd") help) -join "`n"
     Assert-True ($helpOutput.Contains("Usage: botctl.cmd")) "cmd wrapper did not invoke PowerShell controller"

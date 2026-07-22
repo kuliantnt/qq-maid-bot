@@ -45,6 +45,14 @@ fn fields() -> Vec<ManagedConfigField> {
             ManagedConfigApplyMode::Restart,
             None,
         ),
+        ManagedConfigField::public(
+            "console.enabled",
+            "WEB_CONSOLE_ENABLED",
+            "core.console",
+            ManagedConfigValueType::Boolean,
+            ManagedConfigApplyMode::Restart,
+            Some("true"),
+        ),
     ]
 }
 
@@ -870,6 +878,34 @@ fn resolved_environment_prefers_saved_values_and_keeps_unregistered_environment(
     let resolved = center.resolved_environment(&external).unwrap();
     assert_eq!(resolved["RSS_ENABLED"], "false");
     assert_eq!(resolved["UNREGISTERED_VALUE"], "kept");
+}
+
+#[test]
+fn external_console_disable_overrides_previously_saved_enable() {
+    let (center, _database, _directory) = test_center();
+    let initial = center.snapshot(&HashMap::new()).unwrap();
+    center
+        .update_managed(
+            &initial.revision,
+            &[ManagedConfigChange::Set {
+                key: "console.enabled".to_owned(),
+                value: Value::Boolean(true),
+            }],
+        )
+        .unwrap();
+    let external = HashMap::from([("WEB_CONSOLE_ENABLED".to_owned(), "false".to_owned())]);
+
+    let resolved = center.resolved_environment(&external).unwrap();
+    assert_eq!(resolved["WEB_CONSOLE_ENABLED"], "false");
+    let snapshot = center.snapshot(&external).unwrap();
+    let console = snapshot
+        .fields
+        .iter()
+        .find(|field| field.key == "console.enabled")
+        .unwrap();
+    assert_eq!(console.source, ConfigValueSource::Environment);
+    assert_eq!(console.effective_value, Some(Value::Boolean(false)));
+    assert_eq!(console.saved_value, Some(Value::Boolean(true)));
 }
 
 #[cfg(unix)]

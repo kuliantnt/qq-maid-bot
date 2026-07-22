@@ -82,7 +82,7 @@ qbot restart
 - `CHAT_COMMAND_PREFIX`：所有平台共用的单字符命令前缀，默认 `/`；也可通过 Web 控制台下拉框或 `runtime.toml` 的 `command.prefix` 设置为 `#`、`*` 等可见非空白字符，重启后生效。
 - `RUNTIME_CONFIG_FILE`：程序受管普通配置，默认 `config/runtime.toml`。文件不存在时首次启动会安全创建空配置，已有文件不会覆盖。
 - `MASTER_KEY_FILE`：解密主密钥文件，默认相对于受管配置目录的 `secrets/master.key`。首次缺失时安全生成；不得把主密钥原文写进 `.env`。
-- `WEB_CONSOLE_ENABLED`：部署管理入口开关。未显式配置的新实例默认开启并进入受保护首次向导；`false` 时页面、认证和配置 API 均不可访问，也不会生成 Bootstrap token。默认监听仍是回环地址，公网访问必须使用受信 TLS 反向代理。
+- `WEB_CONSOLE_ENABLED`：部署管理入口开关。未显式配置的新实例默认开启并进入受保护首次向导；在进程环境或 `.env` 中显式设为 `false` 时，即使配置中心曾保存为开启，也以部署侧关闭为准，页面、认证和配置 API 均不可访问，也不会生成 Bootstrap token。默认监听仍是回环地址，公网访问必须使用受信 TLS 反向代理。
 - `WEB_CONSOLE_TRUSTED_PROXY_IPS`：受信反向代理实际连接 IP 的逗号列表；只有命中列表才读取 `X-Forwarded-For`，不直接信任客户端头。
 - `WEB_CONSOLE_SECURE_COOKIES`：生产 HTTPS 或 TLS 终止代理必须显式设为 `true`，管理员与 PreAuth Cookie 将带 `Secure` 并使用 `__Host-` 前缀；本机 HTTP 开发保持 `false`。
 
@@ -512,6 +512,10 @@ cp config/.env.example config/.env
 ./botctl.sh start
 ```
 
+通过 `qbot install` 新装时会询问是否启用 Web 控制台；不需要 Web 的用户可选择否，或在
+非交互安装中使用 `qbot install --web false`。关闭 Web 不影响 `qbot config`、文件配置、
+Release/源码启动和机器人业务入口。
+
 Windows ZIP 解压后，在 PowerShell 中执行：
 
 ```powershell
@@ -521,6 +525,11 @@ notepad .\config\.env
 ```
 
 升级时不要直接覆盖已有运行目录中的私有文件和运行数据，尤其是 `config/.env`、`config/runtime.toml`、`config/secrets/master.key`、私有 prompt、私有知识资料、SQLite 数据库、日志和 pid。
+
+统一二进制提供 `config check`、`config sources`、`config migrate`、`migration status` 和
+`backup create/verify/restore` 运维子命令；迁移与恢复默认 dry-run，恢复只写入干净实例目录。
+命令、完整备份的 secret 边界和 schema 回滚限制见
+[配置迁移、备份恢复与安全升级](../docs/deployment/migration-backup.md)。
 
 ### Breaking changes
 

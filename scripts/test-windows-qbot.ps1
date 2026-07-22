@@ -8,6 +8,7 @@ $oldServerUrl = $env:LLM_SERVER_URL
 $oldServerHost = $env:LLM_SERVER_HOST
 $oldServerPort = $env:LLM_SERVER_PORT
 $oldConsoleEnabled = $env:WEB_CONSOLE_ENABLED
+$oldInstallWeb = $env:QBOT_INSTALL_WEB_CONSOLE
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -169,6 +170,12 @@ try {
     Set-Content -LiteralPath (Join-Path $appDir "botctl.sh") -Value "obsolete" -Encoding ASCII
 
     Install-ReleasePayload -ReleaseDir $releaseDir -Version "v9.9.9"
+    Set-InstallWebConsoleChoice -RequestedWeb "false" -ConfigExisted $false
+    $webChoiceValues = Read-ConfigValues
+    Assert-True ($webChoiceValues["WEB_CONSOLE_ENABLED"] -eq "false") "install Web opt-out was not persisted"
+    Set-InstallWebConsoleChoice -RequestedWeb "true" -ConfigExisted $true
+    $webChoiceValues = Read-ConfigValues
+    Assert-True ($webChoiceValues["WEB_CONSOLE_ENABLED"] -eq "true") "explicit reinstall Web choice was not persisted"
     $migratedEnv = Get-Content -LiteralPath (Join-Path $appDir "config\.env") -Raw
     Assert-True ($migratedEnv.Contains("PRIVATE=keep")) "private config was overwritten"
     Assert-True ($migratedEnv.Contains("QWEATHER_API_KEY=")) "empty weather key was removed"
@@ -233,5 +240,6 @@ try {
     $env:LLM_SERVER_HOST = $oldServerHost
     $env:LLM_SERVER_PORT = $oldServerPort
     $env:WEB_CONSOLE_ENABLED = $oldConsoleEnabled
+    $env:QBOT_INSTALL_WEB_CONSOLE = $oldInstallWeb
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

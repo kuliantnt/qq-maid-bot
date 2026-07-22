@@ -30,6 +30,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
+mod cli;
+
 const OPS_HTTP_SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 const BUILD_COMMIT: &str = match option_env!("QQ_MAID_BUILD_COMMIT") {
     Some(value) => value,
@@ -39,6 +41,9 @@ const BUILD_COMMIT: &str = match option_env!("QQ_MAID_BUILD_COMMIT") {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     qq_maid_core::app::load_dotenv_files();
+    if cli::dispatch(std::env::args_os().skip(1).collect())? {
+        return Ok(());
+    }
     init_tracing()?;
     info!(
         version = env!("CARGO_PKG_VERSION"),

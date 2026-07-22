@@ -339,6 +339,10 @@ health() {
 
 console() {
     load_env
+    if ! web_console_enabled; then
+        echo "web console is disabled by WEB_CONSOLE_ENABLED=false"
+        return 0
+    fi
     command -v curl >/dev/null 2>&1 || die "curl is required for console"
     local url status
     url="$(server_url)"

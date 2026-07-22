@@ -112,9 +112,11 @@ docker compose --env-file compose.env \
 | `QQ_MAID_DATA_DIR` | `/app/runtime/data` | UID/GID 10001 可写；SQLite 和本地模型缓存 |
 | `QQ_MAID_MEDIA_DIR` | `/app/runtime/media` | UID/GID 10001 可写；入站媒体临时数据 |
 
-至少同时备份 SQLite 和 `config/secrets/master.key`；只备份数据库无法恢复其中的加密配置。
-一致性备份应先停止容器，或使用 SQLite 在线备份能力。真实 `.env`、主密钥、Prompt、知识
-资料、SQLite 和日志不得进入镜像、Git、Artifact 或 Actions 日志。
+统一 CLI 使用 SQLite Online Backup API 创建 WAL 一致快照。默认不包含 `.env` 和主密钥；
+完整灾备需显式 `--include-secrets`，并把受限备份转移到加密离线介质。只备份数据库无法恢复
+其中的加密配置。命令、校验、干净实例恢复和 schema 兼容规则见
+[配置迁移、备份恢复与安全升级](./migration-backup.md)。真实 `.env`、主密钥、Prompt、知识
+资料、SQLite 和日志不得进入镜像、Git、普通 Artifact 或 Actions 日志。
 
 重建容器不会修改 bind mount 中的已有文件。升级前检查目录仍由 `10001:10001` 读写；
 不要用 root 容器或 `chmod 777` 掩盖权限错误。
@@ -232,10 +234,12 @@ GitHub Environment 创建 `test`，配置 Secrets：
 2. 通过专用 SSH key 上传 `compose.yaml` 与 `docker-deploy.sh`。
 3. 把完整 `仓库@digest` 和 commit 交给服务器。
 4. 校验仓库和 digest 格式，拉取镜像并检查 OCI revision label。
-5. 原子更新 `.image.env`，执行 `docker compose up -d --pull never`。
-6. 等待容器进入 healthy，记录 commit、可选正式 release、构建时 label、digest、容器 ID 和
-   部署时间。
-7. 启动或健康检查失败时恢复上一 `.image.env`，重新启动并确认旧版本 healthy。
+5. 已有实例先用目标镜像对当前卷创建 `data/backups/pre-upgrade-*` 完整一致性备份。
+6. 原子更新 `.image.env`，执行 `docker compose up -d --pull never`。
+7. 等待容器进入 healthy，记录 commit、可选正式 release、构建时 label、digest、容器 ID、
+   升级前备份路径和部署时间。
+8. 启动或健康检查失败时恢复上一 `.image.env`，重新启动并确认旧版本 healthy；若旧镜像
+   不认识新 schema，则按升级前备份恢复干净实例，不盲目声明镜像回滚成功。
 
 重复部署同一 digest 且容器 healthy 时直接成功返回，不产生无意义重建。部署并发组会取消
 旧的测试部署，避免旧 commit 最后覆盖新 commit。首次部署没有回滚点，失败时会明确报告。

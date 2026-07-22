@@ -453,6 +453,10 @@ function Test-Health {
 
 function Test-Console {
     Import-DotEnv
+    if (-not (Test-WebConsoleEnabled)) {
+        Write-Output "web console is disabled by WEB_CONSOLE_ENABLED=false"
+        return
+    }
     $url = "$(Get-ServerUrl)/console/"
     $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 15
     Write-Output "web console: $url -> HTTP $([int]$response.StatusCode)"
