@@ -174,7 +174,7 @@ create_pre_upgrade_backup() {
     fi
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     backup="/app/runtime/data/backups/pre-upgrade-${stamp}-${commit:0:12}"
-    printf '==> 创建升级前一致性完整备份 %s\n' "${backup}" >&2
+    printf '==> 创建升级前数据库与配置恢复包 %s\n' "${backup}" >&2
     if ! compose_with_image_env "${target_env}" run --rm --no-deps bot \
         backup create --output "${backup}" --include-secrets >&2; then
         printf 'error: 升级前备份失败，保持当前镜像和数据不变\n' >&2

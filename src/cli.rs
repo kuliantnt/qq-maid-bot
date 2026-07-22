@@ -347,7 +347,9 @@ fn backup_restore(args: &[String]) -> anyhow::Result<()> {
         return Ok(());
     }
     restore_backup(&bundle, &target, APP_MIGRATIONS)?;
-    println!("restored=true；请补齐外部 secret，随后运行 config check 再启动实例。");
+    println!(
+        "restored=true；已恢复数据库与包内配置，并非完整部署；请补齐同期主密钥、外部 secret 和部署文件，随后运行 config check 再启动实例。"
+    );
     Ok(())
 }
 

@@ -166,10 +166,13 @@ pub fn create_backup(
         .map_err(|error| BackupError::io("commit backup directory", error))?;
 
     let warnings = if options.include_secrets {
-        vec!["备份包含 .env 与主密钥等敏感材料，必须加密离线保存并限制访问权限。".to_owned()]
+        vec![
+            "恢复包允许包含配置目录内的 .env 与主密钥等敏感材料，必须加密离线保存并限制访问权限；它不是完整部署备份。"
+                .to_owned(),
+        ]
     } else {
         vec![
-            "默认备份不包含 .env、secrets/ 或主密钥；完整灾备需另行安全保存主密钥与外部 secret。"
+            "默认恢复包不包含 .env、secrets/ 或主密钥；灾备需另行安全保存同期主密钥、外部 secret 与部署文件。"
                 .to_owned(),
         ]
     };
@@ -250,7 +253,7 @@ pub fn plan_restore(
         vec!["恢复目标必须是停止服务后的全新实例目录；本命令不会覆盖现有运行目录。".to_owned()];
     if !manifest.includes_secret_material {
         warnings.push(
-            "该备份不含主密钥和外部 secret；恢复业务数据后仍需单独恢复主密钥或重新配置 secret。"
+            "该恢复包不含主密钥和外部 secret；数据库若有加密受管配置，启动前必须恢复同期主密钥，不能重新生成。"
                 .to_owned(),
         );
     }
@@ -656,6 +659,10 @@ fn set_private_directory_permissions(_path: &Path) -> Result<(), BackupError> {
 mod tests {
     use super::*;
     use crate::{
+        config::center::{
+            ConfigCenter, ConfigCenterPaths, ManagedConfigApplyMode, ManagedConfigField,
+            SECRET_MISSING_REVISION,
+        },
         runtime::tools::{
             memory::{CreateMemoryRequest, ListMemoryQuery, MemoryStore},
             rss::{RssFeedItem, RssStore, RssTarget, RssTargetType},
@@ -719,6 +726,117 @@ mod tests {
             .unwrap();
         assert_eq!(value, "preserved");
         assert!(target.join("config/runtime.toml").exists());
+        let _ = fs::remove_dir_all(source);
+    }
+
+    #[test]
+    fn encrypted_managed_config_restores_only_with_matching_master_key() {
+        let source = test_directory("encrypted-config-backup-source");
+        fs::create_dir_all(source.join("config")).unwrap();
+        let database_file = source.join("app.db");
+        let database = SqliteDatabase::open(&database_file, APP_MIGRATIONS).unwrap();
+        let fields = || {
+            vec![ManagedConfigField::secret(
+                "provider.openai.api_key",
+                "OPENAI_API_KEY",
+                "core.provider",
+                ManagedConfigApplyMode::Restart,
+            )]
+        };
+        let paths = |root: &Path| ConfigCenterPaths {
+            managed_config_file: root.join("config/runtime.toml"),
+            master_key_file: root.join("config/secrets/master.key"),
+        };
+        let center = ConfigCenter::open(fields(), paths(&source), database.clone()).unwrap();
+        center
+            .replace_secret(
+                "provider.openai.api_key",
+                "restored-secret-value",
+                SECRET_MISSING_REVISION,
+            )
+            .unwrap();
+        drop(center);
+        drop(database);
+
+        let bundle = source.join("bundle");
+        create_backup(
+            &BackupOptions {
+                database_file,
+                config_directory: source.join("config"),
+                output_directory: bundle.clone(),
+                include_secrets: true,
+                application_version: "test".to_owned(),
+            },
+            APP_MIGRATIONS,
+        )
+        .unwrap();
+
+        let matching_target = source.join("restored-matching-key");
+        restore_backup(&bundle, &matching_target, APP_MIGRATIONS).unwrap();
+        let restored_database =
+            SqliteDatabase::open(matching_target.join("data/storage/app.db"), APP_MIGRATIONS)
+                .unwrap();
+        let restored_center =
+            ConfigCenter::open(fields(), paths(&matching_target), restored_database).unwrap();
+        assert_eq!(
+            restored_center
+                .resolved_environment(&std::collections::HashMap::new())
+                .unwrap()["OPENAI_API_KEY"],
+            "restored-secret-value"
+        );
+        drop(restored_center);
+
+        let missing_target = source.join("restored-missing-key");
+        restore_backup(&bundle, &missing_target, APP_MIGRATIONS).unwrap();
+        let missing_key = missing_target.join("config/secrets/master.key");
+        fs::remove_file(&missing_key).unwrap();
+        let missing_database =
+            SqliteDatabase::open(missing_target.join("data/storage/app.db"), APP_MIGRATIONS)
+                .unwrap();
+        let missing_error =
+            match ConfigCenter::open(fields(), paths(&missing_target), missing_database) {
+                Ok(_) => panic!("encrypted config must reject a missing master key"),
+                Err(error) => error,
+            };
+        assert_eq!(missing_error.code(), "secret_storage_error");
+        assert!(
+            missing_error
+                .message()
+                .contains("master key file is missing")
+        );
+        assert!(!missing_key.exists());
+
+        let wrong_key_source = source.join("wrong-key-source");
+        let wrong_key_database =
+            SqliteDatabase::open(wrong_key_source.join("app.db"), APP_MIGRATIONS).unwrap();
+        let wrong_key_center =
+            ConfigCenter::open(fields(), paths(&wrong_key_source), wrong_key_database).unwrap();
+        drop(wrong_key_center);
+        let wrong_target = source.join("restored-wrong-key");
+        restore_backup(&bundle, &wrong_target, APP_MIGRATIONS).unwrap();
+        fs::copy(
+            wrong_key_source.join("config/secrets/master.key"),
+            wrong_target.join("config/secrets/master.key"),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                wrong_target.join("config/secrets/master.key"),
+                fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+        }
+        let wrong_database =
+            SqliteDatabase::open(wrong_target.join("data/storage/app.db"), APP_MIGRATIONS).unwrap();
+        let wrong_error = match ConfigCenter::open(fields(), paths(&wrong_target), wrong_database) {
+            Ok(_) => panic!("encrypted config must reject a mismatched master key"),
+            Err(error) => error,
+        };
+        assert_eq!(wrong_error.code(), "secret_storage_error");
+        assert!(wrong_error.message().contains("failed authentication"));
+
         let _ = fs::remove_dir_all(source);
     }
 

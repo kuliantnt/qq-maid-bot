@@ -528,7 +528,7 @@ notepad .\config\.env
 
 统一二进制提供 `config check`、`config sources`、`config migrate`、`migration status` 和
 `backup create/verify/restore` 运维子命令；迁移与恢复默认 dry-run，恢复只写入干净实例目录。
-命令、完整备份的 secret 边界和 schema 回滚限制见
+命令、数据库与配置恢复包的 secret 边界和 schema 回滚限制见
 [配置迁移、备份恢复与安全升级](../docs/deployment/migration-backup.md)。
 
 ### Breaking changes
