@@ -127,10 +127,11 @@ jobs:
           echo "allow_build=${allow_build}" >> "$GITHUB_OUTPUT"
           echo "allow_publish=${allow_publish}" >> "$GITHUB_OUTPUT"
 
-  # Docker 正式标签只晋级 master 已发布并由测试环境使用过的 commit 镜像。
+  # Docker 正式标签只晋级 master Container workflow 已发布的 commit 镜像；
+  # 测试环境验证是否为硬门禁由独立仓库变量控制。
   # 此 job 不执行 docker build；同一 manifest 同步到 GHCR 与 Docker Hub。
   promote-container:
-    name: Promote tested container digest
+    name: Promote existing container digest
     needs: preflight
     if: |
       startsWith(github.ref, 'refs/tags/v') &&
@@ -143,36 +144,18 @@ jobs:
     env:
       GHCR_REPOSITORY: ghcr.io/kuliantnt/qq-maid-bot
       DOCKERHUB_REPOSITORY: docker.io/kuliantnt/qq-maid-bot
+      REQUIRE_TEST_DEPLOY_FOR_RELEASE: ${{ vars.REQUIRE_TEST_DEPLOY_FOR_RELEASE || 'false' }}
 
     steps:
-      - name: Verify test deployment workflow succeeded
+      - name: Checkout release gate
+        uses: actions/checkout@v7
+
+      - name: Verify container workflow and optional test deployment gate
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_COMMIT: ${{ needs.preflight.outputs.tag_commit }}
-        run: |
-          run_ids="$(gh api --method GET \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/container.yml/runs" \
-            -f branch=master \
-            -f event=push \
-            -f status=completed \
-            -f head_sha="${TAG_COMMIT}" \
-            --jq '.workflow_runs[] | select(.conclusion == "success") | .id')"
-          deployed_run_id=""
-          for run_id in ${run_ids}; do
-            deploy_conclusion="$(gh api --paginate \
-              "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs" \
-              --jq '.jobs[] | select(.name == "Deploy test environment") | .conclusion')"
-            if [[ "${deploy_conclusion}" == "success" ]]; then
-              deployed_run_id="${run_id}"
-              break
-            fi
-          done
-          [[ -n "${deployed_run_id}" ]] || {
-            echo "::error::tag commit 没有成功的 test Environment 部署，拒绝晋级未部署验证的镜像"
-            exit 1
-          }
-          echo "verified test deployment workflow run: ${deployed_run_id}" >> "${GITHUB_STEP_SUMMARY}"
+        run: bash scripts/verify-container-release.sh
 
       - name: Validate Docker Hub credentials
         shell: bash
@@ -232,7 +215,7 @@ jobs:
             }
           done
 
-          # crane copy 直接复制已经部署验证的 commit manifest，不触发 Docker build。
+          # crane copy 直接复制 master 阶段已经构建的 commit manifest，不触发 Docker build。
           crane copy "${GHCR_REPOSITORY}@${digest}" "${DOCKERHUB_REPOSITORY}:${TAG_NAME}"
           dockerhub_digest="$(crane digest "${DOCKERHUB_REPOSITORY}:${TAG_NAME}")"
           [[ "${dockerhub_digest}" == "${digest}" ]] || {

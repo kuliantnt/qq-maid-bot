@@ -19,6 +19,8 @@ GitHub Actions 构建 amd64/arm64 镜像
 阿里云服务器只运行容器，不安装 Rust、Cargo、Node.js，也不在服务器编译项目。
 
 建议先完成一次手动部署，确认镜像、配置和权限正确，再打开 GitHub 自动部署。
+测试服务器是可选能力，不配置也可以正常发布正式 Release。正式项目推荐在测试服稳定后开启
+严格发布门禁；个人部署可以保持默认关闭。
 
 ---
 
@@ -433,7 +435,23 @@ Settings
 TEST_DEPLOY_ENABLED=true
 ```
 
-这是非敏感开关，因此使用 Variable，不使用 Secret。GitHub Variables 适合保存非敏感工作流配置。
+该 Variable 只控制 `master` 是否自动部署测试服，不控制正式 Release 是否必须经过测试服。
+
+正式项目推荐再添加：
+
+```text
+REQUIRE_TEST_DEPLOY_FOR_RELEASE=true
+```
+
+该 Variable 只控制正式发布门禁。只有精确设置为 `true` 时，tag commit 才必须有成功的
+`test` Environment 部署；测试部署失败或尚未执行都会拒绝晋级正式容器标签。未设置或不是
+`true` 时默认为关闭，即使没有阿里云测试服，也可以在 master Container workflow、GHCR
+commit 镜像和双架构 revision 校验通过后正常发布。
+
+两个开关彼此独立。需要自动部署但暂不阻止 Release 时，只开启
+`TEST_DEPLOY_ENABLED=true`；需要严格门禁时应同时开启。它们都是非敏感开关，因此使用
+Variable，不使用 Secret。仅开启自动部署时，失败仍会显示在测试部署 job 中，但不会成为
+Release 的硬性前置条件。
 
 可选：
 

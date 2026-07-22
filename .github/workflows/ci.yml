@@ -83,6 +83,7 @@ jobs:
           bash scripts/test-prepare-project-docs-kb.sh
           bash scripts/test-botctl-guidance.sh
           bash scripts/tests/test-docker-deploy.sh
+          bash scripts/tests/test-container-release-gate.sh
 
       - name: Check shell syntax
         run: find scripts -type f -name '*.sh' -print0 | xargs -0 bash -n

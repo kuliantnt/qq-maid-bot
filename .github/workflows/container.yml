@@ -18,8 +18,11 @@ on:
       - "compose.env.example"
       - "scripts/docker-*.sh"
       - "scripts/tests/test-docker-deploy.sh"
+      - "scripts/verify-container-release.sh"
+      - "scripts/tests/test-container-release-gate.sh"
       - "scripts/tests/test-container-runtime.sh"
       - ".github/workflows/container.yml"
+      - ".github/workflows/release.yml"
   push:
     branches:
       - master
@@ -48,6 +51,7 @@ jobs:
         run: |
           find scripts -type f -name '*.sh' -print0 | xargs -0 bash -n
           bash scripts/tests/test-docker-deploy.sh
+          bash scripts/tests/test-container-release-gate.sh
 
       - name: Validate Compose templates
         env:
@@ -259,6 +263,8 @@ jobs:
     name: Deploy test environment
     # 未初始化测试服时显式保持关闭；不能用 Secret 是否为空隐式决定是否部署。
     if: github.event_name == 'push' && vars.TEST_DEPLOY_ENABLED == 'true'
+    # 测试服是可选能力；只有严格发布门禁开启时，失败才使 Container workflow 失败。
+    continue-on-error: ${{ vars.REQUIRE_TEST_DEPLOY_FOR_RELEASE != 'true' }}
     needs: publish-manifest
     runs-on: ubuntu-latest
     environment: test
