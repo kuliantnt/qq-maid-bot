@@ -331,6 +331,19 @@ mod tests {
         let agent_path = directory.path().join("config/agent.toml");
         std::fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
         std::fs::write(&agent_path, include_str!("../runtime/config/agent.toml")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // 配置中心会拒绝组或其他用户可写的 agent 配置。测试不能依赖宿主机
+            // umask，否则 umask 0002 会把夹具创建成 0775/0664 并提前触发安全拒绝。
+            std::fs::set_permissions(
+                agent_path.parent().unwrap(),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+            std::fs::set_permissions(&agent_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let external = HashMap::from([
             (
                 "AGENT_CONFIG_FILE".to_owned(),
