@@ -31,7 +31,7 @@ if [[ "${1:-}" == "compose" ]]; then
             image_env="${arg}"
         fi
         case "${arg}" in
-            config|pull|up|ps) action="${arg}" ;;
+            config|pull|up|ps|run) action="${arg}" ;;
         esac
         previous="${arg}"
     done
@@ -52,6 +52,10 @@ if [[ "${1:-}" == "compose" ]]; then
         ps)
             [[ -f "${FAKE_DOCKER_STATE}/active-image" ]] && printf 'fake-container\n'
             exit 0
+            ;;
+        run)
+            [[ "${FAKE_DOCKER_MODE:-success}" != "backup-fail" ]]
+            exit
             ;;
     esac
 fi
@@ -170,6 +174,7 @@ if run_deploy "${rollback_dir}" health-fail "${TARGET_IMAGE}" "${TARGET_COMMIT}"
 fi
 grep -Fqx "QQ_MAID_IMAGE=${OLD_IMAGE}" "${rollback_dir}/.image.env"
 grep -Fqx "commit=${OLD_COMMIT}" "${rollback_dir}/deployments/current.env"
+grep -Fq ' run --rm --no-deps bot backup create ' "${rollback_dir}/fake-docker.log"
 
 up_fail_dir="$(new_instance up-fail)"
 printf 'QQ_MAID_IMAGE=%s\n' "${OLD_IMAGE}" > "${up_fail_dir}/.image.env"
@@ -188,6 +193,15 @@ if run_deploy "${pull_fail_dir}" pull-fail "${TARGET_IMAGE}" "${TARGET_COMMIT}";
     exit 1
 fi
 grep -Fqx "QQ_MAID_IMAGE=${OLD_IMAGE}" "${pull_fail_dir}/.image.env"
+
+backup_fail_dir="$(new_instance backup-fail)"
+printf 'QQ_MAID_IMAGE=%s\n' "${OLD_IMAGE}" > "${backup_fail_dir}/.image.env"
+printf '%s\n' "${OLD_IMAGE}" > "${backup_fail_dir}/fake-state/active-image"
+if run_deploy "${backup_fail_dir}" backup-fail "${TARGET_IMAGE}" "${TARGET_COMMIT}"; then
+    echo "expected pre-upgrade backup failure" >&2
+    exit 1
+fi
+grep -Fqx "QQ_MAID_IMAGE=${OLD_IMAGE}" "${backup_fail_dir}/.image.env"
 
 invalid_dir="$(new_instance invalid)"
 if run_deploy "${invalid_dir}" success "ghcr.io/kuliantnt/qq-maid-bot:master" "${TARGET_COMMIT}"; then

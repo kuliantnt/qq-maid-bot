@@ -112,9 +112,13 @@ docker compose --env-file compose.env \
 | `QQ_MAID_DATA_DIR` | `/app/runtime/data` | UID/GID 10001 可写；SQLite 和本地模型缓存 |
 | `QQ_MAID_MEDIA_DIR` | `/app/runtime/media` | UID/GID 10001 可写；入站媒体临时数据 |
 
-至少同时备份 SQLite 和 `config/secrets/master.key`；只备份数据库无法恢复其中的加密配置。
-一致性备份应先停止容器，或使用 SQLite 在线备份能力。真实 `.env`、主密钥、Prompt、知识
-资料、SQLite 和日志不得进入镜像、Git、Artifact 或 Actions 日志。
+统一 CLI 使用 SQLite Online Backup API 创建 WAL 一致快照，并复制配置目录内允许纳入的文件。
+默认不包含 `.env` 和主密钥；`--include-secrets` 仅允许把配置目录内的 `.env` 和
+`secrets/` 纳入恢复包，应把该受限目录转移到加密离线介质。只备份数据库无法恢复其中的
+加密配置；即使使用 `--include-secrets`，包也不包含镜像、Compose/`.image.env`、media 或
+配置目录外的文件，不能当作完整部署备份。命令、校验、干净实例恢复和 schema 兼容规则见
+[配置迁移、备份恢复与安全升级](./migration-backup.md)。真实 `.env`、主密钥、Prompt、知识
+资料、SQLite 和日志不得进入镜像、Git、普通 Artifact 或 Actions 日志。
 
 重建容器不会修改 bind mount 中的已有文件。升级前检查目录仍由 `10001:10001` 读写；
 不要用 root 容器或 `chmod 777` 掩盖权限错误。
@@ -232,10 +236,14 @@ GitHub Environment 创建 `test`，配置 Secrets：
 2. 通过专用 SSH key 上传 `compose.yaml` 与 `docker-deploy.sh`。
 3. 把完整 `仓库@digest` 和 commit 交给服务器。
 4. 校验仓库和 digest 格式，拉取镜像并检查 OCI revision label。
-5. 原子更新 `.image.env`，执行 `docker compose up -d --pull never`。
-6. 等待容器进入 healthy，记录 commit、可选正式 release、构建时 label、digest、容器 ID 和
-   部署时间。
-7. 启动或健康检查失败时恢复上一 `.image.env`，重新启动并确认旧版本 healthy。
+5. 已有实例先用目标镜像对当前卷创建 `data/backups/pre-upgrade-*` 数据库与配置恢复包。
+6. 原子更新 `.image.env`，执行 `docker compose up -d --pull never`。
+7. 等待容器进入 healthy，记录 commit、可选正式 release、构建时 label、digest、容器 ID、
+   升级前备份路径和部署时间。
+8. 启动或健康检查失败时，脚本自动恢复上一 `.image.env`，使用原数据卷重新启动并确认旧版本
+   healthy；它不会自动把数据卷恢复到升级前快照。若旧镜像不认识新 schema，旧容器仍会失败，
+   脚本明确返回失败；运维人员需保留旧 digest，并把升级前恢复包恢复到另一个干净实例目录后，
+   补齐 Compose、镜像状态和配置目录外文件再启动旧镜像。
 
 重复部署同一 digest 且容器 healthy 时直接成功返回，不产生无意义重建。部署并发组会取消
 旧的测试部署，避免旧 commit 最后覆盖新 commit。首次部署没有回滚点，失败时会明确报告。
@@ -274,7 +282,7 @@ label。未传 `--release` 时会显示 `unrecorded` / `unreleased`，不会把 
 | 微信/OneBot 连不上 | 是否只加载对应 override、设置容器内 bind host、配置防火墙/反向代理 |
 | GHCR `unauthorized` | 包可见性与服务器只读 `docker login`；不要把 token 写进 Compose |
 | 拉取后 revision 不一致 | 拒绝部署，检查 tag/digest 是否来自本仓库的 Container workflow |
-| 新版本 unhealthy | `docker-deploy.sh` 会恢复上一 digest；检查新旧错误和回滚 healthy 结果 |
+| 新版本 unhealthy | 脚本会尝试恢复上一 digest 并复用当前数据卷，但不会自动恢复数据；检查旧镜像是否 healthy，schema 不兼容时手工恢复升级前恢复包到干净目录 |
 | 主密钥丢失 | 从与 SQLite 同期的备份恢复；不能重新生成密钥解密旧数据 |
 
 源码/Release 部署以 `runtime/` 为宿主机工作目录，由 `botctl` 管理进程和日志文件；容器部署

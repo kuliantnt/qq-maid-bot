@@ -114,7 +114,8 @@ usage() {
   qbot log                    查看并跟随日志
   qbot health                 请求 /healthz
   qbot console                查看控制台 URL 状态
-  qbot install [version]      从 GitHub Releases 下载并安装，默认 latest
+  qbot install [version] [--web true|false]
+                              从 GitHub Releases 下载并安装，并选择是否启用 Web
   qbot update [version]       匹配版本号后更新，默认 latest
   qbot patch [version]        update 的别名
   qbot version                查看本地版本与最新版本
@@ -126,6 +127,7 @@ usage() {
   qbot deploy                 将本脚本安装为系统命令 (默认 /usr/local/bin/qbot)
 
 常用配置:
+  qbot install --web false  安装时关闭 Web，仅使用 CLI/文件配置
   qbot config bot --app-id 123 --app-secret xxx --sandbox false
   qbot config bot --unbind    解除 QQ 官方 Bot 绑定（重启后生效）
   qbot config ai --provider openai --api-key sk-xxx
@@ -136,6 +138,7 @@ usage() {
 目录: ${APP_DIR}
 项目: https://github.com/${REPO_SLUG}
 下载: 默认直连官方 GitHub；如需加速，可用 QBOT_GITHUB_PROXY 或 QBOT_GITHUB_PROXIES 指定可信镜像
+自动化: QBOT_INSTALL_WEB_CONSOLE=true|false 可指定非交互安装的 Web 选择
 EOF
 }
 
@@ -2017,13 +2020,16 @@ copy_release_into_app() {
 install_or_update() {
     local command_name="$1"
     local requested_version="${2:-latest}"
+    local requested_web="${3:-}"
 
     install_deps
 
-    local target version current tmp_dir release_dir was_running
+    local target version current tmp_dir release_dir was_running config_existed
     target="$(detect_target)"
     version="$(resolve_version "${requested_version}")"
     current="$(local_version 2>/dev/null || true)"
+    config_existed=0
+    [[ -f "${APP_DIR}/config/.env" ]] && config_existed=1
 
     tmp_dir="$(mktemp -d)"
     TMP_DIR_TO_CLEAN="${tmp_dir}"
@@ -2061,6 +2067,9 @@ install_or_update() {
     fi
 
     copy_release_into_app "${release_dir}" "${version}"
+    if [[ "${command_name}" == "install" ]]; then
+        configure_install_web_console "${requested_web}" "${config_existed}"
+    fi
     mark_agent_config_migration_complete "${current}" "${version}"
     rm -rf "${tmp_dir}"
     TMP_DIR_TO_CLEAN=""
@@ -2072,6 +2081,58 @@ install_or_update() {
     if ((was_running)); then
         echo "恢复启动 qbot"
         run_botctl start
+    fi
+}
+
+configure_install_web_console() {
+    local requested="${1:-}"
+    local config_existed="${2:-0}"
+    local answer normalized input_fd=0 output_fd=2 prompt_available=0
+
+    # 已有配置不因重复 install 被交互提示或改写；显式 --web 仍按用户要求更新。
+    if [[ -z "${requested}" && "${config_existed}" == "1" ]]; then
+        return 0
+    fi
+    if [[ -z "${requested}" ]]; then
+        requested="${QBOT_INSTALL_WEB_CONSOLE:-}"
+    fi
+    if [[ -z "${requested}" && -t 0 && -t 1 ]]; then
+        prompt_available=1
+    elif [[ -z "${requested}" ]] && { exec 9<>/dev/tty; } 2>/dev/null; then
+        # curl | bash 等安装方式的 stdin 是脚本本身；有控制终端时仍从 /dev/tty 询问用户。
+        prompt_available=1
+        input_fd=9
+        output_fd=9
+    fi
+    if [[ -z "${requested}" && "${prompt_available}" == "1" ]]; then
+        while :; do
+            printf '安装后是否启用 Web 控制台？[Y/n] ' >&"${output_fd}"
+            IFS= read -r -u "${input_fd}" answer || die "读取 Web 控制台选择失败"
+            case "${answer}" in
+                ""|y|Y|yes|YES|Yes)
+                    requested="true"
+                    break
+                    ;;
+                n|N|no|NO|No)
+                    requested="false"
+                    break
+                    ;;
+                *)
+                    ui_fail "请输入 y 或 n。"
+                    ;;
+            esac
+        done
+        [[ "${input_fd}" != "9" ]] || exec 9>&-
+    elif [[ -z "${requested}" ]]; then
+        requested="true"
+        echo "非交互安装未指定 --web，兼容默认启用；可用 --web false 关闭。"
+    fi
+    normalized="$(normalize_bool_value "${requested}")"
+    set_env_var WEB_CONSOLE_ENABLED "${normalized}"
+    if [[ "${normalized}" == "true" ]]; then
+        echo "Web 控制台：已启用（可继续通过 qbot config 使用纯 CLI 配置）"
+    else
+        echo "Web 控制台：已关闭；使用 qbot config 和 config/.env 完成配置"
     fi
 }
 
@@ -2134,7 +2195,32 @@ case "${1:-}" in
         run_botctl console
         ;;
     install)
-        install_or_update install "${2:-latest}"
+        shift
+        install_version="latest"
+        install_web=""
+        version_seen=0
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --web)
+                    shift
+                    [[ $# -gt 0 ]] || die "--web 缺少 true/false"
+                    install_web="$1"
+                    ;;
+                --no-web)
+                    install_web="false"
+                    ;;
+                --*)
+                    die "install 未知参数: $1"
+                    ;;
+                *)
+                    ((version_seen == 0)) || die "install 只能指定一个版本"
+                    install_version="$1"
+                    version_seen=1
+                    ;;
+            esac
+            shift
+        done
+        install_or_update install "${install_version}" "${install_web}"
         ;;
     update|upgrade)
         install_or_update update "${2:-latest}"

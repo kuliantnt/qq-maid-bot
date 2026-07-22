@@ -42,6 +42,23 @@ fi
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
 
+APP_DIR="${tmp_dir}/web-choice"
+mkdir -p "${APP_DIR}/config"
+printf '%s\n' 'WEB_CONSOLE_ENABLED=true' > "${APP_DIR}/config/.env"
+configure_install_web_console false 0 >/dev/null
+[[ "$(get_real_env_var WEB_CONSOLE_ENABLED)" == "false" ]]
+# 显式参数允许重复安装时调整；未显式选择则保留已有配置。
+configure_install_web_console true 1 >/dev/null
+[[ "$(get_real_env_var WEB_CONSOLE_ENABLED)" == "true" ]]
+configure_install_web_console "" 1 >/dev/null
+[[ "$(get_real_env_var WEB_CONSOLE_ENABLED)" == "true" ]]
+
+APP_DIR="${tmp_dir}/web-choice-noninteractive"
+mkdir -p "${APP_DIR}/config"
+printf '%s\n' 'WEB_CONSOLE_ENABLED=true' > "${APP_DIR}/config/.env"
+QBOT_INSTALL_WEB_CONSOLE=false configure_install_web_console "" 0 >/dev/null
+[[ "$(get_real_env_var WEB_CONSOLE_ENABLED)" == "false" ]]
+
 APP_DIR="${tmp_dir}/web-search-migration"
 mkdir -p "${APP_DIR}/config"
 web_search_agent="${APP_DIR}/config/agent.toml"

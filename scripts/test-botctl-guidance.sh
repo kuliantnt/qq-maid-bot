@@ -73,6 +73,9 @@ output="$(start_and_stop "${runtime}")"
 [[ "${output}" != *"首次配置"* ]]
 [[ "${output}" != *"/console/"* ]]
 [[ "${output}" != *"disabled-secret"* ]]
+output="$(QQ_MAID_RUNTIME_DIR="${runtime}" bash "${runtime}/botctl.sh" console)"
+[[ "${output}" == *"web console is disabled"* ]]
+[[ "${output}" != *"HTTP"* ]]
 
 runtime="$(new_runtime wildcard-host)"
 printf '%s\n' 'LLM_SERVER_HOST=0.0.0.0' 'LLM_SERVER_PORT=9989' 'WEB_CONSOLE_ENABLED=true' > "${runtime}/config/.env"

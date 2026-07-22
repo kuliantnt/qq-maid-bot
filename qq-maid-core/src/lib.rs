@@ -5,6 +5,7 @@ pub mod config;
 pub mod error;
 pub mod http;
 pub mod identity;
+pub mod maintenance;
 pub mod management;
 pub mod runtime;
 pub mod service;

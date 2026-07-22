@@ -264,6 +264,7 @@ flowchart LR
 | Wiki [插件开发](https://github.com/kuliantnt/qq-maid-bot/wiki/插件开发) | 自己写一个 Tool / 插件 |
 | [runtime/README.md](./runtime/README.md) | 运行目录、环境变量、控制脚本和诊断细节 |
 | [Docker 与 Compose 部署](./docs/deployment/docker.md) | GHCR、容器首次启动、持久化、多实例、测试部署和回滚 |
+| [配置迁移、备份恢复与安全升级](./docs/deployment/migration-backup.md) | CLI 预检、旧配置 dry-run、SQLite 一致性备份、恢复和 schema 回滚边界 |
 | [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | 开发环境、架构边界、常用命令和检查要求 |
 | [自定义 Tool 指南](./docs/development/custom-tools.md) | 新增或接入业务工具的技术版 |
 | [OneBot 11 接入文档](./docs/development/onebot11-napcat.md) | NapCat / OneBot 11 技术版 |

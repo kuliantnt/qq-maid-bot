@@ -137,7 +137,7 @@ runtime/.env
 - `OPENAI_API_KEY`、`OPENAI_BASE_URLS`、`OPENAI_API_MODE`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`BIGMODEL_API_KEY`、`BIGMODEL_BASE_URL`、`GEMINI_API_KEY`、`GEMINI_BASE_URL`、`MIMO_API_KEY`：Provider 凭证和连接配置；Core 解析后传给 `qq-maid-llm`。`OPENAI_BASE_URLS` 为逗号分隔时取第一个非空地址。`OPENAI_API_MODE=auto` 优先 Responses API 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于只实现 Chat Completions 的网关。MiMo 等自定义 Provider 的公开连接元数据可在 `agent.toml [providers.*]` 声明，真实 key 只能由 `api_key_env` 指向环境变量，不能写入 `agent.toml`。Tavily 密钥使用配置中心的 `tools.web_search.tavily.api_key` 或兼容环境变量 `TAVILY_API_KEY`，同样不得写入 `agent.toml`。
 - `LLM_SERVER_HOST`、`LLM_SERVER_PORT`、`LLM_REQUEST_TIMEOUT_SECONDS`：外部健康 / 控制台 HTTP 服务和请求超时行为；`AGENT_FINALIZATION_RESERVE_SECONDS` 为最终无工具回答预留时间，短请求会按总预算裁剪。
 - `WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT_SECONDS`、`WEB_SEARCH_IDLE_TIMEOUT_SECONDS`、`WEB_SEARCH_ABSOLUTE_TIMEOUT_SECONDS`：Agent Tool 与 `/查` 共用的搜索流首活动、静默和独立绝对超时，默认分别为 60、30、120 秒，以兼容联网搜索首字较慢或总耗时较长的上游。
-- `WEB_CONSOLE_ENABLED`、`WEB_CONSOLE_ALLOWED_ORIGINS`：部署管理控制台和跨域 allowlist；新实例默认开启但监听默认仍为 `127.0.0.1`，显式设为 false 时页面、认证和配置 API 全部关闭。
+- `WEB_CONSOLE_ENABLED`、`WEB_CONSOLE_ALLOWED_ORIGINS`：部署管理控制台和跨域 allowlist；新实例默认开启但监听默认仍为 `127.0.0.1`。进程环境或 `.env` 显式设为 false 时具有关闭优先级，即使配置中心曾保存为开启，页面、认证和配置 API 也全部关闭。
 - `APP_DB_FILE`：统一 SQLite 文件，承载业务数据和知识检索索引。
 - `QQ_MAID_DB_POOL_MAX_SIZE`：本地 SQLite 连接池大小，默认 8，合法范围 1～32；独立于 `MAX_CONCURRENT_RESPONSES`。
 - `MEMORY_CONSOLIDATION_*`：确定性长期记忆整理开关与时间、数量、来源、单次记录数和字符门槛；默认关闭，只归档同一完整作用域内正文与语义键完全相同的重复项，不读取聊天正文、不调用模型。

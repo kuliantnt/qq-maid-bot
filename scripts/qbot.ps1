@@ -89,7 +89,8 @@ Usage: qbot.cmd <command>
        powershell.exe -ExecutionPolicy Bypass -File .\qbot.ps1 <command>
 
 Commands:
-  install [version]       Download and install the Windows x86_64 Release
+  install [version] [--web true|false]
+                          Install the Release and choose whether Web UI is enabled
   update [version]        Update while preserving config and runtime data
   version                 Show installed and latest versions
   start|stop|restart      Manage the installed bot
@@ -106,6 +107,7 @@ Environment overrides:
   QBOT_APP_DIR            Install directory (default: %USERPROFILE%\qq-maid-bot)
   QBOT_REPO_SLUG          GitHub repository (default: kuliantnt/qq-maid-bot)
   QBOT_GITHUB_PROXY       Optional trusted download URL prefix
+  QBOT_INSTALL_WEB_CONSOLE  Web choice for non-interactive install (true/false)
 "@
 }
 
@@ -475,12 +477,62 @@ function Update-AgentConfigFromRelease {
     Replace-AgentConfigFromRelease -ConfigFile $ConfigFile -TemplateFile $TemplateFile
 }
 
+function Set-InstallWebConsoleChoice {
+    param(
+        [AllowEmptyString()][string]$RequestedWeb,
+        [bool]$ConfigExisted
+    )
+    if ([string]::IsNullOrWhiteSpace($RequestedWeb) -and $ConfigExisted) {
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($RequestedWeb)) {
+        $RequestedWeb = [Environment]::GetEnvironmentVariable("QBOT_INSTALL_WEB_CONSOLE")
+    }
+    if ([string]::IsNullOrWhiteSpace($RequestedWeb)) {
+        $inputRedirected = $true
+        try { $inputRedirected = [Console]::IsInputRedirected } catch { $inputRedirected = $true }
+        if ([Environment]::UserInteractive -and -not $inputRedirected) {
+            while ($true) {
+                $answer = Read-Host "Enable Web console after installation? [Y/n]"
+                if ([string]::IsNullOrWhiteSpace($answer) -or $answer -match '^(?i:y|yes)$') {
+                    $RequestedWeb = "true"
+                    break
+                }
+                if ($answer -match '^(?i:n|no)$') {
+                    $RequestedWeb = "false"
+                    break
+                }
+                Write-Warning "Please enter y or n."
+            }
+        } else {
+            $RequestedWeb = "true"
+            Write-Output "non-interactive install defaults to Web enabled; pass --web false to disable it"
+        }
+    }
+    $normalized = switch -Regex ($RequestedWeb.Trim()) {
+        '^(?i:true|1|yes|y|on)$' { "true"; break }
+        '^(?i:false|0|no|n|off)$' { "false"; break }
+        default { throw "--web must be true or false" }
+    }
+    Set-ConfigValue "WEB_CONSOLE_ENABLED" $normalized
+    if ($normalized -eq "true") {
+        Write-Output "Web console: enabled (CLI configuration remains available)"
+    } else {
+        Write-Output "Web console: disabled; use qbot config and config\.env"
+    }
+}
+
 function Install-OrUpdate {
-    param([string]$Mode, [string]$RequestedVersion)
+    param(
+        [string]$Mode,
+        [string]$RequestedVersion,
+        [AllowEmptyString()][string]$RequestedWeb = ""
+    )
     Assert-SupportedWindowsArchitecture (Get-WindowsOperatingSystemArchitecture)
     $version = Resolve-Version $RequestedVersion
     $current = Get-LocalVersion
     $package = "qq-maid-bot-${version}-windows-x86_64"
+    $configExisted = Test-Path -LiteralPath (Join-Path $script:AppDir "config\.env") -PathType Leaf
     $archiveName = "${package}.zip"
     $tempDir = Join-Path ([IO.Path]::GetTempPath()) ("qbot-install-" + [Guid]::NewGuid())
     New-Item -ItemType Directory -Path $tempDir | Out-Null
@@ -523,6 +575,9 @@ function Install-OrUpdate {
             Invoke-BotControl "stop"
         }
         Install-ReleasePayload -ReleaseDir $releaseDir -Version $version
+        if ($Mode -eq "install") {
+            Set-InstallWebConsoleChoice -RequestedWeb $RequestedWeb -ConfigExisted $configExisted
+        }
         Complete-AgentConfigMigration -CurrentVersion $current -TargetVersion $version
         Write-Output "qbot $Mode completed: $version"
         Write-Output "directory: $($script:AppDir)"
@@ -778,11 +833,35 @@ function Invoke-ConfigCommand {
 
 function Invoke-Qbot {
     param([string]$QbotCommand, [string[]]$Arguments)
-    $requestedVersion = "latest"
-    if ($null -ne $Arguments -and $Arguments.Count -gt 0) { $requestedVersion = $Arguments[0] }
     switch ($QbotCommand) {
-        "install" { Install-OrUpdate "install" $requestedVersion }
-        { $_ -in @("update", "upgrade", "patch") } { Install-OrUpdate "update" $requestedVersion }
+        "install" {
+            $requestedVersion = "latest"
+            $requestedWeb = ""
+            $versionSeen = $false
+            for ($index = 0; $index -lt $Arguments.Count; $index++) {
+                $value = $Arguments[$index]
+                switch ($value) {
+                    "--web" {
+                        $index++
+                        if ($index -ge $Arguments.Count) { throw "--web requires true or false" }
+                        $requestedWeb = $Arguments[$index]
+                    }
+                    "--no-web" { $requestedWeb = "false" }
+                    default {
+                        if ($value.StartsWith("--")) { throw "unknown install option: $value" }
+                        if ($versionSeen) { throw "install accepts only one version" }
+                        $requestedVersion = $value
+                        $versionSeen = $true
+                    }
+                }
+            }
+            Install-OrUpdate "install" $requestedVersion $requestedWeb
+        }
+        { $_ -in @("update", "upgrade", "patch") } {
+            $requestedVersion = "latest"
+            if ($null -ne $Arguments -and $Arguments.Count -gt 0) { $requestedVersion = $Arguments[0] }
+            Install-OrUpdate "update" $requestedVersion
+        }
         "version" {
             $localVersion = Get-LocalVersion
             if ($null -eq $localVersion) { $localVersion = "not installed" }

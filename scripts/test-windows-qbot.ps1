@@ -8,6 +8,7 @@ $oldServerUrl = $env:LLM_SERVER_URL
 $oldServerHost = $env:LLM_SERVER_HOST
 $oldServerPort = $env:LLM_SERVER_PORT
 $oldConsoleEnabled = $env:WEB_CONSOLE_ENABLED
+$oldInstallWeb = $env:QBOT_INSTALL_WEB_CONSOLE
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -24,6 +25,8 @@ try {
     $env:WEB_CONSOLE_ENABLED = $null
     . (Join-Path $repoDir "scripts\qbot.ps1")
     . (Join-Path $repoDir "scripts\lib\agent-config.ps1")
+    $agentConfigMigrationMarker = Join-Path $appDir "config\.agent-config-v0.20.2"
+    Remove-Item -LiteralPath $agentConfigMigrationMarker -Force -ErrorAction SilentlyContinue
 
     Assert-True (Test-SupportedWindowsArchitecture "AMD64") "Windows AMD64 should be supported"
     Assert-True (Test-SupportedWindowsArchitecture "x86_64") "Windows x86_64 should be supported"
@@ -142,15 +145,49 @@ try {
     Complete-AgentConfigMigration -CurrentVersion "v0.20.3" -TargetVersion "v0.21.0"
     Assert-True (Test-Path -LiteralPath $mixedMarker -PathType Leaf) "installed v0.20.2+ did not get the shared marker"
 
-    $failedMarker = Join-Path $appDir "config\.agent-config-v0.20.2"
+    # 从 Install-OrUpdate 真实入口触发模板替换失败，确认异常会中断后续安装与完成标记。
+    $failedMarker = $agentConfigMigrationMarker
     Remove-Item -LiteralPath $failedMarker -Force -ErrorAction SilentlyContinue
+    Set-Content -LiteralPath (Join-Path $appDir "VERSION") -Value "v0.20.1" -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $appDir "config\agent.toml") -Value "must-survive-full-chain" -Encoding ASCII
+    function Resolve-Version { return "v0.20.2" }
+    function Save-ReleaseFile {
+        param([string]$Url, [string]$Destination)
+    }
+    function Test-ReleaseChecksum {
+        param([string]$Archive, [string]$ChecksumFile)
+    }
+    function Expand-Archive {
+        param([string]$LiteralPath, [string]$DestinationPath, [switch]$Force)
+        $packageDir = Join-Path $DestinationPath "qq-maid-bot-v0.20.2-windows-x86_64"
+        New-Item -ItemType Directory -Path (Join-Path $packageDir "config") -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $packageDir "config\agent.toml") -Value "new-release-template" -Encoding ASCII
+    }
+    $script:FullChainMoveCalls = 0
+    function Move-Item {
+        param([string]$LiteralPath, [string]$Destination)
+        $script:FullChainMoveCalls++
+        if ($script:FullChainMoveCalls -eq 2) {
+            throw "simulated full-chain template activation failure"
+        }
+        Microsoft.PowerShell.Management\Move-Item -LiteralPath $LiteralPath -Destination $Destination
+    }
     $failedReplacementError = $null
     try {
-        Replace-AgentConfigFromRelease -ConfigFile (Join-Path $appDir "config\missing.toml") -TemplateFile $agentTemplate
+        Install-OrUpdate -Mode "update" -RequestedVersion "v0.20.2"
     } catch {
         $failedReplacementError = $_.Exception.Message
+    } finally {
+        Remove-Item Function:\Resolve-Version -ErrorAction SilentlyContinue
+        Remove-Item Function:\Save-ReleaseFile -ErrorAction SilentlyContinue
+        Remove-Item Function:\Test-ReleaseChecksum -ErrorAction SilentlyContinue
+        Remove-Item Function:\Expand-Archive -ErrorAction SilentlyContinue
+        Remove-Item Function:\Move-Item -ErrorAction SilentlyContinue
+        . (Join-Path $repoDir "scripts\qbot.ps1")
     }
     Assert-True ($null -ne $failedReplacementError) "failed agent migration did not return an error"
+    Assert-True ((Get-Content -LiteralPath (Join-Path $appDir "config\agent.toml") -Raw).Contains("must-survive-full-chain")) "full-chain replacement failure did not restore agent.toml"
+    Assert-True ((Get-Content -LiteralPath (Join-Path $appDir "VERSION") -Raw).Contains("v0.20.1")) "failed migration continued into release installation"
     Assert-True (-not (Test-Path -LiteralPath $failedMarker)) "failed agent migration left a marker"
 
     New-Item -ItemType Directory -Path (Join-Path $appDir "config") -Force | Out-Null
@@ -169,6 +206,12 @@ try {
     Set-Content -LiteralPath (Join-Path $appDir "botctl.sh") -Value "obsolete" -Encoding ASCII
 
     Install-ReleasePayload -ReleaseDir $releaseDir -Version "v9.9.9"
+    Set-InstallWebConsoleChoice -RequestedWeb "false" -ConfigExisted $false
+    $webChoiceValues = Read-ConfigValues
+    Assert-True ($webChoiceValues["WEB_CONSOLE_ENABLED"] -eq "false") "install Web opt-out was not persisted"
+    Set-InstallWebConsoleChoice -RequestedWeb "true" -ConfigExisted $true
+    $webChoiceValues = Read-ConfigValues
+    Assert-True ($webChoiceValues["WEB_CONSOLE_ENABLED"] -eq "true") "explicit reinstall Web choice was not persisted"
     $migratedEnv = Get-Content -LiteralPath (Join-Path $appDir "config\.env") -Raw
     Assert-True ($migratedEnv.Contains("PRIVATE=keep")) "private config was overwritten"
     Assert-True ($migratedEnv.Contains("QWEATHER_API_KEY=")) "empty weather key was removed"
@@ -233,5 +276,6 @@ try {
     $env:LLM_SERVER_HOST = $oldServerHost
     $env:LLM_SERVER_PORT = $oldServerPort
     $env:WEB_CONSOLE_ENABLED = $oldConsoleEnabled
+    $env:QBOT_INSTALL_WEB_CONSOLE = $oldInstallWeb
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
