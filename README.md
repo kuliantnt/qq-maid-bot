@@ -110,6 +110,12 @@ notepad "$HOME\qq-maid-bot\config\.env"
 测试环境自动部署见 [Docker 与 Compose 部署](./docs/deployment/docker.md)。配置迁移、
 备份恢复与 schema 回滚边界见 [配置迁移、备份恢复与安全升级](./docs/deployment/migration-backup.md)。
 
+普通用户也可以直接从 Docker Hub 拉取最新正式镜像：
+
+```bash
+docker pull kuliantnt/qq-maid-bot:latest
+```
+
 ### 从源码运行
 
 需要已安装 Rust 工具链：
