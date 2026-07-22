@@ -15,7 +15,15 @@ set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_GH_LOG}"
 case "$*" in
     *'/actions/workflows/container.yml/runs'*)
-        printf '%s\n' "${FAKE_GH_RUN_IDS:-}"
+        call_count=0
+        if [[ -f "${FAKE_GH_CONTAINER_CALLS_FILE}" ]]; then
+            read -r call_count < "${FAKE_GH_CONTAINER_CALLS_FILE}"
+        fi
+        call_count=$((call_count + 1))
+        printf '%s\n' "${call_count}" > "${FAKE_GH_CONTAINER_CALLS_FILE}"
+        if ((call_count > FAKE_GH_EMPTY_RESPONSES_BEFORE_SUCCESS)); then
+            printf '%s\n' "${FAKE_GH_RUN_IDS:-}"
+        fi
         ;;
     *'/jobs'*)
         [[ "${FAKE_GH_FAIL_ON_JOBS:-false}" != "true" ]] || exit 42
@@ -35,6 +43,7 @@ run_gate() {
     local deploy_conclusion="$3"
     local fail_on_jobs="$4"
     local case_name="$5"
+    local empty_responses_before_success="${6:-0}"
     local summary_file="${TEST_DIR}/${case_name}.summary"
 
     GH_BIN="${FAKE_GH}" \
@@ -44,8 +53,12 @@ run_gate() {
     GITHUB_STEP_SUMMARY="${summary_file}" \
     FAKE_GH_LOG="${TEST_DIR}/gh.log" \
     FAKE_GH_RUN_IDS="${run_ids}" \
+    FAKE_GH_EMPTY_RESPONSES_BEFORE_SUCCESS="${empty_responses_before_success}" \
+    FAKE_GH_CONTAINER_CALLS_FILE="${TEST_DIR}/${case_name}.container-calls" \
     FAKE_GH_DEPLOY_CONCLUSION="${deploy_conclusion}" \
     FAKE_GH_FAIL_ON_JOBS="${fail_on_jobs}" \
+    CONTAINER_WORKFLOW_WAIT_SECONDS=2 \
+    CONTAINER_WORKFLOW_POLL_SECONDS=1 \
         bash "${ROOT_DIR}/scripts/verify-container-release.sh"
 }
 
@@ -55,6 +68,13 @@ grep -Fqx 'verified master Container workflow run: 101' "${TEST_DIR}/default-dis
 grep -Fqx \
     'test Environment deployment gate: disabled (REQUIRE_TEST_DEPLOY_FOR_RELEASE != true)' \
     "${TEST_DIR}/default-disabled.summary"
+
+# tag 紧跟 master push 时，首次查询可能看不到尚未完成的 Container workflow；等待后应继续晋级。
+run_gate "" "105" "" true delayed-container-workflow 2
+grep -Fqx \
+    'verified master Container workflow run: 105' \
+    "${TEST_DIR}/delayed-container-workflow.summary"
+grep -Fqx '3' "${TEST_DIR}/delayed-container-workflow.container-calls"
 
 # 无论是否开启测试门禁，都必须存在对应 commit 的成功 master Container workflow。
 if run_gate "" "" "" true missing-container-workflow; then
