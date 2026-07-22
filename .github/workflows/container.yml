@@ -18,6 +18,7 @@ on:
       - "compose.env.example"
       - "scripts/docker-*.sh"
       - "scripts/tests/test-docker-deploy.sh"
+      - "scripts/tests/test-container-runtime.sh"
       - ".github/workflows/container.yml"
   push:
     branches:
@@ -70,9 +71,11 @@ jobs:
           - platform: linux/amd64
             runner: ubuntu-latest
             suffix: amd64
+            runtime_test: full
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
             suffix: arm64
+            runtime_test: basic
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -129,6 +132,8 @@ jobs:
           file: Dockerfile
           platforms: ${{ matrix.platform }}
           push: ${{ github.event_name == 'push' }}
+          # PR 使用原生架构 runner，将单架构结果载入本机 Docker 做真实运行验证。
+          load: ${{ github.event_name == 'pull_request' }}
           tags: ${{ steps.metadata.outputs.tag }}
           build-args: |
             QQ_MAID_BUILD_COMMIT=${{ github.sha }}
@@ -139,6 +144,21 @@ jobs:
           # 单架构标签必须直接指向 image manifest，便于后续无嵌套地合成多架构索引。
           provenance: false
           sbom: false
+
+      - name: Run container runtime tests
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          bash scripts/tests/test-container-runtime.sh \
+            "${IMAGE_TAG}" \
+            "${{ matrix.runtime_test }}" \
+            "${{ matrix.suffix }}"
+          image_bytes="$(docker image inspect --format '{{.Size}}' "${IMAGE_TAG}")"
+          printf '%s\n' \
+            "${{ matrix.platform }} PR image loaded; runtime=${{ matrix.runtime_test }} passed; local image bytes=${image_bytes}" \
+            >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Record platform digest
         if: github.event_name == 'push'
@@ -237,7 +257,8 @@ jobs:
 
   deploy-test:
     name: Deploy test environment
-    if: github.event_name == 'push'
+    # 未初始化测试服时显式保持关闭；不能用 Secret 是否为空隐式决定是否部署。
+    if: github.event_name == 'push' && vars.TEST_DEPLOY_ENABLED == 'true'
     needs: publish-manifest
     runs-on: ubuntu-latest
     environment: test

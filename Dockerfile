@@ -1,7 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
-ARG RUST_IMAGE=rust:1.96.0-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc
-ARG RUNTIME_IMAGE=debian:12.11-slim@sha256:b1a741487078b369e78119849663d7f1a5341ef2768798f7b7406c4240f86aef
+# ort-sys 的官方预编译 ONNX Runtime 静态库依赖 glibc 2.38+ 与较新的 libstdc++ ABI。
+# builder/runtime 统一使用 Debian 13，避免在 bookworm 上出现 __isoc23_strto*、
+# __cxa_call_terminate 等未定义符号，并确保构建期与运行期 native ABI 一致。
+ARG RUST_IMAGE=rust:1.96.0-trixie@sha256:58fe97504a0e4cbba5d85599619a589923d3e779472a6fb0840d58d1c4ba99d7
+ARG RUNTIME_IMAGE=debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
 
 FROM ${RUST_IMAGE} AS builder
 

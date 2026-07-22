@@ -113,6 +113,11 @@ run_deploy() {
     local mode="$2"
     local image="$3"
     local commit="$4"
+    local release="${5:-}"
+    local args=(deploy --image "${image}" --commit "${commit}")
+    if [[ -n "${release}" ]]; then
+        args+=(--release "${release}")
+    fi
     DOCKER_BIN="${FAKE_DOCKER}" \
     FAKE_DOCKER_LOG="${directory}/fake-docker.log" \
     FAKE_DOCKER_STATE="${directory}/fake-state" \
@@ -122,18 +127,39 @@ run_deploy() {
     FAKE_OLD_COMMIT="${OLD_COMMIT}" \
     DEPLOY_HEALTH_ATTEMPTS=2 \
     DEPLOY_HEALTH_INTERVAL_SECONDS=0 \
-        bash "${directory}/docker-deploy.sh" deploy --image "${image}" --commit "${commit}"
+        bash "${directory}/docker-deploy.sh" "${args[@]}"
+}
+
+run_status() {
+    local directory="$1"
+    DOCKER_BIN="${FAKE_DOCKER}" \
+    FAKE_DOCKER_LOG="${directory}/fake-docker.log" \
+    FAKE_DOCKER_STATE="${directory}/fake-state" \
+    FAKE_DOCKER_MODE=success \
+    FAKE_TARGET_IMAGE="${TARGET_IMAGE}" \
+    FAKE_TARGET_COMMIT="${TARGET_COMMIT}" \
+    FAKE_OLD_COMMIT="${OLD_COMMIT}" \
+        bash "${directory}/docker-deploy.sh" status
 }
 
 success_dir="$(new_instance success)"
-run_deploy "${success_dir}" success "${TARGET_IMAGE}" "${TARGET_COMMIT}"
+run_deploy "${success_dir}" success "${TARGET_IMAGE}" "${TARGET_COMMIT}" v1.2.3
 grep -Fqx "QQ_MAID_IMAGE=${TARGET_IMAGE}" "${success_dir}/.image.env"
 grep -Fqx "commit=${TARGET_COMMIT}" "${success_dir}/deployments/current.env"
+grep -Fqx "release=v1.2.3" "${success_dir}/deployments/current.env"
+grep -Fqx "build_version_label=sha-test" "${success_dir}/deployments/current.env"
 
 up_count_before="$(grep -c ' compose .* up ' "${success_dir}/fake-docker.log" || true)"
 run_deploy "${success_dir}" success "${TARGET_IMAGE}" "${TARGET_COMMIT}"
 up_count_after="$(grep -c ' compose .* up ' "${success_dir}/fake-docker.log" || true)"
 [[ "${up_count_before}" == "${up_count_after}" ]]
+status_output="$(run_status "${success_dir}")"
+grep -Fqx "release=v1.2.3" <<< "${status_output}"
+grep -Fqx "build_version_label=sha-test" <<< "${status_output}"
+if grep -Eq '^version=' <<< "${status_output}"; then
+    echo "status must not call the build-time sha label a release version" >&2
+    exit 1
+fi
 
 rollback_dir="$(new_instance rollback)"
 printf 'QQ_MAID_IMAGE=%s\n' "${OLD_IMAGE}" > "${rollback_dir}/.image.env"
@@ -166,6 +192,10 @@ grep -Fqx "QQ_MAID_IMAGE=${OLD_IMAGE}" "${pull_fail_dir}/.image.env"
 invalid_dir="$(new_instance invalid)"
 if run_deploy "${invalid_dir}" success "ghcr.io/kuliantnt/qq-maid-bot:master" "${TARGET_COMMIT}"; then
     echo "expected mutable tag rejection" >&2
+    exit 1
+fi
+if run_deploy "${invalid_dir}" success "${TARGET_IMAGE}" "${TARGET_COMMIT}" sha-test; then
+    echo "expected invalid release rejection" >&2
     exit 1
 fi
 

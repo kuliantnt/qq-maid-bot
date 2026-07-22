@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 测试/正式环境只部署 GHCR digest，避免可变 tag 在拉取和回滚期间漂移。
+# 测试/正式环境只部署受信仓库的 digest，避免可变 tag 在拉取和回滚期间漂移。
 EXPECTED_IMAGE_REPOSITORY="${QQ_MAID_EXPECTED_IMAGE_REPOSITORY:-ghcr.io/kuliantnt/qq-maid-bot}"
 DOCKER_BIN="${DOCKER_BIN:-docker}"
 HEALTH_ATTEMPTS="${DEPLOY_HEALTH_ATTEMPTS:-60}"
@@ -17,7 +17,7 @@ CURRENT_STATE="${STATE_DIR}/current.env"
 usage() {
     cat <<'EOF'
 Usage:
-  docker-deploy.sh deploy --image <ghcr.io/...@sha256:...> --commit <40位commit>
+  docker-deploy.sh deploy --image <ghcr.io/...@sha256:...> --commit <40位commit> [--release vX.Y.Z]
   docker-deploy.sh status
 
 环境变量：
@@ -51,6 +51,11 @@ validate_image_reference() {
 
 validate_commit() {
     [[ "$1" =~ ^[0-9a-f]{40}$ ]] || fail "commit 必须是 40 位小写十六进制 SHA"
+}
+
+validate_release() {
+    [[ -z "$1" || "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+        || fail "release 必须为空或稳定版本 vX.Y.Z"
 }
 
 read_image_reference() {
@@ -122,12 +127,24 @@ image_label() {
         "${image}"
 }
 
+recorded_release_for_image() {
+    local image="$1"
+    local recorded_image release
+    [[ -f "${CURRENT_STATE}" && ! -L "${CURRENT_STATE}" ]] || return 1
+    recorded_image="$(sed -n 's/^image=//p' "${CURRENT_STATE}" | tail -n 1)"
+    [[ "${recorded_image}" == "${image}" ]] || return 1
+    release="$(sed -n 's/^release=//p' "${CURRENT_STATE}" | tail -n 1)"
+    [[ "${release}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    printf '%s\n' "${release}"
+}
+
 record_state() {
     local image="$1"
     local commit="$2"
     local container="$3"
-    local version deployed_at tmp
-    version="$(image_label "${image}" org.opencontainers.image.version)"
+    local release="$4"
+    local build_version_label deployed_at tmp
+    build_version_label="$(image_label "${image}" org.opencontainers.image.version)"
     deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     install -d -m 0755 "${STATE_DIR}"
     tmp="${CURRENT_STATE}.new"
@@ -135,7 +152,10 @@ record_state() {
     {
         printf 'image=%s\n' "${image}"
         printf 'commit=%s\n' "${commit}"
-        printf 'version=%s\n' "${version}"
+        printf 'release=%s\n' "${release:-unreleased}"
+        # commit 镜像在 tag 晋级前已经构建；该 OCI label 只能描述构建时版本，
+        # 不能把 sha-* 值当成之后追加的正式发布版本。
+        printf 'build_version_label=%s\n' "${build_version_label}"
         printf 'deployed_at=%s\n' "${deployed_at}"
         printf 'container_id=%s\n' "${container}"
     } > "${tmp}"
@@ -143,7 +163,7 @@ record_state() {
 }
 
 show_status() {
-    local image id health revision version
+    local image id health revision release build_version_label
     validate_runtime_files
     image="$(read_image_reference "${IMAGE_ENV}")" \
         || fail "尚未记录已部署镜像"
@@ -152,16 +172,18 @@ show_status() {
     [[ -n "${id}" ]] || fail "Compose 服务 bot 当前没有容器"
     health="$(container_health "${id}" || true)"
     revision="$(image_label "${image}" org.opencontainers.image.revision)"
-    version="$(image_label "${image}" org.opencontainers.image.version)"
-    printf 'image=%s\ncommit=%s\nversion=%s\ncontainer_id=%s\nhealth=%s\n' \
-        "${image}" "${revision}" "${version}" "${id}" "${health:-unknown}"
+    release="$(recorded_release_for_image "${image}" || true)"
+    build_version_label="$(image_label "${image}" org.opencontainers.image.version)"
+    printf 'image=%s\ncommit=%s\nrelease=%s\nbuild_version_label=%s\ncontainer_id=%s\nhealth=%s\n' \
+        "${image}" "${revision}" "${release:-unrecorded}" "${build_version_label}" \
+        "${id}" "${health:-unknown}"
     "${DOCKER_BIN}" stats --no-stream \
         --format 'resources={{.CPUPerc}} cpu, {{.MemUsage}} memory' "${id}" || true
 }
 
 rollback() {
     local previous_image="$1"
-    local previous_commit previous_container restore_tmp
+    local previous_commit previous_container previous_release restore_tmp
     if [[ -z "${previous_image}" ]]; then
         printf 'error: 首次部署失败，没有上一镜像可回滚\n' >&2
         return 1
@@ -181,26 +203,32 @@ rollback() {
         return 1
     }
     previous_commit="$(image_label "${previous_image}" org.opencontainers.image.revision)"
-    record_state "${previous_image}" "${previous_commit}" "${previous_container}"
+    previous_release="$(recorded_release_for_image "${previous_image}" || true)"
+    record_state "${previous_image}" "${previous_commit}" "${previous_container}" "${previous_release}"
     printf '==> 已恢复上一镜像并确认 healthy\n' >&2
 }
 
 deploy() {
     local image="$1"
     local commit="$2"
+    local release="$3"
     local current_image=""
     local target_env target_revision new_container
 
     validate_runtime_files
     validate_image_reference "${image}"
     validate_commit "${commit}"
+    validate_release "${release}"
     install -d -m 0755 "${STATE_DIR}"
 
     current_image="$(read_image_reference "${IMAGE_ENV}" || true)"
+    if [[ -z "${release}" && "${current_image}" == "${image}" ]]; then
+        release="$(recorded_release_for_image "${image}" || true)"
+    fi
     if [[ "${current_image}" == "${image}" ]]; then
         if new_container="$(wait_until_healthy "${IMAGE_ENV}")"; then
             printf '==> 目标 digest 已在运行且 healthy，无需重建\n'
-            record_state "${image}" "${commit}" "${new_container}"
+            record_state "${image}" "${commit}" "${new_container}" "${release}"
             return 0
         fi
         printf 'warning: 相同 digest 当前不健康，将重新创建容器\n' >&2
@@ -232,7 +260,7 @@ deploy() {
         return 1
     fi
 
-    record_state "${image}" "${commit}" "${new_container}"
+    record_state "${image}" "${commit}" "${new_container}" "${release}"
     printf '==> 部署成功：commit=%s image=%s\n' "${commit}" "${image}"
     "${DOCKER_BIN}" stats --no-stream \
         --format 'resources={{.CPUPerc}} cpu, {{.MemUsage}} memory' "${new_container}" || true
@@ -248,6 +276,7 @@ case "${command}" in
         shift
         image=""
         commit=""
+        release=""
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --image)
@@ -259,6 +288,11 @@ case "${command}" in
                     shift
                     [[ $# -gt 0 ]] || fail "--commit 缺少参数"
                     commit="$1"
+                    ;;
+                --release)
+                    shift
+                    [[ $# -gt 0 ]] || fail "--release 缺少参数"
+                    release="$1"
                     ;;
                 -h|--help)
                     usage
@@ -272,7 +306,7 @@ case "${command}" in
         done
         [[ -n "${image}" ]] || fail "deploy 需要 --image"
         [[ -n "${commit}" ]] || fail "deploy 需要 --commit"
-        deploy "${image}" "${commit}"
+        deploy "${image}" "${commit}" "${release}"
         ;;
     -h|--help)
         usage

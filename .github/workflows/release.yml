@@ -128,7 +128,7 @@ jobs:
           echo "allow_publish=${allow_publish}" >> "$GITHUB_OUTPUT"
 
   # Docker 正式标签只晋级 master 已发布并由测试环境使用过的 commit 镜像。
-  # 此 job 不执行 docker build；源 commit 镜像不存在或 label 不一致时明确失败。
+  # 此 job 不执行 docker build；同一 manifest 同步到 GHCR 与 Docker Hub。
   promote-container:
     name: Promote tested container digest
     needs: preflight
@@ -141,7 +141,8 @@ jobs:
       contents: read
       packages: write
     env:
-      IMAGE_REPOSITORY: ghcr.io/kuliantnt/qq-maid-bot
+      GHCR_REPOSITORY: ghcr.io/kuliantnt/qq-maid-bot
+      DOCKERHUB_REPOSITORY: docker.io/kuliantnt/qq-maid-bot
 
     steps:
       - name: Verify test deployment workflow succeeded
@@ -150,18 +151,41 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_COMMIT: ${{ needs.preflight.outputs.tag_commit }}
         run: |
-          run_id="$(gh api --method GET \
+          run_ids="$(gh api --method GET \
             "repos/${GITHUB_REPOSITORY}/actions/workflows/container.yml/runs" \
             -f branch=master \
             -f event=push \
-            -f status=success \
+            -f status=completed \
             -f head_sha="${TAG_COMMIT}" \
-            --jq '.workflow_runs[0].id // empty')"
-          [[ -n "${run_id}" ]] || {
-            echo "::error::tag commit 没有成功的 Container master 工作流，拒绝晋级未通过测试部署的镜像"
+            --jq '.workflow_runs[] | select(.conclusion == "success") | .id')"
+          deployed_run_id=""
+          for run_id in ${run_ids}; do
+            deploy_conclusion="$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs" \
+              --jq '.jobs[] | select(.name == "Deploy test environment") | .conclusion')"
+            if [[ "${deploy_conclusion}" == "success" ]]; then
+              deployed_run_id="${run_id}"
+              break
+            fi
+          done
+          [[ -n "${deployed_run_id}" ]] || {
+            echo "::error::tag commit 没有成功的 test Environment 部署，拒绝晋级未部署验证的镜像"
             exit 1
           }
-          echo "verified Container workflow run: ${run_id}" >> "${GITHUB_STEP_SUMMARY}"
+          echo "verified test deployment workflow run: ${deployed_run_id}" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Validate Docker Hub credentials
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          for name in DOCKERHUB_USERNAME DOCKERHUB_TOKEN; do
+            [[ -n "${!name}" ]] || {
+              echo "::error::缺少正式镜像发布 Secret: ${name}"
+              exit 1
+            }
+          done
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -169,6 +193,13 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Set up crane
         uses: imjasonh/setup-crane@v0.4
@@ -179,20 +210,21 @@ jobs:
           TAG_COMMIT: ${{ needs.preflight.outputs.tag_commit }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
+          trap 'echo "::error::正式容器双渠道发布未完成；当前结果不能视为 GHCR 与 Docker Hub 均发布成功"' ERR
           if [[ ! "${TAG_NAME}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
             echo "::error::容器正式晋级仅接受 vX.Y.Z 稳定版本 tag"
             exit 1
           fi
           major="${BASH_REMATCH[1]}"
           minor="${BASH_REMATCH[2]}"
-          source="${IMAGE_REPOSITORY}:sha-${TAG_COMMIT}"
+          source="${GHCR_REPOSITORY}:sha-${TAG_COMMIT}"
           digest="$(crane digest "${source}")" || {
             echo "::error::commit 镜像不存在：${source}；tag 阶段不会重新构建"
             exit 1
           }
 
           for platform in linux/amd64 linux/arm64; do
-            revision="$(crane config --platform "${platform}" "${IMAGE_REPOSITORY}@${digest}" \
+            revision="$(crane config --platform "${platform}" "${GHCR_REPOSITORY}@${digest}" \
               | jq -r '.config.Labels["org.opencontainers.image.revision"] // ""')"
             [[ "${revision}" == "${TAG_COMMIT}" ]] || {
               echo "::error::${platform} 镜像 revision=${revision} 与 tag commit=${TAG_COMMIT} 不一致"
@@ -200,18 +232,36 @@ jobs:
             }
           done
 
+          # crane copy 直接复制已经部署验证的 commit manifest，不触发 Docker build。
+          crane copy "${GHCR_REPOSITORY}@${digest}" "${DOCKERHUB_REPOSITORY}:${TAG_NAME}"
+          dockerhub_digest="$(crane digest "${DOCKERHUB_REPOSITORY}:${TAG_NAME}")"
+          [[ "${dockerhub_digest}" == "${digest}" ]] || {
+            echo "::error::Docker Hub manifest digest=${dockerhub_digest} 与已测试 GHCR digest=${digest} 不一致"
+            exit 1
+          }
+
           for tag in "${TAG_NAME}" "${major}.${minor}" "${major}" latest; do
-            crane tag "${IMAGE_REPOSITORY}@${digest}" "${tag}"
-            [[ "$(crane digest "${IMAGE_REPOSITORY}:${tag}")" == "${digest}" ]] || {
-              echo "::error::标签 ${tag} 晋级后的 digest 不一致"
+            crane tag "${GHCR_REPOSITORY}@${digest}" "${tag}"
+            crane tag "${DOCKERHUB_REPOSITORY}@${dockerhub_digest}" "${tag}"
+            ghcr_tag_digest="$(crane digest "${GHCR_REPOSITORY}:${tag}")"
+            dockerhub_tag_digest="$(crane digest "${DOCKERHUB_REPOSITORY}:${tag}")"
+            [[ "${ghcr_tag_digest}" == "${digest}" ]] || {
+              echo "::error::GHCR 标签 ${tag} 的实际 manifest digest 不一致"
+              exit 1
+            }
+            [[ "${dockerhub_tag_digest}" == "${digest}" ]] || {
+              echo "::error::Docker Hub 标签 ${tag} 的实际 manifest digest 不一致"
               exit 1
             }
           done
 
-          printf '%s\n' "promoted image: \`${IMAGE_REPOSITORY}@${digest}\`" >> "${GITHUB_STEP_SUMMARY}"
-          printf '%s\n' \
-            "tags: \`${TAG_NAME}\`, \`${major}.${minor}\`, \`${major}\`, \`latest\`" \
-            >> "${GITHUB_STEP_SUMMARY}"
+          {
+            printf '%s\n' "GHCR manifest: \`${GHCR_REPOSITORY}@${digest}\`"
+            printf '%s\n' "Docker Hub manifest: \`${DOCKERHUB_REPOSITORY}@${dockerhub_digest}\`"
+            printf '%s\n' \
+              "tags: \`${TAG_NAME}\`, \`${major}.${minor}\`, \`${major}\`, \`latest\`"
+            printf '%s\n' "双渠道正式标签已逐项校验为同一实际 manifest digest。"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   # ==========================================================================
   # build-package：4 平台矩阵构建

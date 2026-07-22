@@ -21,6 +21,7 @@ Options:
   --authorized-key-file <path>  要安装的专用 SSH 公钥文件
 
 本脚本检查 Docker Engine/Compose，创建非 root 部署用户、实例目录和最小配置。
+注意：该用户会加入 docker 组，事实上可获得接近宿主机 root 的权限，并非完整隔离边界。
 Docker 的安装步骤见 docs/deployment/docker.md；脚本不会静默修改系统软件源。
 EOF
 }

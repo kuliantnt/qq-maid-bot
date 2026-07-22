@@ -1,6 +1,6 @@
 # Docker 与 Compose 部署
 
-Docker 是服务器推荐部署方式。GitHub Actions 在固定的 Debian/Rust 构建链路中生成镜像，
+Docker 是服务器推荐部署方式。GitHub Actions 在固定的 Debian 13/Rust 构建链路中生成镜像，
 服务器只拉取并运行镜像，不安装 Rust、Cargo、Node.js，也不现场编译。现有 Release 包、
 `qbot` / `botctl` 和源码部署继续保留。
 
@@ -15,7 +15,8 @@ Docker 是服务器推荐部署方式。GitHub Actions 在固定的 Debian/Rust 
 - 根文件系统只读，所有 Linux capabilities 均移除，不使用 privileged、host network、
   Docker socket 或 systemd。
 - 应用日志只写 stdout/stderr，通过 `docker compose logs` 读取。
-- OCI labels 记录仓库、commit、版本和构建时间；启动日志也会记录版本与 commit。
+- OCI labels 记录仓库、构建 commit、构建时版本标识和构建时间；启动日志也会记录
+  Cargo 版本与 commit。
 
 基础镜像支持 `linux/amd64` 与 `linux/arm64`。发布工作流在对应架构的原生 GitHub runner
 分别构建，只有两个架构都成功才生成多架构 manifest。具体 digest、压缩镜像字节数和
@@ -31,8 +32,15 @@ docker version
 docker compose version
 ```
 
-Docker daemon 应由 systemd 或发行版服务管理。部署用户不需要 sudo 白名单，但加入
-`docker` 组等价于拥有较高宿主机权限，应只允许专用 SSH key 登录，不能与普通账号共用。
+Docker daemon 应由 systemd 或发行版服务管理。`docker` 组可以启动 privileged 容器、挂载
+宿主机根目录，因此其权限事实上接近宿主机 root。把 SSH 登录用户设为非 root，只能减少
+普通文件和 Shell 操作的默认权限，不能构成对宿主机的完整权限隔离；该账号必须只供部署使用，
+使用专用 SSH key，不能与普通账号共用。
+
+需要进一步隔离时，可以评估 [rootless Docker](https://docs.docker.com/engine/security/rootless/)，
+或在 `authorized_keys` 为 CI key 配置 SSH `command="..."` forced-command，由受审计的入口只
+允许上传指定部署文件和执行固定 digest 部署命令。forced-command 需要同时处理当前工作流的
+SCP 与 SSH 调用，启用前应在独立测试账号验证；不要直接把任意远程参数拼接到 Shell。
 
 ## 本地首次启动
 
@@ -126,20 +134,28 @@ docker compose --env-file compose.env \
 两个 `compose.env` 分别设置不同的 `COMPOSE_PROJECT_NAME` 和绝对 `QQ_MAID_*_DIR`。需要
 映射入口时再设置不同宿主机端口，并复用仓库中的同一 `compose.yaml` 与入口 override。
 
-## GHCR 标签与发布流程
+## Registry 标签与发布流程
 
 发布模型遵循 build once, deploy many：
 
 | 触发 | 容器行为 |
 | --- | --- |
-| PR | 校验 Compose 和部署脚本，在 amd64/arm64 原生 runner 构建镜像；不推送、不部署 |
-| `master` | 发布 `sha-<完整commit>` 多架构镜像，输出 digest，更新可变 `master` 标签，按 digest 自动部署测试服 |
-| `vX.Y.Z` | 确认 tag 位于 `master`、该 commit 的 Container push 工作流（含测试部署）成功、`sha-<commit>` 已存在且两个架构 revision label 一致；给同一 digest 添加 `vX.Y.Z`、`X.Y`、`X`、`latest`，不执行 Docker build |
+| PR | 校验 Compose 和部署脚本，在 amd64/arm64 原生 runner 构建并加载镜像；amd64 执行完整容器运行契约，arm64 执行基础启动与健康检查；不推送、不部署 |
+| `master` | 仅向 GHCR 发布 `sha-<完整commit>` 多架构镜像，输出 digest 并更新可变 `master`；只有仓库变量 `TEST_DEPLOY_ENABLED=true` 时才按 digest 部署测试服 |
+| `vX.Y.Z` | 确认 tag 位于 `master`、该 commit 已成功部署到 test、GHCR `sha-<commit>` 存在且双架构 revision label 一致；不重新构建，把同一 manifest 的 `vX.Y.Z`、`X.Y`、`X`、`latest` 同步到 GHCR 与 Docker Hub，并校验两个 Registry 的实际 digest |
 
-`master` 和 `latest` 都是可变标签，不能作为回滚依据。测试服和正式环境均应把完整
+GHCR 镜像为 `ghcr.io/kuliantnt/qq-maid-bot`；Docker Hub 正式镜像为
+`docker.io/kuliantnt/qq-maid-bot`。Docker Hub 不接收 `sha-*` 或 `master`。`master` 和
+`latest` 都是可变标签，不能作为回滚依据。测试服和正式环境均应把完整
 `仓库@sha256:digest` 记录为部署事实。tag 对应的 commit 镜像不存在时 Release workflow
-明确失败，不会在 tag 阶段补建另一份镜像。现有 GitHub Release 原生包仍由同一个 tag
-工作流生成；创建 tag 不会自动更新正式服务器。
+明确失败，不会在 tag 阶段补建另一份镜像。任一 Registry 登录、复制、打标签或 digest
+校验失败，正式发布 job 都会失败，不能视为双渠道发布成功。现有 GitHub Release 原生包仍由
+同一个 tag 工作流生成；创建 tag 不会自动更新正式服务器。
+
+commit 镜像在 `master` 阶段已经构建，tag 阶段无法在保持同一 digest 的同时修改 OCI label。
+`org.opencontainers.image.revision` 始终是 40 位 Git commit；
+`org.opencontainers.image.version` 保留构建时的 `sha-*` 标识，不代表后来追加的正式 tag。
+正式 `vX.Y.Z` 应从部署命令记录的 release 或所选镜像 tag/digest 对照中读取。
 
 GHCR 包公开时无需登录。私有包应使用只含 `read:packages` 的独立凭据：
 
@@ -148,6 +164,14 @@ printf '%s' "${GHCR_READ_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --
 ```
 
 不要把仓库写权限或个人高权限 Token 长期留在服务器。
+
+正式发布还需要在仓库 Actions Secrets 配置 Docker Hub 的专用访问令牌：
+
+- `DOCKERHUB_USERNAME`
+- `DOCKERHUB_TOKEN`
+
+令牌只用于 Release workflow 同步正式标签，不参与 PR/master 构建，也不会把 GHCR 的
+`sha-*` 或 `master` 标签同步到 Docker Hub。
 
 ## 阿里云测试服初始化
 
@@ -179,19 +203,24 @@ GitHub Environment 创建 `test`，配置 Secrets：
 - `TEST_DEPLOY_SSH_KEY`
 - `TEST_DEPLOY_KNOWN_HOSTS`
 
+仓库 variable `TEST_DEPLOY_ENABLED` 默认视为未启用；只有明确设置为 `true`，master Container
+workflow 才进入 `test` Environment。服务器和上述 Secrets 尚未初始化时应保持关闭，GHCR
+commit 镜像仍会正常构建发布。不要用 Secret 是否为空作为部署开关。
+
 可选 Environment variable `TEST_DEPLOY_DIR`，默认 `/opt/qq-maid-bot-test`。`KNOWN_HOSTS`
 必须由可信通道预先取得，工作流不会运行 `ssh-keyscan` 临时信任未知主机。
 
 ## 自动部署、健康检查与回滚
 
-`master` 镜像的两个架构发布成功后，工作流：
+`master` 镜像的两个架构发布成功且 `TEST_DEPLOY_ENABLED=true` 后，工作流：
 
 1. 合成并记录不可变 commit manifest digest。
 2. 通过专用 SSH key 上传 `compose.yaml` 与 `docker-deploy.sh`。
 3. 把完整 `仓库@digest` 和 commit 交给服务器。
 4. 校验仓库和 digest 格式，拉取镜像并检查 OCI revision label。
 5. 原子更新 `.image.env`，执行 `docker compose up -d --pull never`。
-6. 等待容器进入 healthy，记录 commit、version、digest、容器 ID 和部署时间。
+6. 等待容器进入 healthy，记录 commit、可选正式 release、构建时 label、digest、容器 ID 和
+   部署时间。
 7. 启动或健康检查失败时恢复上一 `.image.env`，重新启动并确认旧版本 healthy。
 
 重复部署同一 digest 且容器 healthy 时直接成功返回，不产生无意义重建。部署并发组会取消
@@ -212,8 +241,12 @@ docker compose --env-file compose.env --env-file .image.env logs --tail 200 bot
 ```bash
 ./docker-deploy.sh deploy \
   --image ghcr.io/kuliantnt/qq-maid-bot@sha256:<digest> \
-  --commit <40位commit>
+  --commit <40位commit> \
+  --release vX.Y.Z
 ```
+
+`status` 中 `release` 来自这份部署记录；`build_version_label` 是镜像构建时不可变的 OCI
+label。未传 `--release` 时会显示 `unrecorded` / `unreleased`，不会把 `sha-*` 误称为正式版本。
 
 ## 常见问题
 
