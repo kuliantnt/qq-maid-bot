@@ -169,13 +169,15 @@ printf '%s' "${GHCR_READ_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --
 
 不要把仓库写权限或个人高权限 Token 长期留在服务器。
 
-正式发布还需要在仓库 Actions Secrets 配置 Docker Hub 的专用访问令牌：
+默认不启用测试服时，正常正式 Release 唯一需要预先配置的 GitHub Actions Secrets 是
+Docker Hub 的专用访问令牌：
 
 - `DOCKERHUB_USERNAME`
 - `DOCKERHUB_TOKEN`
 
 令牌只用于 Release workflow 同步正式标签，不参与 PR/master 构建，也不会把 GHCR 的
-`sha-*` 或 `master` 标签同步到 Docker Hub。
+`sha-*` 或 `master` 标签同步到 Docker Hub。下文的 `TEST_DEPLOY_*` Secrets 仅在选择启用
+阿里云测试服时需要，不是所有正式 Release 的前置配置。
 
 ## 阿里云测试服初始化
 

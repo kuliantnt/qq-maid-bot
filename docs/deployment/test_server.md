@@ -415,7 +415,9 @@ cat ~/.ssh/qq-maid-test-deploy
 cat ~/.ssh/qq-maid-test-known_hosts
 ```
 
-Secrets 应放在 Environment 中，而不是提交到仓库或 Compose 文件。
+Secrets 应放在 Environment 中，而不是提交到仓库或 Compose 文件。它们只服务于可选的
+测试服自动部署；默认关闭测试服时无需配置。正常正式 Release 唯一需要预先配置的是仓库
+Actions Secrets `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN`。
 
 ### 3. 开启仓库变量
 
