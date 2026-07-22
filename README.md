@@ -17,26 +17,22 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.20.7`，项目处于 `20.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.21.0`，项目处于 `21.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
-使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
+使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
-## 20.x 版本线更新
-- **配置与部署升级**（v0.20.0 - v0.20.7）：新增安全配置中心、`/console/` 管理入口、Agent 配置迁移和工具白名单，支持在网页中配置 Provider、QQ / OneBot / 微信入口及主要运行能力；管理员初始化和密码重置可直接粘贴完整令牌字符串。
-- **Session Dream 触发与续批稳定性**（v0.20.7）：按新增 Session、活跃日期或成功检查点间隔触发记忆整理，字符或 Session 截断后可继续处理尾部批次，模型或数据库失败时保留检查点以便重试。
-- **待办查询与 Agent 稳定性**（v0.20.6）：自然语言待办查询统一进入受控 Tool Loop，支持周期类型与组合筛选；知识工具超出上下文预算时会压缩结果并收尾，Prompt Cache 会话前缀保持稳定。
-- **知识库 Agent 化**（PR #528、#534）：知识检索改为按需调用的受控工具，支持结构化证据、混合召回和相关性评测。
-- **联网搜索后端与结果展示**（v0.20.5，PR #551、#552）：`/查` 和自然语言搜索可统一选择 Provider 原生搜索、Tavily 或关闭，并为多目标查询展示带来源的可信结果卡片和成功/失败统计。
-- **QQ 语音与命令前缀**（v0.20.1）：QQ 语音转写进入普通对话链路，所有入口支持统一可配置的聊天命令前缀。
-- **图片生成与多平台发送**（v0.20.3）：支持 QQ 官方与 OneBot 11 图片发送，并兼容 Windows 本地图片的 `file://` URI。
-- **运维与多模型能力**（v0.19.0 - v0.20.2）：支持白名单 `/ops` 运维、多模型候选降级、联网查询、RSS 推送和可选长期记忆整理。
+## 21.x 版本线更新
+- **多平台部署主线**（v0.21.0）：同一二进制覆盖 QQ 官方、OneBot、微信入口，以及 Linux / Windows / Docker 部署路径；新增 GHCR 多架构镜像、Compose 覆盖、配置迁移与备份恢复 CLI。
+- **Docker 与测试环境**（PR #562）：`linux/amd64` / `linux/arm64` 原生构建推送 GHCR，默认不映射管理端口，按需叠加 console / OneBot / 微信 override；测试环境可按 digest 自动部署与失败回滚。
+- **配置迁移与备份恢复**（PR #565）：`config migrate`、`backup create/verify/restore` 默认 dry-run，支持旧 dotenv 保守导入、SQLite 一致性快照和干净目录恢复。
+- **可选 Web 安装**（PR #565）：`qbot install --web false` 可关闭控制台，仅用 CLI / 文件配置；部署侧显式关闭具有安全优先级。
 
 ### 配置方式变化
 
-0.19 及之前需要在 `config/.env` 中手写凭证和开关；0.20 起推荐新部署走 `/console/` 引导。旧 `.env` 部署继续可用。
+0.19 及之前需要在 `config/.env` 中手写凭证和开关；0.20 起推荐新部署走 `/console/` 引导；0.21 起 Docker / Release / 源码共用同一配置中心与运维 CLI，旧 `.env` 部署继续可用。
 
-### 20.x 之前（v0.19.0）
-- Session Dream 与确定性记忆整理（默认关）、多实体联网搜索、待办组合筛选、`/ops` 白名单运维、搜索超时与 RSS 短链接展示。
+### 上一版（20.x）
+- 安全配置中心与 `/console/`、QQ 语音转写与统一命令前缀、知识库 Agent 化、Tavily 可选搜索、图片生成与多平台发送、Session Dream 续批稳定性。
 
 完整变更与升级说明见 [CHANGELOG.md](./CHANGELOG.md)。
 
@@ -71,7 +67,8 @@ OneBot 11 当前主要面向 NapCat，详细限制与接入步骤见 Wiki [用 N
 curl -fsSL https://github.com/kuliantnt/qq-maid-bot/raw/refs/heads/master/scripts/qbot.sh -o /tmp/qbot.sh
 bash /tmp/qbot.sh deploy
 
-qbot install
+qbot install                 # 交互询问是否启用 Web 控制台
+# qbot install --web false   # 仅 CLI / 文件配置，不启用 /console/
 qbot config bot
 qbot config ai
 qbot start
@@ -110,7 +107,8 @@ notepad "$HOME\qq-maid-bot\config\.env"
 
 服务器推荐使用 GHCR 镜像与 Docker Compose：运行镜像不包含 Rust 或 Node.js，默认不映射
 管理端口，并以非 root 用户运行。首次启动、持久化目录、按 digest 升级回滚、多实例和
-测试环境自动部署见 [Docker 与 Compose 部署](./docs/deployment/docker.md)。
+测试环境自动部署见 [Docker 与 Compose 部署](./docs/deployment/docker.md)。配置迁移、
+备份恢复与 schema 回滚边界见 [配置迁移、备份恢复与安全升级](./docs/deployment/migration-backup.md)。
 
 ### 从源码运行
 
@@ -129,7 +127,7 @@ runtime/botctl.sh status
 
 ## 配置方式
 
-v0.20.x 起推荐新部署通过 `/console/` 网页完成配置。启动机器人后浏览器打开 `http://127.0.0.1:8787/console/`，从启动日志中找到 `bootstrap.token` 建立首位管理员，按向导分步保存。旧 `.env` 部署可继续使用。
+v0.20.x 起推荐新部署通过 `/console/` 网页完成配置；v0.21.0 起也可在安装时选择关闭 Web，仅用 `qbot config` 与文件配置。启用控制台时，启动后浏览器打开 `http://127.0.0.1:8787/console/`，从启动日志中找到 `bootstrap.token` 建立首位管理员，按向导分步保存。旧 `.env` 部署可继续使用，也可先 `qq-maid-bot config migrate` dry-run 再显式导入。
 
 配置分为多层：
 

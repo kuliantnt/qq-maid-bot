@@ -2,6 +2,33 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.21.0] - 2026-07-22
+
+### Release Focus
+
+* **多平台部署与统一运维版本**：在 20.x 配置中心与多入口业务能力之上，收口 Docker / GHCR 容器发布、配置迁移备份恢复和可选 Web 安装，让 QQ 官方、OneBot、微信以及 Linux / Windows / 容器部署共用同一套二进制与运维边界。
+
+### Added
+
+* **Docker Compose 与 GHCR 发布**（PR #562）：新增 `Dockerfile`、基础 `compose.yaml` 以及控制台 / OneBot / 微信端口 override；Container workflow 在 `linux/amd64` 与 `linux/arm64` 原生 runner 构建并推送 GHCR 多架构镜像，正式 Release 门禁与测试环境自动部署解耦。
+* **测试环境自动部署文档与脚本**（PR #562）：补充 `scripts/docker-deploy.sh`、`scripts/docker-host-init.sh` 与 [Docker 与 Compose 部署](./docs/deployment/docker.md)、[测试服务器 Docker 部署教程](./docs/deployment/test_server.md)；部署只接受受信仓库 digest，失败时按上一 digest 回滚镜像。
+* **配置迁移、备份恢复 CLI**（PR #565）：统一二进制新增 `migration status`、`config check`、`config sources`、`config migrate` 与 `backup create/verify/restore`；默认 dry-run，使用 SQLite Online Backup 与 manifest SHA-256，恢复只写入干净目标目录。
+* **可选 Web 控制台安装**（PR #565）：`qbot install --web true|false` 与 `QBOT_INSTALL_WEB_CONSOLE` 支持新装时选择是否启用 `/console/`；关闭后继续使用 CLI 与文件配置，重复安装默认不改写已有选择。
+* **配置迁移与备份文档**（PR #565）：新增 [配置迁移、备份恢复与安全升级](./docs/deployment/migration-backup.md)，说明旧 dotenv 保守导入、含/不含 secret 的恢复包边界，以及 Docker 升级前自动备份与 schema 回滚边界。
+
+### Changed
+
+* **部署路径并列收口**：Release 包、源码与 Docker 共用同一配置注册表、SQLite migration 和备份格式；Web 控制台只是另一种交互入口，不是独立运行方式。
+* **容器运行模型**：镜像以非 root 用户、只读根文件系统运行，默认不映射管理端口；按需叠加 console / OneBot / 微信 compose override，并把容器内监听改为 `0.0.0.0`。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 版本号提升到 `0.21.0`，内部 crate 版本不统一提升。
+* 本版本无新增业务数据库 migration 门槛，也无必需配置迁移。已有 `.env` / `runtime.toml` / `agent.toml` 与 20.x 配置中心部署可直接升级；旧 dotenv 可先 `config migrate` dry-run，再显式 `--apply` 填补空缺，不覆盖已有受管值。
+* Docker 升级前默认生成 `data/backups/pre-upgrade-*` 恢复包；镜像回滚与 schema 恢复不是同一动作——旧二进制读不懂新 schema 时必须恢复同期备份到干净目录。
+* `WEB_CONSOLE_ENABLED` 仍可由安装选项或部署侧环境关闭；显式关闭时登录页、认证和配置 API 均不注册，也不会生成 Bootstrap token。
+* 真实 GHCR 拉取、跨架构镜像、微信/OneBot 公网回调和含 secret 的灾备演练仍需在目标部署环境验证。
+
 ## [v0.20.7] - 2026-07-21
 
 ### Release Focus
