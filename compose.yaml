@@ -1,0 +1,33 @@
+name: ${COMPOSE_PROJECT_NAME:-qq-maid-bot}
+
+services:
+  bot:
+    image: ${QQ_MAID_IMAGE:?请通过 --env-file 设置精确版本或 digest}
+    restart: unless-stopped
+    stop_grace_period: 20s
+    read_only: true
+    user: "${QQ_MAID_UID:-10001}:${QQ_MAID_GID:-10001}"
+    env_file:
+      - ${QQ_MAID_ENV_FILE:-./runtime/config/.env}
+    volumes:
+      - type: bind
+        source: ${QQ_MAID_CONFIG_DIR:-./runtime/config}
+        target: /app/runtime/config
+      - type: bind
+        source: ${QQ_MAID_DATA_DIR:-./runtime/data}
+        target: /app/runtime/data
+      - type: bind
+        source: ${QQ_MAID_MEDIA_DIR:-./runtime/media}
+        target: /app/runtime/media
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent --show-error --max-time 3 \"http://127.0.0.1:$${LLM_SERVER_PORT:-8787}/healthz\""]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 4

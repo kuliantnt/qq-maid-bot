@@ -1,0 +1,5 @@
+services:
+  bot:
+    ports:
+      # 控制台仍默认只绑定宿主机回环地址；公网访问应由受信 TLS 反向代理接入。
+      - "${QQ_MAID_HTTP_HOST:-127.0.0.1}:${QQ_MAID_HTTP_PORT:-8787}:8787"

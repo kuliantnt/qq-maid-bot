@@ -84,6 +84,19 @@ fn test_agent_file() -> (
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let text = include_str!("../../../../runtime/config/agent.toml");
     std::fs::write(&path, text).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        // agent.toml 的受管写入要求目录和文件都不能由组或其他用户写入；显式设置
+        // 测试权限，避免宿主机 umask 0002 让夹具被误判为不安全。
+        std::fs::set_permissions(
+            path.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     let running = AgentRuntimeConfig::from_toml(
         text,
         AgentConfigSource::File(path.to_string_lossy().into_owned()),

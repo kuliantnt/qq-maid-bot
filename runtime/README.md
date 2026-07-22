@@ -1,5 +1,9 @@
 # runtime/ — 源码运行目录与部署应用根目录模板
 
+服务器使用 GHCR 镜像和 Compose 时，请先看
+[Docker 与 Compose 部署](../docs/deployment/docker.md)。本文继续作为配置字段、原生 Release
+目录和控制脚本的权威说明；容器部署复用相同的 `runtime/` 相对路径语义。
+
 本目录是服务器运行目录示例，部署后会放置 release 二进制、控制脚本、配置模板和运行产物。真实 `.env`、私有 prompt、知识资料、SQLite、日志和 pid 都属于本地私有配置或运行数据，不应提交到公开仓库。
 
 ## 目录结构

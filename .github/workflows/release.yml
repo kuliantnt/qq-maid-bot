@@ -26,6 +26,7 @@ jobs:
     outputs:
       allow_build: ${{ steps.check.outputs.allow_build }}
       allow_publish: ${{ steps.check.outputs.allow_publish }}
+      tag_commit: ${{ steps.check.outputs.tag_commit }}
 
     steps:
       - name: Checkout
@@ -61,6 +62,7 @@ jobs:
           # 1. 安全解析 tag 为 commit（兼容轻量 tag 和 annotated tag）
           tag_commit=$(git rev-list -n 1 "${TAG_NAME}")
           echo "Tag ${TAG_NAME} resolves to commit ${tag_commit}"
+          echo "tag_commit=${tag_commit}" >> "$GITHUB_OUTPUT"
 
           # 2. 校验 tag commit 属于 master 祖先
           #    使用完整 refspec 强制更新 origin/master，避免 --depth=1 等浅拉取
@@ -124,6 +126,125 @@ jobs:
 
           echo "allow_build=${allow_build}" >> "$GITHUB_OUTPUT"
           echo "allow_publish=${allow_publish}" >> "$GITHUB_OUTPUT"
+
+  # Docker 正式标签只晋级 master Container workflow 已发布的 commit 镜像；
+  # 测试环境验证是否为硬门禁由独立仓库变量控制。
+  # 此 job 不执行 docker build；同一 manifest 同步到 GHCR 与 Docker Hub。
+  promote-container:
+    name: Promote existing container digest
+    needs: preflight
+    if: |
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.preflight.outputs.allow_publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    env:
+      GHCR_REPOSITORY: ghcr.io/kuliantnt/qq-maid-bot
+      DOCKERHUB_REPOSITORY: docker.io/kuliantnt/qq-maid-bot
+      REQUIRE_TEST_DEPLOY_FOR_RELEASE: ${{ vars.REQUIRE_TEST_DEPLOY_FOR_RELEASE || 'false' }}
+
+    steps:
+      - name: Checkout release gate
+        uses: actions/checkout@v7
+
+      - name: Verify container workflow and optional test deployment gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_COMMIT: ${{ needs.preflight.outputs.tag_commit }}
+        run: bash scripts/verify-container-release.sh
+
+      - name: Validate Docker Hub credentials
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          for name in DOCKERHUB_USERNAME DOCKERHUB_TOKEN; do
+            [[ -n "${!name}" ]] || {
+              echo "::error::缺少正式镜像发布 Secret: ${name}"
+              exit 1
+            }
+          done
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up crane
+        uses: imjasonh/setup-crane@v0.4
+
+      - name: Promote existing commit manifest
+        shell: bash
+        env:
+          TAG_COMMIT: ${{ needs.preflight.outputs.tag_commit }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          trap 'echo "::error::正式容器双渠道发布未完成；当前结果不能视为 GHCR 与 Docker Hub 均发布成功"' ERR
+          if [[ ! "${TAG_NAME}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::容器正式晋级仅接受 vX.Y.Z 稳定版本 tag"
+            exit 1
+          fi
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+          source="${GHCR_REPOSITORY}:sha-${TAG_COMMIT}"
+          digest="$(crane digest "${source}")" || {
+            echo "::error::commit 镜像不存在：${source}；tag 阶段不会重新构建"
+            exit 1
+          }
+
+          for platform in linux/amd64 linux/arm64; do
+            revision="$(crane config --platform "${platform}" "${GHCR_REPOSITORY}@${digest}" \
+              | jq -r '.config.Labels["org.opencontainers.image.revision"] // ""')"
+            [[ "${revision}" == "${TAG_COMMIT}" ]] || {
+              echo "::error::${platform} 镜像 revision=${revision} 与 tag commit=${TAG_COMMIT} 不一致"
+              exit 1
+            }
+          done
+
+          # crane copy 直接复制 master 阶段已经构建的 commit manifest，不触发 Docker build。
+          crane copy "${GHCR_REPOSITORY}@${digest}" "${DOCKERHUB_REPOSITORY}:${TAG_NAME}"
+          dockerhub_digest="$(crane digest "${DOCKERHUB_REPOSITORY}:${TAG_NAME}")"
+          [[ "${dockerhub_digest}" == "${digest}" ]] || {
+            echo "::error::Docker Hub manifest digest=${dockerhub_digest} 与已测试 GHCR digest=${digest} 不一致"
+            exit 1
+          }
+
+          for tag in "${TAG_NAME}" "${major}.${minor}" "${major}" latest; do
+            crane tag "${GHCR_REPOSITORY}@${digest}" "${tag}"
+            crane tag "${DOCKERHUB_REPOSITORY}@${dockerhub_digest}" "${tag}"
+            ghcr_tag_digest="$(crane digest "${GHCR_REPOSITORY}:${tag}")"
+            dockerhub_tag_digest="$(crane digest "${DOCKERHUB_REPOSITORY}:${tag}")"
+            [[ "${ghcr_tag_digest}" == "${digest}" ]] || {
+              echo "::error::GHCR 标签 ${tag} 的实际 manifest digest 不一致"
+              exit 1
+            }
+            [[ "${dockerhub_tag_digest}" == "${digest}" ]] || {
+              echo "::error::Docker Hub 标签 ${tag} 的实际 manifest digest 不一致"
+              exit 1
+            }
+          done
+
+          {
+            printf '%s\n' "GHCR manifest: \`${GHCR_REPOSITORY}@${digest}\`"
+            printf '%s\n' "Docker Hub manifest: \`${DOCKERHUB_REPOSITORY}@${dockerhub_digest}\`"
+            printf '%s\n' \
+              "tags: \`${TAG_NAME}\`, \`${major}.${minor}\`, \`${major}\`, \`latest\`"
+            printf '%s\n' "双渠道正式标签已逐项校验为同一实际 manifest digest。"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   # ==========================================================================
   # build-package：4 平台矩阵构建
@@ -237,7 +358,7 @@ jobs:
   # ==========================================================================
   publish-release:
     name: Publish GitHub Release
-    needs: [preflight, build-package]
+    needs: [preflight, build-package, promote-container]
     if: |
       startsWith(github.ref, 'refs/tags/v') &&
       needs.preflight.outputs.allow_publish == 'true'

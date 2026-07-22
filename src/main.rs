@@ -31,11 +31,20 @@ use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 const OPS_HTTP_SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
+const BUILD_COMMIT: &str = match option_env!("QQ_MAID_BUILD_COMMIT") {
+    Some(value) => value,
+    None => "unknown",
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     qq_maid_core::app::load_dotenv_files();
     init_tracing()?;
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        commit = BUILD_COMMIT,
+        "qq-maid-bot starting"
+    );
 
     let external_environment = std::env::vars().collect::<HashMap<_, _>>();
     let (database_file, database_pool_size) =
@@ -83,9 +92,7 @@ async fn main() -> anyhow::Result<()> {
             admin_auth,
             env!("CARGO_PKG_VERSION"),
         )?
-        .serve_with_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .serve_with_shutdown(shutdown_signal())
         .await;
     }
     let core_config = core_config.expect("runtime readiness checked Core configuration");
@@ -150,8 +157,8 @@ async fn main() -> anyhow::Result<()> {
     });
 
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("收到 Ctrl+C，准备停止统一进程");
+        _ = shutdown_signal() => {
+            info!("收到退出信号，准备停止统一进程");
             shutdown_token.cancel();
             let _ = core_shutdown_tx.send(());
             let _ = tokio::time::timeout(OPS_HTTP_SHUTDOWN_WAIT, &mut gateway_handle).await;
@@ -169,6 +176,25 @@ async fn main() -> anyhow::Result<()> {
             let _ = tokio::time::timeout(OPS_HTTP_SHUTDOWN_WAIT, &mut core_http_handle).await;
             Err(task_exit_error("qq-maid-gateway-rs", result))
         }
+    }
+}
+
+/// Docker 与 systemd 使用 SIGTERM，交互式终端使用 SIGINT；两者必须进入同一收尾链路。
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 
@@ -305,6 +331,19 @@ mod tests {
         let agent_path = directory.path().join("config/agent.toml");
         std::fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
         std::fs::write(&agent_path, include_str!("../runtime/config/agent.toml")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // 配置中心会拒绝组或其他用户可写的 agent 配置。测试不能依赖宿主机
+            // umask，否则 umask 0002 会把夹具创建成 0775/0664 并提前触发安全拒绝。
+            std::fs::set_permissions(
+                agent_path.parent().unwrap(),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+            std::fs::set_permissions(&agent_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let external = HashMap::from([
             (
                 "AGENT_CONFIG_FILE".to_owned(),

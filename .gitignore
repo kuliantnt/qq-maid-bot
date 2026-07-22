@@ -9,6 +9,10 @@ __pycache__/
 .vscode/
 # 本地部署配置，可能包含远端路径或账号信息，不进入 Git。
 scripts/deploy.conf
+# Compose 实例变量、当前 digest 与部署状态属于本机运行配置。
+compose.env
+.image.env
+deployments/
 # 根级历史残留，防止误建。
 data/
 

@@ -654,6 +654,19 @@ mod tests {
             include_str!("../../../runtime/config/agent.toml"),
         )
         .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // 该用例会真实保存 agent.toml，夹具必须满足配置中心的安全权限约束，
+            // 不能让宿主机 umask 决定测试结果。
+            std::fs::set_permissions(
+                agent_path.parent().unwrap(),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+            std::fs::set_permissions(&agent_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let agent_environment = HashMap::from([(
             crate::config::agent::AGENT_CONFIG_FILE_ENV.to_owned(),
             agent_path.to_string_lossy().into_owned(),
