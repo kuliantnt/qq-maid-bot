@@ -325,6 +325,8 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
             raw.message_type,
             &raw.msg_elements,
             raw.parallel_message.as_ref(),
+            ref_indices.msg_idx.as_deref(),
+            &base_content,
         ),
     );
     let timestamp = raw.timestamp;
@@ -408,6 +410,8 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
             raw.message_type,
             &raw.msg_elements,
             raw.parallel_message.as_ref(),
+            ref_indices.msg_idx.as_deref(),
+            &base_content,
         ),
     );
     let input_parts = input_parts_from_content_and_attachments(
@@ -506,6 +510,8 @@ fn quoted_payload_fallback(
     message_type: Option<u64>,
     msg_elements: &[RawMsgElement],
     parallel_message: Option<&RawParallelMessage>,
+    current_msg_idx: Option<&str>,
+    current_content: &str,
 ) -> QuotedPayloadFallback {
     if message_type != Some(MSG_TYPE_QUOTE) {
         return QuotedPayloadFallback::default();
@@ -517,7 +523,14 @@ fn quoted_payload_fallback(
     let mut content_fragments = Vec::new();
     let mut input_parts = Vec::new();
     if let Some(quoted_root) = msg_elements.first() {
-        append_quoted_element_parts(quoted_root, &mut content_fragments, &mut input_parts);
+        append_quoted_element_parts(
+            quoted_root,
+            current_msg_idx,
+            current_content,
+            true,
+            &mut content_fragments,
+            &mut input_parts,
+        );
     }
 
     let mut content = content_fragments.join("\n");
@@ -547,6 +560,9 @@ fn quoted_payload_fallback(
 
 fn append_quoted_element_parts(
     element: &RawMsgElement,
+    current_msg_idx: Option<&str>,
+    current_content: &str,
+    is_quoted_root: bool,
     content_fragments: &mut Vec<String>,
     input_parts: &mut Vec<MessageInputPart>,
 ) {
@@ -554,6 +570,18 @@ fn append_quoted_element_parts(
     let cleaned_content = strip_qq_image_placeholders(raw_content);
     let parsed = parse_safe_content_parts(&cleaned_content, "qq_official");
     let element_content = parsed.text.trim().to_owned();
+    // QQ 某些引用事件会把当前用户输入作为引用根的子元素下发。
+    // 先按稳定 msg_idx 排除；平台未给 idx 时仅在非根节点按当前正文兜底，
+    // 防止“引用内容 + 当前提问”被拼成同一段引用上下文。
+    let matches_current_idx =
+        current_msg_idx.is_some_and(|idx| element.msg_idx.as_deref() == Some(idx));
+    let lacks_comparable_idx = current_msg_idx.is_none() || element.msg_idx.is_none();
+    let matches_current_content =
+        lacks_comparable_idx && !current_content.is_empty() && element_content == current_content;
+    let is_current_message = !is_quoted_root && (matches_current_idx || matches_current_content);
+    if is_current_message {
+        return;
+    }
     if !element_content.is_empty() {
         content_fragments.push(element_content.clone());
     }
@@ -572,7 +600,14 @@ fn append_quoted_element_parts(
     input_parts.extend(element_parts);
 
     for child in &element.msg_elements {
-        append_quoted_element_parts(child, content_fragments, input_parts);
+        append_quoted_element_parts(
+            child,
+            current_msg_idx,
+            current_content,
+            false,
+            content_fragments,
+            input_parts,
+        );
     }
 }
 

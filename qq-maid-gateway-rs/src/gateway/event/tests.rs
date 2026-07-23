@@ -835,6 +835,69 @@ fn group_quote_keeps_current_text_out_of_quoted_payload() {
 }
 
 #[test]
+fn nested_group_quote_excludes_current_text_from_payload() {
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_AT_MESSAGE_CREATE.to_owned()),
+        id: Some("event-current".to_owned()),
+        d: json!({
+            "id": "msg-current",
+            "group_openid": "group-1",
+            "author": {"member_openid": "member-1"},
+            "content": "查看引用内容",
+            "message_type": 103,
+            "message_scene": {"ext": ["msg_idx=REFIDX_current"]},
+            "msg_elements": [{
+                "msg_idx": "REFIDX_quoted",
+                "content": "测试",
+                "msg_elements": [
+                    {"msg_idx": "REFIDX_current", "content": "查看引用内容"}
+                ]
+            }]
+        }),
+    };
+
+    let message = parse_group_message(&envelope).unwrap().unwrap();
+    let reply = message.reply.as_ref().unwrap();
+
+    assert_eq!(message.content, "查看引用内容");
+    assert_eq!(reply.content.as_deref(), Some("测试"));
+    assert_eq!(reply.input_parts.len(), 1);
+    assert_eq!(reply.input_parts[0].text_content(), Some("测试"));
+}
+
+#[test]
+fn nested_quote_keeps_same_text_when_msg_idx_differs_from_current() {
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_AT_MESSAGE_CREATE.to_owned()),
+        id: None,
+        d: json!({
+            "id": "msg-current",
+            "group_openid": "group-1",
+            "author": {"member_openid": "member-1"},
+            "content": "同一句话",
+            "message_type": 103,
+            "message_scene": {"ext": ["msg_idx=REFIDX_current"]},
+            "msg_elements": [{
+                "msg_idx": "REFIDX_quoted",
+                "msg_elements": [
+                    {"msg_idx": "REFIDX_quoted_child", "content": "同一句话"}
+                ]
+            }]
+        }),
+    };
+
+    let message = parse_group_message(&envelope).unwrap().unwrap();
+    let reply = message.reply.as_ref().unwrap();
+
+    assert_eq!(reply.content.as_deref(), Some("同一句话"));
+    assert_eq!(reply.input_parts[0].text_content(), Some("同一句话"));
+}
+
+#[test]
 fn c2c_quote_keeps_current_text_out_of_quoted_payload() {
     let envelope = GatewayEnvelope {
         op: 0,

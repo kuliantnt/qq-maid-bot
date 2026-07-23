@@ -158,16 +158,42 @@ fn quoted_context_parts_for_model(
         source: Some(TextSource::Quote),
     }];
     if has_input_parts {
-        parts.extend(input_parts_for_model(
+        parts.extend(quoted_input_parts_for_model(
             quoted.input_parts.clone(),
             supports_vision,
-            TextSource::Quote,
         ));
-        parts.push(MessageInputPart::Text {
-            // Provider 不接收 TextSource，结束标记负责把引用 parts 与当前用户正文隔开。
-            text: "引用内容结束（以上内容块属于被引用消息；以下为当前用户消息）：".to_owned(),
-            source: Some(TextSource::Quote),
-        });
+    }
+    parts
+}
+
+fn quoted_input_parts_for_model(
+    input_parts: Vec<MessageInputPart>,
+    supports_vision: bool,
+) -> Vec<MessageInputPart> {
+    let mut parts = Vec::new();
+    for part in input_parts {
+        match part {
+            MessageInputPart::Text { text, .. } if !text.trim().is_empty() => {
+                // Provider 不接收 TextSource，标签必须与原始引用文字留在同一个 part 内。
+                parts.push(MessageInputPart::Text {
+                    text: format!("引用文本：{text}"),
+                    source: Some(TextSource::Quote),
+                });
+            }
+            MessageInputPart::Text { .. } => {}
+            MessageInputPart::Image { media }
+                if supports_vision && media.status == MediaStatus::Available =>
+            {
+                parts.push(MessageInputPart::Image { media });
+            }
+            other => parts.push(MessageInputPart::Text {
+                text: format!(
+                    "引用媒体：{}",
+                    media_fallback_for_model(&other, supports_vision)
+                ),
+                source: Some(TextSource::Quote),
+            }),
+        }
     }
     parts
 }

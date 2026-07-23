@@ -320,18 +320,11 @@ fn quoted_text_uses_input_parts_without_repeating_summary() {
             .fallback_text()
             .contains("引用文本")
     );
-    assert!(
-        current.content_parts[0]
-            .fallback_text()
-            .contains("引用内容开始")
+    assert_eq!(
+        current.content_parts[1].text_content(),
+        Some("引用文本：OK")
     );
-    assert_eq!(current.content_parts[1].text_content(), Some("OK"));
-    assert!(
-        current.content_parts[2]
-            .fallback_text()
-            .contains("引用内容结束")
-    );
-    assert_eq!(current.content_parts[3].text_content(), Some("继续"));
+    assert_eq!(current.content_parts[2].text_content(), Some("继续"));
 }
 
 #[test]
@@ -372,11 +365,9 @@ fn build_chat_messages_includes_quoted_sender_summary_when_backfilled() {
     assert!(quote_text.contains("member-9"));
     assert!(quote_text.contains("身份来源=event"));
     assert!(!quote_text.contains("用户上一条"));
-    assert_eq!(current.content_parts[1].text_content(), Some("用户上一条"));
-    assert!(
-        current.content_parts[2]
-            .fallback_text()
-            .contains("引用内容结束")
+    assert_eq!(
+        current.content_parts[1].text_content(),
+        Some("引用文本：用户上一条")
     );
 }
 
@@ -491,15 +482,16 @@ fn quoted_mixed_parts_keep_their_order_for_vision_and_text_fallback() {
 
     let vision_messages = build_respond_messages_for_model(&req, true);
     let vision = &vision_messages.last().unwrap().content_parts;
-    assert_eq!(vision[1].text_content(), Some("图前"));
+    assert_eq!(vision[1].text_content(), Some("引用文本：图前"));
     assert!(matches!(vision[2], MessageInputPart::Image { .. }));
-    assert_eq!(vision[3].text_content(), Some("图后"));
+    assert_eq!(vision[3].text_content(), Some("引用文本：图后"));
 
     let no_vision_messages = build_respond_messages_for_model(&req, false);
     let no_vision = &no_vision_messages.last().unwrap().content_parts;
-    assert_eq!(no_vision[1].text_content(), Some("图前"));
+    assert_eq!(no_vision[1].text_content(), Some("引用文本：图前"));
+    assert!(no_vision[2].fallback_text().starts_with("引用媒体："));
     assert!(no_vision[2].fallback_text().contains("当前模型不支持读取"));
-    assert_eq!(no_vision[3].text_content(), Some("图后"));
+    assert_eq!(no_vision[3].text_content(), Some("引用文本：图后"));
 }
 
 #[test]

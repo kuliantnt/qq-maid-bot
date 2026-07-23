@@ -225,8 +225,6 @@ impl QuotedMessageContext {
         if !self.lookup_found {
             lines.push(self.lookup_failure_text());
         }
-        // TextSource 不会序列化到 Provider，必须用显式边界让模型识别后续 parts 属于引用。
-        lines.push("引用内容开始（以下内容块属于被引用消息）：".to_owned());
         lines.join("\n")
     }
 
@@ -447,7 +445,6 @@ mod tests {
 
         let metadata = quoted.metadata_text();
         assert!(metadata.contains("reference=REFIDX_1"));
-        assert!(metadata.contains("以下内容块属于被引用消息"));
         assert!(!metadata.contains("OK"));
         assert!(!metadata.contains("a.png"));
 
@@ -484,7 +481,7 @@ mod tests {
                 .metadata_text()
                 .contains("引用内容不可用：ref_index_miss")
         );
-        assert!(!quoted.fallback_text().contains("引用内容开始"));
+        assert_eq!(quoted.metadata_text(), quoted.fallback_text());
     }
 
     #[test]
