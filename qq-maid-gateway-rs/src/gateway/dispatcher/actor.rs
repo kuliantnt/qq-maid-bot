@@ -46,9 +46,7 @@ use super::types::{
     WorkerExitReason,
 };
 use super::worker::{WorkerContext, run_worker};
-use crate::{
-    api::QqApiClient, auth::AccessTokenManager, config::AppConfig, respond::RespondClient,
-};
+use crate::{api::QqApiClient, config::AppConfig, respond::RespondClient};
 
 pub(super) type HandlerFuture<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
 
@@ -79,7 +77,7 @@ impl RealMessageHandler {
     #[allow(clippy::new_ret_no_self, clippy::too_many_arguments)]
     pub(super) fn new(
         config: AppConfig,
-        auth: AccessTokenManager,
+        commands: GatewayCommandService,
         respond: RespondClient,
         api: QqApiClient,
         dedupe: Arc<MessageDedupe>,
@@ -89,12 +87,6 @@ impl RealMessageHandler {
         bot_identity: SharedBotIdentity,
         runtime: GatewayRuntimeStatus,
     ) -> Arc<dyn MessageHandler> {
-        let commands = GatewayCommandService::new(
-            config.clone(),
-            runtime.clone(),
-            respond.clone(),
-            Some(auth),
-        );
         Arc::new(Self {
             config,
             commands,

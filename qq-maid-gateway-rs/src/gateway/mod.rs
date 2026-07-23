@@ -107,8 +107,8 @@ pub async fn run_with_application_version(
         runtime.clone(),
         respond.clone(),
         qq_auth.clone(),
-    )
-    .with_application_version(application_version);
+        application_version,
+    );
     // 微信与 QQ 共用 Core；监听器只创建一次，之后统一交给渠道监督器管理生命周期。
     let dedupe = Arc::new(MessageDedupe::new(DEDUPE_TTL));
     // QQ 官方 REFIDX 与 OneBot message_id 共用同一进程内索引实现，但 key 始终包含
@@ -177,6 +177,7 @@ pub async fn run_with_application_version(
     let qq_official_handle = match config.qq_official_binding_state() {
         QqOfficialBindingState::Enabled => Some(tokio::spawn(run_qq_official(
             config,
+            commands,
             respond,
             push_sink,
             runtime,
@@ -301,6 +302,7 @@ fn finish_channel_results(
 #[allow(clippy::too_many_arguments)]
 async fn run_qq_official(
     config: AppConfig,
+    commands: GatewayCommandService,
     respond: RespondClient,
     push_sink: GatewayPushSink,
     runtime: GatewayRuntimeStatus,
@@ -335,7 +337,7 @@ async fn run_qq_official(
     let aggregator_shutdown = CancellationToken::new();
     let dispatcher = MessageDispatcher::new(
         config.clone(),
-        auth.clone(),
+        commands,
         respond.clone(),
         api.clone(),
         dedupe.clone(),
