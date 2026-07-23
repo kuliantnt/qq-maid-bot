@@ -320,7 +320,18 @@ fn quoted_text_uses_input_parts_without_repeating_summary() {
             .fallback_text()
             .contains("引用文本")
     );
+    assert!(
+        current.content_parts[0]
+            .fallback_text()
+            .contains("引用内容开始")
+    );
     assert_eq!(current.content_parts[1].text_content(), Some("OK"));
+    assert!(
+        current.content_parts[2]
+            .fallback_text()
+            .contains("引用内容结束")
+    );
+    assert_eq!(current.content_parts[3].text_content(), Some("继续"));
 }
 
 #[test]
@@ -362,6 +373,11 @@ fn build_chat_messages_includes_quoted_sender_summary_when_backfilled() {
     assert!(quote_text.contains("身份来源=event"));
     assert!(!quote_text.contains("用户上一条"));
     assert_eq!(current.content_parts[1].text_content(), Some("用户上一条"));
+    assert!(
+        current.content_parts[2]
+            .fallback_text()
+            .contains("引用内容结束")
+    );
 }
 
 #[test]

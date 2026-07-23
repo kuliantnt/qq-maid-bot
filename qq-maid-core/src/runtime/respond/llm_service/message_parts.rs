@@ -163,6 +163,11 @@ fn quoted_context_parts_for_model(
             supports_vision,
             TextSource::Quote,
         ));
+        parts.push(MessageInputPart::Text {
+            // Provider 不接收 TextSource，结束标记负责把引用 parts 与当前用户正文隔开。
+            text: "引用内容结束（以上内容块属于被引用消息；以下为当前用户消息）：".to_owned(),
+            source: Some(TextSource::Quote),
+        });
     }
     parts
 }
