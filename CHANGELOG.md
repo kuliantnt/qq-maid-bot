@@ -2,6 +2,24 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.21.3] - 2026-07-24
+
+### Changed
+
+* **工具领域边界收敛**（PR #576）：将 Todo 工具注册、结果投影、状态提示和成功校验收敛到 Todo 领域 facade；为 RSS、Knowledge、Memory、Search、Train、Weather 增加各自状态 adapter，通用 Tool Loop 只保留跨领域的结果顺序、重试覆盖和回退。
+* **领域存储导出收紧**（PR #576）：Todo、Memory、RSS 的存储导出改为显式 facade；维护文档同步明确二开时的领域边界，避免公共状态模块继续承载具体领域名称和意图判断。
+
+### Fixed
+
+* **QQ 引用图文消息超时**（PR #580）：按 QQ 官方 `message_type=103` 正确解析引用正文与附件，下载引用图片并在失败、超时或文件过大时降级为媒体摘要，避免不可达临时 URL 拖垮多模态链路；下载后清除临时远端 URL，防止鉴权参数进入 Core / LLM / 普通日志。
+* **`/ping` 应用版本注入**（PR #579）：QQ 官方 Dispatcher 复用已注入主包版本的命令服务，私聊与群聊 `/ping` 与根程序 `--version` 使用同一版本来源，不再回退到 Gateway 子 crate 版本。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 版本号提升到 `0.21.3`，内部 crate 版本不统一提升。
+* 本版本无数据库 migration、无必需配置迁移。Todo 工具名称、参数、返回语义，以及 `/todo` 可见编号与跨轮编号语义保持不变。
+* 引用图文修复仅影响 QQ 官方入口的引用媒体解析与下载降级路径；OneBot / 微信入口行为不变。
+
 ## [v0.21.2] - 2026-07-23
 
 ### Added
