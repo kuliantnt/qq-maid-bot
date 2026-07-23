@@ -1,6 +1,7 @@
 //! 只读知识检索 Tool。
 
 mod index;
+pub(crate) mod status;
 mod storage;
 mod tool;
 

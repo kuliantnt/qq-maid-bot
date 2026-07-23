@@ -2,13 +2,7 @@
 //!
 //! 这些轻量规则只用于用户可见状态，不参与工具暴露或执行决策。
 
-use super::{
-    memory,
-    status::{StatusAction, StatusHint, StatusSubject},
-    todo,
-    todo::route::TodoIntentAction,
-    train, weather,
-};
+use super::{status::StatusHint, todo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InteractionDomain {
@@ -64,31 +58,25 @@ pub(crate) fn classify_status_hint(
     interaction_state: &InteractionStateSnapshot,
 ) -> Option<StatusHint> {
     let has_recent_todo_context = interaction_state.has_recent_context(InteractionDomain::Todo);
-    let lower = text.to_ascii_lowercase();
-    let todo_intent = todo::route::classify_todo_intent(text, &lower, has_recent_todo_context);
-    if todo_intent.is_confident() {
-        let action = match todo::route::todo_intent_action(text) {
-            TodoIntentAction::Confirm => StatusAction::Confirm,
-            TodoIntentAction::Write => StatusAction::Write,
-            TodoIntentAction::Query => StatusAction::Query,
-            TodoIntentAction::Process => StatusAction::Process,
-        };
-        return Some(StatusHint::new(StatusSubject::Todo, action));
+    if let Some(hint) = todo::status::classify_status_hint(text, has_recent_todo_context) {
+        return Some(hint);
     }
-    if memory::route::has_memory_status_intent(text) {
-        return Some(StatusHint::new(StatusSubject::Record, StatusAction::Write));
-    }
-    if weather::route::has_weather_status_intent(text) {
-        return Some(StatusHint::new(StatusSubject::Weather, StatusAction::Query));
-    }
-    if train::route::has_train_status_intent(text) {
-        return Some(StatusHint::new(StatusSubject::Train, StatusAction::Query));
+    for classify in [
+        super::memory::status::classify_status_hint,
+        super::weather::status::classify_status_hint,
+        super::train::status::classify_status_hint,
+    ] {
+        if let Some(hint) = classify(text) {
+            return Some(hint);
+        }
     }
     None
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::runtime::tools::status::{StatusAction, StatusSubject};
+
     use super::*;
 
     #[test]

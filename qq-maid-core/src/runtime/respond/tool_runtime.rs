@@ -12,11 +12,9 @@ use crate::{
     runtime::tools::rss::RssFetcher,
     runtime::tools::weather::WEATHER_TOOL_NAME,
     runtime::tools::{
-        CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool,
-        KnowledgeSearchTool, ListTodoTool, ManageRecurringReminderTool, MergeTodoTool,
-        RestoreTodoTool, RssManageSubscriptionsTool, RssRecentItemsTool, SaveMemoryTool, TaskStore,
-        TodoScopedToolInputs, ToolTurnPostprocess, TrainScheduleTool, WEB_SEARCH_TOOL_NAME,
-        WeatherTool, WebSearchTimeouts, WebSearchTool, postprocess_tool_turn,
+        KnowledgeSearchTool, RssManageSubscriptionsTool, RssRecentItemsTool, SaveMemoryTool,
+        TaskStore, TodoScopedToolInputs, ToolTurnPostprocess, TrainScheduleTool,
+        WEB_SEARCH_TOOL_NAME, WeatherTool, WebSearchTimeouts, WebSearchTool, postprocess_tool_turn,
         replace_scoped_todo_tools_from_visible_snapshot, todo,
     },
     storage::notification::NotificationOutboxStore,
@@ -74,51 +72,13 @@ impl ToolRuntime {
                 knowledge_index,
                 tool_result_max_chars,
             )),
-            Arc::new(ListTodoTool::new(
-                stores.task_store.clone(),
-                stores.session_store.clone(),
-            )),
-            Arc::new(GetTodoTool::new(
-                stores.task_store.clone(),
-                stores.session_store.clone(),
-            )),
-            Arc::new(CreateTodoTool::new(
-                stores.task_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-            Arc::new(CompleteTodoTool::new(
-                stores.task_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-            Arc::new(EditTodoTool::new(
-                stores.task_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-            Arc::new(RestoreTodoTool::new(
-                stores.task_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-            Arc::new(DeleteTodoTool::new(
-                stores.task_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-            Arc::new(MergeTodoTool::new(
-                stores.task_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-            Arc::new(ManageRecurringReminderTool::new(
-                stores.task_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
             Arc::new(save_memory_tool.clone()),
         ];
+        tools.extend(todo::registered_tools(
+            stores.task_store.clone(),
+            stores.session_store.clone(),
+            stores.notification_store.clone(),
+        ));
         if weather_available {
             tools.push(Arc::new(WeatherTool::new(
                 executors.weather_executor.clone(),

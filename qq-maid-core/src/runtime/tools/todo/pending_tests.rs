@@ -2,12 +2,9 @@ use crate::runtime::respond::tests::support::{message, test_meta, test_service};
 use crate::runtime::{
     pending::PreparedAction,
     session::{SessionMeta, now_iso_cn},
-    tools::{
-        CompleteTodoTool,
-        todo::{
-            ClarificationCandidate, PendingTodoClarification, TodoItemDraft, TodoPendingPayload,
-            TodoStatus, TodoStore, TodoTimePrecision,
-        },
+    tools::todo::{
+        ClarificationCandidate, CompleteTodoTool, PendingTodoClarification, TodoItemDraft,
+        TodoPendingPayload, TodoStatus, TodoStore, TodoTimePrecision,
     },
 };
 use crate::service::CoreInboundKind;

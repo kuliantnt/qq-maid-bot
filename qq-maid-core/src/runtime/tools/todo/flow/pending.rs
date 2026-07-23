@@ -28,12 +28,9 @@ use crate::{
         pending::{PendingReplyKind, classify_reply},
         session::{LAST_QUERY_TTL_SECONDS, SessionRecord},
         tools::todo::{
-            PendingTodoClarification, TodoBulkDeleteOutcome, TodoOwner, TodoPendingPayload,
-            TodoStatus, todo_lexicon,
-        },
-        tools::{
             CompleteTodoTool, DeleteTodoTool, EditTodoTool, ManageRecurringReminderTool,
-            RestoreTodoTool,
+            PendingTodoClarification, RestoreTodoTool, TodoBulkDeleteOutcome, TodoOwner,
+            TodoPendingPayload, TodoStatus, todo_lexicon,
         },
         tools::{cancel_reminder_task, cancel_reminder_task_by_id},
     },

@@ -5,6 +5,7 @@
 //! QWeather 的地点匹配、增强摘要和请求细节分别下沉到内部子模块。
 
 mod qweather;
+pub(crate) mod status;
 mod tool;
 mod types;
 

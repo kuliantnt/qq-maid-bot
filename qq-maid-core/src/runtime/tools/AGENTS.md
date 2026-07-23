@@ -17,6 +17,11 @@
 
 禁止把具体业务规则散落到 `respond/chat_flow/session/prompt/gateway/llm` 中。Respond 层只负责通用编排、工具调用、结果投影和必要上下文维护；Gateway 只负责平台消息收发；LLM crate 只负责模型协议和 Tool Loop 协议。
 
+领域 `mod.rs` 是跨模块唯一门面：只导出实际调用方需要的稳定类型和函数，禁止用
+`pub use storage::*` 或大量转发重新暴露 Repository 子模块。通用 `agent_turn.rs`、状态
+提示和 Tool Registry 只能注册领域 adapter / 集合；具体 Tool 名称、操作分类、结果索引
+合并、成功验真和领域状态判断必须留在对应 `<domain>/`。
+
 ## 开发自己的业务工具
 
 新增一个独立业务能力时，先把它当作一个 `<domain>` 设计，而不是只写一个模型函数。可以参考 `todo/` 的拆分方式，但不要照搬 Todo 的所有复杂度；按业务是否需要持久化、用户后续引用、主动通知、确认/澄清来决定交付面。
@@ -58,10 +63,13 @@
 
 ## 工具注册
 
-新增工具通常需要同步注册：
+在已有领域内新增 Tool 时，通常只修改该领域的 Tool 实现、`registered_tools` 集合、
+配置白名单和测试，不应继续改 `runtime/tools/mod.rs`、通用 `agent_turn.rs` 或在
+`respond/tool_runtime.rs` 逐个构造 Tool。只有新增一个全新领域时，才在通用层增加一次
+领域模块声明和注册集合接线。
 
-* `qq-maid-core/src/runtime/tools/mod.rs`
-* `qq-maid-core/src/runtime/respond/tool_runtime.rs`
+仍需同步检查：
+
 * `qq-maid-core/src/config/agent.rs`
 * `runtime/config/agent.example.toml`
 * 必要时更新 `qq-maid-core/src/runtime/respond/help.rs`
@@ -70,13 +78,19 @@
 
 注册检查清单：
 
-* 在 domain `mod.rs` 中导出 Tool 类型和必要的 domain helper；跨模块只暴露稳定门面，不暴露临时解析细节。
-* 在 `runtime/tools/mod.rs` 中 `mod` / `pub use` 新 Tool，保持 Core 其他层只依赖工具门面。
-* 在 `respond/tool_runtime.rs` 的服务端 `ToolRegistry` 注册实例，并注入所需 store、executor、session 或 notification 依赖。
+* 在 domain `mod.rs` 中提供稳定门面；有多个 Tool 时由领域构造 `registered_tools` 一类的注册集合，跨模块不得逐个导出或构造具体 Tool。
+* 在 `runtime/tools/mod.rs` 中只声明领域模块和必要的通用抽象，避免成为领域 Tool 的转发清单。
+* 在 `respond/tool_runtime.rs` 的服务端 `ToolRegistry` 追加领域注册集合，并注入领域所需 store、executor、session 或 notification 依赖；Respond 不得维护领域 Tool 名称、构造顺序或参数差异。
 * 在 `config/agent.rs` 的默认白名单中决定私聊和群聊是否开放；写入类或持久化类默认只考虑私聊，群聊必须显式评估 owner 语义。
 * 在 `runtime/config/agent.example.toml` 更新可版本管理的工具白名单示例和注释，保持默认策略与代码默认值一致。
 * 如果用户需要知道显式命令或能力边界，更新 `respond/help.rs` 或对应 README；文档不要复制大段实现细节。
 * 如果 Tool 会产生用户可见列表或单条对象，接入通用 visible entity 快照，并在 Respond 请求进入 Tool Runtime 时替换为带作用域限制的 Tool。
+* 有 Tool Loop 整轮回执、重试覆盖、结果索引合并、成功验真或自然语言状态提示时，在领域目录提供 adapter；通用层只调度 adapter 和通用结果，不枚举领域 Tool 名称或业务动作。
+
+二开新增全新领域时，最小通用接线应只有：在 `runtime/tools/mod.rs` 声明领域、在
+`respond/tool_runtime.rs` 注册领域集合、在通用结果/状态 adapter 列表中登记领域入口。
+如果还需要把 SQL、业务字段、Tool 名称分支或用户文案写进这些通用文件，说明领域门面
+仍不完整，应先回到 `<domain>/` 补齐，而不是继续扩大通用层。
 
 ## 测试要求
 

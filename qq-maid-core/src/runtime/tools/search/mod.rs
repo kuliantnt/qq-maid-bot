@@ -64,6 +64,7 @@ impl Default for WebSearchTimeouts {
 
 pub(crate) mod agent_turn;
 mod ops;
+pub(crate) mod status;
 
 pub(crate) type WebSearchDeltaHandler<'a> = Box<
     dyn FnMut(String) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send>> + Send + 'a,

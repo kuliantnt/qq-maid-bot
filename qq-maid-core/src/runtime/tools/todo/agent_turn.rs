@@ -14,19 +14,12 @@ use crate::{
         session::{SessionMeta, SessionRecord},
         tools::{
             TaskStore,
-            agent_turn::{DomainTurnDiagnostics, DomainTurnPostprocessor, IndexedToolOutcomes},
+            agent_turn::{DomainResultProjection, DomainTurnDiagnostics, DomainTurnPostprocessor},
             todo,
         },
     },
-    service::VisibleEntitySnapshot,
     util::metrics::LlmMetrics,
 };
-
-pub(crate) struct TodoAgentProjection {
-    pub(crate) consumed_result_indexes: std::collections::HashSet<usize>,
-    pub(crate) outcomes: IndexedToolOutcomes,
-    pub(crate) visible_entity_snapshot: Option<VisibleEntitySnapshot>,
-}
 
 /// 捕获投影前的 Todo 会话上下文和模型原始回复，避免通用 Tool Turn 调度层
 /// 感知验真候选细节，也避免事实卡或工具回执干扰成功声明判定。
@@ -95,12 +88,12 @@ pub(crate) fn project_results(
     meta: &SessionMeta,
     results: &[ToolExecutionResult],
     attempts: &[qq_maid_llm::provider::ToolExecutionAttempt],
-) -> Result<TodoAgentProjection, LlmError> {
+) -> Result<DomainResultProjection, LlmError> {
     let owner = TaskStore::owner(meta.user_id.as_deref(), &meta.scope_key);
     let aggregation =
         todo::flow::aggregate_todo_tool_results(task_store, session, &owner, results, attempts)?;
     let visible_entity_snapshot = aggregation.visible_entity_snapshot(session, meta);
-    Ok(TodoAgentProjection {
+    Ok(DomainResultProjection {
         consumed_result_indexes: aggregation.consumed_result_indexes,
         outcomes: aggregation.outcomes,
         visible_entity_snapshot,

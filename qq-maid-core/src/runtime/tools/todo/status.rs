@@ -11,7 +11,40 @@
 //! - 短中文文案只用于行内状态点缀（`format_todo_*`），不得替换为带“待办”后缀的
 //!   长文案，否则会改变 QQ 侧确认/删除提示文案。
 
-use crate::runtime::tools::todo::TodoStatus;
+use crate::runtime::tools::{
+    status::{StatusAction, StatusHint, StatusSubject},
+    todo::{TodoStatus, route::TodoIntentAction},
+};
+
+/// 根据 Todo Tool 名称生成通用状态提示；具体工具集合由 Todo 模块维护。
+pub(crate) fn status_hint_for_tool_name(tool_name: &str) -> Option<StatusHint> {
+    let action = match tool_name {
+        "list_todos" | "get_todo" => StatusAction::Query,
+        "create_todo" | "edit_todo" | "merge_todos" | "manage_recurring_reminder" => {
+            StatusAction::Write
+        }
+        "complete_todos" | "restore_todos" | "delete_todos" => StatusAction::Confirm,
+        "clarification_control" => StatusAction::Process,
+        _ => return None,
+    };
+    Some(StatusHint::new(StatusSubject::Todo, action))
+}
+
+/// Todo 自然语言意图只在领域内分类，外层状态调度器不维护 Todo 词表和动作映射。
+pub(crate) fn classify_status_hint(text: &str, has_recent_context: bool) -> Option<StatusHint> {
+    let lower = text.to_ascii_lowercase();
+    let intent = super::route::classify_todo_intent(text, &lower, has_recent_context);
+    if !intent.is_confident() {
+        return None;
+    }
+    let action = match super::route::todo_intent_action(text) {
+        TodoIntentAction::Confirm => StatusAction::Confirm,
+        TodoIntentAction::Write => StatusAction::Write,
+        TodoIntentAction::Query => StatusAction::Query,
+        TodoIntentAction::Process => StatusAction::Process,
+    };
+    Some(StatusHint::new(StatusSubject::Todo, action))
+}
 
 /// 面向模型的机器格式状态串，与 `TodoStatus` 的 serde snake_case 口径一致。
 pub fn status_machine_str(status: &TodoStatus) -> &'static str {
