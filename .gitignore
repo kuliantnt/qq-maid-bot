@@ -94,3 +94,5 @@ runtime/qq-maid-healthcheck.sh
 runtime/llmctl.sh
 runtime/gatewayctl.sh
 runtime/config/knowledge/project_docs/.qq-maid-project-docs-kb
+runtime/botmon.sh
+runtime/qq-maid-systemd.sh
