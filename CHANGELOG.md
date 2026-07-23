@@ -2,6 +2,28 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.21.2] - 2026-07-23
+
+### Added
+
+* **`/ping` 显示主包版本**（PR #572）：`/ping` 展示根包 `qq-maid-bot` 的版本号，由主程序入口注入 Gateway，避免误用 Gateway 子 crate 版本。
+
+### Changed
+
+* **工具状态语义收紧**（PR #572）：自然语言状态分类只生成用户提示和 diagnostics，不再参与 Tool 暴露或执行；Search / RSS 等弱关键词与技术讨论更不易被误判成正在调用工具。
+* **Web Search 结果投影收敛**（PR #572）：同轮重复只读搜索只展示首次真实结果，缓存命中仍保留在 Agent 原始轨迹；不再为缓存命中发送额外 Started / Finished / Failed 进度事件。
+* **Todo 成功验真覆盖省略式请求**（PR #572）：当模型声称已新增、已记录、已修改、已完成或已删除 Todo 时，要求本轮存在真实成功的 Todo 写工具结果；“明天开会”“下午整理一下”等省略式任务声明同样进入验真。
+
+### Fixed
+
+* **后置 Todo 创建声明拦截**（PR #572）：模型未调用写工具却声称“已记录”时返回 `todo_success_not_verified`，不再把伪造成功文案展示给用户；普通创作、解释和分析中的“已完成”不会被误拦截。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 版本号提升到 `0.21.2`，内部 crate 版本不统一提升。
+* 本版本无数据库 migration、无必需配置迁移。Todo pending、用户编号快照、权限与持久化语义不变。
+* 状态提示继续保持严格，不影响模型调用已注册白名单 Tool；重复只读搜索的 `tool_results` / `tool_attempts` / `deduplicated` 与模型可见原始轨迹保持完整。
+
 ## [v0.21.1] - 2026-07-23
 
 ### Added
