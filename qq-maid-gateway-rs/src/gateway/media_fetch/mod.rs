@@ -12,7 +12,7 @@ use futures_util::future::join_all;
 use qq_maid_common::input_part::{MediaStatus, MessageInputPart, MessageMedia};
 use tracing::{debug, warn};
 
-use super::event::Attachment;
+use super::event::{Attachment, MessageReply};
 
 mod local_cache;
 
@@ -47,6 +47,7 @@ pub(crate) async fn fetch_qq_official_image_attachments(
 ) {
     if attachments.is_empty() {
         mark_unreadable_image_parts(input_parts);
+        clear_remote_image_urls(input_parts);
         return;
     }
 
@@ -89,6 +90,7 @@ pub(crate) async fn fetch_qq_official_image_attachments(
 
     if fetches.is_empty() {
         mark_unreadable_image_parts(input_parts);
+        clear_remote_image_urls(input_parts);
         return;
     }
 
@@ -135,6 +137,75 @@ pub(crate) async fn fetch_qq_official_image_attachments(
     }
 
     mark_unreadable_image_parts(input_parts);
+    clear_remote_image_urls(input_parts);
+}
+
+/// 引用附件不位于当前消息顶层 attachments，需要直接从已经归一化的 quote parts
+/// 中取回。下载失败只更新媒体可读状态，Core 随后会把它转换成摘要文本继续回复。
+pub(crate) async fn fetch_qq_official_quoted_images(
+    client: &reqwest::Client,
+    context: &MediaFetchContext,
+    message_id: &str,
+    reply: Option<&mut MessageReply>,
+) {
+    let Some(reply) = reply else {
+        return;
+    };
+    deduplicate_quoted_images_by_filename(&mut reply.input_parts);
+    let attachments = reply
+        .input_parts
+        .iter()
+        .filter_map(|part| {
+            let MessageInputPart::Image { media } = part else {
+                return None;
+            };
+            Some(Attachment {
+                content_type: media.mime_type.clone(),
+                filename: media.filename.clone(),
+                url: media.url.clone(),
+                size_bytes: media.size_bytes,
+                media_id: media.media_id.clone(),
+                file_id: media.file_id.clone(),
+                attachment_id: media.attachment_id.clone(),
+                asr_refer_text: None,
+                voice_wav_url: None,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    fetch_qq_official_image_attachments(
+        client,
+        context,
+        message_id,
+        &mut reply.input_parts,
+        &attachments,
+    )
+    .await;
+    reply.media_summaries = reply
+        .input_parts
+        .iter()
+        .filter_map(qq_maid_common::input_part::QuotedMediaSummary::from_input_part)
+        .collect();
+}
+
+fn deduplicate_quoted_images_by_filename(input_parts: &mut Vec<MessageInputPart>) {
+    let mut seen = std::collections::HashSet::new();
+    input_parts.retain(|part| {
+        let MessageInputPart::Image { media } = part else {
+            return true;
+        };
+        let Some(filename) = media
+            .filename
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return true;
+        };
+        // QQ 官方图片文件名实测按内容摘要稳定生成；同一引用内保留首个即可，
+        // 避免相同图片因临时 URL/fileid 不同而重复下载、重复发送给模型。
+        seen.insert(filename.to_ascii_lowercase())
+    });
 }
 
 pub(crate) fn normalize_download_url(value: &str) -> Option<String> {
@@ -326,16 +397,34 @@ fn update_matching_image_part(
 }
 
 fn media_matches_attachment(media: &MessageMedia, attachment: &Attachment) -> bool {
-    attachment
-        .url
-        .as_deref()
-        .zip(media.url.as_deref())
-        .is_some_and(|(left, right)| left.trim() == right.trim())
-        || attachment
-            .filename
-            .as_deref()
-            .zip(media.filename.as_deref())
-            .is_some_and(|(left, right)| left.trim() == right.trim())
+    if let Some(matches) =
+        exact_optional_field_match(attachment.url.as_deref(), media.url.as_deref())
+    {
+        return matches;
+    }
+    for (attachment_id, media_id) in [
+        (attachment.file_id.as_deref(), media.file_id.as_deref()),
+        (attachment.media_id.as_deref(), media.media_id.as_deref()),
+        (
+            attachment.attachment_id.as_deref(),
+            media.attachment_id.as_deref(),
+        ),
+    ] {
+        if let Some(matches) = exact_optional_field_match(attachment_id, media_id) {
+            return matches;
+        }
+    }
+    exact_optional_field_match(attachment.filename.as_deref(), media.filename.as_deref())
+        .unwrap_or(false)
+}
+
+fn exact_optional_field_match(left: Option<&str>, right: Option<&str>) -> Option<bool> {
+    let left = left.map(str::trim).filter(|value| !value.is_empty());
+    let right = right.map(str::trim).filter(|value| !value.is_empty());
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left == right),
+        _ => None,
+    }
 }
 
 fn mark_unreadable_image_parts(parts: &mut [MessageInputPart]) {
@@ -348,6 +437,18 @@ fn mark_unreadable_image_parts(parts: &mut [MessageInputPart]) {
             MediaStatus::Available | MediaStatus::MissingReadableUrl
         ) {
             media.status = media.inferred_readability_status();
+        }
+    }
+}
+
+fn clear_remote_image_urls(parts: &mut [MessageInputPart]) {
+    for part in parts {
+        if let MessageInputPart::Image { media } = part {
+            // QQ 图片 URL 可能携带短期鉴权参数；下载结果落盘或降级后不再向 Core 透传。
+            media.url = None;
+            if media.local_path.is_none() && media.status == MediaStatus::Available {
+                media.status = MediaStatus::MissingReadableUrl;
+            }
         }
     }
 }
@@ -368,6 +469,8 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use tokio::net::TcpListener;
+
+    mod quoted;
 
     fn media_file_count(root: &std::path::Path) -> usize {
         if !root.exists() {
@@ -517,6 +620,7 @@ mod tests {
         };
         let local_path = media.local_path.as_deref().unwrap();
         assert_eq!(media.status, MediaStatus::Available);
+        assert_eq!(media.url, None);
         assert_eq!(std::fs::read(local_path).unwrap(), b"fake-jpeg");
     }
 
@@ -728,6 +832,7 @@ mod tests {
             panic!("expected image part");
         };
         assert_eq!(media.status, MediaStatus::SizeExceeded);
+        assert_eq!(media.url, None);
         assert!(media.local_path.is_none());
         assert_eq!(media_file_count(&root_dir), 0);
     }
