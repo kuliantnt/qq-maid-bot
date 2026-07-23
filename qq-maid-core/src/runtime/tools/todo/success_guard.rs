@@ -1,13 +1,55 @@
 //! Todo Tool Loop 成功文案守卫。
 //!
-//! 本模块只做“输出验真”：当模型回复声称已新增、已修改、已完成或已删除
-//! Todo 时，必须能在本轮 Tool Loop 结果里看到真实成功的 Todo 写工具输出。
-//! 这里不再根据用户输入猜测本轮应该调用哪个工具，避免路由、模型和守卫三套
-//! 意图判断互相冲突。
+//! 本模块只维护“成功边界”：独立判断用户输入是否需要启用验真，并在模型回复
+//! 声称已新增、已修改、已完成或已删除 Todo 时，要求本轮 Tool Loop 存在真实成功
+//! 的 Todo 写工具输出。候选判断不决定本轮应该调用哪个工具，也不参与 Tool 暴露、
+//! 路由或执行，避免与状态提示和业务流程耦合。
 
 use serde_json::Value;
 
 use qq_maid_llm::provider::ToolExecutionResult;
+
+use super::route::{self, TodoIntentAction};
+
+// 省略式待办没有“待办/提醒”等显式对象，只能用时间线索与明确、可执行的任务行为
+// 共同识别。这里维护 Todo 域正向行为，不通过公共闲聊/创作/解释排除词猜测意图。
+const IMPLICIT_TODO_TASK_ACTION_MARKERS: &[&str] = &[
+    "开会",
+    "参加会议",
+    "整理",
+    "交水电费",
+    "缴费",
+    "交房租",
+    "还款",
+    "还书",
+    "采购",
+    "取件",
+    "拿快递",
+    "寄件",
+    "送材料",
+    "接人",
+    "提交",
+    "交作业",
+    "打电话",
+    "回电话",
+    "回邮件",
+    "回复邮件",
+    "预约",
+    "报名",
+    "续费",
+    "报销",
+    "体检",
+    "复诊",
+    "吃药",
+    "服药",
+    "锻炼",
+    "跑步",
+    "检查",
+    "复查",
+    "维修",
+    "打印",
+    "备份",
+];
 
 const TODO_WRITE_SUCCESS_MARKERS: &[&str] = &[
     "已新增",
@@ -39,6 +81,26 @@ const TODO_WRITE_SUCCESS_MARKERS: &[&str] = &[
     "已经跳过",
     "已经关闭",
 ];
+
+/// 判定用户输入是否需要启用 Todo 成功文案验真。
+///
+/// 这是成功边界，不是用户状态提示分类：显式 Todo 写意图沿用既有强信号，另行覆盖
+/// “时间表达 + 明确任务行为”的省略式创建请求。结果只决定是否核验模型最终文案，
+/// 不参与 Tool 暴露、路由、参数解析或执行。
+pub(crate) fn is_todo_success_verification_candidate(
+    text: &str,
+    has_recent_todo_context: bool,
+) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let intent = route::classify_todo_intent(text, &lower, has_recent_todo_context);
+    if intent.is_confident() && !matches!(route::todo_intent_action(text), TodoIntentAction::Query)
+    {
+        return true;
+    }
+
+    route::looks_like_temporal_expression(text)
+        && contains_any(text, IMPLICIT_TODO_TASK_ACTION_MARKERS)
+}
 
 /// 判定模型是否可以安全透传 Todo 成功文案。
 ///
@@ -582,6 +644,30 @@ mod tests {
                 claimed_success: false
             }
         );
+    }
+
+    #[test]
+    fn implicit_todo_success_candidates_require_time_and_task_behavior() {
+        for input in ["明天开会", "下午整理一下", "晚上交水电费"] {
+            assert!(
+                super::is_todo_success_verification_candidate(input, false),
+                "省略式任务应进入成功验真：{input}"
+            );
+        }
+
+        for input in [
+            "开会时怎么活跃气氛",
+            "整理 Rust 所有权知识点的思路",
+            "明天陪我聊聊",
+            "晚上分析一下架构",
+            "下午写一段文案",
+            "明天解释这段日志",
+        ] {
+            assert!(
+                !super::is_todo_success_verification_candidate(input, false),
+                "非省略式任务不应进入成功验真：{input}"
+            );
+        }
     }
 
     #[test]

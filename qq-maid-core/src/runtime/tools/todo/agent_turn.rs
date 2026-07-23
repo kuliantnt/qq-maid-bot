@@ -97,8 +97,7 @@ pub(crate) fn validate_model_reply_success(
 }
 
 pub(crate) fn should_validate_success(
-    intent: todo::route::TodoIntent,
-    action: todo::route::TodoIntentAction,
+    user_input_is_candidate: bool,
     output: &RespondOutput,
 ) -> bool {
     output
@@ -107,7 +106,7 @@ pub(crate) fn should_validate_success(
         .iter()
         .any(|name| todo::success_guard::is_todo_write_tool(name))
         || todo::success_guard::has_todo_write_tool_result(&output.agent.tool_results)
-        || (intent.is_confident() && !matches!(action, todo::route::TodoIntentAction::Query))
+        || user_input_is_candidate
 }
 
 /// 最终模型轮次失败后，只在 Todo 写工具已有可信结果时构造确定性回执输入。

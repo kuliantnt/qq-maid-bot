@@ -103,12 +103,11 @@ pub(crate) fn postprocess_tool_turn(
 
     let todo_interaction = todo::interaction_state::snapshot_for_request(req, Some(state_session));
     let user_text = req.effective_user_text();
-    let todo_intent = todo::route::classify_todo_intent(
-        &user_text,
-        &user_text.to_ascii_lowercase(),
-        todo_interaction.has_visible_snapshot || todo_interaction.has_recent_operation,
-    );
-    let todo_action = todo::route::todo_intent_action(&user_text);
+    let todo_success_verification_candidate =
+        todo::success_guard::is_todo_success_verification_candidate(
+            &user_text,
+            todo_interaction.has_visible_snapshot || todo_interaction.has_recent_operation,
+        );
 
     let outcome = project_tool_turn(task_store, state_session, meta, &output)?;
     if let Some(interaction) = standalone_interaction.as_mut() {
@@ -118,7 +117,7 @@ pub(crate) fn postprocess_tool_turn(
     }
 
     let todo_guard_enabled =
-        todo::agent_turn::should_validate_success(todo_intent, todo_action, &output);
+        todo::agent_turn::should_validate_success(todo_success_verification_candidate, &output);
     let validation = if outcome.can_replace_model_reply() {
         if outcome.should_preserve_model_reply() {
             apply_agent_turn_outcome_with_model_reply(&mut output, &outcome);

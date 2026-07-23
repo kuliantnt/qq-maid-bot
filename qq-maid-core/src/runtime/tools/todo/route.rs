@@ -164,7 +164,7 @@ fn has_reminder_action(text: &str) -> bool {
     contains_any(text, REMINDER_ACTION_MARKERS)
 }
 
-fn looks_like_temporal_expression(text: &str) -> bool {
+pub(super) fn looks_like_temporal_expression(text: &str) -> bool {
     // 路由层只判断“是否存在时间线索”，不消费推断出的日期，也不改变 Todo Tool
     // 内部基于模型/时间上下文生成的最终 due_date/due_at。
     let ctx = time_context::request_time_context();

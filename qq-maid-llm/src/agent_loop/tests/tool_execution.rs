@@ -231,6 +231,17 @@ async fn duplicate_read_only_tool_call_replays_success_and_keeps_dependency_chai
 #[tokio::test]
 async fn duplicate_web_search_executes_once_and_returns_cache_marker_to_model() {
     let calls = Arc::new(StdMutex::new(0));
+    let events = Arc::new(StdMutex::new(Vec::new()));
+    let progress_sink = {
+        let events = events.clone();
+        Arc::new(move |event: ToolLoopProgressEvent| {
+            let events = events.clone();
+            Box::pin(async move {
+                events.lock().unwrap().push(event);
+                Ok(())
+            }) as ToolLoopProgressFuture
+        })
+    };
     let registry = registry_with(vec![Arc::new(NamedSlowReadOnlyTool {
         name: "web_search",
         calls: calls.clone(),
@@ -247,16 +258,35 @@ async fn duplicate_web_search_executes_once_and_returns_cache_marker_to_model() 
     ));
     let observed = session.observed.clone();
 
-    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
-        .await
-        .unwrap();
+    let outcome = run_agent_loop(
+        session,
+        registry,
+        test_context(),
+        3,
+        Some(progress_sink),
+        None,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(*calls.lock().unwrap(), 1);
     assert_eq!(outcome.reply, "answer based on the first search");
     assert_eq!(outcome.agent.executed_tools, ["web_search"]);
     assert_eq!(outcome.agent.tool_results.len(), 2);
+    assert_eq!(outcome.agent.tool_attempts.len(), 2);
     assert_eq!(outcome.agent.tool_results[0].output["value"], "rust");
     assert_eq!(outcome.agent.tool_results[1].output["deduplicated"], true);
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![
+            ToolLoopProgressEvent::ToolCallStarted {
+                tool_name: "web_search".to_owned()
+            },
+            ToolLoopProgressEvent::ToolCallFinished {
+                tool_name: "web_search".to_owned()
+            }
+        ]
+    );
     let observed = observed.lock().unwrap();
     assert!(observed[1].0[0].output.contains("rust"));
     assert!(observed[2].0[0].output.contains("deduplicated"));
@@ -911,6 +941,17 @@ async fn unknown_tool_is_emitted_and_attempted_but_rejected() {
 #[tokio::test]
 async fn invalid_tool_arguments_are_emitted_and_attempted_but_not_executed() {
     let calls = Arc::new(StdMutex::new(0));
+    let events = Arc::new(StdMutex::new(Vec::new()));
+    let progress_sink = {
+        let events = events.clone();
+        Arc::new(move |event: ToolLoopProgressEvent| {
+            let events = events.clone();
+            Box::pin(async move {
+                events.lock().unwrap().push(event);
+                Ok(())
+            }) as ToolLoopProgressFuture
+        })
+    };
     let registry = registry_with(vec![Arc::new(CountingTool {
         name: "echo",
         calls: calls.clone(),
@@ -927,9 +968,16 @@ async fn invalid_tool_arguments_are_emitted_and_attempted_but_not_executed() {
         ],
     ));
 
-    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
-        .await
-        .unwrap();
+    let outcome = run_agent_loop(
+        session,
+        registry,
+        test_context(),
+        3,
+        Some(progress_sink),
+        None,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(outcome.agent.emitted_tools, vec!["echo"]);
     assert_eq!(outcome.agent.model_rounds, 2);
@@ -940,6 +988,12 @@ async fn invalid_tool_arguments_are_emitted_and_attempted_but_not_executed() {
     assert_eq!(outcome.agent.tool_results[0].name, "echo");
     assert!(!outcome.agent.tool_results[0].succeeded);
     assert_eq!(*calls.lock().unwrap(), 0);
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![ToolLoopProgressEvent::ToolCallFailed {
+            tool_name: "echo".to_owned()
+        }]
+    );
 }
 
 #[tokio::test]
