@@ -20,7 +20,7 @@ use crate::{
 
 use super::template::{TodoPushBody, format_todo_single_reminder_push};
 
-const TODO_REMINDER_SOURCE: &str = "todo";
+pub(crate) const TODO_REMINDER_SOURCE: &str = "todo";
 const TODO_REMINDER_KIND: &str = "todo_reminder";
 
 #[derive(Clone)]

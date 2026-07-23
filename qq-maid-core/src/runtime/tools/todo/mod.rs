@@ -18,6 +18,7 @@ pub(crate) mod edit_patch;
 pub(crate) mod flow;
 pub(crate) mod format;
 mod freshness;
+pub(crate) mod group_admin;
 pub(crate) mod interaction_state;
 mod json;
 pub(crate) mod ops;

@@ -17,6 +17,7 @@ use crate::{
 };
 
 // 拆分出的纯 helper 子模块：均不改变 schema 与对外 API。
+mod delete;
 mod id;
 mod normalize;
 mod query;
@@ -47,6 +48,9 @@ pub use types::*;
 pub use schema::TODO_MIGRATIONS;
 #[cfg(test)]
 pub use time::infer_due_date_from_text;
+
+#[cfg(test)]
+mod group_admin_tests;
 
 use self::id::{
     clean_todo_id, parse_required_todo_db_id, parse_todo_db_id, private_target_from_scope_key,
@@ -814,117 +818,6 @@ impl TodoStore {
         tx.commit().map_err(TodoError::from_sql)?;
         Ok(TodoBulkRestoreOutcome {
             restored,
-            skipped_ids,
-        })
-    }
-
-    /// 物理删除已完成待办事项（按 ID 列表匹配）。
-    pub fn delete_completed_by_ids(
-        &self,
-        owner: &TodoOwner,
-        ids: &[String],
-    ) -> Result<TodoBulkDeleteOutcome, TodoError> {
-        self.delete_by_ids_with_status(owner, ids, TodoStatus::Completed)
-    }
-
-    /// 物理删除进行中的待办事项（按 ID 列表匹配）。
-    ///
-    /// 删除确认只能删除发起确认时仍处于 Pending 的记录；如果确认期间记录状态变化，
-    /// 这里会按 skipped 处理，避免过期确认越过用户当前状态授权。
-    pub fn delete_pending_by_ids(
-        &self,
-        owner: &TodoOwner,
-        ids: &[String],
-    ) -> Result<TodoBulkDeleteOutcome, TodoError> {
-        self.delete_by_ids_with_status(owner, ids, TodoStatus::Pending)
-    }
-
-    /// 按 ID 物理删除任意状态的待办事项。
-    ///
-    /// 仅用于调用方明确授权删除任意当前状态的场景；确认链路应使用带状态条件的
-    /// `delete_*_by_ids`，避免过期确认越过发起确认时的状态边界。
-    pub fn delete_by_ids(
-        &self,
-        owner: &TodoOwner,
-        ids: &[String],
-    ) -> Result<TodoBulkDeleteOutcome, TodoError> {
-        let mut conn = self.connection()?;
-        let tx = conn.transaction().map_err(TodoError::from_sql)?;
-        let mut deleted_count = 0usize;
-        let mut skipped_ids = Vec::new();
-
-        for id_text in ids.iter().map(|id| clean_todo_id(id)) {
-            let Some(id) = parse_todo_db_id(&id_text) else {
-                if !id_text.is_empty() {
-                    skipped_ids.push(id_text);
-                }
-                continue;
-            };
-            let affected = tx
-                .execute(
-                    "DELETE FROM todos
-                     WHERE id = ?1
-                       AND owner_key = ?2
-                       AND scope_key = ?3",
-                    params![id, owner.key.as_str(), owner.scope_key.as_str()],
-                )
-                .map_err(TodoError::from_sql)?;
-            if affected == 0 {
-                skipped_ids.push(id_text);
-            } else {
-                deleted_count += affected;
-            }
-        }
-        tx.commit().map_err(TodoError::from_sql)?;
-        Ok(TodoBulkDeleteOutcome {
-            deleted_count,
-            skipped_ids,
-        })
-    }
-
-    /// 按指定终态物理删除记录，并在事务内校验 owner、scope 和 status。
-    fn delete_by_ids_with_status(
-        &self,
-        owner: &TodoOwner,
-        ids: &[String],
-        status: TodoStatus,
-    ) -> Result<TodoBulkDeleteOutcome, TodoError> {
-        let mut conn = self.connection()?;
-        let tx = conn.transaction().map_err(TodoError::from_sql)?;
-        let mut deleted_count = 0usize;
-        let mut skipped_ids = Vec::new();
-
-        for id_text in ids.iter().map(|id| clean_todo_id(id)) {
-            let Some(id) = parse_todo_db_id(&id_text) else {
-                if !id_text.is_empty() {
-                    skipped_ids.push(id_text);
-                }
-                continue;
-            };
-            let affected = tx
-                .execute(
-                    "DELETE FROM todos
-                     WHERE id = ?1
-                       AND owner_key = ?2
-                       AND scope_key = ?3
-                       AND status = ?4",
-                    params![
-                        id,
-                        owner.key.as_str(),
-                        owner.scope_key.as_str(),
-                        status.as_str(),
-                    ],
-                )
-                .map_err(TodoError::from_sql)?;
-            if affected == 0 {
-                skipped_ids.push(id_text);
-            } else {
-                deleted_count += affected;
-            }
-        }
-        tx.commit().map_err(TodoError::from_sql)?;
-        Ok(TodoBulkDeleteOutcome {
-            deleted_count,
             skipped_ids,
         })
     }

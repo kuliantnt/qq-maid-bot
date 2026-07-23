@@ -402,6 +402,11 @@ impl RustRespondService {
         &self.bot_display_name
     }
 
+    /// Todo / Memory 等 Core 业务展示统一读取手动展示名；该存储不参与权限判断。
+    pub(crate) fn display_name_store(&self) -> &DisplayNameStore {
+        &self.display_name_store
+    }
+
     /// 统一的请求响应入口。
     ///
     /// 分派顺序：

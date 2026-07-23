@@ -233,6 +233,7 @@ fn install_todo_clarification(
 
 mod clarification;
 mod commands;
+mod group_admin;
 mod query;
 mod rendering;
 mod write;

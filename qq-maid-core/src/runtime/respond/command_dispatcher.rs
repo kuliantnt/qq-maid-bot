@@ -232,7 +232,7 @@ impl<'a> CommandDispatcher<'a> {
                 interaction_session.set_turn_actor(turn_actor.clone());
                 if let Some(response) = self
                     .service
-                    .handle_todo_flow(todo_text, &meta, &mut interaction_session)
+                    .handle_todo_flow(&req, todo_text, &meta, &mut interaction_session, &session)
                     .await?
                 {
                     return Ok(DispatchOutcome::Respond(Box::new(response)));

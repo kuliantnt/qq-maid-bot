@@ -48,7 +48,7 @@ pub(crate) fn structured_command_body(markdown: impl Into<String>) -> CommandBod
     CommandBody::dual(to_chat_text(&markdown), markdown)
 }
 
-pub(super) const GROUP_ADMIN_REQUIRED_REPLY: &str = "这个群管理操作只允许群主或管理员执行。";
+pub(crate) const GROUP_ADMIN_REQUIRED_REPLY: &str = "这个群管理操作只允许群主或管理员执行。";
 
 pub(super) fn group_management_allowed(req: &RespondRequest) -> bool {
     crate::runtime::group_role::group_management_allowed(

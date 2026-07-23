@@ -13,7 +13,7 @@ use crate::{
     error::LlmError,
     runtime::{
         respond::{
-            RespondResponse, RustRespondService,
+            RespondRequest, RespondResponse, RustRespondService,
             common::{CommandBody, command_response, session_error, todo_error},
         },
         session::{SessionMeta, SessionRecord},
@@ -30,6 +30,7 @@ use chrono::NaiveDate;
 mod command;
 mod completed_query;
 mod format;
+mod group_admin;
 mod pending;
 mod pending_clarification;
 mod pending_lifecycle;
@@ -96,9 +97,11 @@ impl RustRespondService {
     /// 处理待办指令的主入口。解析 `/todo` 子命令并分派到对应的处理逻辑。
     pub(crate) async fn handle_todo_flow(
         &self,
+        req: &RespondRequest,
         user_text: &str,
         meta: &SessionMeta,
         session: &mut SessionRecord,
+        conversation_session: &SessionRecord,
     ) -> Result<Option<RespondResponse>, LlmError> {
         // Todo 默认归属当前 actor；即使消息来自群聊，也不能隐式写入群共享 Todo。
         let owner = TodoStore::owner(meta.user_id.as_deref(), &meta.scope_key);
@@ -116,6 +119,18 @@ impl RustRespondService {
         let Some(command) = parse_todo_command(user_text) else {
             return Ok(None);
         };
+        if command.action == "todo_group" {
+            return self
+                .handle_group_todo_command(
+                    req,
+                    meta,
+                    session,
+                    conversation_session,
+                    user_text,
+                    &command.argument,
+                )
+                .map(Some);
+        }
         let write_tool_notice = self.todo_write_tool_notice(meta);
 
         let (reply, command_name, visible_query_shown) = match command.action.as_str() {
