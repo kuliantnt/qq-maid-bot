@@ -56,15 +56,14 @@ use tracing::warn;
 use super::{
     BotOutboundCache,
     bot_identity::SharedBotIdentity,
+    command::GatewayCommandService,
     dedupe::MessageDedupe,
     event::{C2cMessage, GroupMessage},
     group_filter::GroupCooldowns,
     ping::GatewayRuntimeStatus,
     ref_index::SharedRefIndex,
 };
-use crate::{
-    api::QqApiClient, auth::AccessTokenManager, config::AppConfig, respond::RespondClient,
-};
+use crate::{api::QqApiClient, config::AppConfig, respond::RespondClient};
 
 #[derive(Clone)]
 pub(super) struct MessageDispatcherHandle {
@@ -190,10 +189,12 @@ pub(super) struct MessageDispatcher {
 }
 
 impl MessageDispatcher {
+    /// 统一 Gateway 启动链路传入同一个命令服务，确保 QQ 官方入口的 `/ping`
+    /// 与 OneBot、微信入口使用相同的应用版本和诊断配置。
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         config: AppConfig,
-        auth: AccessTokenManager,
+        commands: GatewayCommandService,
         respond: RespondClient,
         api: QqApiClient,
         dedupe: Arc<MessageDedupe>,
@@ -216,7 +217,7 @@ impl MessageDispatcher {
         let handle_respond = respond.clone();
         let handler = RealMessageHandler::new(
             config.clone(),
-            auth,
+            commands,
             respond,
             api.clone(),
             dedupe,

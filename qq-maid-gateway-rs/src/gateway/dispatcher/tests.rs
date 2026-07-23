@@ -1,4 +1,5 @@
 use super::*;
+use crate::auth::AccessTokenManager;
 use crate::gateway::test_support::qq_official_test_config;
 use crate::respond::{RespondClient, scope_key_from_c2c_message, scope_key_from_group_message};
 use qq_maid_core::service::{
