@@ -13,7 +13,6 @@ pub mod rss;
 pub(crate) mod search;
 pub(crate) mod status;
 mod status_classifier;
-mod status_semantics;
 pub(crate) mod todo;
 pub mod train;
 pub mod weather;
@@ -32,7 +31,9 @@ pub use radar::{
 pub use rss::{RssManageSubscriptionsTool, RssRecentItemsTool};
 pub(crate) use search::{WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME, WebSearchDeltaHandler};
 pub use search::{WebSearchTimeouts, WebSearchTool, WebSearchToolRequest};
-pub(crate) use status::{StatusAudience, StatusHint, StatusPhase, status_hint_text};
+pub(crate) use status::{
+    StatusAudience, StatusHint, StatusPhase, status_hint_for_tool_name, status_hint_text,
+};
 pub(crate) use status_classifier::{
     InteractionDomain, InteractionDomainState, InteractionStateSnapshot, classify_status_hint,
 };

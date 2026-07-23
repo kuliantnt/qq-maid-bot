@@ -77,9 +77,10 @@ pub(crate) fn infer_group_memory_kind(text: &str) -> Option<MemoryKind> {
     None
 }
 
-pub(crate) fn has_memory_intent(text: &str, lower: &str) -> bool {
-    lower.contains("memory")
-        || ["记忆", "记一下", "记住", "帮我记", "记录一下", "保存一下"]
+/// 只为用户可见状态识别明确的记忆写入请求；真实保存仍以 `save_memory` Tool 为准。
+pub(crate) fn has_memory_status_intent(text: &str) -> bool {
+    !is_memory_write_explicitly_negated(text)
+        && ["记一下", "记住", "帮我记", "记录一下", "保存一下"]
             .iter()
             .any(|needle| text.contains(needle))
 }
@@ -99,6 +100,25 @@ mod tests {
             "我最近在学 Rust",
         ] {
             assert!(!is_memory_write_explicitly_negated(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn memory_status_requires_an_explicit_write_request() {
+        for text in [
+            "记住我喜欢简短回复",
+            "帮我记一下这个偏好",
+            "保存一下这条信息",
+        ] {
+            assert!(has_memory_status_intent(text), "{text}");
+        }
+        for text in [
+            "Memory 怎么设计",
+            "解释一下记忆系统",
+            "这段内容是什么",
+            "不要记住这句话",
+        ] {
+            assert!(!has_memory_status_intent(text), "{text}");
         }
     }
 }

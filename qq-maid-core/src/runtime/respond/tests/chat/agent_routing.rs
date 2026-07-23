@@ -79,6 +79,7 @@ async fn non_todo_agent_direct_answers_with_success_markers_are_not_guarded() {
             "解释‘已删除项目不可恢复’",
             "已删除项目不可恢复，表示删除操作无法撤销。",
         ),
+        ("晚上分析一下架构", "已完成对架构的分析，下面是关键结论。"),
     ];
     let mut inspector =
         MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
@@ -100,7 +101,7 @@ async fn non_todo_agent_direct_answers_with_success_markers_are_not_guarded() {
         assert_eq!(diagnostics["tool_call_emitted"], false, "{input}");
     }
 
-    assert_eq!(inspector.tool_call_count(), 3);
+    assert_eq!(inspector.tool_call_count(), cases.len());
 }
 
 #[tokio::test]

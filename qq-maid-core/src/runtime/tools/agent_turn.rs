@@ -20,17 +20,10 @@ use crate::{
 use super::agent_presenters::{
     tool_outcome_from_knowledge_result, tool_outcome_from_rss_result,
     tool_outcome_from_train_result, tool_outcome_from_weather_result,
-    tool_outcome_from_web_search_result,
 };
+use super::search::agent_turn::{SearchResultProjection, project_result as project_search_result};
 
 pub(crate) type IndexedToolOutcomes = Vec<(usize, ToolExecutionOutcome)>;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct ToolTurnContext {
-    pub(crate) semantic_domain: Option<&'static str>,
-    pub(crate) status_subject: Option<&'static str>,
-    pub(crate) status_action: Option<&'static str>,
-}
 
 pub(crate) trait DomainTurnDiagnostics {
     fn log_tool_loop_results(&self, executed_tools: &[String]);
@@ -42,6 +35,17 @@ pub(crate) trait DomainTurnDiagnostics {
     ) -> Option<&'static str> {
         None
     }
+}
+
+/// 领域后处理器只接收通用 Tool Turn 结果，并自行完成领域验真与诊断构造。
+///
+/// 通用调度层不读取领域候选、成功声明或工具名称等具体规则。
+pub(crate) trait DomainTurnPostprocessor {
+    fn postprocess_output(
+        self: Box<Self>,
+        projected_outcome: Option<&AgentTurnOutcome>,
+        output: &mut RespondOutput,
+    ) -> Box<dyn DomainTurnDiagnostics>;
 }
 
 pub(crate) struct ToolTurnPostprocess {
@@ -93,7 +97,7 @@ pub(crate) fn postprocess_tool_turn(
     meta: &SessionMeta,
     interaction_meta: &SessionMeta,
     mut output: RespondOutput,
-    context: ToolTurnContext,
+    req: &crate::runtime::respond::RespondRequest,
 ) -> Result<ToolTurnPostprocess, LlmError> {
     let mut standalone_interaction = if interaction_meta.scope_key != meta.scope_key {
         Some(
@@ -108,6 +112,10 @@ pub(crate) fn postprocess_tool_turn(
         .as_mut()
         .unwrap_or(conversation_session);
 
+    let domain_postprocessors: Vec<Box<dyn DomainTurnPostprocessor>> = vec![Box::new(
+        todo::agent_turn::TodoTurnPostprocessor::for_request(req, state_session, &output.reply),
+    )];
+
     let outcome = project_tool_turn(task_store, state_session, meta, &output)?;
     if let Some(interaction) = standalone_interaction.as_mut() {
         session_store
@@ -115,34 +123,24 @@ pub(crate) fn postprocess_tool_turn(
             .map_err(crate::runtime::respond::common::session_error)?;
     }
 
-    let todo_guard_enabled = todo::agent_turn::should_validate_success(&context, &output);
-    let validation = if outcome.can_replace_model_reply() {
+    let projected_outcome = if outcome.can_replace_model_reply() {
         if outcome.should_preserve_model_reply() {
             apply_agent_turn_outcome_with_model_reply(&mut output, &outcome);
         } else {
             apply_agent_turn_outcome(&mut output, &outcome);
         }
-        todo::agent_turn::success_validation_from_agent_outcome(&outcome)
+        Some(&outcome)
     } else if outcome.has_unhandled_outcome() && !outcome.outcomes.is_empty() {
         apply_agent_turn_compat_output(&mut output, &outcome);
-        todo::agent_turn::success_validation_from_agent_outcome(&outcome)
-    } else if todo_guard_enabled {
-        let validation = todo::agent_turn::validate_model_reply_success(&output);
-        if !validation.passed() {
-            output = todo::agent_turn::success_not_verified_output(output);
-        }
-        validation
+        Some(&outcome)
     } else {
-        todo::success_guard::TodoSuccessValidation::Passed {
-            claimed_success: false,
-        }
+        None
     };
-    let diagnostics = ToolTurnDiagnostics {
-        domains: vec![Box::new(todo::agent_turn::diagnostics_from_tool_results(
-            &output.agent.tool_results,
-            validation,
-        ))],
-    };
+    let mut domains = Vec::with_capacity(domain_postprocessors.len());
+    for postprocessor in domain_postprocessors {
+        domains.push(postprocessor.postprocess_output(projected_outcome, &mut output));
+    }
+    let diagnostics = ToolTurnDiagnostics { domains };
     Ok(ToolTurnPostprocess {
         output,
         outcome,
@@ -216,8 +214,10 @@ fn project_tool_turn(
             outcomes.push(outcome);
         } else if let Some(outcome) = tool_outcome_from_rss_result(result) {
             outcomes.push(outcome);
-        } else if let Some(outcome) = tool_outcome_from_web_search_result(result) {
-            outcomes.push(outcome);
+        } else if let Some(projection) = project_search_result(result) {
+            if let SearchResultProjection::Visible(outcome) = projection {
+                outcomes.push(outcome);
+            }
         } else if let Some(outcome) = tool_outcome_from_knowledge_result(result) {
             outcomes.push(outcome);
         } else if let Some(outcome) = memory::agent_turn::tool_outcome_from_result(result) {

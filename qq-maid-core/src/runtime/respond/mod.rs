@@ -64,7 +64,9 @@ pub(crate) mod train_flow;
 mod translation_flow;
 pub(crate) mod weather_flow;
 
-pub(crate) use crate::runtime::tools::{StatusAudience, StatusHint, StatusPhase, status_hint_text};
+pub(crate) use crate::runtime::tools::{
+    StatusAudience, StatusHint, StatusPhase, status_hint_for_tool_name, status_hint_text,
+};
 use chat_flow::ChatFlowSinks;
 use command_dispatcher::{CommandDispatcher, DispatchOutcome};
 use common::session_error;

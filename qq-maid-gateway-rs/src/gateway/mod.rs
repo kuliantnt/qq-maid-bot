@@ -73,6 +73,25 @@ pub async fn run(
     runtime: GatewayRuntimeStatus,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<()> {
+    run_with_application_version(
+        config,
+        respond,
+        push_sink,
+        runtime,
+        shutdown_token,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await
+}
+
+pub async fn run_with_application_version(
+    config: AppConfig,
+    respond: RespondClient,
+    push_sink: GatewayPushSink,
+    runtime: GatewayRuntimeStatus,
+    shutdown_token: CancellationToken,
+    application_version: &'static str,
+) -> anyhow::Result<()> {
     let qq_auth = config
         .enabled_qq_official_credentials()
         .map(|(app_id, app_secret)| {
@@ -88,7 +107,8 @@ pub async fn run(
         runtime.clone(),
         respond.clone(),
         qq_auth.clone(),
-    );
+    )
+    .with_application_version(application_version);
     // 微信与 QQ 共用 Core；监听器只创建一次，之后统一交给渠道监督器管理生命周期。
     let dedupe = Arc::new(MessageDedupe::new(DEDUPE_TTL));
     // QQ 官方 REFIDX 与 OneBot message_id 共用同一进程内索引实现，但 key 始终包含

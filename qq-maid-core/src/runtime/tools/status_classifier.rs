@@ -3,10 +3,10 @@
 //! 这些轻量规则只用于用户可见状态，不参与工具暴露或执行决策。
 
 use super::{
-    memory, rss, search,
+    memory,
     status::{StatusAction, StatusHint, StatusSubject},
-    status_semantics, todo,
-    todo::route::TodoRouteAction,
+    todo,
+    todo::route::TodoIntentAction,
     train, weather,
 };
 
@@ -65,46 +65,26 @@ pub(crate) fn classify_status_hint(
 ) -> Option<StatusHint> {
     let has_recent_todo_context = interaction_state.has_recent_context(InteractionDomain::Todo);
     let lower = text.to_ascii_lowercase();
-    let non_tool_context = status_semantics::has_non_tool_status_context(text, &lower);
-    let todo_intent =
-        todo::route::classify_todo_route(text, &lower, has_recent_todo_context, non_tool_context);
-    if todo_intent.routes_to_tool_loop() {
-        let action = if todo::route::routes_as_todo_write_status(text, non_tool_context) {
-            StatusAction::Write
-        } else {
-            match todo::route::todo_route_action(text) {
-                TodoRouteAction::Confirm => StatusAction::Confirm,
-                TodoRouteAction::Write => StatusAction::Write,
-                TodoRouteAction::Query => StatusAction::Query,
-                TodoRouteAction::Process => StatusAction::Process,
-            }
+    let todo_intent = todo::route::classify_todo_intent(text, &lower, has_recent_todo_context);
+    if todo_intent.is_confident() {
+        let action = match todo::route::todo_intent_action(text) {
+            TodoIntentAction::Confirm => StatusAction::Confirm,
+            TodoIntentAction::Write => StatusAction::Write,
+            TodoIntentAction::Query => StatusAction::Query,
+            TodoIntentAction::Process => StatusAction::Process,
         };
         return Some(StatusHint::new(StatusSubject::Todo, action));
     }
-    if memory::route::has_memory_intent(text, &lower) {
-        return Some(StatusHint::new(StatusSubject::Record, StatusAction::Read));
+    if memory::route::has_memory_status_intent(text) {
+        return Some(StatusHint::new(StatusSubject::Record, StatusAction::Write));
     }
-    if weather::route::has_weather_intent(text, &lower) {
+    if weather::route::has_weather_status_intent(text) {
         return Some(StatusHint::new(StatusSubject::Weather, StatusAction::Query));
     }
-    if train::route::has_train_intent(text, &lower) {
+    if train::route::has_train_status_intent(text) {
         return Some(StatusHint::new(StatusSubject::Train, StatusAction::Query));
     }
-    if rss::route::has_rss_intent(text, &lower) {
-        return Some(StatusHint::new(StatusSubject::Rss, StatusAction::Query));
-    }
-    if has_search_intent(text, &lower) {
-        return Some(StatusHint::new(StatusSubject::Search, StatusAction::Query));
-    }
     None
-}
-
-pub(crate) fn has_search_intent(text: &str, lower: &str) -> bool {
-    search::route::has_search_intent(
-        text,
-        lower,
-        status_semantics::has_local_text_processing_intent(text, lower),
-    )
 }
 
 #[cfg(test)]
@@ -149,8 +129,8 @@ mod tests {
                 StatusHint::new(StatusSubject::Todo, StatusAction::Confirm),
             ),
             (
-                "查一下今天 AI 新闻",
-                StatusHint::new(StatusSubject::Search, StatusAction::Query),
+                "记住我喜欢简短回复",
+                StatusHint::new(StatusSubject::Record, StatusAction::Write),
             ),
         ];
         for (input, expected) in cases {
@@ -159,6 +139,20 @@ mod tests {
                 Some(expected),
                 "{input}"
             );
+        }
+    }
+
+    #[test]
+    fn search_and_rss_text_wait_for_structured_tool_events() {
+        let context = InteractionStateSnapshot::default();
+
+        for input in [
+            "联网查一下今天 AI 新闻",
+            "这个项目的最新进展",
+            "GitHub Actions 怎么配置",
+            "看看 RSS 最近更新",
+        ] {
+            assert_eq!(classify_status_hint(input, &context), None, "{input}");
         }
     }
 }

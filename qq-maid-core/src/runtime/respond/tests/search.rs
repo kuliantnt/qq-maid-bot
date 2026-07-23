@@ -124,7 +124,7 @@ impl WebSearchExecutor for RecordingWebSearchExecutor {
 }
 
 #[tokio::test]
-async fn natural_search_agent_can_call_web_search_without_router_rewrite() {
+async fn model_web_search_call_does_not_depend_on_text_status_intent() {
     let provider = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_call_json(
@@ -153,7 +153,7 @@ async fn natural_search_agent_can_call_web_search_without_router_rewrite() {
         );
 
     let response = service
-        .respond(private_message("可以联网查一下"))
+        .respond(private_message("帮我确认这个说法是否可靠"))
         .await
         .unwrap();
 
@@ -173,7 +173,7 @@ async fn natural_search_agent_can_call_web_search_without_router_rewrite() {
 
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["respond_route"], "agent_runtime");
-    assert_eq!(diagnostics["route_domains"], serde_json::json!(["search"]));
+    assert_eq!(diagnostics["route_domains"], serde_json::json!([]));
     assert_eq!(diagnostics["used_search"], true);
     assert_eq!(
         diagnostics["agent_executed_tools"],

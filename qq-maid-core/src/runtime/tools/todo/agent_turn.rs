@@ -7,13 +7,14 @@ use crate::{
     error::LlmError,
     runtime::{
         respond::{
+            RespondRequest,
             agent_outcome::{AgentTurnOutcome, ToolEffect, ToolOutcomeStatus},
             llm_service::RespondOutput,
         },
         session::{SessionMeta, SessionRecord},
         tools::{
             TaskStore,
-            agent_turn::{DomainTurnDiagnostics, IndexedToolOutcomes, ToolTurnContext},
+            agent_turn::{DomainTurnDiagnostics, DomainTurnPostprocessor, IndexedToolOutcomes},
             todo,
         },
     },
@@ -25,6 +26,67 @@ pub(crate) struct TodoAgentProjection {
     pub(crate) consumed_result_indexes: std::collections::HashSet<usize>,
     pub(crate) outcomes: IndexedToolOutcomes,
     pub(crate) visible_entity_snapshot: Option<VisibleEntitySnapshot>,
+}
+
+/// 捕获投影前的 Todo 会话上下文和模型原始回复，避免通用 Tool Turn 调度层
+/// 感知验真候选细节，也避免事实卡或工具回执干扰成功声明判定。
+pub(crate) struct TodoTurnPostprocessor {
+    candidate_scope: todo::success_guard::TodoSuccessVerificationScope,
+    original_model_reply: String,
+}
+
+impl TodoTurnPostprocessor {
+    pub(crate) fn for_request(
+        req: &RespondRequest,
+        session: &SessionRecord,
+        original_model_reply: &str,
+    ) -> Self {
+        let interaction = todo::interaction_state::snapshot_for_request(req, Some(session));
+        let user_text = req.effective_user_text();
+        Self {
+            candidate_scope: todo::success_guard::todo_success_verification_scope(
+                &user_text,
+                interaction.has_visible_snapshot || interaction.has_recent_operation,
+            ),
+            original_model_reply: original_model_reply.to_owned(),
+        }
+    }
+}
+
+impl DomainTurnPostprocessor for TodoTurnPostprocessor {
+    fn postprocess_output(
+        self: Box<Self>,
+        projected_outcome: Option<&AgentTurnOutcome>,
+        output: &mut RespondOutput,
+    ) -> Box<dyn DomainTurnDiagnostics> {
+        let validation = if let Some(validation) =
+            projected_outcome.and_then(success_validation_from_agent_outcome)
+        {
+            validation
+        } else {
+            let scope = success_verification_scope(self.candidate_scope, output);
+            if matches!(
+                scope,
+                todo::success_guard::TodoSuccessVerificationScope::None
+            ) {
+                todo::success_guard::TodoSuccessValidation::Passed {
+                    claimed_success: false,
+                }
+            } else {
+                let validation =
+                    validate_model_reply_success(&self.original_model_reply, output, scope);
+                if !validation.passed() {
+                    apply_success_not_verified_output(output);
+                }
+                validation
+            }
+        };
+
+        Box::new(diagnostics_from_tool_results(
+            &output.agent.tool_results,
+            validation,
+        ))
+    }
 }
 
 pub(crate) fn project_results(
@@ -64,18 +126,17 @@ pub(crate) fn diagnostics_from_tool_results(
     }
 }
 
-pub(crate) fn success_validation_from_agent_outcome(
+fn success_validation_from_agent_outcome(
     outcome: &AgentTurnOutcome,
-) -> todo::success_guard::TodoSuccessValidation {
+) -> Option<todo::success_guard::TodoSuccessValidation> {
     let todo_write_outcomes = outcome
         .outcomes
         .iter()
         .filter(|item| item.domain == "todo" && item.effect != ToolEffect::ReadOnly)
         .collect::<Vec<_>>();
     if todo_write_outcomes.is_empty() {
-        return todo::success_guard::TodoSuccessValidation::Passed {
-            claimed_success: false,
-        };
+        // 其他领域 outcome 不能替 Todo 完成验真；调用方仍需检查模型原始回复。
+        return None;
     }
     if todo_write_outcomes.iter().all(|item| {
         matches!(
@@ -83,29 +144,48 @@ pub(crate) fn success_validation_from_agent_outcome(
             ToolOutcomeStatus::Succeeded | ToolOutcomeStatus::PendingConfirmation
         )
     }) {
-        return todo::success_guard::TodoSuccessValidation::Passed {
+        return Some(todo::success_guard::TodoSuccessValidation::Passed {
             claimed_success: true,
-        };
+        });
     }
-    todo::success_guard::TodoSuccessValidation::Blocked
+    Some(todo::success_guard::TodoSuccessValidation::Blocked)
 }
 
-pub(crate) fn validate_model_reply_success(
+fn validate_model_reply_success(
+    original_model_reply: &str,
     output: &RespondOutput,
+    scope: todo::success_guard::TodoSuccessVerificationScope,
 ) -> todo::success_guard::TodoSuccessValidation {
-    todo::success_guard::validate_todo_success_reply(&output.reply, &output.agent.tool_results)
+    todo::success_guard::validate_todo_success_reply(
+        original_model_reply,
+        &output.agent.tool_results,
+        scope,
+    )
 }
 
-pub(crate) fn should_validate_success(context: &ToolTurnContext, output: &RespondOutput) -> bool {
-    output
+fn success_verification_scope(
+    candidate_scope: todo::success_guard::TodoSuccessVerificationScope,
+    output: &RespondOutput,
+) -> todo::success_guard::TodoSuccessVerificationScope {
+    if !matches!(
+        candidate_scope,
+        todo::success_guard::TodoSuccessVerificationScope::None
+    ) {
+        // 输入已确定范围时保持该范围；省略式创建不能因工具痕迹扩大到完整写声明。
+        return candidate_scope;
+    }
+    if output
         .agent
         .emitted_tools
         .iter()
         .any(|name| todo::success_guard::is_todo_write_tool(name))
         || todo::success_guard::has_todo_write_tool_result(&output.agent.tool_results)
-        || (context.semantic_domain == Some("todo")
-            && context.status_subject == Some("todo")
-            && matches!(context.status_action, Some("write" | "confirm" | "process")))
+    {
+        // 一旦本轮实际涉及 Todo 写工具，完整核验所有写操作成功声明。
+        todo::success_guard::TodoSuccessVerificationScope::ExplicitMutation
+    } else {
+        candidate_scope
+    }
 }
 
 /// 最终模型轮次失败后，只在 Todo 写工具已有可信结果时构造确定性回执输入。
@@ -152,26 +232,23 @@ pub(crate) fn fallback_output_after_agent_failure(
     })
 }
 
-pub(crate) fn success_not_verified_output(output: RespondOutput) -> RespondOutput {
+fn apply_success_not_verified_output(output: &mut RespondOutput) {
     let reply = todo::success_guard::todo_success_not_verified_reply_for_tool_results(
         &output.agent.tool_results,
     );
-    RespondOutput {
-        reply: reply.clone(),
-        text: reply.clone(),
-        markdown: None,
-        parts: Vec::new(),
-        metrics: LlmMetrics {
-            provider: "rust".to_owned(),
-            model: "tool-loop-guard".to_owned(),
-            stream: false,
-            ttfe_ms: None,
-            ttft_ms: None,
-            total_latency_ms: 0,
-        },
-        usage: None,
-        agent: output.agent,
-    }
+    output.reply = reply.clone();
+    output.text = reply;
+    output.markdown = None;
+    output.parts.clear();
+    output.metrics = LlmMetrics {
+        provider: "rust".to_owned(),
+        model: "tool-loop-guard".to_owned(),
+        stream: false,
+        ttfe_ms: None,
+        ttft_ms: None,
+        total_latency_ms: 0,
+    };
+    output.usage = None;
 }
 
 pub(crate) struct TodoAgentDiagnostics {

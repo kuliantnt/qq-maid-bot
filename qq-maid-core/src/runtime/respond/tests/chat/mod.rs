@@ -3,12 +3,9 @@ use std::fs;
 use qq_maid_llm::provider::{ToolCallingProtocol, types::ChatRole};
 use serde_json::Value;
 
-use crate::runtime::{
-    respond::{PlannedRespond, RespondPlan, agent_route::RespondRoute},
-    tools::{
-        StatusHint,
-        status::{StatusAction, StatusSubject},
-    },
+use crate::runtime::respond::{
+    PlannedRespond, RespondPlan,
+    agent_route::{AgentToolMode, RespondRoute},
 };
 
 mod agent_routing;
@@ -484,22 +481,71 @@ async fn group_tool_loop_exposes_rss_management_but_not_todo_when_enabled() {
 }
 
 #[tokio::test]
-async fn private_natural_search_intent_routes_to_agent_runtime_with_search_semantics() {
+async fn private_natural_search_requests_wait_for_structured_tool_status() {
     let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(provider, true);
 
-    for input in ["联网查一下", "联网查询下今日 ai 新闻", "查一下今天 AI 新闻"]
-    {
+    for input in [
+        "联网查一下",
+        "联网查询下今日 ai 新闻",
+        "网上搜索 Rust 发布说明",
+    ] {
         let planned = service.plan_core_respond(&private_message(input)).unwrap();
         assert_eq!(planned, RespondPlan::AgentRuntime, "{input}");
 
         let decision = planned.respond_route().unwrap();
         assert_eq!(decision.route, RespondRoute::AgentRuntime, "{input}");
         assert_eq!(
-            planned.classified_status_hint(),
-            Some(StatusHint::new(StatusSubject::Search, StatusAction::Query)),
+            decision.tool_mode(),
+            Some(AgentToolMode::ConfiguredWhitelist),
             "{input}"
         );
+        assert_eq!(planned.classified_status_hint(), None, "{input}");
+    }
+}
+
+#[tokio::test]
+async fn timed_non_todo_requests_keep_agent_route_without_todo_status() {
+    let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(provider, true);
+
+    for input in [
+        "明天陪我聊聊",
+        "晚上分析一下架构",
+        "下午写一段文案",
+        "明天解释这段日志",
+    ] {
+        let planned = service.plan_core_respond(&private_message(input)).unwrap();
+        assert_eq!(planned, RespondPlan::AgentRuntime, "{input}");
+        assert_eq!(
+            planned
+                .respond_route()
+                .and_then(|decision| decision.tool_mode()),
+            Some(AgentToolMode::ConfiguredWhitelist),
+            "{input}"
+        );
+        assert_eq!(planned.classified_status_hint(), None, "{input}");
+    }
+}
+
+#[tokio::test]
+async fn weak_search_and_rss_terms_do_not_emit_tool_status_hints() {
+    let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(provider, true);
+
+    for input in [
+        "这个项目的最新进展",
+        "有没有更简单的写法",
+        "GitHub Actions 怎么配置",
+        "有没有最新进展",
+        "This research compares runtimes",
+        "Please research this topic",
+        "RSS 是什么格式",
+        "看看 RSS 最近更新",
+    ] {
+        let planned = service.plan_core_respond(&private_message(input)).unwrap();
+        assert_eq!(planned, RespondPlan::AgentRuntime, "{input}");
+        assert_eq!(planned.classified_status_hint(), None, "{input}");
     }
 }
 
@@ -510,7 +556,7 @@ async fn private_pasted_text_processing_does_not_route_to_web_search_plan() {
 Codex 分析结果：
 - 自然语言查询被 route 到 WebSearch
 - 工具返回：查询内容太长了，请压缩到 200 字以内再试。
-- has_search_intent 命中了 search 关键词
+- search 状态词误命中
 人话说这个";
 
     let plan = service.plan_core_respond(&private_message(input)).unwrap();
@@ -521,10 +567,10 @@ Codex 分析结果：
 async fn private_explicit_search_command_routes_to_web_search_plan() {
     let service = test_service_with_provider_and_tool_calling(MockProvider::new(), true);
 
-    let plan = service
-        .plan_core_respond(&private_message("/查 台风巴威"))
-        .unwrap();
-    assert_eq!(plan, RespondPlan::WebSearch);
+    for input in ["/查 台风巴威", "/search Rust release notes"] {
+        let plan = service.plan_core_respond(&private_message(input)).unwrap();
+        assert_eq!(plan, RespondPlan::WebSearch, "{input}");
+    }
 }
 
 #[tokio::test]

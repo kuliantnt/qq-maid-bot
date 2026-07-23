@@ -42,6 +42,95 @@ async fn todo_create_intent_without_tool_call_does_not_leak_fake_success_reply()
 }
 
 #[tokio::test]
+async fn implicit_todo_create_claim_without_tool_call_is_blocked() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_loop_reply_without_tool("已记录，明天开会");
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+
+    let response = service.respond(private_message("明天开会")).await.unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("这次没有确认改动成功"), "{text}");
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], false);
+    assert_eq!(diagnostics["error_code"], "todo_success_not_verified");
+    assert_eq!(diagnostics["agent_executed_tools"], serde_json::json!([]));
+    assert!(service.task_store.list_all(&owner).unwrap().is_empty());
+    assert_eq!(inspector.tool_call_count(), 1);
+}
+
+#[tokio::test]
+async fn implicit_buy_groceries_claim_without_tool_call_is_blocked() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_loop_reply_without_tool("已记录，明天买菜");
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service.respond(private_message("明天买菜")).await.unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("这次没有确认改动成功"), "{text}");
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], false);
+    assert_eq!(diagnostics["error_code"], "todo_success_not_verified");
+    assert_eq!(diagnostics["agent_executed_tools"], serde_json::json!([]));
+    assert_eq!(inspector.tool_call_count(), 1);
+}
+
+#[tokio::test]
+async fn implicit_task_execution_reply_without_create_claim_is_allowed() {
+    for (input, reply) in [
+        (
+            "晚上检查一下这段日志为什么报错",
+            "已完成检查，根因是配置项缺失。",
+        ),
+        ("下午整理一下这段文案", "已完成整理，修改如下：新的文案。"),
+    ] {
+        let inspector = MockProvider::new()
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+            .with_tool_loop_reply_without_tool(reply);
+        let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+        let response = service.respond(private_message(input)).await.unwrap();
+
+        assert_eq!(response.text.as_deref(), Some(reply), "{input}");
+        let diagnostics = response.diagnostics.unwrap();
+        assert_eq!(diagnostics["todo_success_claimed"], false, "{input}");
+        assert_eq!(diagnostics["todo_success_verified"], true, "{input}");
+        assert_eq!(diagnostics["error_code"], Value::Null, "{input}");
+        assert_eq!(inspector.tool_call_count(), 1, "{input}");
+    }
+}
+
+#[tokio::test]
+async fn implicit_task_create_claim_is_still_blocked() {
+    for input in ["晚上检查一下这段日志为什么报错", "下午整理一下这段文案"]
+    {
+        let inspector = MockProvider::new()
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+            .with_tool_loop_reply_without_tool("已记录为待办");
+        let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+        let response = service.respond(private_message(input)).await.unwrap();
+
+        let text = response.text.unwrap();
+        assert!(text.contains("这次没有确认改动成功"), "{input}: {text}");
+        let diagnostics = response.diagnostics.unwrap();
+        assert_eq!(diagnostics["todo_success_claimed"], true, "{input}");
+        assert_eq!(diagnostics["todo_success_verified"], false, "{input}");
+        assert_eq!(
+            diagnostics["error_code"], "todo_success_not_verified",
+            "{input}"
+        );
+        assert_eq!(inspector.tool_call_count(), 1, "{input}");
+    }
+}
+
+#[tokio::test]
 async fn todo_detail_clear_promise_without_tool_call_is_blocked() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)

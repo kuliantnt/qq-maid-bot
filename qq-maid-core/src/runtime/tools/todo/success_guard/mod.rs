@@ -1,15 +1,75 @@
 //! Todo Tool Loop 成功文案守卫。
 //!
-//! 本模块只做“输出验真”：当模型回复声称已新增、已修改、已完成或已删除
-//! Todo 时，必须能在本轮 Tool Loop 结果里看到真实成功的 Todo 写工具输出。
-//! 这里不再根据用户输入猜测本轮应该调用哪个工具，避免路由、模型和守卫三套
-//! 意图判断互相冲突。
+//! 本模块只维护“成功边界”：独立判断用户输入是否需要启用验真，并在模型回复
+//! 声称已新增、已修改、已完成或已删除 Todo 时，要求本轮 Tool Loop 存在真实成功
+//! 的 Todo 写工具输出。候选判断不决定本轮应该调用哪个工具，也不参与 Tool 暴露、
+//! 路由或执行，避免与状态提示和业务流程耦合。
 
 use serde_json::Value;
 
 use qq_maid_llm::provider::ToolExecutionResult;
 
-const TODO_WRITE_SUCCESS_MARKERS: &[&str] = &[
+use super::route::{self, TodoIntentAction};
+
+// 省略式待办没有“待办/提醒”等显式对象，只能用时间线索与明确、可执行的任务行为
+// 共同识别。这里维护 Todo 域正向行为，不通过公共闲聊/创作/解释排除词猜测意图。
+const IMPLICIT_TODO_TASK_ACTION_MARKERS: &[&str] = &[
+    "盯一下",
+    "盯下",
+    "看一下",
+    "看下",
+    "开会",
+    "参加会议",
+    "买菜",
+    "买东西",
+    "买药",
+    "整理",
+    "跟进",
+    "出一版",
+    "复盘",
+    "验收",
+    "发送",
+    "发给",
+    "发一下",
+    "发布",
+    "发版",
+    "完成初稿",
+    "完成草稿",
+    "交水电费",
+    "缴费",
+    "交房租",
+    "还款",
+    "还书",
+    "采购",
+    "取件",
+    "拿快递",
+    "寄件",
+    "送材料",
+    "接人",
+    "提交",
+    "交作业",
+    "打电话",
+    "回电话",
+    "回邮件",
+    "回复邮件",
+    "预约",
+    "报名",
+    "续费",
+    "报销",
+    "体检",
+    "复诊",
+    "吃药",
+    "服药",
+    "锻炼",
+    "跑步",
+    "检查",
+    "复查",
+    "维修",
+    "打印",
+    "备份",
+];
+
+const TODO_CREATE_SUCCESS_MARKERS: &[&str] = &[
     "已新增",
     "已新建",
     "已创建",
@@ -17,6 +77,16 @@ const TODO_WRITE_SUCCESS_MARKERS: &[&str] = &[
     "已记录",
     "已生成待确认",
     "已发起",
+    "已经新增",
+    "已经新建",
+    "已经创建",
+    "已经添加",
+    "已经记录",
+    "已经生成待确认",
+    "已经发起",
+];
+
+const TODO_OTHER_WRITE_SUCCESS_MARKERS: &[&str] = &[
     "已完成",
     "已修改",
     "已更新",
@@ -25,11 +95,6 @@ const TODO_WRITE_SUCCESS_MARKERS: &[&str] = &[
     "已删除",
     "已跳过",
     "已关闭",
-    "已经新增",
-    "已经新建",
-    "已经创建",
-    "已经添加",
-    "已经记录",
     "已经完成",
     "已经修改",
     "已经更新",
@@ -40,6 +105,41 @@ const TODO_WRITE_SUCCESS_MARKERS: &[&str] = &[
     "已经关闭",
 ];
 
+/// Todo 成功声明需要验真的范围。
+///
+/// 该范围只供 Tool Turn 最终文案验真使用，不参与 Tool 暴露、路由或执行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TodoSuccessVerificationScope {
+    None,
+    ExplicitMutation,
+    ImplicitCreate,
+}
+
+/// 判定用户输入是否需要启用 Todo 成功文案验真。
+///
+/// 这是成功边界，不是用户状态提示分类：显式 Todo 写意图沿用既有强信号，另行覆盖
+/// “时间表达 + 明确任务行为”的省略式创建请求。结果只决定是否核验模型最终文案，
+/// 不参与 Tool 暴露、路由、参数解析或执行。
+pub(crate) fn todo_success_verification_scope(
+    text: &str,
+    has_recent_todo_context: bool,
+) -> TodoSuccessVerificationScope {
+    let lower = text.to_ascii_lowercase();
+    let intent = route::classify_todo_intent(text, &lower, has_recent_todo_context);
+    if intent.is_confident() && !matches!(route::todo_intent_action(text), TodoIntentAction::Query)
+    {
+        return TodoSuccessVerificationScope::ExplicitMutation;
+    }
+
+    if route::looks_like_temporal_expression(text)
+        && contains_any(text, IMPLICIT_TODO_TASK_ACTION_MARKERS)
+    {
+        return TodoSuccessVerificationScope::ImplicitCreate;
+    }
+
+    TodoSuccessVerificationScope::None
+}
+
 /// 判定模型是否可以安全透传 Todo 成功文案。
 ///
 /// - 未声称 Todo 写入成功：直接放行。
@@ -47,8 +147,11 @@ const TODO_WRITE_SUCCESS_MARKERS: &[&str] = &[
 pub(crate) fn validate_todo_success_reply(
     reply: &str,
     tool_results: &[ToolExecutionResult],
+    scope: TodoSuccessVerificationScope,
 ) -> TodoSuccessValidation {
-    if reply_claims_todo_detail_clear_success(reply) {
+    if matches!(scope, TodoSuccessVerificationScope::ExplicitMutation)
+        && reply_claims_todo_detail_clear_success(reply)
+    {
         return if tool_results.iter().any(successful_todo_detail_clear_result) {
             TodoSuccessValidation::Passed {
                 claimed_success: true,
@@ -57,7 +160,12 @@ pub(crate) fn validate_todo_success_reply(
             TodoSuccessValidation::Blocked
         };
     }
-    if !reply_claims_todo_write_success(reply) {
+    let claims_write_success = match scope {
+        TodoSuccessVerificationScope::None => false,
+        TodoSuccessVerificationScope::ExplicitMutation => reply_claims_todo_write_success(reply),
+        TodoSuccessVerificationScope::ImplicitCreate => reply_claims_todo_create_success(reply),
+    };
+    if !claims_write_success {
         return TodoSuccessValidation::Passed {
             claimed_success: false,
         };
@@ -249,12 +357,31 @@ pub(crate) fn is_todo_write_tool(name: &str) -> bool {
 }
 
 fn reply_claims_todo_write_success(reply: &str) -> bool {
+    reply_claims_todo_success(reply, true)
+}
+
+fn reply_claims_todo_create_success(reply: &str) -> bool {
     let text = reply.trim();
     if text.is_empty() || explicitly_denies_todo_success(text) {
         return false;
     }
     let normalized: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
-    if claims_todo_detail_clear_success(&normalized) {
+    if looks_like_todo_status_or_capability_explanation(&normalized) {
+        return false;
+    }
+
+    // 省略式创建请求可能与天气、搜索等结果混合，创建声明不一定在回复开头，
+    // 也不一定再次出现“待办”等对象词；只要任意位置声称创建成功就必须验真。
+    contains_any(&normalized, TODO_CREATE_SUCCESS_MARKERS)
+}
+
+fn reply_claims_todo_success(reply: &str, include_other_writes: bool) -> bool {
+    let text = reply.trim();
+    if text.is_empty() || explicitly_denies_todo_success(text) {
+        return false;
+    }
+    let normalized: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if include_other_writes && claims_todo_detail_clear_success(&normalized) {
         return true;
     }
     if looks_like_todo_status_or_capability_explanation(&normalized) {
@@ -262,7 +389,7 @@ fn reply_claims_todo_write_success(reply: &str) -> bool {
     }
     // 不读取用户输入、不推断“本轮必须调用哪个工具”；这里只从模型最终回复
     // 本身识别高风险成功文案，避免无 Tool 结果时透传“已新增/已删除”。
-    if starts_with_todo_success_marker(&normalized) {
+    if starts_with_todo_success_marker(&normalized, include_other_writes) {
         return true;
     }
 
@@ -290,7 +417,7 @@ fn reply_claims_todo_write_success(reply: &str) -> bool {
     if !has_todo_context {
         return false;
     }
-    contains_todo_success_marker(&normalized)
+    contains_todo_success_marker(&normalized, include_other_writes)
 }
 
 fn reply_claims_todo_detail_clear_success(reply: &str) -> bool {
@@ -399,13 +526,20 @@ fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
 }
 
-fn contains_todo_success_marker(text: &str) -> bool {
-    contains_any(text, TODO_WRITE_SUCCESS_MARKERS)
+fn contains_todo_success_marker(text: &str, include_other_writes: bool) -> bool {
+    contains_any(text, TODO_CREATE_SUCCESS_MARKERS)
+        || (include_other_writes && contains_any(text, TODO_OTHER_WRITE_SUCCESS_MARKERS))
 }
 
-fn starts_with_todo_success_marker(text: &str) -> bool {
-    TODO_WRITE_SUCCESS_MARKERS
+fn starts_with_todo_success_marker(text: &str, include_other_writes: bool) -> bool {
+    TODO_CREATE_SUCCESS_MARKERS
         .iter()
+        .chain(
+            include_other_writes
+                .then_some(TODO_OTHER_WRITE_SUCCESS_MARKERS)
+                .into_iter()
+                .flatten(),
+        )
         .any(|marker| text.starts_with(marker))
 }
 
@@ -414,37 +548,31 @@ fn allowlist_marker_without_action_success(text: &str, allowlist_markers: &[&str
 }
 
 fn contains_clear_todo_action_success_marker(text: &str) -> bool {
-    [
-        "已新增",
-        "已新建",
-        "已创建",
-        "已添加",
-        "已记录",
-        "已生成待确认",
-        "已发起",
-        "已修改",
-        "已更新",
-        "已恢复",
-        "已删除",
-        "已跳过",
-        "已关闭",
-        "已经新增",
-        "已经新建",
-        "已经创建",
-        "已经添加",
-        "已经记录",
-        "已经修改",
-        "已经更新",
-        "已经恢复",
-        "已经删除",
-        "已经跳过",
-        "已经关闭",
-    ]
-    .iter()
-    .any(|marker| {
-        text.match_indices(marker)
-            .any(|(pos, _)| !is_explanatory_clear_success_usage(text, pos, marker))
-    })
+    TODO_CREATE_SUCCESS_MARKERS
+        .iter()
+        .copied()
+        .chain(
+            [
+                "已修改",
+                "已更新",
+                "已恢复",
+                "已删除",
+                "已跳过",
+                "已关闭",
+                "已经修改",
+                "已经更新",
+                "已经恢复",
+                "已经删除",
+                "已经跳过",
+                "已经关闭",
+            ]
+            .iter()
+            .copied(),
+        )
+        .any(|marker| {
+            text.match_indices(marker)
+                .any(|(pos, _)| !is_explanatory_clear_success_usage(text, pos, marker))
+        })
 }
 
 fn is_explanatory_clear_success_usage(text: &str, pos: usize, marker: &str) -> bool {
@@ -538,295 +666,5 @@ fn todo_tool_failure_reply(summary: &TodoToolResultSummary) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use qq_maid_llm::provider::ToolExecutionResult;
-    use serde_json::json;
-
-    use crate::runtime::tools::todo::success_guard::todo_success_not_verified_reply_for_tool_results;
-
-    use super::TodoSuccessValidation;
-
-    struct TestOutput {
-        reply: String,
-        tool_results: Vec<ToolExecutionResult>,
-    }
-
-    fn output(reply: &str, tool_results: Vec<ToolExecutionResult>) -> TestOutput {
-        TestOutput {
-            reply: reply.to_owned(),
-            tool_results,
-        }
-    }
-
-    fn validate_todo_success_reply(output: &TestOutput) -> TodoSuccessValidation {
-        super::validate_todo_success_reply(&output.reply, &output.tool_results)
-    }
-
-    fn todo_success_not_verified_reply_for_output(output: &TestOutput) -> String {
-        todo_success_not_verified_reply_for_tool_results(&output.tool_results)
-    }
-
-    fn tool_result(name: &str, value: serde_json::Value, succeeded: bool) -> ToolExecutionResult {
-        ToolExecutionResult {
-            name: name.to_owned(),
-            output: value,
-            succeeded,
-        }
-    }
-
-    #[test]
-    fn non_success_chat_passes_without_tool_result() {
-        assert_eq!(
-            validate_todo_success_reply(&output("晚上好，今天想聊点什么？", Vec::new())),
-            TodoSuccessValidation::Passed {
-                claimed_success: false
-            }
-        );
-    }
-
-    #[test]
-    fn explicit_non_success_explanation_passes_without_tool_result() {
-        assert_eq!(
-            validate_todo_success_reply(&output(
-                "这次没有确认改动成功。请先查看最新待办列表，再按编号操作一次。",
-                Vec::new()
-            )),
-            TodoSuccessValidation::Passed {
-                claimed_success: false
-            }
-        );
-    }
-
-    #[test]
-    fn capability_and_status_explanations_pass_without_tool_result() {
-        for reply in [
-            "可以删除已完成待办，但需要先列出并选择具体条目。",
-            "暂不支持批量清理全部已完成待办；可以先查看已完成列表。",
-            "请提供要删除的已完成待办编号；我还不能确认已经删除任何待办。",
-            "请提供要删除的已完成待办编号；已删除项目不可恢复。",
-            "已完成待办可以查看，也可以选择具体条目删除。",
-        ] {
-            assert_eq!(
-                validate_todo_success_reply(&output(reply, Vec::new())),
-                TodoSuccessValidation::Passed {
-                    claimed_success: false
-                },
-                "{reply}"
-            );
-        }
-    }
-
-    #[test]
-    fn todo_success_reply_without_tool_result_is_blocked() {
-        assert_eq!(
-            validate_todo_success_reply(&output("已新增待办：明天接老公", Vec::new())),
-            TodoSuccessValidation::Blocked
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output("已新增：明天接老公", Vec::new())),
-            TodoSuccessValidation::Blocked
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output("第二条待办已删除。", Vec::new())),
-            TodoSuccessValidation::Blocked
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output("刚才那个待办已完成。", Vec::new())),
-            TodoSuccessValidation::Blocked
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output("已删除待办，还要继续吗？", Vec::new())),
-            TodoSuccessValidation::Blocked
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output(
-                "已删除第一条待办，请先用 /todo 查看确认。",
-                Vec::new()
-            )),
-            TodoSuccessValidation::Blocked
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output(
-                "暂不支持批量清理，但已删除第一条待办。",
-                Vec::new()
-            )),
-            TodoSuccessValidation::Blocked
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output("已完成待办已删除。", Vec::new())),
-            TodoSuccessValidation::Blocked
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output(
-                "请提供要删除的已完成待办编号；已删除第一条待办。",
-                Vec::new()
-            )),
-            TodoSuccessValidation::Blocked
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output(
-                "请提供要删除的已完成待办编号；已删除项目不可恢复。第一条待办已删除。",
-                Vec::new()
-            )),
-            TodoSuccessValidation::Blocked
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output("第三条详情以后不会显示了。", Vec::new())),
-            TodoSuccessValidation::Blocked
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output("第二条备注已清除。", Vec::new())),
-            TodoSuccessValidation::Blocked
-        );
-    }
-
-    #[test]
-    fn todo_success_reply_requires_successful_structured_result() {
-        assert_eq!(
-            validate_todo_success_reply(&output(
-                "第二条待办已删除。",
-                vec![tool_result(
-                    "delete_todos",
-                    json!({"ok": false, "message": "failed"}),
-                    false,
-                )],
-            )),
-            TodoSuccessValidation::Blocked
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output(
-                "第二条待办已删除。",
-                vec![tool_result(
-                    "delete_todos",
-                    json!({"ok": true, "requires_confirmation": true, "pending_action": "delete"}),
-                    true,
-                )],
-            )),
-            TodoSuccessValidation::Passed {
-                claimed_success: true
-            }
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output(
-                "已新增待办：明天接老公",
-                vec![tool_result(
-                    "create_todo",
-                    json!({"ok": true, "created": {"title": "明天接老公"}}),
-                    true,
-                )],
-            )),
-            TodoSuccessValidation::Passed {
-                claimed_success: true
-            }
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output(
-                "已新增待办：明天接老公",
-                vec![tool_result(
-                    "create_todo",
-                    json!({"ok": true, "requires_confirmation": true, "pending_action": "create"}),
-                    true,
-                )],
-            )),
-            TodoSuccessValidation::Blocked
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output(
-                "第三条详情已清除。",
-                vec![tool_result(
-                    "create_todo",
-                    json!({"ok": true, "created": {"title": "明天接老公"}}),
-                    true,
-                )],
-            )),
-            TodoSuccessValidation::Blocked
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output(
-                "第三条详情已清除。",
-                vec![tool_result(
-                    "edit_todo",
-                    json!({"ok": true, "updated": {"detail": "原详情仍然存在"}}),
-                    true,
-                )],
-            )),
-            TodoSuccessValidation::Blocked
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output(
-                "第三条详情已清除。",
-                vec![tool_result(
-                    "edit_todo",
-                    json!({"ok": true, "updated": {"title": "新标题", "detail": "旧详情"}}),
-                    true,
-                )],
-            )),
-            TodoSuccessValidation::Blocked
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output(
-                "第三条详情已清除。",
-                vec![tool_result(
-                    "edit_todo",
-                    json!({"ok": true, "updated": {"title": "新标题"}}),
-                    true,
-                )],
-            )),
-            TodoSuccessValidation::Blocked
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output(
-                "第三条详情已清除。",
-                vec![tool_result(
-                    "edit_todo",
-                    json!({"ok": false, "updated": {"title": "检查日志", "detail": null}}),
-                    true,
-                )],
-            )),
-            TodoSuccessValidation::Blocked
-        );
-        assert_eq!(
-            validate_todo_success_reply(&output(
-                "第三条详情已清除。",
-                vec![tool_result(
-                    "edit_todo",
-                    json!({"ok": true, "updated": {"title": "检查日志", "detail": null}}),
-                    true,
-                )],
-            )),
-            TodoSuccessValidation::Passed {
-                claimed_success: true
-            }
-        );
-    }
-
-    #[test]
-    fn tool_failure_reply_prefers_business_error_over_dependency_skip() {
-        let output = output(
-            "已删除待办。",
-            vec![
-                tool_result(
-                    "delete_todos",
-                    json!({
-                        "ok": false,
-                        "error_code": "todo_selection_not_found",
-                        "message": "no completed or cancelled todo matched query",
-                    }),
-                    false,
-                ),
-                tool_result(
-                    "complete_todos",
-                    json!({
-                        "ok": false,
-                        "skipped": true,
-                        "reason": "dependency_previous_call_failed",
-                    }),
-                    false,
-                ),
-            ],
-        );
-
-        let reply = todo_success_not_verified_reply_for_output(&output);
-        assert!(reply.contains("没有找到可删除的已完成待办"));
-    }
-}
+#[path = "tests.rs"]
+mod tests;

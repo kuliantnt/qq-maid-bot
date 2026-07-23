@@ -62,69 +62,8 @@ impl Default for WebSearchTimeouts {
     }
 }
 
+pub(crate) mod agent_turn;
 mod ops;
-
-pub(crate) mod route {
-    //! 联网搜索普通消息 Agent Chat 路由判断。
-    //!
-    //! 本模块只表达 Search 域的显式搜索词；本地文本整理的排除规则由 respond
-    //! 通用 status_semantics 先行判断后传入，避免 Search 域依赖 respond。
-
-    pub(crate) fn has_search_intent(
-        text: &str,
-        lower: &str,
-        local_text_processing_intent: bool,
-    ) -> bool {
-        if local_text_processing_intent {
-            return false;
-        }
-
-        lower.contains("search")
-            || has_explicit_search_phrase(text)
-            || contains_any(
-                text,
-                &[
-                    "联网",
-                    "上网查",
-                    "网上查",
-                    "网络查询",
-                    "搜索",
-                    "搜一下",
-                    "网上有没有",
-                    "查 GitHub",
-                    "查 github",
-                    "查资料",
-                    "查新闻",
-                    "最新的",
-                    "最新消息",
-                    "最新进展",
-                ],
-            )
-    }
-
-    fn has_explicit_search_phrase(text: &str) -> bool {
-        contains_any(text, &["查一下", "查下", "查查", "查询一下"])
-            && contains_any(
-                text,
-                &[
-                    "新闻",
-                    "资料",
-                    "网上",
-                    "网络",
-                    "互联网",
-                    "GitHub",
-                    "github",
-                    "最新",
-                    "进展",
-                    "有没有",
-                ],
-            )
-    }
-
-    fn contains_any(text: &str, needles: &[&str]) -> bool {
-        needles.iter().any(|needle| text.contains(needle))
-    }
-}
 
 pub(crate) type WebSearchDeltaHandler<'a> = Box<
     dyn FnMut(String) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send>> + Send + 'a,

@@ -23,13 +23,12 @@ const TRAIN_TOOL_NAME: &str = "get_train_schedule";
 const TRAIN_TOOL_CODE_MAX_CHARS: usize = 20;
 
 pub(crate) mod route {
-    //! 列车普通消息 Agent Chat 路由判断。
+    //! 列车普通消息的用户可见状态判断；不参与 Agent Runtime 路由或工具执行。
 
-    pub(crate) fn has_train_intent(text: &str, _lower: &str) -> bool {
-        contains_any(
-            text,
-            &["火车", "列车", "车次", "高铁", "动车", "时刻", "站台"],
-        ) || has_train_code(text)
+    pub(crate) fn has_train_status_intent(text: &str) -> bool {
+        has_train_code(text)
+            || (contains_any(text, &["火车", "列车", "车次", "高铁", "动车"])
+                && contains_any(text, &["查", "看看", "几点", "经停", "时刻表"]))
     }
 
     fn has_train_code(text: &str) -> bool {
@@ -91,6 +90,26 @@ pub(crate) mod route {
 
     fn contains_any(text: &str, needles: &[&str]) -> bool {
         needles.iter().any(|needle| text.contains(needle))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn train_status_requires_a_train_entity_or_code() {
+            for text in ["查一下 G1234", "查一下高铁车次", "看看这趟车次"] {
+                assert!(has_train_status_intent(text), "{text}");
+            }
+            for text in [
+                "这是重要时刻",
+                "代码运行在哪个平台",
+                "介绍一下站台设计",
+                "解释一下高铁原理",
+            ] {
+                assert!(!has_train_status_intent(text), "{text}");
+            }
+        }
     }
 }
 

@@ -11,5 +11,4 @@ mod tool;
 pub use feed::{RssFetchConfig, RssFetcher};
 pub use scheduler::{RssScheduler, RssSchedulerConfig};
 pub use storage::*;
-pub(crate) use tool::route;
 pub use tool::{RssManageSubscriptionsTool, RssRecentItemsTool};

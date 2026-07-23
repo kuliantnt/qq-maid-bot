@@ -32,18 +32,6 @@ const RSS_MANAGE_OUTPUT_ERROR_MAX_CHARS: usize = 180;
 const RSS_MANAGE_OUTPUT_TARGET_MAX_CHARS: usize = 120;
 const RSS_MANAGE_OUTPUT_SCOPE_MAX_CHARS: usize = 120;
 
-pub(crate) mod route {
-    //! RSS 普通消息 Agent Chat 路由判断。
-
-    pub(crate) fn has_rss_intent(text: &str, lower: &str) -> bool {
-        lower.contains("rss") || contains_any(text, &["订阅更新", "最近订阅", "订阅记录"])
-    }
-
-    fn contains_any(text: &str, needles: &[&str]) -> bool {
-        needles.iter().any(|needle| text.contains(needle))
-    }
-}
-
 /// 模型可调用的 RSS 最近条目查询 Tool。
 #[derive(Clone)]
 pub struct RssRecentItemsTool {

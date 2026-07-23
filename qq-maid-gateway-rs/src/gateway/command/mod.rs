@@ -96,6 +96,7 @@ pub(crate) struct GatewayCommandService {
     runtime: GatewayRuntimeStatus,
     respond: RespondClient,
     qq_auth: Option<AccessTokenManager>,
+    application_version: &'static str,
 }
 
 impl GatewayCommandService {
@@ -110,7 +111,13 @@ impl GatewayCommandService {
             runtime,
             respond,
             qq_auth,
+            application_version: env!("CARGO_PKG_VERSION"),
         }
+    }
+
+    pub(crate) fn with_application_version(mut self, application_version: &'static str) -> Self {
+        self.application_version = application_version;
+        self
     }
 
     pub(crate) fn from_config(
@@ -170,7 +177,7 @@ impl GatewayCommandService {
             &self.runtime,
             &token_snapshot,
             &self.respond.health_snapshot(),
-            check_failure.as_deref(),
+            ping::PingReplyOptions::new(check_failure.as_deref(), self.application_version),
         );
         if let Some(notice) = check_notice {
             // 禁止主动探测的渠道仍返回本地健康快照；提示必须由 Gateway 静态生成，

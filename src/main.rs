@@ -151,12 +151,13 @@ async fn main() -> anyhow::Result<()> {
     let shutdown_token = CancellationToken::new();
     let gateway_shutdown = shutdown_token.clone();
     let mut gateway_handle = tokio::spawn(async move {
-        qq_maid_gateway_rs::app::run_with_config_with_shutdown_and_status(
+        qq_maid_gateway_rs::app::run_with_config_with_shutdown_and_status_and_application_version(
             gateway_config,
             respond,
             push_sink,
             gateway_runtime,
             gateway_shutdown,
+            env!("CARGO_PKG_VERSION"),
         )
         .await
     });

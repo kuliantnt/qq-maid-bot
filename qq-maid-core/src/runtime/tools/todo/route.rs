@@ -1,8 +1,8 @@
-//! Todo 普通消息进入 Tool Loop 前的轻量路由判定。
+//! Todo 普通消息的高置信领域信号。
 //!
-//! 这里只判断“是否明显是 Todo / Reminder 任务”，不解析具体日期、编号目标或执行
-//! 状态变更。真正的 owner、可见编号、pending、快照和写入不变量仍由 Todo Tool 与
-//! flow 模块处理。
+//! 状态提示与 Todo 成功文案验真可以各自消费这里的强信号，但它不参与 Agent Runtime
+//! 路由、Tool 暴露或执行，也不解析具体日期、编号目标和状态变更。真正的 owner、
+//! 可见编号、pending、快照和写入不变量仍由 Todo Tool 与 flow 模块处理。
 
 use qq_maid_common::time_context;
 
@@ -13,6 +13,7 @@ const TODO_WRITE_MARKERS: &[&str] = &[
     "加个",
     "加一",
     "创建",
+    "帮我记",
     "记一下",
     "记录",
     "提醒我",
@@ -45,7 +46,7 @@ const REMINDER_ACTION_MARKERS: &[&str] = &[
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TodoRouteKind {
+pub(crate) enum TodoIntentKind {
     None,
     DirectIntent,
     StrongReference,
@@ -56,7 +57,7 @@ pub(crate) enum TodoRouteKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TodoRouteAction {
+pub(crate) enum TodoIntentAction {
     Confirm,
     Write,
     Query,
@@ -64,74 +65,66 @@ pub(crate) enum TodoRouteAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TodoRouteIntent {
-    pub kind: TodoRouteKind,
+pub(crate) struct TodoIntent {
+    pub kind: TodoIntentKind,
 }
 
-impl TodoRouteIntent {
-    pub(crate) fn routes_to_tool_loop(self) -> bool {
+impl TodoIntent {
+    pub(crate) fn is_confident(self) -> bool {
         matches!(
             self.kind,
-            TodoRouteKind::DirectIntent
-                | TodoRouteKind::StrongReference
-                | TodoRouteKind::ContextReference
-                | TodoRouteKind::NumberContext
+            TodoIntentKind::DirectIntent
+                | TodoIntentKind::StrongReference
+                | TodoIntentKind::ContextReference
+                | TodoIntentKind::NumberContext
         )
     }
 }
 
-pub(crate) fn classify_todo_route(
+pub(crate) fn classify_todo_intent(
     text: &str,
     lower: &str,
     has_recent_todo_context: bool,
-    non_tool_status_context: bool,
-) -> TodoRouteIntent {
-    if has_todo_intent(text, lower)
-        || has_reminder_intent(text)
-        || has_scheduled_task_intent(text, non_tool_status_context)
-    {
-        return intent(TodoRouteKind::DirectIntent);
+) -> TodoIntent {
+    if has_todo_intent(text, lower) || has_reminder_intent(text) {
+        return intent(TodoIntentKind::DirectIntent);
     }
     if is_strong_todo_reference_operation(text) {
-        return intent(TodoRouteKind::StrongReference);
+        return intent(TodoIntentKind::StrongReference);
     }
     if is_weak_todo_context_reference(text) && has_recent_todo_context {
-        return intent(TodoRouteKind::ContextReference);
+        return intent(TodoIntentKind::ContextReference);
     }
     if is_bare_number_todo_operation(text) {
         if has_recent_todo_context {
-            return intent(TodoRouteKind::NumberContext);
+            return intent(TodoIntentKind::NumberContext);
         }
-        return intent(TodoRouteKind::NumberContextMissing);
+        return intent(TodoIntentKind::NumberContextMissing);
     }
     if is_weak_todo_context_reference(text) {
-        return intent(TodoRouteKind::ContextReferenceMissing);
+        return intent(TodoIntentKind::ContextReferenceMissing);
     }
-    intent(TodoRouteKind::None)
+    intent(TodoIntentKind::None)
 }
 
-pub(crate) fn todo_route_action(text: &str) -> TodoRouteAction {
+pub(crate) fn todo_intent_action(text: &str) -> TodoIntentAction {
     if is_detail_clear_edit(text) {
-        return TodoRouteAction::Write;
+        return TodoIntentAction::Write;
     }
     if contains_any(text, TODO_CONFIRM_MARKERS) {
-        return TodoRouteAction::Confirm;
+        return TodoIntentAction::Confirm;
     }
     if contains_any(text, TODO_WRITE_MARKERS) {
-        return TodoRouteAction::Write;
+        return TodoIntentAction::Write;
     }
     if contains_any(text, TODO_QUERY_MARKERS) {
-        return TodoRouteAction::Query;
+        return TodoIntentAction::Query;
     }
-    TodoRouteAction::Process
+    TodoIntentAction::Process
 }
 
-pub(crate) fn routes_as_todo_write_status(text: &str, non_tool_status_context: bool) -> bool {
-    has_reminder_intent(text) || has_scheduled_task_intent(text, non_tool_status_context)
-}
-
-fn intent(kind: TodoRouteKind) -> TodoRouteIntent {
-    TodoRouteIntent { kind }
+fn intent(kind: TodoIntentKind) -> TodoIntent {
+    TodoIntent { kind }
 }
 
 fn has_todo_intent(text: &str, lower: &str) -> bool {
@@ -139,7 +132,8 @@ fn has_todo_intent(text: &str, lower: &str) -> bool {
         return false;
     }
 
-    let has_todo_object = contains_any(text, TODO_OBJECT_MARKERS) || lower.contains("todo");
+    let has_todo_object =
+        contains_any(text, TODO_OBJECT_MARKERS) || contains_ascii_word(lower, "todo");
     let has_todo_action = contains_any(text, TODO_WRITE_MARKERS)
         || contains_any(text, TODO_CONFIRM_MARKERS)
         || contains_any(text, TODO_QUERY_MARKERS);
@@ -170,42 +164,7 @@ fn has_reminder_action(text: &str) -> bool {
     contains_any(text, REMINDER_ACTION_MARKERS)
 }
 
-fn has_scheduled_task_intent(text: &str, non_tool_status_context: bool) -> bool {
-    if non_tool_status_context || !looks_like_temporal_expression(text) {
-        return false;
-    }
-    let compact = text.split_whitespace().collect::<String>();
-    let action_markers = [
-        "盯一下",
-        "盯下",
-        "看一下",
-        "看下",
-        "检查",
-        "跟进",
-        "开会",
-        "提交",
-        "出一版",
-        "复盘",
-        "续费",
-        "验收",
-        "整理",
-        "发送",
-        "发给",
-        "发一下",
-        "发布",
-        "发版",
-        "交水电费",
-        "交作业",
-        "买菜",
-        "买东西",
-        "买药",
-        "完成初稿",
-        "完成草稿",
-    ];
-    contains_any(&compact, &action_markers)
-}
-
-fn looks_like_temporal_expression(text: &str) -> bool {
+pub(super) fn looks_like_temporal_expression(text: &str) -> bool {
     // 路由层只判断“是否存在时间线索”，不消费推断出的日期，也不改变 Todo Tool
     // 内部基于模型/时间上下文生成的最终 due_date/due_at。
     let ctx = time_context::request_time_context();
@@ -324,6 +283,11 @@ fn has_ascii_digit(text: &str) -> bool {
     text.bytes().any(|byte| byte.is_ascii_digit())
 }
 
+fn contains_ascii_word(text: &str, expected: &str) -> bool {
+    text.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .any(|word| word == expected)
+}
+
 fn has_ordinal_reference(text: &str) -> bool {
     contains_any(
         text,
@@ -378,4 +342,56 @@ fn is_cjk_punctuation(ch: char) -> bool {
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn classify(text: &str, has_recent_todo_context: bool) -> TodoIntent {
+        classify_todo_intent(text, &text.to_ascii_lowercase(), has_recent_todo_context)
+    }
+
+    #[test]
+    fn explicit_todo_operations_are_high_confidence() {
+        for (input, action) in [
+            ("新增待办，明天接人", TodoIntentAction::Write),
+            ("帮我记一个待办，今晚检查日志", TodoIntentAction::Write),
+            ("明天提醒我交水电费", TodoIntentAction::Write),
+            ("查看待办", TodoIntentAction::Query),
+            ("完成第一条", TodoIntentAction::Confirm),
+            ("删除第 7 条", TodoIntentAction::Confirm),
+        ] {
+            assert!(classify(input, false).is_confident(), "{input}");
+            assert_eq!(todo_intent_action(input), action, "{input}");
+        }
+    }
+
+    #[test]
+    fn weak_references_require_recent_todo_context() {
+        for input in ["这个改一下", "删除7", "把7合并到6"] {
+            assert!(classify(input, true).is_confident(), "{input}");
+            assert!(!classify(input, false).is_confident(), "{input}");
+        }
+    }
+
+    #[test]
+    fn time_expressions_do_not_create_todo_status_without_todo_signal() {
+        for input in [
+            "明天陪我聊聊",
+            "晚上分析一下架构",
+            "下午写一段文案",
+            "明天解释这段日志",
+            "明天开会",
+            "下午整理一下",
+        ] {
+            assert!(!classify(input, false).is_confident(), "{input}");
+        }
+    }
+
+    #[test]
+    fn todo_ascii_marker_matches_a_word_instead_of_a_substring() {
+        assert!(classify("查看 TODO", false).is_confident());
+        assert!(!classify("查看 TodoMVC 示例", false).is_confident());
+    }
 }

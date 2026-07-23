@@ -50,6 +50,17 @@ pub(crate) enum ToolCallStartDecision {
     SkipForFinalAnswer,
 }
 
+/// 控制用户进度事件，与 diagnostics 中是否记录 attempt/result 分离。
+///
+/// 缓存命中仍是一条完整 Agent 轨迹，但没有真实执行，不能伪造 Started/Finished；
+/// 参数错误、预算拒绝等预执行失败则仍需要 Failed 事件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolCallProgressDisposition {
+    Executed,
+    CacheHit,
+    FailedBeforeExecution,
+}
+
 pub(crate) struct PreparedToolLoopCall {
     tool_name: String,
     prepared: Result<PreparedToolCall, LlmError>,
@@ -159,7 +170,7 @@ impl<'a> ToolLoopExecutor<'a> {
                 .as_ref()
                 .map(|(name, arguments)| (name.as_str(), arguments)),
         );
-        let (tool_name, output, succeeded) = match prepared {
+        let (tool_name, output, succeeded, progress_disposition) = match prepared {
             Ok(prepared) => {
                 let tool_name = prepared.name.clone();
                 let read_only_key = prepared
@@ -173,7 +184,12 @@ impl<'a> ToolLoopExecutor<'a> {
                     // 缓存只保存已明确成功的只读结果；命中只回传紧凑引用，避免把
                     // 完整证据再次写入上下文。缓存命中不增加真实执行次数。
                     debug!(tool = %tool_name, "agent read-only tool cache hit");
-                    (tool_name, compact_cached_output(cached_output), true)
+                    (
+                        tool_name,
+                        compact_cached_output(cached_output),
+                        true,
+                        ToolCallProgressDisposition::CacheHit,
+                    )
                 } else if prepared.max_calls_per_request.is_some_and(|limit| {
                     self.execution_counts.get(&tool_name).copied().unwrap_or(0) >= limit
                 }) {
@@ -191,6 +207,7 @@ impl<'a> ToolLoopExecutor<'a> {
                         tool_name,
                         tool_limit_output(prepared.max_calls_per_request.unwrap_or(0)),
                         false,
+                        ToolCallProgressDisposition::FailedBeforeExecution,
                     )
                 } else if prepared.dependency == ToolCallDependency::PreviousCallSuccess
                     && !self.previous_call_succeeded
@@ -199,6 +216,7 @@ impl<'a> ToolLoopExecutor<'a> {
                         tool_name,
                         tool_skip_output("dependency_previous_call_failed"),
                         false,
+                        ToolCallProgressDisposition::FailedBeforeExecution,
                     )
                 } else {
                     match before_start(&tool_name, prepared.effect)? {
@@ -209,6 +227,7 @@ impl<'a> ToolLoopExecutor<'a> {
                                 tool_name,
                                 tool_skip_output("request_budget_reserved_for_final_answer"),
                                 false,
+                                ToolCallProgressDisposition::FailedBeforeExecution,
                             )
                         }
                         ToolCallStartDecision::Execute => {
@@ -233,9 +252,19 @@ impl<'a> ToolLoopExecutor<'a> {
                                     if succeeded && let Some(key) = read_only_key {
                                         self.completed_read_only_calls.insert(key, output.clone());
                                     }
-                                    (tool_name, output, succeeded)
+                                    (
+                                        tool_name,
+                                        output,
+                                        succeeded,
+                                        ToolCallProgressDisposition::Executed,
+                                    )
                                 }
-                                Err(err) => (tool_name, tool_error_output(&err), false),
+                                Err(err) => (
+                                    tool_name,
+                                    tool_error_output(&err),
+                                    false,
+                                    ToolCallProgressDisposition::Executed,
+                                ),
                             }
                         }
                     }
@@ -243,17 +272,27 @@ impl<'a> ToolLoopExecutor<'a> {
             }
             Err(err) => {
                 self.rejected_call = true;
-                (requested_tool_name, tool_error_output(&err), false)
+                (
+                    requested_tool_name,
+                    tool_error_output(&err),
+                    false,
+                    ToolCallProgressDisposition::FailedBeforeExecution,
+                )
             }
         };
         self.previous_call_succeeded = succeeded;
-        let event = if succeeded {
-            ToolLoopProgressEvent::ToolCallFinished {
-                tool_name: tool_name.clone(),
+        let event = match progress_disposition {
+            ToolCallProgressDisposition::CacheHit => None,
+            ToolCallProgressDisposition::Executed if succeeded => {
+                Some(ToolLoopProgressEvent::ToolCallFinished {
+                    tool_name: tool_name.clone(),
+                })
             }
-        } else {
-            ToolLoopProgressEvent::ToolCallFailed {
-                tool_name: tool_name.clone(),
+            ToolCallProgressDisposition::Executed
+            | ToolCallProgressDisposition::FailedBeforeExecution => {
+                Some(ToolLoopProgressEvent::ToolCallFailed {
+                    tool_name: tool_name.clone(),
+                })
             }
         };
         let result = tool_execution_result(&tool_name, &output, succeeded);
@@ -278,7 +317,9 @@ impl<'a> ToolLoopExecutor<'a> {
         }
         // 工具已经完成后先落可信轨迹，再通知上层；receiver 此时关闭不能抹掉结果。
         on_result(result);
-        self.emit_progress(event).await?;
+        if let Some(event) = event {
+            self.emit_progress(event).await?;
+        }
         Ok(ToolLoopCallOutput {
             output,
             skipped_for_finalization,
