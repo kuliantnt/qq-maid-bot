@@ -27,14 +27,20 @@ const DEFAULT_AGENT_CONFIG: &str = include_str!("../../../../runtime/config/agen
 /// 显式 `AGENT_CONFIG_FILE` 永远不自动创建，避免把拼错的高级部署路径静默纠正；仅默认
 /// 路径缺失时使用 `create_new`，不会覆盖人工文件或并发创建结果。
 pub fn ensure_default_agent_config(environment: &HashMap<String, String>) -> Result<(), LlmError> {
+    ensure_default_agent_config_at(environment, Path::new(DEFAULT_AGENT_CONFIG_PATH))
+}
+
+fn ensure_default_agent_config_at(
+    environment: &HashMap<String, String>,
+    path: &Path,
+) -> Result<(), LlmError> {
     if environment
         .get(AGENT_CONFIG_FILE_ENV)
         .is_some_and(|value| !value.trim().is_empty())
-        || Path::new(DEFAULT_AGENT_CONFIG_PATH).exists()
+        || path.exists()
     {
         return Ok(());
     }
-    let path = Path::new(DEFAULT_AGENT_CONFIG_PATH);
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).map_err(|error| {
         LlmError::config(format!(
@@ -366,6 +372,29 @@ impl AgentRuntimeConfig {
             ))
         })?;
         Self::from_toml(&text, AgentConfigSource::File(path))
+    }
+
+    /// 为只读 `config check` 校验 Agent 策略，不触发首次启动的文件安装。
+    ///
+    /// 未显式覆盖路径且默认活动文件尚不存在时，校验与当前二进制同版的内嵌模板；其他
+    /// 情况仍交给正式加载器，以保证已有活动文件和显式路径继续采用严格文件语义。
+    pub fn validate_for_read_only_check(
+        environment: &HashMap<String, String>,
+    ) -> Result<(), LlmError> {
+        let has_explicit_path = environment
+            .get(AGENT_CONFIG_FILE_ENV)
+            .is_some_and(|value| !value.trim().is_empty());
+        let default_exists = Path::new(DEFAULT_AGENT_CONFIG_PATH)
+            .try_exists()
+            .unwrap_or(true);
+        if !has_explicit_path && !default_exists {
+            return Self::from_toml(
+                DEFAULT_AGENT_CONFIG,
+                AgentConfigSource::File(DEFAULT_AGENT_CONFIG_PATH.to_owned()),
+            )
+            .map(drop);
+        }
+        Self::load_from_environment(environment).map(drop)
     }
 
     pub(in crate::config) fn from_toml(

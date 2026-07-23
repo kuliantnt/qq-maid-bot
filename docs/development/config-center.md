@@ -17,7 +17,7 @@ config/runtime.toml / SQLite 认证加密密文
 - `config/agent.toml` 是模型路线、搜索路线、Profile、Scene、Tool Calling 和 Tool 白名单的唯一持久化事实来源。网页直接结构化编辑这个文件，不是比它更高的一层。
 - 两个文件都允许人工维护，也都使用独立的 SHA-256 revision。程序写回会规范化 TOML 格式并删除注释/自定义排版，但会通过现有 Agent schema 保留全部合法配置语义和所有未修改条目。
 - 进程环境先于 `config/.env` 和 `.env`，dotenv 仅补缺失项；dotenv 文件不存在是正常输入。对于配置中心已登记字段，外部值仅在尚无受管值时作为首次启动兜底；管理员在 WebUI 保存后，`runtime.toml` 普通值或 SQLite 加密 secret 优先，快照以 `overridden=true` 标记已覆盖同名外部兜底。未登记的 Bootstrap 与高风险部署字段仍只由文件或环境管理。
-- `AGENT_CONFIG_FILE` 仅决定服务端受管目标，浏览器不能提交任意路径。统一程序要求该文件存在且通过完整校验；`ops.toml` 继续是禁止通用 WebUI 编辑的高风险部署配置。
+- `AGENT_CONFIG_FILE` 仅决定服务端受管目标，浏览器不能提交任意路径。普通启动要求活动文件存在且通过完整校验；唯一例外是全新实例的只读 `config check` 可在默认路径缺失时校验二进制内嵌模板，且不会落盘。`ops.toml` 继续是禁止通用 WebUI 编辑的高风险部署配置。
 - 当前纳入配置中心的字段都标记为重启生效。受管文件写入使用内容 SHA-256 revision、整份校验、同目录临时文件、同步和原子替换；同一进程内严格串行，并在修改开始和正式替换前核对同一个 expected revision。跨进程写入或人工编辑不共享进程内锁，替换前复核只能尽量缩短冲突窗口，仍存在极小的 TOCTOU 窗口，因此这里不是绝对 CAS 保证。
 
 ## 敏感值与主密钥

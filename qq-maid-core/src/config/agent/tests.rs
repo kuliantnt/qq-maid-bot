@@ -1,6 +1,55 @@
 use super::*;
 use qq_maid_llm::web_search::{WebSearchDepth, WebSearchTopic};
 
+struct TestDirectory(std::path::PathBuf);
+
+impl TestDirectory {
+    fn new(name: &str) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "qq-maid-agent-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn first_start_agent_config_matches_embedded_template() {
+    let directory = TestDirectory::new("first-start-content");
+    let path = directory.0.join("config/agent.toml");
+
+    ensure_default_agent_config_at(&HashMap::new(), &path).unwrap();
+
+    assert_eq!(std::fs::read_to_string(path).unwrap(), DEFAULT_AGENT_CONFIG);
+}
+
+#[cfg(unix)]
+#[test]
+fn first_start_agent_config_uses_mode_0600() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = TestDirectory::new("first-start-mode");
+    let path = directory.0.join("config/agent.toml");
+
+    ensure_default_agent_config_at(&HashMap::new(), &path).unwrap();
+
+    assert_eq!(
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
 #[test]
 fn toml_config_overrides_routes_profiles_and_scenes() {
     let text = r#"

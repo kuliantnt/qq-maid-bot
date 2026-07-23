@@ -92,7 +92,7 @@ fn config_check() -> anyhow::Result<()> {
     if !migration.unknown.is_empty() {
         bail!("数据库包含当前二进制不认识的 migration，禁止继续预检或降级启动");
     }
-    let agent = AgentRuntimeConfig::load_from_environment(&environment);
+    let agent = AgentRuntimeConfig::validate_for_read_only_check(&environment);
     println!(
         "agent_config={}",
         if agent.is_ok() { "valid" } else { "invalid" }
