@@ -30,6 +30,8 @@
 - Tool 文件只作为工具入口，负责参数解析、上下文校验和结果返回。
 - 多步业务流程应抽到 `<domain>/ops.rs`，例如同时更新任务、取消 outbox、生成下一次提醒。
 - storage 只负责底层持久化读写；只有需要新增数据库读写或事务语义时才扩展 storage。
+- 领域模块必须通过 `tools/<domain>/mod.rs` 提供少量明确门面；不得用 `pub use storage::*` 等通配导出把 Repository 内部类型重新暴露给 Runtime。
+- 通用 Tool 注册、整轮投影和状态提示层只能装配领域门面或消费通用 adapter；具体 Tool 名称、业务动作、结果索引合并、成功验真和领域状态分类必须留在 `tools/<domain>/`。
 - 不要在 respond/chat_flow/session/prompt 层新增零散 Todo/Reminder/Command 业务判断。
 
 依赖方向保持：

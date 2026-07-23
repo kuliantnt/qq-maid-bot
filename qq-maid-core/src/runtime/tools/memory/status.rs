@@ -1,0 +1,13 @@
+//! Memory 领域的用户可见状态适配。
+
+use crate::runtime::tools::status::{StatusAction, StatusHint, StatusSubject};
+
+pub(crate) fn status_hint_for_tool_name(tool_name: &str) -> Option<StatusHint> {
+    (tool_name == super::SAVE_MEMORY_TOOL_NAME)
+        .then_some(StatusHint::new(StatusSubject::Record, StatusAction::Write))
+}
+
+pub(crate) fn classify_status_hint(text: &str) -> Option<StatusHint> {
+    super::route::has_memory_status_intent(text)
+        .then_some(StatusHint::new(StatusSubject::Record, StatusAction::Write))
+}

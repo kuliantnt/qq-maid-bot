@@ -75,26 +75,20 @@ impl StatusHint {
 /// 这里不读取用户原文，也不参与 Tool Registry、权限或执行判断；未知工具统一回退到
 /// 通用处理状态，避免为状态提示再维护一套自然语言意图分类器。
 pub(crate) fn status_hint_for_tool_name(tool_name: &str) -> Option<StatusHint> {
-    let hint = match tool_name {
-        "web_search" | "knowledge_search" => {
-            StatusHint::new(StatusSubject::Search, StatusAction::Query)
+    for classify in [
+        super::todo::status::status_hint_for_tool_name,
+        super::memory::status::status_hint_for_tool_name,
+        super::rss::status::status_hint_for_tool_name,
+        super::search::status::status_hint_for_tool_name,
+        super::knowledge::status::status_hint_for_tool_name,
+        super::weather::status::status_hint_for_tool_name,
+        super::train::status::status_hint_for_tool_name,
+    ] {
+        if let Some(hint) = classify(tool_name) {
+            return Some(hint);
         }
-        "get_weather" => StatusHint::new(StatusSubject::Weather, StatusAction::Query),
-        "get_train_schedule" => StatusHint::new(StatusSubject::Train, StatusAction::Query),
-        "get_rss_recent_items" => StatusHint::new(StatusSubject::Rss, StatusAction::Query),
-        "manage_rss_subscriptions" => StatusHint::new(StatusSubject::Rss, StatusAction::Process),
-        "list_todos" | "get_todo" => StatusHint::new(StatusSubject::Todo, StatusAction::Query),
-        "create_todo" | "edit_todo" | "merge_todos" | "manage_recurring_reminder" => {
-            StatusHint::new(StatusSubject::Todo, StatusAction::Write)
-        }
-        "complete_todos" | "restore_todos" | "delete_todos" => {
-            StatusHint::new(StatusSubject::Todo, StatusAction::Confirm)
-        }
-        "clarification_control" => StatusHint::new(StatusSubject::Todo, StatusAction::Process),
-        "save_memory" => StatusHint::new(StatusSubject::Record, StatusAction::Write),
-        _ => return None,
-    };
-    Some(hint)
+    }
+    None
 }
 
 pub(crate) fn status_hint_text(

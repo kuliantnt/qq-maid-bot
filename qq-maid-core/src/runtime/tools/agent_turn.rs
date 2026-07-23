@@ -15,6 +15,7 @@ use crate::{
         session::{SessionMeta, SessionRecord, SessionStore},
         tools::{TaskStore, memory, todo},
     },
+    service::VisibleEntitySnapshot,
 };
 
 use super::agent_presenters::{
@@ -24,6 +25,16 @@ use super::agent_presenters::{
 use super::search::agent_turn::{SearchResultProjection, project_result as project_search_result};
 
 pub(crate) type IndexedToolOutcomes = Vec<(usize, ToolExecutionOutcome)>;
+
+/// 单个业务域对整轮 Tool 结果的结构化投影。
+///
+/// 领域只报告它消费的结果和对应回执；跨领域的原始调用顺序、重试覆盖和未知 Tool
+/// 回退统一由本模块处理，避免把整轮编排错误地下沉到任一业务域。
+pub(crate) struct DomainResultProjection {
+    pub(crate) consumed_result_indexes: std::collections::HashSet<usize>,
+    pub(crate) outcomes: IndexedToolOutcomes,
+    pub(crate) visible_entity_snapshot: Option<VisibleEntitySnapshot>,
+}
 
 pub(crate) trait DomainTurnDiagnostics {
     fn log_tool_loop_results(&self, executed_tools: &[String]);
@@ -203,11 +214,11 @@ fn project_tool_turn(
         if is_retry_superseded_result(index, &output.agent.tool_attempts) {
             // 旧尝试仍保留在 Agent diagnostics；这里只丢弃它对应的用户展示块。
             let mut discarded = Vec::new();
-            drain_todo_outcomes_for_result(index, &mut todo_outcomes, &mut discarded);
+            drain_domain_outcomes_for_result(index, &mut todo_outcomes, &mut discarded);
             continue;
         }
         if todo_projection.consumed_result_indexes.contains(&index) {
-            drain_todo_outcomes_for_result(index, &mut todo_outcomes, &mut outcomes);
+            drain_domain_outcomes_for_result(index, &mut todo_outcomes, &mut outcomes);
         } else if let Some(outcome) = tool_outcome_from_weather_result(result) {
             outcomes.push(outcome);
         } else if let Some(outcome) = tool_outcome_from_train_result(result) {
@@ -234,6 +245,23 @@ fn project_tool_turn(
     ))
 }
 
+fn drain_domain_outcomes_for_result(
+    result_index: usize,
+    domain_outcomes: &mut std::iter::Peekable<impl Iterator<Item = (usize, ToolExecutionOutcome)>>,
+    outcomes: &mut Vec<ToolExecutionOutcome>,
+) {
+    while domain_outcomes
+        .peek()
+        .is_some_and(|(outcome_index, _)| *outcome_index == result_index)
+    {
+        if let Some((_, outcome)) = domain_outcomes.next() {
+            outcomes.push(outcome);
+        }
+    }
+}
+
+/// 重试后的旧结果仍保留在原始 Agent 轨迹中，但不能再参与用户展示或领域回执。
+/// 这是所有领域共用的 Tool Loop 语义，不属于 Todo 专用逻辑。
 pub(crate) fn is_retry_superseded_result(
     result_index: usize,
     attempts: &[qq_maid_llm::provider::ToolExecutionAttempt],
@@ -241,21 +269,6 @@ pub(crate) fn is_retry_superseded_result(
     attempts
         .iter()
         .any(|attempt| attempt.retry_of == Some(result_index))
-}
-
-fn drain_todo_outcomes_for_result(
-    result_index: usize,
-    todo_outcomes: &mut std::iter::Peekable<impl Iterator<Item = (usize, ToolExecutionOutcome)>>,
-    outcomes: &mut Vec<ToolExecutionOutcome>,
-) {
-    while todo_outcomes
-        .peek()
-        .is_some_and(|(outcome_index, _)| *outcome_index == result_index)
-    {
-        if let Some((_, outcome)) = todo_outcomes.next() {
-            outcomes.push(outcome);
-        }
-    }
 }
 
 fn apply_agent_turn_outcome(output: &mut RespondOutput, outcome: &AgentTurnOutcome) {
