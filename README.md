@@ -17,11 +17,12 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.21.0`，项目处于 `21.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.21.1`，项目处于 `21.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
 ## 21.x 版本线更新
+- **群管理员 Todo 与 Agent 模板**（v0.21.1）：群主 / 管理员可用 `/todo group` 查看并删除本群未完成 Todo；Release 提供 `agent.example.toml`，首次启动从内嵌模板生成活动 `config/agent.toml`。
 - **多平台部署主线**（v0.21.0）：同一二进制覆盖 QQ 官方、OneBot、微信入口，以及 Linux / Windows / Docker 部署路径；新增 GHCR 多架构镜像、Compose 覆盖、配置迁移与备份恢复 CLI。
 - **Docker 与测试环境**（PR #562）：`linux/amd64` / `linux/arm64` 原生构建推送 GHCR，默认不映射管理端口，按需叠加 console / OneBot / 微信 override；测试环境可按 digest 自动部署与失败回滚。
 - **配置迁移与备份恢复**（PR #565）：`config migrate`、`backup create/verify/restore` 默认 dry-run，支持旧 dotenv 保守导入、SQLite 一致性快照和干净目录恢复。
@@ -39,7 +40,7 @@
 ## 能做什么
 
 - **聊天与上下文**：管理多轮会话，理解图片，并结合引用消息继续追问；共享群聊历史会区分发言成员，降低昵称、偏好和身份信息串线风险。
-- **Todo 与提醒**：新增、修改、完成、恢复和删除待办，支持单次提醒、重复提醒和每日摘要；列表可按今天 / 明天 / 本周 / 逾期 / 关键词组合筛选。
+- **Todo 与提醒**：新增、修改、完成、恢复和删除待办，支持单次提醒、重复提醒和每日摘要；列表可按今天 / 明天 / 本周 / 逾期 / 关键词组合筛选。群主或管理员可用 `/todo group` 管理本群未完成 Todo。
 - **查询与订阅**：查询天气、火车时刻和网页信息，支持多对象对比式联网搜索；订阅 RSS/Atom 并主动推送更新。
 - **记忆与知识库**：个人记忆、群内个人画像和群公共记忆分域管理，并按场景与可见性召回。用户明确要求“记住”时可直接保存；可选的确定性整理（`MEMORY_CONSOLIDATION_ENABLED`）与 Session Dream（`MEMORY_DREAM_ENABLED`）分开开关。Dream 只从会话消息提取安全长期事实，写入个人记忆或当前成员群画像，不覆盖已确认记忆；本地 Markdown 可自动索引并按需检索。
 - **受控工具与运维命令**：模型只能调用服务端注册并按场景放行的工具；管理员可通过默认关闭的 `/ops` 白名单命令触发固定程序，结果以真实执行或持久化结果为准。
