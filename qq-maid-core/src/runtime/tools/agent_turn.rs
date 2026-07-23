@@ -37,6 +37,17 @@ pub(crate) trait DomainTurnDiagnostics {
     }
 }
 
+/// 领域后处理器只接收通用 Tool Turn 结果，并自行完成领域验真与诊断构造。
+///
+/// 通用调度层不读取领域候选、成功声明或工具名称等具体规则。
+pub(crate) trait DomainTurnPostprocessor {
+    fn postprocess_output(
+        self: Box<Self>,
+        projected_outcome: Option<&AgentTurnOutcome>,
+        output: &mut RespondOutput,
+    ) -> Box<dyn DomainTurnDiagnostics>;
+}
+
 pub(crate) struct ToolTurnPostprocess {
     pub(crate) output: RespondOutput,
     pub(crate) outcome: AgentTurnOutcome,
@@ -101,13 +112,9 @@ pub(crate) fn postprocess_tool_turn(
         .as_mut()
         .unwrap_or(conversation_session);
 
-    let todo_interaction = todo::interaction_state::snapshot_for_request(req, Some(state_session));
-    let user_text = req.effective_user_text();
-    let todo_success_verification_candidate =
-        todo::success_guard::is_todo_success_verification_candidate(
-            &user_text,
-            todo_interaction.has_visible_snapshot || todo_interaction.has_recent_operation,
-        );
+    let domain_postprocessors: Vec<Box<dyn DomainTurnPostprocessor>> = vec![Box::new(
+        todo::agent_turn::TodoTurnPostprocessor::for_request(req, state_session),
+    )];
 
     let outcome = project_tool_turn(task_store, state_session, meta, &output)?;
     if let Some(interaction) = standalone_interaction.as_mut() {
@@ -116,35 +123,24 @@ pub(crate) fn postprocess_tool_turn(
             .map_err(crate::runtime::respond::common::session_error)?;
     }
 
-    let todo_guard_enabled =
-        todo::agent_turn::should_validate_success(todo_success_verification_candidate, &output);
-    let validation = if outcome.can_replace_model_reply() {
+    let projected_outcome = if outcome.can_replace_model_reply() {
         if outcome.should_preserve_model_reply() {
             apply_agent_turn_outcome_with_model_reply(&mut output, &outcome);
         } else {
             apply_agent_turn_outcome(&mut output, &outcome);
         }
-        todo::agent_turn::success_validation_from_agent_outcome(&outcome)
+        Some(&outcome)
     } else if outcome.has_unhandled_outcome() && !outcome.outcomes.is_empty() {
         apply_agent_turn_compat_output(&mut output, &outcome);
-        todo::agent_turn::success_validation_from_agent_outcome(&outcome)
-    } else if todo_guard_enabled {
-        let validation = todo::agent_turn::validate_model_reply_success(&output);
-        if !validation.passed() {
-            output = todo::agent_turn::success_not_verified_output(output);
-        }
-        validation
+        Some(&outcome)
     } else {
-        todo::success_guard::TodoSuccessValidation::Passed {
-            claimed_success: false,
-        }
+        None
     };
-    let diagnostics = ToolTurnDiagnostics {
-        domains: vec![Box::new(todo::agent_turn::diagnostics_from_tool_results(
-            &output.agent.tool_results,
-            validation,
-        ))],
-    };
+    let mut domains = Vec::with_capacity(domain_postprocessors.len());
+    for postprocessor in domain_postprocessors {
+        domains.push(postprocessor.postprocess_output(projected_outcome, &mut output));
+    }
+    let diagnostics = ToolTurnDiagnostics { domains };
     Ok(ToolTurnPostprocess {
         output,
         outcome,

@@ -14,9 +14,27 @@ use super::route::{self, TodoIntentAction};
 // 省略式待办没有“待办/提醒”等显式对象，只能用时间线索与明确、可执行的任务行为
 // 共同识别。这里维护 Todo 域正向行为，不通过公共闲聊/创作/解释排除词猜测意图。
 const IMPLICIT_TODO_TASK_ACTION_MARKERS: &[&str] = &[
+    "盯一下",
+    "盯下",
+    "看一下",
+    "看下",
     "开会",
     "参加会议",
+    "买菜",
+    "买东西",
+    "买药",
     "整理",
+    "跟进",
+    "出一版",
+    "复盘",
+    "验收",
+    "发送",
+    "发给",
+    "发一下",
+    "发布",
+    "发版",
+    "完成初稿",
+    "完成草稿",
     "交水电费",
     "缴费",
     "交房租",
@@ -51,7 +69,7 @@ const IMPLICIT_TODO_TASK_ACTION_MARKERS: &[&str] = &[
     "备份",
 ];
 
-const TODO_WRITE_SUCCESS_MARKERS: &[&str] = &[
+const TODO_CREATE_SUCCESS_MARKERS: &[&str] = &[
     "已新增",
     "已新建",
     "已创建",
@@ -59,6 +77,16 @@ const TODO_WRITE_SUCCESS_MARKERS: &[&str] = &[
     "已记录",
     "已生成待确认",
     "已发起",
+    "已经新增",
+    "已经新建",
+    "已经创建",
+    "已经添加",
+    "已经记录",
+    "已经生成待确认",
+    "已经发起",
+];
+
+const TODO_OTHER_WRITE_SUCCESS_MARKERS: &[&str] = &[
     "已完成",
     "已修改",
     "已更新",
@@ -67,11 +95,6 @@ const TODO_WRITE_SUCCESS_MARKERS: &[&str] = &[
     "已删除",
     "已跳过",
     "已关闭",
-    "已经新增",
-    "已经新建",
-    "已经创建",
-    "已经添加",
-    "已经记录",
     "已经完成",
     "已经修改",
     "已经更新",
@@ -82,24 +105,39 @@ const TODO_WRITE_SUCCESS_MARKERS: &[&str] = &[
     "已经关闭",
 ];
 
+/// Todo 成功声明需要验真的范围。
+///
+/// 该范围只供 Tool Turn 最终文案验真使用，不参与 Tool 暴露、路由或执行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TodoSuccessVerificationScope {
+    None,
+    ExplicitMutation,
+    ImplicitCreate,
+}
+
 /// 判定用户输入是否需要启用 Todo 成功文案验真。
 ///
 /// 这是成功边界，不是用户状态提示分类：显式 Todo 写意图沿用既有强信号，另行覆盖
 /// “时间表达 + 明确任务行为”的省略式创建请求。结果只决定是否核验模型最终文案，
 /// 不参与 Tool 暴露、路由、参数解析或执行。
-pub(crate) fn is_todo_success_verification_candidate(
+pub(crate) fn todo_success_verification_scope(
     text: &str,
     has_recent_todo_context: bool,
-) -> bool {
+) -> TodoSuccessVerificationScope {
     let lower = text.to_ascii_lowercase();
     let intent = route::classify_todo_intent(text, &lower, has_recent_todo_context);
     if intent.is_confident() && !matches!(route::todo_intent_action(text), TodoIntentAction::Query)
     {
-        return true;
+        return TodoSuccessVerificationScope::ExplicitMutation;
     }
 
-    route::looks_like_temporal_expression(text)
+    if route::looks_like_temporal_expression(text)
         && contains_any(text, IMPLICIT_TODO_TASK_ACTION_MARKERS)
+    {
+        return TodoSuccessVerificationScope::ImplicitCreate;
+    }
+
+    TodoSuccessVerificationScope::None
 }
 
 /// 判定模型是否可以安全透传 Todo 成功文案。
@@ -109,8 +147,11 @@ pub(crate) fn is_todo_success_verification_candidate(
 pub(crate) fn validate_todo_success_reply(
     reply: &str,
     tool_results: &[ToolExecutionResult],
+    scope: TodoSuccessVerificationScope,
 ) -> TodoSuccessValidation {
-    if reply_claims_todo_detail_clear_success(reply) {
+    if matches!(scope, TodoSuccessVerificationScope::ExplicitMutation)
+        && reply_claims_todo_detail_clear_success(reply)
+    {
         return if tool_results.iter().any(successful_todo_detail_clear_result) {
             TodoSuccessValidation::Passed {
                 claimed_success: true,
@@ -119,7 +160,12 @@ pub(crate) fn validate_todo_success_reply(
             TodoSuccessValidation::Blocked
         };
     }
-    if !reply_claims_todo_write_success(reply) {
+    let claims_write_success = match scope {
+        TodoSuccessVerificationScope::None => false,
+        TodoSuccessVerificationScope::ExplicitMutation => reply_claims_todo_write_success(reply),
+        TodoSuccessVerificationScope::ImplicitCreate => reply_claims_todo_create_success(reply),
+    };
+    if !claims_write_success {
         return TodoSuccessValidation::Passed {
             claimed_success: false,
         };
@@ -311,12 +357,20 @@ pub(crate) fn is_todo_write_tool(name: &str) -> bool {
 }
 
 fn reply_claims_todo_write_success(reply: &str) -> bool {
+    reply_claims_todo_success(reply, true)
+}
+
+fn reply_claims_todo_create_success(reply: &str) -> bool {
+    reply_claims_todo_success(reply, false)
+}
+
+fn reply_claims_todo_success(reply: &str, include_other_writes: bool) -> bool {
     let text = reply.trim();
     if text.is_empty() || explicitly_denies_todo_success(text) {
         return false;
     }
     let normalized: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
-    if claims_todo_detail_clear_success(&normalized) {
+    if include_other_writes && claims_todo_detail_clear_success(&normalized) {
         return true;
     }
     if looks_like_todo_status_or_capability_explanation(&normalized) {
@@ -324,7 +378,7 @@ fn reply_claims_todo_write_success(reply: &str) -> bool {
     }
     // 不读取用户输入、不推断“本轮必须调用哪个工具”；这里只从模型最终回复
     // 本身识别高风险成功文案，避免无 Tool 结果时透传“已新增/已删除”。
-    if starts_with_todo_success_marker(&normalized) {
+    if starts_with_todo_success_marker(&normalized, include_other_writes) {
         return true;
     }
 
@@ -352,7 +406,7 @@ fn reply_claims_todo_write_success(reply: &str) -> bool {
     if !has_todo_context {
         return false;
     }
-    contains_todo_success_marker(&normalized)
+    contains_todo_success_marker(&normalized, include_other_writes)
 }
 
 fn reply_claims_todo_detail_clear_success(reply: &str) -> bool {
@@ -461,13 +515,20 @@ fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
 }
 
-fn contains_todo_success_marker(text: &str) -> bool {
-    contains_any(text, TODO_WRITE_SUCCESS_MARKERS)
+fn contains_todo_success_marker(text: &str, include_other_writes: bool) -> bool {
+    contains_any(text, TODO_CREATE_SUCCESS_MARKERS)
+        || (include_other_writes && contains_any(text, TODO_OTHER_WRITE_SUCCESS_MARKERS))
 }
 
-fn starts_with_todo_success_marker(text: &str) -> bool {
-    TODO_WRITE_SUCCESS_MARKERS
+fn starts_with_todo_success_marker(text: &str, include_other_writes: bool) -> bool {
+    TODO_CREATE_SUCCESS_MARKERS
         .iter()
+        .chain(
+            include_other_writes
+                .then_some(TODO_OTHER_WRITE_SUCCESS_MARKERS)
+                .into_iter()
+                .flatten(),
+        )
         .any(|marker| text.starts_with(marker))
 }
 
@@ -606,7 +667,7 @@ mod tests {
 
     use crate::runtime::tools::todo::success_guard::todo_success_not_verified_reply_for_tool_results;
 
-    use super::TodoSuccessValidation;
+    use super::{TodoSuccessValidation, TodoSuccessVerificationScope};
 
     struct TestOutput {
         reply: String,
@@ -621,7 +682,11 @@ mod tests {
     }
 
     fn validate_todo_success_reply(output: &TestOutput) -> TodoSuccessValidation {
-        super::validate_todo_success_reply(&output.reply, &output.tool_results)
+        super::validate_todo_success_reply(
+            &output.reply,
+            &output.tool_results,
+            TodoSuccessVerificationScope::ExplicitMutation,
+        )
     }
 
     fn todo_success_not_verified_reply_for_output(output: &TestOutput) -> String {
@@ -648,9 +713,25 @@ mod tests {
 
     #[test]
     fn implicit_todo_success_candidates_require_time_and_task_behavior() {
-        for input in ["明天开会", "下午整理一下", "晚上交水电费"] {
-            assert!(
-                super::is_todo_success_verification_candidate(input, false),
+        for input in [
+            "明天开会",
+            "下午整理一下",
+            "晚上交水电费",
+            "明天买菜",
+            "下午买东西",
+            "晚上买药",
+            "明天跟进项目",
+            "下午复盘",
+            "明天验收",
+            "晚上发送邮件",
+            "明天发布公告",
+            "下午发版",
+            "晚上完成初稿",
+            "明天完成草稿",
+        ] {
+            assert_eq!(
+                super::todo_success_verification_scope(input, false),
+                TodoSuccessVerificationScope::ImplicitCreate,
                 "省略式任务应进入成功验真：{input}"
             );
         }
@@ -663,9 +744,45 @@ mod tests {
             "下午写一段文案",
             "明天解释这段日志",
         ] {
-            assert!(
-                !super::is_todo_success_verification_candidate(input, false),
+            assert_eq!(
+                super::todo_success_verification_scope(input, false),
+                TodoSuccessVerificationScope::None,
                 "非省略式任务不应进入成功验真：{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_and_implicit_candidates_use_distinct_success_claim_scopes() {
+        assert_eq!(
+            super::todo_success_verification_scope("帮我记一个待办，明天开会", false),
+            TodoSuccessVerificationScope::ExplicitMutation
+        );
+
+        for reply in ["已完成检查，根因是配置错误", "已更新分析结果，结论如下"]
+        {
+            assert_eq!(
+                super::validate_todo_success_reply(
+                    reply,
+                    &[],
+                    TodoSuccessVerificationScope::ImplicitCreate,
+                ),
+                TodoSuccessValidation::Passed {
+                    claimed_success: false
+                },
+                "省略式创建不应拦截普通执行文案：{reply}"
+            );
+        }
+        for reply in ["已记录为待办", "已经创建待办：明天开会", "已经发起新增确认"]
+        {
+            assert_eq!(
+                super::validate_todo_success_reply(
+                    reply,
+                    &[],
+                    TodoSuccessVerificationScope::ImplicitCreate,
+                ),
+                TodoSuccessValidation::Blocked,
+                "省略式创建仍应拦截创建成功声明：{reply}"
             );
         }
     }
