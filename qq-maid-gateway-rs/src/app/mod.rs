@@ -51,8 +51,35 @@ pub async fn run_with_config_with_shutdown_and_status(
     runtime: GatewayRuntimeStatus,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<()> {
+    run_with_config_with_shutdown_and_status_and_application_version(
+        config,
+        respond,
+        push_sink,
+        runtime,
+        shutdown_token,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await
+}
+
+pub async fn run_with_config_with_shutdown_and_status_and_application_version(
+    config: AppConfig,
+    respond: RespondClient,
+    push_sink: GatewayPushSink,
+    runtime: GatewayRuntimeStatus,
+    shutdown_token: CancellationToken,
+    application_version: &'static str,
+) -> anyhow::Result<()> {
     log_startup(&config);
-    gateway::run(config, respond, push_sink, runtime, shutdown_token).await
+    gateway::run_with_application_version(
+        config,
+        respond,
+        push_sink,
+        runtime,
+        shutdown_token,
+        application_version,
+    )
+    .await
 }
 
 /// 依次尝试加载当前工作目录下的 `config/.env` 和 `.env` 文件。

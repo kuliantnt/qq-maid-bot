@@ -22,10 +22,7 @@ use crate::{
 use qq_maid_common::time_context::now_unix_seconds_marker;
 use qq_maid_core::service::CoreHealthSnapshot;
 
-use self::{
-    healthz::{LlmUpstreamSnapshot, core_health_snapshot},
-    render::render_ping_reply,
-};
+use self::healthz::{LlmUpstreamSnapshot, core_health_snapshot};
 
 pub use self::status::{GatewayRuntimeSnapshot, GatewayRuntimeStatus, InvalidSessionSnapshot};
 
@@ -74,6 +71,7 @@ pub(crate) fn build_ping_reply(
     token_snapshot: &AccessTokenSnapshot,
     core_health: &CoreHealthSnapshot,
     check_failure: Option<&str>,
+    application_version: &str,
 ) -> String {
     let mut llm_health = core_health_snapshot(core_health);
     if let Some(summary) = check_failure {
@@ -83,12 +81,14 @@ pub(crate) fn build_ping_reply(
             error_summary: summary.to_owned(),
         };
     }
-    render_ping_reply(
-        command_text,
+    render::render_ping_reply_at_with_version(
         context,
         config,
         runtime,
         token_snapshot,
         &llm_health,
+        parse_ping_mode(command_text).unwrap_or(PingMode::Summary),
+        qq_maid_common::time_context::now_unix_seconds(),
+        application_version,
     )
 }

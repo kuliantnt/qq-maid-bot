@@ -14,7 +14,7 @@ use super::{
     GatewayRuntimeStatus, PingMode, build_ping_reply,
     healthz::{LlmHealthSnapshot, LlmUpstreamSnapshot},
     is_ping_check_command, is_ping_command,
-    render::render_ping_reply_at,
+    render::render_ping_reply_at_with_version,
 };
 
 fn command_context(message: &C2cMessage) -> GatewayCommandContext {
@@ -40,7 +40,7 @@ fn render_c2c_ping_reply_at(
     mode: PingMode,
     now_seconds: i64,
 ) -> String {
-    render_ping_reply_at(
+    render_ping_reply_at_with_version(
         &command_context(message),
         config,
         runtime,
@@ -48,6 +48,7 @@ fn render_c2c_ping_reply_at(
         llm_health,
         mode,
         now_seconds,
+        env!("CARGO_PKG_VERSION"),
     )
 }
 
@@ -67,6 +68,7 @@ async fn build_c2c_ping_reply_with_check_failure(
         &auth.snapshot().await,
         core_health,
         check_failure,
+        env!("CARGO_PKG_VERSION"),
     )
 }
 
@@ -282,6 +284,7 @@ fn renders_summary_ping_reply_without_debug_noise_or_secrets() {
     );
 
     assert!(reply.contains("# 🟢 服务运行正常"));
+    assert!(reply.contains(&format!("| 版本 | {} |", env!("CARGO_PKG_VERSION"))));
     assert!(reply.contains("## 核心链路"));
     assert!(reply.contains("| Gateway | 🟢 正常 | 已运行 "));
     assert!(reply.contains("| QQ 连接 | 🟢 已连接 | WebSocket 已连接于 3分钟20秒前 |"));
@@ -670,7 +673,7 @@ fn group_ping_all_hides_configuration_and_stable_ids() {
         timestamp: None,
         attachment_count: 0,
     };
-    let reply = render_ping_reply_at(
+    let reply = render_ping_reply_at_with_version(
         &context,
         &config(),
         &GatewayRuntimeStatus::new_for_test(),
@@ -678,6 +681,7 @@ fn group_ping_all_hides_configuration_and_stable_ids() {
         &health("ok(in-process)", LlmUpstreamSnapshot::Unverified),
         PingMode::All,
         1200,
+        env!("CARGO_PKG_VERSION"),
     );
 
     assert!(!reply.contains("### 配置"));

@@ -1,5 +1,5 @@
 use qq_maid_common::time_context::{
-    format_diagnostic_time_for_display, now_diagnostic_time_for_display, now_unix_seconds,
+    format_diagnostic_time_for_display, now_diagnostic_time_for_display,
 };
 
 use crate::{
@@ -19,27 +19,7 @@ use super::{
     time::{diagnostic_time_option_text, time_or_placeholder},
 };
 
-pub(super) fn render_ping_reply(
-    command_text: &str,
-    context: &GatewayCommandContext,
-    config: &AppConfig,
-    runtime: &GatewayRuntimeStatus,
-    token_snapshot: &AccessTokenSnapshot,
-    llm_health: &LlmHealthSnapshot,
-) -> String {
-    let mode = super::parse_ping_mode(command_text).unwrap_or(PingMode::Summary);
-    render_ping_reply_at(
-        context,
-        config,
-        runtime,
-        token_snapshot,
-        llm_health,
-        mode,
-        now_unix_seconds(),
-    )
-}
-
-pub(super) fn render_ping_reply_at(
+pub(super) fn render_ping_reply_at_with_version(
     context: &GatewayCommandContext,
     config: &AppConfig,
     runtime: &GatewayRuntimeStatus,
@@ -47,6 +27,7 @@ pub(super) fn render_ping_reply_at(
     llm_health: &LlmHealthSnapshot,
     mode: PingMode,
     now_seconds: i64,
+    application_version: &str,
 ) -> String {
     let snapshot = runtime.snapshot();
     let current_scope = context.scope_key().unwrap_or_else(|| "unknown".to_owned());
@@ -88,6 +69,7 @@ pub(super) fn render_ping_reply_at(
         "## 当前消息".to_owned(),
         "| 项目 | 内容 |".to_owned(),
         "|---|---|".to_owned(),
+        format!("| 版本 | {application_version} |"),
         format!("| 平台 | {} |", markdown_cell(context.platform_name)),
         format!("| 场景 | {} |", context.conversation.label()),
         format!("| 事件 | {} |", markdown_cell(context.event_name)),
