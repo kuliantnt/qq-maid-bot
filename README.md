@@ -17,11 +17,12 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.21.1`，项目处于 `21.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.21.2`，项目处于 `21.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
 ## 21.x 版本线更新
+- **主包版本诊断与工具结果验真**（v0.21.2）：`/ping` 显示根主包版本；收紧自然语言状态提示，并要求 Todo 成功文案必须由真实写工具结果支撑；同轮重复只读搜索只展示首次结果。
 - **群管理员 Todo 与 Agent 模板**（v0.21.1）：群主 / 管理员可用 `/todo group` 查看并删除本群未完成 Todo；Release 提供 `agent.example.toml`，首次启动从内嵌模板生成活动 `config/agent.toml`。
 - **多平台部署主线**（v0.21.0）：同一二进制覆盖 QQ 官方、OneBot、微信入口，以及 Linux / Windows / Docker 部署路径；新增 GHCR 多架构镜像、Compose 覆盖、配置迁移与备份恢复 CLI。
 - **Docker 与测试环境**（PR #562）：`linux/amd64` / `linux/arm64` 原生构建推送 GHCR，默认不映射管理端口，按需叠加 console / OneBot / 微信 override；测试环境可按 digest 自动部署与失败回滚。
