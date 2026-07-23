@@ -2,6 +2,25 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.21.1] - 2026-07-23
+
+### Added
+
+* **群管理员管理 Todo**（PR #568）：群主或管理员可在群聊使用 `/todo group` 查看当前群未完成 Todo / 提醒，并用 `/todo group delete <编号>` 删除；列表编号绑定操作者、平台、机器人账号与完整群 scope，删除时再次校验目标记录所属群，避免跨群或个人快照误删。
+* **Agent 配置示例模板**（PR #568）：仓库与 Release 包中的默认策略文件改为 `agent.example.toml`；首次启动从二进制内嵌的同版模板生成未跟踪的 `config/agent.toml`，修改外部示例不会改变首次生成内容。只读 `config check` 在默认路径缺失时直接校验内嵌模板而不落盘。
+
+### Fixed
+
+* **Todo 提醒并发取消**（PR #568）：取消或删除带提醒的 Todo 时更可靠地终止已租约的提醒通知，降低重复推送风险。
+* **容器发布门禁竞态**（PR #567）：收紧 GHCR 正式 Release 门禁对 tag / digest 就绪状态的判定，降低并发构建误判失败的概率。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 版本号提升到 `0.21.1`，内部 crate 版本不统一提升。
+* 本版本无数据库 migration、无必需配置迁移。已有 `config/agent.toml` 不会被覆盖；新实例首次启动才生成活动配置。
+* 群 Todo 管理仅限当前群、且操作者为群主或管理员；普通成员和个人 `/todo` 查询语义不变。编号来自最近一次 `/todo group` 列表快照，过期或跨会话后需重新列出。
+* Release / Docker 中的 `agent.example.toml` 仅供参考与升级迁移；活动策略仍为本地 `config/agent.toml`。
+
 ## [v0.21.0] - 2026-07-22
 
 ### Release Focus
