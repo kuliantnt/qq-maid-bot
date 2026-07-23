@@ -113,7 +113,7 @@ pub(crate) fn postprocess_tool_turn(
         .unwrap_or(conversation_session);
 
     let domain_postprocessors: Vec<Box<dyn DomainTurnPostprocessor>> = vec![Box::new(
-        todo::agent_turn::TodoTurnPostprocessor::for_request(req, state_session),
+        todo::agent_turn::TodoTurnPostprocessor::for_request(req, state_session, &output.reply),
     )];
 
     let outcome = project_tool_turn(task_store, state_session, meta, &output)?;

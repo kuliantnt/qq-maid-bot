@@ -28,13 +28,19 @@ pub(crate) struct TodoAgentProjection {
     pub(crate) visible_entity_snapshot: Option<VisibleEntitySnapshot>,
 }
 
-/// 捕获投影前的 Todo 会话上下文，避免通用 Tool Turn 调度层感知验真候选细节。
+/// 捕获投影前的 Todo 会话上下文和模型原始回复，避免通用 Tool Turn 调度层
+/// 感知验真候选细节，也避免事实卡或工具回执干扰成功声明判定。
 pub(crate) struct TodoTurnPostprocessor {
     candidate_scope: todo::success_guard::TodoSuccessVerificationScope,
+    original_model_reply: String,
 }
 
 impl TodoTurnPostprocessor {
-    pub(crate) fn for_request(req: &RespondRequest, session: &SessionRecord) -> Self {
+    pub(crate) fn for_request(
+        req: &RespondRequest,
+        session: &SessionRecord,
+        original_model_reply: &str,
+    ) -> Self {
         let interaction = todo::interaction_state::snapshot_for_request(req, Some(session));
         let user_text = req.effective_user_text();
         Self {
@@ -42,6 +48,7 @@ impl TodoTurnPostprocessor {
                 &user_text,
                 interaction.has_visible_snapshot || interaction.has_recent_operation,
             ),
+            original_model_reply: original_model_reply.to_owned(),
         }
     }
 }
@@ -52,8 +59,10 @@ impl DomainTurnPostprocessor for TodoTurnPostprocessor {
         projected_outcome: Option<&AgentTurnOutcome>,
         output: &mut RespondOutput,
     ) -> Box<dyn DomainTurnDiagnostics> {
-        let validation = if let Some(outcome) = projected_outcome {
-            success_validation_from_agent_outcome(outcome)
+        let validation = if let Some(validation) =
+            projected_outcome.and_then(success_validation_from_agent_outcome)
+        {
+            validation
         } else {
             let scope = success_verification_scope(self.candidate_scope, output);
             if matches!(
@@ -64,7 +73,8 @@ impl DomainTurnPostprocessor for TodoTurnPostprocessor {
                     claimed_success: false,
                 }
             } else {
-                let validation = validate_model_reply_success(output, scope);
+                let validation =
+                    validate_model_reply_success(&self.original_model_reply, output, scope);
                 if !validation.passed() {
                     apply_success_not_verified_output(output);
                 }
@@ -118,16 +128,15 @@ pub(crate) fn diagnostics_from_tool_results(
 
 fn success_validation_from_agent_outcome(
     outcome: &AgentTurnOutcome,
-) -> todo::success_guard::TodoSuccessValidation {
+) -> Option<todo::success_guard::TodoSuccessValidation> {
     let todo_write_outcomes = outcome
         .outcomes
         .iter()
         .filter(|item| item.domain == "todo" && item.effect != ToolEffect::ReadOnly)
         .collect::<Vec<_>>();
     if todo_write_outcomes.is_empty() {
-        return todo::success_guard::TodoSuccessValidation::Passed {
-            claimed_success: false,
-        };
+        // 其他领域 outcome 不能替 Todo 完成验真；调用方仍需检查模型原始回复。
+        return None;
     }
     if todo_write_outcomes.iter().all(|item| {
         matches!(
@@ -135,19 +144,20 @@ fn success_validation_from_agent_outcome(
             ToolOutcomeStatus::Succeeded | ToolOutcomeStatus::PendingConfirmation
         )
     }) {
-        return todo::success_guard::TodoSuccessValidation::Passed {
+        return Some(todo::success_guard::TodoSuccessValidation::Passed {
             claimed_success: true,
-        };
+        });
     }
-    todo::success_guard::TodoSuccessValidation::Blocked
+    Some(todo::success_guard::TodoSuccessValidation::Blocked)
 }
 
 fn validate_model_reply_success(
+    original_model_reply: &str,
     output: &RespondOutput,
     scope: todo::success_guard::TodoSuccessVerificationScope,
 ) -> todo::success_guard::TodoSuccessValidation {
     todo::success_guard::validate_todo_success_reply(
-        &output.reply,
+        original_model_reply,
         &output.agent.tool_results,
         scope,
     )

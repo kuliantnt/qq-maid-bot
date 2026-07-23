@@ -630,6 +630,100 @@ async fn readonly_weather_result_preserves_model_advice() {
 }
 
 #[tokio::test]
+async fn weather_only_outcome_does_not_bypass_implicit_todo_success_verification() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "get_weather",
+            r#"{"city":"杭州","forecast_days":3}"#,
+            "已记录，明天买菜",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+
+    let response = service
+        .respond(private_message("查一下明天天气，顺便明天买菜"))
+        .await
+        .unwrap();
+
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("这次没有确认改动成功"), "{text}");
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["error_code"], "todo_success_not_verified");
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], false);
+    assert_eq!(diagnostics["agent_tool_results"][0]["name"], "get_weather");
+    assert_eq!(diagnostics["agent_tool_results"][0]["succeeded"], true);
+    assert_eq!(diagnostics["tool_outcomes"][0]["domain"], "weather");
+    assert!(service.task_store.list_all(&owner).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn weather_only_outcome_preserves_non_todo_analysis_reply() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "get_weather",
+            r#"{"city":"杭州","forecast_days":3}"#,
+            "已完成分析，建议携带雨具。",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("查一下明天天气，晚上分析一下出行方案"))
+        .await
+        .unwrap();
+
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("杭州天气"), "{text}");
+    assert!(text.contains("已完成分析，建议携带雨具。"), "{text}");
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["error_code"], Value::Null);
+    assert_eq!(diagnostics["todo_success_claimed"], false);
+    assert_eq!(diagnostics["todo_success_verified"], true);
+    assert_eq!(diagnostics["tool_outcomes"][0]["domain"], "weather");
+}
+
+#[tokio::test]
+async fn weather_and_real_todo_create_keep_both_trusted_results() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_calls_json(
+            vec![
+                ("get_weather", r#"{"city":"杭州","forecast_days":3}"#),
+                (
+                    "create_todo",
+                    r#"{"content":"买菜","title":null,"detail":null,"due_date":null,"due_at":null,"time_precision":null}"#,
+                ),
+            ],
+            "天气已查询，也已记录买菜提醒。",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+
+    let response = service
+        .respond(private_message("查一下明天天气，顺便提醒我买菜"))
+        .await
+        .unwrap();
+
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("杭州天气"), "{text}");
+    assert!(text.contains("✅ 已新增待办"), "{text}");
+    assert!(text.contains("买菜"), "{text}");
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["error_code"], Value::Null);
+    assert_eq!(diagnostics["todo_success_claimed"], true);
+    assert_eq!(diagnostics["todo_success_verified"], true);
+    assert_eq!(diagnostics["tool_outcomes"][0]["domain"], "weather");
+    assert_eq!(diagnostics["tool_outcomes"][1]["domain"], "todo");
+    assert_eq!(diagnostics["tool_outcomes"][0]["presentation"], "trusted");
+    assert_eq!(diagnostics["tool_outcomes"][1]["presentation"], "trusted");
+    let todos = service.task_store.list_all(&owner).unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0].title, "买菜");
+}
+
+#[tokio::test]
 async fn conditional_weather_and_todo_request_uses_tool_loop() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
