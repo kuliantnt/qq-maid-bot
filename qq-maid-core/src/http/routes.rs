@@ -651,7 +651,7 @@ mod tests {
         std::fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
         std::fs::write(
             &agent_path,
-            include_str!("../../../runtime/config/agent.toml"),
+            include_str!("../../../runtime/config/agent.example.toml"),
         )
         .unwrap();
         #[cfg(unix)]

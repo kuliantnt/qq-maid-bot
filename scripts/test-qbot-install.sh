@@ -171,7 +171,7 @@ mkdir -p "${fixture}/${package}/config" "${output}"
 printf '#!/usr/bin/env bash\nexit 0\n' > "${fixture}/${package}/qq-maid-bot"
 printf '#!/usr/bin/env bash\nexit 0\n' > "${fixture}/${package}/botctl.sh"
 printf 'EXAMPLE=1\n' > "${fixture}/${package}/config/.env.example"
-printf '[agent]\n' > "${fixture}/${package}/config/agent.toml"
+printf '[agent]\n' > "${fixture}/${package}/config/agent.example.toml"
 printf 'fixture\n' > "${fixture}/${package}/README.md"
 printf 'v9.9.9\n' > "${fixture}/${package}/VERSION"
 chmod +x "${fixture}/${package}/qq-maid-bot" "${fixture}/${package}/botctl.sh"
@@ -214,6 +214,8 @@ copy_release_into_app "${release_dir}" v9.9.9
 [[ -x "${APP_DIR}/qq-maid-bot" ]]
 [[ -x "${APP_DIR}/botctl.sh" ]]
 [[ -f "${APP_DIR}/config/.env.example" ]]
+[[ -f "${APP_DIR}/config/agent.example.toml" ]]
+[[ ! -e "${APP_DIR}/config/agent.toml" ]]
 grep -Fqx 'PRIVATE=keep' "${APP_DIR}/config/.env"
 grep -Fqx 'QWEATHER_API_KEY=' "${APP_DIR}/config/.env"
 ! grep -Eq '^[[:space:]]*(export[[:space:]]+)?(LLM_MODEL|TOOL_CALLING_ENABLED|TODO_MODEL|QQ_MAID_ENABLE_IMAGE)[[:space:]]*=' "${APP_DIR}/config/.env"

@@ -11,7 +11,7 @@
 ```text
 runtime/
 ├── config/.env.example              # 可提交的环境变量模板
-├── config/agent.toml                # 可提交的非敏感 Agent 场景策略
+├── config/agent.example.toml        # 可提交的非敏感 Agent 场景策略模板
 ├── config/ops.example.toml          # 默认关闭的 `/ops` 白名单公开模板
 ├── config/runtime.example.toml      # 程序受管普通配置的公开格式示例
 ├── .env                             # 兼容环境变量文件，不提交
@@ -52,7 +52,7 @@ runtime/
 cp config/.env.example config/.env
 ```
 
-编辑 `runtime/config/.env`，填写至少一个入口渠道和模型 Provider 等必要配置。QQ 官方机器人凭证现在是可选绑定；微信-only 部署可以不填写 QQ AppID/AppSecret。默认 `runtime/config/agent.toml` 是非敏感 Agent 策略的唯一权威文件，并将私聊、群聊、辅助任务和搜索路线统一到 OpenAI GPT-5.6 Luna；`.env` 继续保存 `OPENAI_API_KEY`、Base URL 和普通运行参数。如不希望模型在普通私聊中主动调用工具，修改 `[scenes.private].tool_calling_enabled=false`。未显式配置 `PROMPT_DIR` 时，Core 使用默认 `config/prompts`；默认目录缺少真实 prompt 文件时会回退到内置通用 prompt。显式配置 `PROMPT_DIR` 后，缺文件或空文件会作为配置错误处理。
+编辑 `runtime/config/.env`，填写至少一个入口渠道和模型 Provider 等必要配置。QQ 官方机器人凭证现在是可选绑定；微信-only 部署可以不填写 QQ AppID/AppSecret。默认 `runtime/config/agent.example.toml` 是非敏感 Agent 策略模板，首次启动会用它生成本地 `runtime/config/agent.toml`；`.env` 继续保存 `OPENAI_API_KEY`、Base URL 和普通运行参数。如不希望模型在普通私聊中主动调用工具，修改 `[scenes.private].tool_calling_enabled=false`。未显式配置 `PROMPT_DIR` 时，Core 使用默认 `config/prompts`；默认目录缺少真实 prompt 文件时会回退到内置通用 prompt。显式配置 `PROMPT_DIR` 后，缺文件或空文件会作为配置错误处理。
 
 Rust 进程按当前工作目录依次尝试加载 `config/.env` 和 `.env`。`make run` 和部署控制脚本都会以 `runtime/` 作为工作目录启动，因此默认相对路径都按 `runtime/` 解析。
 
@@ -77,7 +77,7 @@ qbot restart
 - `PROMPT_DIR`：包含 `maid_system.md`、`mode_rules.md`、`session_context.md` 的目录。
 - `KNOWLEDGE_DIR`：Markdown 知识目录，留空时使用 `config/knowledge`。
 - `APP_DB_FILE`：通用 SQLite 文件路径，承载 Session、待办、长期记忆、RSS / Atom 订阅、通知 Outbox、Ops 入站幂等领取和知识检索索引。
-- `AGENT_CONFIG_FILE`：Agent 场景策略文件路径，默认 `config/agent.toml`。统一程序要求目标文件存在且完整合法；该路径只由 Bootstrap 配置决定，WebUI 不能指定其他文件。
+- `AGENT_CONFIG_FILE`：Agent 场景策略文件路径，默认 `config/agent.toml`。默认路径缺失时由首次启动自动生成；显式指定其他路径时，目标文件必须存在且完整合法。该路径只由 Bootstrap 配置决定，WebUI 不能指定其他文件。
 - `OPS_CONFIG_FILE`：`/ops` 白名单运维配置路径，默认 `config/ops.toml`。默认文件缺失时功能保持关闭；显式设置后文件缺失会启动失败。
 - `CHAT_COMMAND_PREFIX`：所有平台共用的单字符命令前缀，默认 `/`；也可通过 Web 控制台下拉框或 `runtime.toml` 的 `command.prefix` 设置为 `#`、`*` 等可见非空白字符，重启后生效。
 - `RUNTIME_CONFIG_FILE`：程序受管普通配置，默认 `config/runtime.toml`。文件不存在时首次启动会安全创建空配置，已有文件不会覆盖。
@@ -494,7 +494,7 @@ Win + R -> shell:startup
 
 ## Release 包
 
-Release 包采用白名单生成。Linux/macOS 包只包含 Unix 控制与诊断脚本，Windows 包只包含 `qbot.ps1`、`qbot.cmd`、`botctl.ps1`、`botctl.cmd` 和登录启动示例；两类包均包含对应平台的 `qq-maid-bot` 二进制、本文件、`config/.env.example`、`config/agent.toml`、公开 `.example` 配置模板、`VERSION` 和空的 `data/storage/` 目录。控制台静态资源已嵌入 release 二进制，不再复制独立 `static/` 目录。真实 `.env`、私有 prompt、私有知识资料、SQLite 数据库、日志、pid 和 `.bak` 备份不会被写入归档。
+Release 包采用白名单生成。Linux/macOS 包只包含 Unix 控制与诊断脚本，Windows 包只包含 `qbot.ps1`、`qbot.cmd`、`botctl.ps1`、`botctl.cmd` 和登录启动示例；两类包均包含对应平台的 `qq-maid-bot` 二进制、本文件、`config/.env.example`、`config/agent.example.toml`、其他公开 `.example` 配置模板、`VERSION` 和空的 `data/storage/` 目录。控制台静态资源已嵌入 release 二进制，不再复制独立 `static/` 目录。真实 `.env`、私有 prompt、私有知识资料、SQLite 数据库、日志、pid 和 `.bak` 备份不会被写入归档。
 
 GitHub Release 自动生成 `linux-x86_64`、`linux-aarch64`、`macos-aarch64` 和 `windows-x86_64` 包；Linux / macOS 使用 `.tar.gz`，Windows 使用 `.zip`。macOS Intel（x86_64）不再提供官方预编译包。
 

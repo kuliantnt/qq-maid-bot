@@ -90,7 +90,7 @@ fn test_agent_file() -> (
             .unwrap();
     let path = directory.join("config/agent.toml");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let text = include_str!("../../../../runtime/config/agent.toml");
+    let text = include_str!("../../../../runtime/config/agent.example.toml");
     std::fs::write(&path, text).unwrap();
     #[cfg(unix)]
     {

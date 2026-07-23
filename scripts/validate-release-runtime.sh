@@ -71,7 +71,7 @@ case "${PAYLOAD_PROFILE}" in
 esac
 
 require_file config/.env.example
-require_file config/agent.toml
+require_file config/agent.example.toml
 require_file config/ops.example.toml
 require_file config/runtime.example.toml
 require_file README.md

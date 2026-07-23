@@ -59,7 +59,7 @@ try {
         Copy-Item -LiteralPath (Join-Path $repoDir "scripts\$name") -Destination (Join-Path $releaseDir $name)
     }
     Set-Content -LiteralPath (Join-Path $releaseDir "config\.env.example") -Value "EXAMPLE=1" -Encoding ASCII
-    Set-Content -LiteralPath (Join-Path $releaseDir "config\agent.toml") -Value "release-agent" -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $releaseDir "config\agent.example.toml") -Value "release-agent" -Encoding ASCII
 
     $agentTestDir = Join-Path $testRoot "agent-migration"
     New-Item -ItemType Directory -Path $agentTestDir -Force | Out-Null
@@ -161,7 +161,7 @@ try {
         param([string]$LiteralPath, [string]$DestinationPath, [switch]$Force)
         $packageDir = Join-Path $DestinationPath "qq-maid-bot-v0.20.2-windows-x86_64"
         New-Item -ItemType Directory -Path (Join-Path $packageDir "config") -Force | Out-Null
-        Set-Content -LiteralPath (Join-Path $packageDir "config\agent.toml") -Value "new-release-template" -Encoding ASCII
+        Set-Content -LiteralPath (Join-Path $packageDir "config\agent.example.toml") -Value "new-release-template" -Encoding ASCII
     }
     $script:FullChainMoveCalls = 0
     function Move-Item {
@@ -223,7 +223,8 @@ try {
     Assert-True ((Get-Content -LiteralPath $envBackups[0].FullName -Raw).Contains("LLM_MODEL=openai:legacy-model")) "env backup lost legacy values"
     Assert-True ((Get-Content -LiteralPath (Join-Path $appDir "data\storage\app.db") -Raw).Contains("db")) "database was overwritten"
     Assert-True ((Get-Content -LiteralPath (Join-Path $appDir "logs\qq-maid-bot.log") -Raw).Contains("log")) "log was overwritten"
-    Assert-True (Test-Path -LiteralPath (Join-Path $appDir "config\agent.toml.release-v9.9.9")) "agent.toml update candidate is missing"
+    Assert-True ((Get-Content -LiteralPath (Join-Path $appDir "config\agent.toml") -Raw).Contains("custom-agent")) "local agent.toml was overwritten"
+    Assert-True ((Get-Content -LiteralPath (Join-Path $appDir "config\agent.example.toml") -Raw).Contains("release-agent")) "agent.example.toml was not installed"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $appDir "botctl.sh"))) "Unix control script was not removed"
     Assert-True (Test-Path -LiteralPath (Join-Path $appDir "qbot.cmd")) "qbot.cmd was not installed"
 

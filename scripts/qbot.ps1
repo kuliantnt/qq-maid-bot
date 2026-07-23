@@ -304,7 +304,7 @@ function Install-ReleasePayload {
     param([string]$ReleaseDir, [string]$Version)
     foreach ($required in @(
         "qq-maid-bot.exe", "botctl.ps1", "botctl.cmd",
-        "config\.env.example", "config\agent.toml", "README.md", "VERSION"
+        "config\.env.example", "config\agent.example.toml", "README.md", "VERSION"
     )) {
         if (-not (Test-Path -LiteralPath (Join-Path $ReleaseDir $required) -PathType Leaf)) {
             throw "Release package is missing $required"
@@ -566,7 +566,7 @@ function Install-OrUpdate {
         if ($Mode -eq "update" -and (Test-AgentConfigResetRequired -CurrentVersion $current -TargetVersion $version -MarkerFile $agentConfigMarker)) {
             Update-AgentConfigFromRelease `
                 -ConfigFile (Join-Path $script:AppDir "config\agent.toml") `
-                -TemplateFile (Join-Path $releaseDir "config\agent.toml")
+                -TemplateFile (Join-Path $releaseDir "config\agent.example.toml")
         }
 
         $wasRunning = Test-InstalledBotRunning

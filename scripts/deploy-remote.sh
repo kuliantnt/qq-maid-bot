@@ -47,7 +47,7 @@ prepare_validate_runtime() {
     install -m 0755 scripts/qq-maid-systemd.sh "${LOCAL_VALIDATE_DIR}/qq-maid-systemd.sh"
     install -m 0644 scripts/lib/agent-config.sh "${LOCAL_VALIDATE_DIR}/lib/agent-config.sh"
     install -m 0644 runtime/config/.env.example "${LOCAL_VALIDATE_DIR}/config/.env.example"
-    install -m 0644 runtime/config/agent.toml "${LOCAL_VALIDATE_DIR}/config/agent.toml"
+    install -m 0644 runtime/config/agent.example.toml "${LOCAL_VALIDATE_DIR}/config/agent.example.toml"
     install -m 0644 runtime/config/ops.example.toml "${LOCAL_VALIDATE_DIR}/config/ops.example.toml"
     install -m 0644 runtime/config/runtime.example.toml "${LOCAL_VALIDATE_DIR}/config/runtime.example.toml"
     install -m 0644 runtime/README.md "${LOCAL_VALIDATE_DIR}/README.md"
@@ -82,7 +82,7 @@ scp scripts/botmon.sh "${REMOTE_HOST}:${REMOTE_APP_DIR}/.botmon.sh.new"
 scp scripts/qq-maid-systemd.sh "${REMOTE_HOST}:${REMOTE_APP_DIR}/.qq-maid-systemd.sh.new"
 scp scripts/lib/agent-config.sh "${REMOTE_HOST}:${REMOTE_APP_DIR}/lib/.agent-config.sh.new"
 scp runtime/config/.env.example "${REMOTE_HOST}:${REMOTE_APP_DIR}/config/.env.example.new"
-scp runtime/config/agent.toml "${REMOTE_HOST}:${REMOTE_APP_DIR}/config/agent.toml.new"
+scp runtime/config/agent.example.toml "${REMOTE_HOST}:${REMOTE_APP_DIR}/config/agent.example.toml.new"
 scp runtime/config/ops.example.toml "${REMOTE_HOST}:${REMOTE_APP_DIR}/config/ops.example.toml.new"
 scp runtime/config/runtime.example.toml "${REMOTE_HOST}:${REMOTE_APP_DIR}/config/runtime.example.toml.new"
 scp runtime/README.md "${REMOTE_HOST}:${REMOTE_APP_DIR}/README.md"
@@ -90,13 +90,14 @@ scp runtime/README.md "${REMOTE_HOST}:${REMOTE_APP_DIR}/README.md"
 echo "==> Installing artifacts..."
 # 设置可执行权限后，将临时文件原子地替换为目标文件；清理旧 qq-maid-* 时需保留
 # 当前二进制、健康检查脚本和 systemd 管理脚本，避免远端巡检/自启动入口在部署后被误删。
-ssh "${REMOTE_HOST}" "cd '${REMOTE_APP_DIR}' && chmod 0755 .qq-maid-bot.new .botctl.sh.new .diagnose-network.sh.new .validate-runtime.sh.new .qq-maid-healthcheck.sh.new .botmon.sh.new .qq-maid-systemd.sh.new && chmod 0644 lib/.agent-config.sh.new && mv -f .qq-maid-bot.new qq-maid-bot && mv -f .botctl.sh.new botctl.sh && mv -f .diagnose-network.sh.new diagnose-network.sh && mv -f .validate-runtime.sh.new validate-runtime.sh && mv -f .qq-maid-healthcheck.sh.new qq-maid-healthcheck.sh && mv -f .botmon.sh.new botmon.sh && mv -f .qq-maid-systemd.sh.new qq-maid-systemd.sh && mv -f lib/.agent-config.sh.new lib/agent-config.sh && mv -f config/.env.example.new config/.env.example && mv -f config/ops.example.toml.new config/ops.example.toml && mv -f config/runtime.example.toml.new config/runtime.example.toml && find . -maxdepth 1 -type f -name 'qq-maid-*' ! -name 'qq-maid-bot' ! -name 'qq-maid-healthcheck.sh' ! -name 'qq-maid-systemd.sh' -delete && find . -maxdepth 1 -type f -name '*ctl.sh' ! -name 'botctl.sh' -delete && rm -f botctl.ps1 botctl.cmd windows-startup-example.bat .env.example && rm -rf static .static.new static.old"
+ssh "${REMOTE_HOST}" "cd '${REMOTE_APP_DIR}' && chmod 0755 .qq-maid-bot.new .botctl.sh.new .diagnose-network.sh.new .validate-runtime.sh.new .qq-maid-healthcheck.sh.new .botmon.sh.new .qq-maid-systemd.sh.new && chmod 0644 lib/.agent-config.sh.new && mv -f .qq-maid-bot.new qq-maid-bot && mv -f .botctl.sh.new botctl.sh && mv -f .diagnose-network.sh.new diagnose-network.sh && mv -f .validate-runtime.sh.new validate-runtime.sh && mv -f .qq-maid-healthcheck.sh.new qq-maid-healthcheck.sh && mv -f .botmon.sh.new botmon.sh && mv -f .qq-maid-systemd.sh.new qq-maid-systemd.sh && mv -f lib/.agent-config.sh.new lib/agent-config.sh && mv -f config/.env.example.new config/.env.example && mv -f config/agent.example.toml.new config/agent.example.toml && mv -f config/ops.example.toml.new config/ops.example.toml && mv -f config/runtime.example.toml.new config/runtime.example.toml && find . -maxdepth 1 -type f -name 'qq-maid-*' ! -name 'qq-maid-bot' ! -name 'qq-maid-healthcheck.sh' ! -name 'qq-maid-systemd.sh' -delete && find . -maxdepth 1 -type f -name '*ctl.sh' ! -name 'botctl.sh' -delete && rm -f botctl.ps1 botctl.cmd windows-startup-example.bat .env.example && rm -rf static .static.new static.old"
 # Agent 策略模板随 Release 一起升级：先保留远端旧文件，再原子启用新版。
 # 这是本次版本升级的唯一自动替换点；后续新增普通可选字段由程序默认值兼容。
 ssh "${REMOTE_HOST}" "cd '${REMOTE_APP_DIR}' && bash -s" <<'REMOTE_AGENT_CONFIG'
 set -euo pipefail
 marker=config/.agent-config-v0.20.2
 if test ! -e "$marker"; then
+    cp config/agent.example.toml config/agent.toml.new
     if test -L config/agent.toml; then
         echo "refuse to replace symbolic-link config/agent.toml" >&2
         exit 1

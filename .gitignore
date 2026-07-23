@@ -63,6 +63,7 @@ qq-maid-gateway-rs/config/.env
 # 不提交真实配置、运行产物、二进制和部署脚本副本。
 runtime/.env
 runtime/config/.env
+runtime/config/agent.toml
 runtime/config/ops.toml
 runtime/config/runtime.toml
 # 配置中心主密钥及以后新增的本机秘密只存在于持久化运行目录。

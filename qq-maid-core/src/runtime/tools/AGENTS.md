@@ -63,7 +63,7 @@
 * `qq-maid-core/src/runtime/tools/mod.rs`
 * `qq-maid-core/src/runtime/respond/tool_runtime.rs`
 * `qq-maid-core/src/config/agent.rs`
-* `runtime/config/agent.toml`
+* `runtime/config/agent.example.toml`
 * 必要时更新 `qq-maid-core/src/runtime/respond/help.rs`
 
 涉及用户可继续引用或按编号操作的工具，必须提供 visible entity 快照，并保证私聊、群聊、用户、scope、account_id 隔离；无法唯一定位时必须澄清，不得猜测执行。
@@ -74,7 +74,7 @@
 * 在 `runtime/tools/mod.rs` 中 `mod` / `pub use` 新 Tool，保持 Core 其他层只依赖工具门面。
 * 在 `respond/tool_runtime.rs` 的服务端 `ToolRegistry` 注册实例，并注入所需 store、executor、session 或 notification 依赖。
 * 在 `config/agent.rs` 的默认白名单中决定私聊和群聊是否开放；写入类或持久化类默认只考虑私聊，群聊必须显式评估 owner 语义。
-* 在 `runtime/config/agent.toml` 更新可版本管理的工具白名单示例和注释，保持默认策略与代码默认值一致。
+* 在 `runtime/config/agent.example.toml` 更新可版本管理的工具白名单示例和注释，保持默认策略与代码默认值一致。
 * 如果用户需要知道显式命令或能力边界，更新 `respond/help.rs` 或对应 README；文档不要复制大段实现细节。
 * 如果 Tool 会产生用户可见列表或单条对象，接入通用 visible entity 快照，并在 Respond 请求进入 Tool Runtime 时替换为带作用域限制的 Tool。
 

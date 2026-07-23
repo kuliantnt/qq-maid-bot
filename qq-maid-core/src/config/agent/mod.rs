@@ -20,7 +20,7 @@ use web_search_config::web_search_from_file;
 
 pub const DEFAULT_AGENT_CONFIG_PATH: &str = "config/agent.toml";
 pub const AGENT_CONFIG_FILE_ENV: &str = "AGENT_CONFIG_FILE";
-const DEFAULT_AGENT_CONFIG: &str = include_str!("../../../../runtime/config/agent.toml");
+const DEFAULT_AGENT_CONFIG: &str = include_str!("../../../../runtime/config/agent.example.toml");
 
 /// 空配置目录首次启动时安装公开的默认 Agent 策略。
 ///
@@ -349,7 +349,7 @@ impl AgentRuntimeConfig {
         #[cfg(test)]
         let path = if override_path.is_none() && !Path::new(&path).exists() {
             format!(
-                "{}/../runtime/config/agent.toml",
+                "{}/../runtime/config/agent.example.toml",
                 env!("CARGO_MANIFEST_DIR")
             )
         } else {

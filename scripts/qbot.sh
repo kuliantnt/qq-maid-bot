@@ -2056,7 +2056,7 @@ install_or_update() {
     if [[ "${command_name}" == "update" ]] && agent_config_reset_required "${current}" "${version}"; then
         upgrade_agent_config_from_release \
             "${APP_DIR}/config/agent.toml" \
-            "${release_dir}/config/agent.toml" || die "替换 agent.toml 失败，已停止本次更新"
+            "${release_dir}/config/agent.example.toml" || die "替换 agent.toml 失败，已停止本次更新"
     fi
 
     was_running=0

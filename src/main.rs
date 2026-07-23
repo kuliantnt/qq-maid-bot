@@ -301,7 +301,7 @@ mod tests {
             (
                 "AGENT_CONFIG_FILE".to_owned(),
                 Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("runtime/config/agent.toml")
+                    .join("runtime/config/agent.example.toml")
                     .to_string_lossy()
                     .into_owned(),
             ),
@@ -335,7 +335,11 @@ mod tests {
                 .unwrap();
         let agent_path = directory.path().join("config/agent.toml");
         std::fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
-        std::fs::write(&agent_path, include_str!("../runtime/config/agent.toml")).unwrap();
+        std::fs::write(
+            &agent_path,
+            include_str!("../runtime/config/agent.example.toml"),
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

@@ -55,7 +55,7 @@ QQ、OneBot、微信等入口接入相关能力优先在 gateway 的平台 adapt
 │   ├── README.md
 │   └── config/
 │       ├── .env.example
-│       └── agent.toml
+│       └── agent.example.toml
 ├── web-console/
 │   ├── src/
 │   ├── dist/

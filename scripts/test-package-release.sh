@@ -18,6 +18,7 @@ unix_listing="$(tar -tzf "${DIST_DIR}/qq-maid-bot-test-linux-x86_64.tar.gz")"
 printf '%s\n' "${unix_listing}" | grep -Fx 'qq-maid-bot-test-linux-x86_64/botctl.sh' >/dev/null
 printf '%s\n' "${unix_listing}" | grep -Fx 'qq-maid-bot-test-linux-x86_64/lib/agent-config.sh' >/dev/null
 printf '%s\n' "${unix_listing}" | grep -Fx 'qq-maid-bot-test-linux-x86_64/config/.env.example' >/dev/null
+printf '%s\n' "${unix_listing}" | grep -Fx 'qq-maid-bot-test-linux-x86_64/config/agent.example.toml' >/dev/null
 printf '%s\n' "${unix_listing}" | grep -Fx 'qq-maid-bot-test-linux-x86_64/config/ops.example.toml' >/dev/null
 printf '%s\n' "${unix_listing}" | grep -Fx 'qq-maid-bot-test-linux-x86_64/config/runtime.example.toml' >/dev/null
 if printf '%s\n' "${unix_listing}" | grep -E 'config/runtime\.toml$|config/secrets/|master\.key$' >/dev/null; then
@@ -36,6 +37,7 @@ printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/b
 printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/qbot.cmd' >/dev/null
 printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/lib/agent-config.ps1' >/dev/null
 printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/config/.env.example' >/dev/null
+printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/config/agent.example.toml' >/dev/null
 printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/config/ops.example.toml' >/dev/null
 printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/config/runtime.example.toml' >/dev/null
 if printf '%s\n' "${windows_listing}" | grep -E 'config/runtime\.toml$|config/secrets/|master\.key$' >/dev/null; then
