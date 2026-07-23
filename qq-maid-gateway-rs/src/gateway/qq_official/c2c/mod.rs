@@ -13,7 +13,9 @@ use super::super::{
     dedupe::MessageDedupe,
     event::C2cMessage,
     logging::{c2c_message_log_summary, mask_openid},
-    media_fetch::{MediaFetchContext, fetch_qq_official_image_attachments},
+    media_fetch::{
+        MediaFetchContext, fetch_qq_official_image_attachments, fetch_qq_official_quoted_images,
+    },
     outbound::{
         DeliveryMode, ReplyCapability, ReplyTarget, RuntimeRecordingSender,
         send_c2c_text_with_status,
@@ -278,22 +280,31 @@ pub(crate) async fn handle_c2c_message(
             })?;
         return Ok(());
     }
+    let media_client = qq_maid_common::http_client::client();
+    let media_context = MediaFetchContext {
+        platform: "qq_official",
+        app_id: config
+            .app_id
+            .clone()
+            .context("QQ C2C handler requires a bound channel")?,
+        peer_id: message.user_openid.clone(),
+        root_dir: config.media_dir.clone(),
+        timeout: config.media_download_timeout,
+        max_bytes: config.media_max_bytes,
+    };
     fetch_qq_official_image_attachments(
-        &qq_maid_common::http_client::client(),
-        &MediaFetchContext {
-            platform: "qq_official",
-            app_id: config
-                .app_id
-                .clone()
-                .context("QQ C2C handler requires a bound channel")?,
-            peer_id: message.user_openid.clone(),
-            root_dir: config.media_dir.clone(),
-            timeout: config.media_download_timeout,
-            max_bytes: config.media_max_bytes,
-        },
+        &media_client,
+        &media_context,
         &message.message_id,
         &mut message.input_parts,
         &message.attachments,
+    )
+    .await;
+    fetch_qq_official_quoted_images(
+        &media_client,
+        &media_context,
+        &message.message_id,
+        message.reply.as_mut(),
     )
     .await;
 

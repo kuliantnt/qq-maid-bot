@@ -757,6 +757,159 @@ fn parses_qq_quote_msg_element_as_payload_fallback() {
 }
 
 #[test]
+fn parses_plain_group_quote_from_structured_element_without_parallel_duplication() {
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+        id: Some("event-current".to_owned()),
+        d: json!({
+            "id": "msg-current",
+            "group_openid": "group-1",
+            "author": {"member_openid": "member-1", "member_role": "admin"},
+            "content": " 取event",
+            "message_scene": {
+                "ext": [
+                    "ref_msg_idx=REFIDX_quoted",
+                    "msg_idx=REFIDX_current",
+                    "auth_token=redacted-test-token"
+                ]
+            },
+            "message_type": 103,
+            "parallel_message": {
+                "msg_nodes": [{"message_type": 0, "content": "感谢"}]
+            },
+            "msg_elements": [{
+                "msg_idx": "REFIDX_quoted",
+                "message_type": 103,
+                "content": "感谢"
+            }]
+        }),
+    };
+
+    let message = parse_group_message(&envelope).unwrap().unwrap();
+    let reply = message.reply.unwrap();
+
+    assert_eq!(message.content, "取event");
+    assert_eq!(message.current_msg_idx.as_deref(), Some("REFIDX_current"));
+    assert_eq!(reply.ref_msg_idx.as_deref(), Some("REFIDX_quoted"));
+    assert_eq!(reply.content.as_deref(), Some("感谢"));
+    assert_eq!(reply.input_parts.len(), 1);
+    assert!(matches!(
+        &reply.input_parts[0],
+        MessageInputPart::Text { text, source: Some(TextSource::Quote) } if text == "感谢"
+    ));
+    assert!(reply.media_summaries.is_empty());
+}
+
+#[test]
+fn quoted_images_keep_original_order_when_metadata_matches() {
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+        id: None,
+        d: json!({
+            "id": "msg-current",
+            "group_openid": "group-1",
+            "author": {"member_openid": "member-1"},
+            "content": "解释这些图",
+            "message_type": 103,
+            "parallel_message": {
+                "msg_nodes": [{"content": "[图片][图片][图片] 展示文本"}]
+            },
+            "msg_elements": [{
+                "msg_idx": "REFIDX_quoted",
+                "content": "[图片][图片][图片] 结构化正文",
+                "attachments": [
+                    {
+                        "content_type": "image/png",
+                        "filename": "same.png",
+                        "size": 123,
+                        "url": "https://example.test/1.png",
+                        "fileid": "file-1"
+                    },
+                    {
+                        "content_type": "image/png",
+                        "filename": "same.png",
+                        "size": 123,
+                        "url": "https://example.test/2.png",
+                        "fileid": "file-2"
+                    },
+                    {
+                        "content_type": "image/png",
+                        "filename": "same.png",
+                        "size": 123,
+                        "url": "https://example.test/3.png",
+                        "fileid": "file-3"
+                    }
+                ]
+            }]
+        }),
+    };
+
+    let message = parse_group_message(&envelope).unwrap().unwrap();
+    let reply = message.reply.unwrap();
+
+    assert_eq!(reply.content.as_deref(), Some("结构化正文"));
+    let images = reply
+        .input_parts
+        .iter()
+        .filter_map(MessageInputPart::media)
+        .collect::<Vec<_>>();
+    assert_eq!(images.len(), 3);
+    assert_eq!(
+        images
+            .iter()
+            .filter_map(|media| media.file_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec!["file-1", "file-2", "file-3"]
+    );
+    assert_eq!(reply.media_summaries.len(), 3);
+}
+
+#[test]
+fn parallel_message_is_only_used_when_structured_quote_text_is_missing() {
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+        id: None,
+        d: json!({
+            "id": "msg-current",
+            "group_openid": "group-1",
+            "author": {"member_openid": "member-1"},
+            "content": "解释图片",
+            "message_type": 103,
+            "parallel_message": {
+                "msg_nodes": [{"content": "[图片][图片] 展示兜底"}]
+            },
+            "msg_elements": [{
+                "msg_idx": "REFIDX_quoted",
+                "attachments": [{
+                    "content_type": "image/png",
+                    "filename": "quoted.png",
+                    "url": "https://example.test/quoted.png"
+                }]
+            }]
+        }),
+    };
+
+    let message = parse_group_message(&envelope).unwrap().unwrap();
+    let reply = message.reply.unwrap();
+
+    assert_eq!(reply.content.as_deref(), Some("展示兜底"));
+    assert!(matches!(
+        &reply.input_parts[0],
+        MessageInputPart::Text { text, source: Some(TextSource::Quote) } if text == "展示兜底"
+    ));
+    assert!(matches!(
+        reply.input_parts[1],
+        MessageInputPart::Image { .. }
+    ));
+}
+
+#[test]
 fn parses_quoted_audio_asr_as_quoted_user_content() {
     let envelope = GatewayEnvelope {
         op: 0,
