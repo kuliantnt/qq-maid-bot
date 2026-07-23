@@ -1,12 +1,32 @@
 use super::*;
 use crate::{
     runtime::{
+        notification::{NotificationBeforePushPause, NotificationWorker, NotificationWorkerConfig},
+        push::{PushError, PushIntent, PushResult, PushSink},
         respond::{RespondRequest, common::empty_respond_request},
         tools::todo::sync_reminder_task,
     },
     storage::notification::NotificationStatus,
 };
+use async_trait::async_trait;
 use qq_maid_common::identity_context::ConversationKind;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+#[derive(Default)]
+struct CountingPushSink {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl PushSink for CountingPushSink {
+    async fn push(&self, _intent: PushIntent) -> Result<PushResult, PushError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(PushResult { message_id: None })
+    }
+}
 
 fn group_request(text: &str, group_id: &str, user_id: &str, role: &str) -> RespondRequest {
     RespondRequest {
@@ -136,7 +156,7 @@ async fn group_list_uses_full_platform_account_and_group_scope() {
 }
 
 #[tokio::test]
-async fn group_admin_delete_removes_other_creator_todo_and_cancels_reminder() {
+async fn group_admin_delete_cancels_claimed_reminder_before_push() {
     let service = test_service();
     let creator = TodoStore::owner(Some("u2"), "group:g1");
     let item = service
@@ -150,6 +170,40 @@ async fn group_admin_delete_removes_other_creator_todo_and_cancels_reminder() {
         )
         .unwrap();
     sync_reminder_task(&service.notification_store, &creator, &item).unwrap();
+    let task = service
+        .notification_store
+        .list_all_for_test()
+        .unwrap()
+        .pop()
+        .unwrap();
+    service
+        .notification_store
+        .database()
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE notification_outbox
+             SET scheduled_at = '2020-01-01T09:00:00+08:00'
+             WHERE id = ?1",
+            [task.id],
+        )
+        .unwrap();
+
+    let sink = Arc::new(CountingPushSink::default());
+    let pause = NotificationBeforePushPause::default();
+    let worker = NotificationWorker::new(
+        service.notification_store.clone(),
+        sink.clone(),
+        NotificationWorkerConfig::default(),
+    )
+    .with_before_push_pause_for_test(pause.clone());
+    let worker_task = tokio::spawn(async move { worker.run_once().await });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        pause.wait_until_reached(),
+    )
+    .await
+    .expect("worker should pause after claiming and before push");
 
     service
         .respond(group_request("/todo group", "g1", "u1", "owner"))
@@ -159,8 +213,17 @@ async fn group_admin_delete_removes_other_creator_todo_and_cancels_reminder() {
         .respond(group_request("/todo group delete 1", "g1", "u1", "owner"))
         .await
         .unwrap();
+    pause.resume();
+    let stats = worker_task.await.unwrap().unwrap();
+
     assert_eq!(deleted.command.as_deref(), Some("todo_group_delete"));
     assert!(deleted.text.as_deref().unwrap().contains("对应提醒已取消"));
+    assert_eq!(sink.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(stats.cancelled_count, 1);
+    assert_eq!(stats.sent_count, 0);
+    assert_eq!(stats.failed_count, 0);
+    assert_eq!(stats.invalid_payload_count, 0);
+    assert_eq!(stats.lease_lost_count, 0);
     assert!(
         service
             .task_store
@@ -171,6 +234,45 @@ async fn group_admin_delete_removes_other_creator_todo_and_cancels_reminder() {
     let tasks = service.notification_store.list_all_for_test().unwrap();
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].status, NotificationStatus::Cancelled);
+    assert!(tasks[0].locked_by.is_none());
+    assert!(tasks[0].locked_at.is_none());
+    assert!(tasks[0].sent_at.is_none());
+    assert!(tasks[0].next_attempt_at.is_none());
+    assert!(tasks[0].last_error.is_none());
+}
+
+#[tokio::test]
+async fn group_admin_delete_without_reminder_uses_conditional_message() {
+    let service = test_service();
+    let creator = TodoStore::owner(Some("u2"), "group:g1");
+    let item = service
+        .task_store
+        .create(&creator, draft("没有提醒的群 Todo"))
+        .unwrap();
+    service
+        .respond(group_request("/todo group", "g1", "u1", "owner"))
+        .await
+        .unwrap();
+
+    let deleted = service
+        .respond(group_request("/todo group delete 1", "g1", "u1", "owner"))
+        .await
+        .unwrap();
+
+    assert!(
+        deleted
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("如有对应提醒，也已取消")
+    );
+    assert!(
+        service
+            .task_store
+            .get_by_id(&creator, &item.id)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

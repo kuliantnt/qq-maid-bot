@@ -117,8 +117,13 @@ pub(crate) fn format_group_todo_list_reply(
 }
 
 pub(crate) fn format_group_todo_deleted_reply(item: &TodoItem) -> CommandBody {
+    let reminder_message = if item.reminder_at.is_some() {
+        "对应提醒已取消"
+    } else {
+        "如有对应提醒，也已取消"
+    };
     CommandBody::plain(format!(
-        "已删除当前群 Todo：{}。对应提醒已取消。",
+        "已删除当前群 Todo：{}。{reminder_message}。",
         item.title
     ))
 }

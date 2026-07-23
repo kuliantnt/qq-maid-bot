@@ -18,8 +18,14 @@ use tracing::{debug, info, warn};
 use crate::{
     runtime::push::{PushError, PushIntent, PushSink},
     service::VisibleEntitySnapshot,
-    storage::notification::{NotificationOutboxStore, NotificationTask, NotificationWriteOutcome},
+    storage::notification::{
+        NotificationDeliveryState, NotificationOutboxStore, NotificationTask,
+        NotificationWriteOutcome,
+    },
 };
+
+#[cfg(test)]
+use tokio::sync::Notify;
 
 const DEFAULT_WORKER_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -41,6 +47,7 @@ pub struct NotificationWorkerStats {
     pub sent_count: usize,
     pub failed_count: usize,
     pub invalid_payload_count: usize,
+    pub cancelled_count: usize,
     pub lease_lost_count: usize,
 }
 
@@ -52,6 +59,26 @@ pub struct NotificationWorker {
     config: NotificationWorkerConfig,
     command_prefix: CommandPrefix,
     worker_id: String,
+    #[cfg(test)]
+    before_push_pause: Option<NotificationBeforePushPause>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct NotificationBeforePushPause {
+    reached: Arc<Notify>,
+    resume: Arc<Notify>,
+}
+
+#[cfg(test)]
+impl NotificationBeforePushPause {
+    pub(crate) async fn wait_until_reached(&self) {
+        self.reached.notified().await;
+    }
+
+    pub(crate) fn resume(&self) {
+        self.resume.notify_one();
+    }
 }
 
 #[async_trait]
@@ -94,6 +121,8 @@ impl NotificationWorker {
             config,
             command_prefix: CommandPrefix::default(),
             worker_id: new_worker_id(),
+            #[cfg(test)]
+            before_push_pause: None,
         }
     }
 
@@ -104,6 +133,15 @@ impl NotificationWorker {
 
     pub fn with_after_sent_hook(mut self, hook: Arc<dyn NotificationSentHook>) -> Self {
         self.after_sent_hook = Some(hook);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_before_push_pause_for_test(
+        mut self,
+        pause: NotificationBeforePushPause,
+    ) -> Self {
+        self.before_push_pause = Some(pause);
         self
     }
 
@@ -209,6 +247,15 @@ impl NotificationWorker {
                         "notification worker lease lost during multipart delivery"
                     );
                 }
+                Err(DeliveryError::Cancelled) => {
+                    stats.cancelled_count += 1;
+                    debug!(
+                        task_id = task.id,
+                        source_type = %task.source_type,
+                        kind = %task.kind,
+                        "notification task cancelled before push"
+                    );
+                }
             }
         }
         if stats.claimed_count > 0 {
@@ -217,6 +264,7 @@ impl NotificationWorker {
                 sent = stats.sent_count,
                 failed = stats.failed_count,
                 invalid_payload = stats.invalid_payload_count,
+                cancelled = stats.cancelled_count,
                 lease_lost = stats.lease_lost_count,
                 "notification worker cycle finished"
             );
@@ -250,6 +298,22 @@ impl NotificationWorker {
             ));
         }
         for (index, part) in parts.into_iter().enumerate().skip(delivered_parts) {
+            #[cfg(test)]
+            if let Some(pause) = &self.before_push_pause {
+                pause.reached.notify_one();
+                pause.resume.notified().await;
+            }
+            match self
+                .store
+                .delivery_state(task.id, &self.worker_id, index as u32)
+                .map_err(|err| DeliveryError::Progress(err.message().to_owned()))?
+            {
+                NotificationDeliveryState::Ready => {}
+                NotificationDeliveryState::Cancelled => return Err(DeliveryError::Cancelled),
+                NotificationDeliveryState::LeaseLost => return Err(DeliveryError::LeaseLost),
+            }
+            // 复核成功即视为本分段开始投递；进入平台网络请求后无法撤回。后续分段仍会
+            // 各自重新复核，因此业务删除后不会再开始新的分段推送。
             self.push_sink
                 .push(PushIntent {
                     target: task.target.clone(),
@@ -321,6 +385,7 @@ enum DeliveryError {
     Push(PushError),
     Progress(String),
     LeaseLost,
+    Cancelled,
 }
 
 enum MarkFailedOutcome {

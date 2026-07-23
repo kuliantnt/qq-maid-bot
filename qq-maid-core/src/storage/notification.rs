@@ -89,6 +89,13 @@ pub enum NotificationWriteOutcome {
     LeaseLost,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationDeliveryState {
+    Ready,
+    Cancelled,
+    LeaseLost,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct NotificationTask {
     pub id: i64,
@@ -422,6 +429,48 @@ impl NotificationOutboxStore {
             )
             .map_err(NotificationError::from_sql)?;
         Ok(write_outcome(changed))
+    }
+
+    /// 外部推送开始前复核当前分段的投递许可。
+    ///
+    /// Worker 领取后会把任务保留在内存中；业务取消或过期租约接管可能在真正调用平台
+    /// 之前改变数据库状态，因此不能只信任领取时的快照。
+    pub fn delivery_state(
+        &self,
+        id: i64,
+        worker_id: &str,
+        expected_delivered_parts: u32,
+    ) -> Result<NotificationDeliveryState, NotificationError> {
+        let conn = self.connection()?;
+        let state = conn
+            .query_row(
+                "SELECT status, locked_by, delivered_parts
+                 FROM notification_outbox
+                 WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, u32>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(NotificationError::from_sql)?;
+        let Some((status, locked_by, delivered_parts)) = state else {
+            return Ok(NotificationDeliveryState::LeaseLost);
+        };
+        if status == NotificationStatus::Cancelled.as_str() {
+            return Ok(NotificationDeliveryState::Cancelled);
+        }
+        if status == NotificationStatus::Sending.as_str()
+            && locked_by.as_deref() == Some(worker_id)
+            && delivered_parts == expected_delivered_parts
+        {
+            return Ok(NotificationDeliveryState::Ready);
+        }
+        Ok(NotificationDeliveryState::LeaseLost)
     }
 
     /// 在平台确认当前分段成功后推进持久化进度。条件更新保证重入时不会跳段。
