@@ -147,11 +147,17 @@ fn quoted_context_parts_for_model(
     quoted: &QuotedMessageContext,
     supports_vision: bool,
 ) -> Vec<MessageInputPart> {
+    let has_input_parts = !quoted.input_parts.is_empty();
     let mut parts = vec![MessageInputPart::Text {
-        text: quoted.fallback_text(),
+        // 结构化引用 parts 已包含正文和媒体，此处只保留引用边界与发送者信息。
+        text: if has_input_parts {
+            quoted.metadata_text()
+        } else {
+            quoted.fallback_text()
+        },
         source: Some(TextSource::Quote),
     }];
-    if quoted.lookup_found {
+    if has_input_parts {
         parts.extend(input_parts_for_model(
             quoted.input_parts.clone(),
             supports_vision,
