@@ -21,6 +21,9 @@ pub(crate) struct RawMsgElement {
     pub(crate) content: Option<String>,
     #[serde(default)]
     pub(crate) attachments: Vec<crate::gateway::event::Attachment>,
+    /// 引用根元素可能继续包含有序子元素；只有根元素及其后代属于被引用消息。
+    #[serde(default)]
+    pub(crate) msg_elements: Vec<RawMsgElement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -88,6 +91,7 @@ mod tests {
             msg_idx: Some("REFIDX_element".to_owned()),
             content: None,
             attachments: Vec::new(),
+            msg_elements: Vec::new(),
         }];
 
         let indices = parse_ref_indices(Some(&scene), Some(MSG_TYPE_QUOTE), &elements);

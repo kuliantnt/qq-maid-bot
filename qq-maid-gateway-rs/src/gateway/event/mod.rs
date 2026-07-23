@@ -511,31 +511,13 @@ fn quoted_payload_fallback(
         return QuotedPayloadFallback::default();
     }
 
-    // QQ 可能把一条引用消息拆成多个 element。解析层先按原始顺序完整保留；
-    // 媒体取回阶段再依据 QQ 官方实测的稳定文件名规则收敛重复图片。
+    // QQ 引用事件的顶层 msg_elements[0] 才是被引用原消息；后续顶层元素可能是
+    // 等价表示或当前消息内容，不能继续并入 quote。引用根内部的嵌套元素仍按原始
+    // 顺序递归保留，媒体取回阶段再按稳定文件名收敛重复图片。
     let mut content_fragments = Vec::new();
     let mut input_parts = Vec::new();
-    for element in msg_elements {
-        let raw_content = element.content.as_deref().unwrap_or_default();
-        let cleaned_content = strip_qq_image_placeholders(raw_content);
-        let parsed = parse_safe_content_parts(&cleaned_content, "qq_official");
-        let element_content = parsed.text.trim().to_owned();
-        if !element_content.is_empty() {
-            content_fragments.push(element_content.clone());
-        }
-        let mut element_parts = input_parts_from_content_and_attachments(
-            &element_content,
-            parsed.input_parts,
-            &element.attachments,
-            "qq_official",
-            TextSource::Quote,
-        );
-        for part in &mut element_parts {
-            if let MessageInputPart::Text { source, .. } = part {
-                *source = Some(TextSource::Quote);
-            }
-        }
-        input_parts.extend(element_parts);
+    if let Some(quoted_root) = msg_elements.first() {
+        append_quoted_element_parts(quoted_root, &mut content_fragments, &mut input_parts);
     }
 
     let mut content = content_fragments.join("\n");
@@ -560,6 +542,37 @@ fn quoted_payload_fallback(
         content: (!content.is_empty()).then_some(content),
         input_parts,
         media_summaries,
+    }
+}
+
+fn append_quoted_element_parts(
+    element: &RawMsgElement,
+    content_fragments: &mut Vec<String>,
+    input_parts: &mut Vec<MessageInputPart>,
+) {
+    let raw_content = element.content.as_deref().unwrap_or_default();
+    let cleaned_content = strip_qq_image_placeholders(raw_content);
+    let parsed = parse_safe_content_parts(&cleaned_content, "qq_official");
+    let element_content = parsed.text.trim().to_owned();
+    if !element_content.is_empty() {
+        content_fragments.push(element_content.clone());
+    }
+    let mut element_parts = input_parts_from_content_and_attachments(
+        &element_content,
+        parsed.input_parts,
+        &element.attachments,
+        "qq_official",
+        TextSource::Quote,
+    );
+    for part in &mut element_parts {
+        if let MessageInputPart::Text { source, .. } = part {
+            *source = Some(TextSource::Quote);
+        }
+    }
+    input_parts.extend(element_parts);
+
+    for child in &element.msg_elements {
+        append_quoted_element_parts(child, content_fragments, input_parts);
     }
 }
 

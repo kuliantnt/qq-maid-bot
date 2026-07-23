@@ -803,6 +803,128 @@ fn parses_plain_group_quote_from_structured_element_without_parallel_duplication
 }
 
 #[test]
+fn group_quote_keeps_current_text_out_of_quoted_payload() {
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_AT_MESSAGE_CREATE.to_owned()),
+        id: Some("event-current".to_owned()),
+        d: json!({
+            "id": "msg-current",
+            "group_openid": "group-1",
+            "author": {"member_openid": "member-1"},
+            "content": "这条正常么？",
+            "mentions": [{"is_you": true, "member_openid": "bot-1"}],
+            "message_type": 103,
+            "msg_elements": [
+                {"msg_idx": "REFIDX_quoted", "content": "OK"},
+                {"msg_idx": "REFIDX_equivalent", "content": "OK"},
+                {"msg_idx": "REFIDX_current", "content": "这条正常么？"}
+            ]
+        }),
+    };
+
+    let message = parse_group_message(&envelope).unwrap().unwrap();
+    let reply = message.reply.as_ref().unwrap();
+
+    assert_eq!(message.content, "这条正常么？");
+    assert!(message.mentions.iter().any(|mention| mention.is_you));
+    assert_eq!(reply.content.as_deref(), Some("OK"));
+    assert_eq!(reply.input_parts.len(), 1);
+    assert_eq!(reply.input_parts[0].text_content(), Some("OK"));
+}
+
+#[test]
+fn c2c_quote_keeps_current_text_out_of_quoted_payload() {
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
+        id: Some("event-current".to_owned()),
+        d: json!({
+            "id": "msg-current",
+            "author": {"user_openid": "user-1"},
+            "content": "这条正常么？",
+            "message_type": 103,
+            "msg_elements": [
+                {"msg_idx": "REFIDX_quoted", "content": "OK"},
+                {"msg_idx": "REFIDX_current", "content": "这条正常么？"}
+            ]
+        }),
+    };
+
+    let message = parse_c2c_message(&envelope).unwrap().unwrap();
+    let reply = message.reply.as_ref().unwrap();
+
+    assert_eq!(message.content, "这条正常么？");
+    assert_eq!(message.input_parts[0].text_content(), Some("这条正常么？"));
+    assert_eq!(reply.content.as_deref(), Some("OK"));
+    assert_eq!(reply.input_parts[0].text_content(), Some("OK"));
+}
+
+#[test]
+fn nested_quoted_elements_keep_text_and_media_order_without_current_parts() {
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+        id: None,
+        d: json!({
+            "id": "msg-current",
+            "group_openid": "group-1",
+            "author": {"member_openid": "member-1"},
+            "content": "解释引用图文",
+            "attachments": [{
+                "content_type": "image/png",
+                "filename": "current.png",
+                "url": "https://example.test/current.png"
+            }],
+            "message_type": 103,
+            "msg_elements": [
+                {
+                    "msg_idx": "REFIDX_quoted",
+                    "msg_elements": [
+                        {"content": "引用第一段"},
+                        {
+                            "content": "[图片]引用第二段",
+                            "attachments": [{
+                                "content_type": "image/png",
+                                "filename": "quoted.png",
+                                "url": "https://example.test/quoted.png"
+                            }]
+                        }
+                    ]
+                },
+                {"msg_idx": "REFIDX_current", "content": "解释引用图文"}
+            ]
+        }),
+    };
+
+    let message = parse_group_message(&envelope).unwrap().unwrap();
+    let reply = message.reply.as_ref().unwrap();
+
+    assert_eq!(message.content, "解释引用图文");
+    assert!(
+        message
+            .attachments
+            .iter()
+            .any(|item| item.filename.as_deref() == Some("current.png"))
+    );
+    assert_eq!(reply.content.as_deref(), Some("引用第一段\n引用第二段"));
+    assert_eq!(reply.input_parts[0].text_content(), Some("引用第一段"));
+    assert_eq!(reply.input_parts[1].text_content(), Some("引用第二段"));
+    assert_eq!(
+        reply.input_parts[2]
+            .media()
+            .and_then(|media| media.filename.as_deref()),
+        Some("quoted.png")
+    );
+    assert!(!reply.input_parts.iter().any(|part| {
+        part.media().and_then(|media| media.filename.as_deref()) == Some("current.png")
+    }));
+}
+
+#[test]
 fn quoted_images_keep_original_order_when_metadata_matches() {
     let envelope = GatewayEnvelope {
         op: 0,
