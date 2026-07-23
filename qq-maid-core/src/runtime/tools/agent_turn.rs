@@ -25,13 +25,6 @@ use super::search::agent_turn::{SearchResultProjection, project_result as projec
 
 pub(crate) type IndexedToolOutcomes = Vec<(usize, ToolExecutionOutcome)>;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct ToolTurnContext {
-    pub(crate) semantic_domain: Option<&'static str>,
-    pub(crate) status_subject: Option<&'static str>,
-    pub(crate) status_action: Option<&'static str>,
-}
-
 pub(crate) trait DomainTurnDiagnostics {
     fn log_tool_loop_results(&self, executed_tools: &[String]);
     fn extend_response_diagnostics(&self, target: &mut Map<String, Value>);
@@ -93,7 +86,7 @@ pub(crate) fn postprocess_tool_turn(
     meta: &SessionMeta,
     interaction_meta: &SessionMeta,
     mut output: RespondOutput,
-    context: ToolTurnContext,
+    req: &crate::runtime::respond::RespondRequest,
 ) -> Result<ToolTurnPostprocess, LlmError> {
     let mut standalone_interaction = if interaction_meta.scope_key != meta.scope_key {
         Some(
@@ -108,6 +101,15 @@ pub(crate) fn postprocess_tool_turn(
         .as_mut()
         .unwrap_or(conversation_session);
 
+    let todo_interaction = todo::interaction_state::snapshot_for_request(req, Some(state_session));
+    let user_text = req.effective_user_text();
+    let todo_intent = todo::route::classify_todo_intent(
+        &user_text,
+        &user_text.to_ascii_lowercase(),
+        todo_interaction.has_visible_snapshot || todo_interaction.has_recent_operation,
+    );
+    let todo_action = todo::route::todo_intent_action(&user_text);
+
     let outcome = project_tool_turn(task_store, state_session, meta, &output)?;
     if let Some(interaction) = standalone_interaction.as_mut() {
         session_store
@@ -115,7 +117,8 @@ pub(crate) fn postprocess_tool_turn(
             .map_err(crate::runtime::respond::common::session_error)?;
     }
 
-    let todo_guard_enabled = todo::agent_turn::should_validate_success(&context, &output);
+    let todo_guard_enabled =
+        todo::agent_turn::should_validate_success(todo_intent, todo_action, &output);
     let validation = if outcome.can_replace_model_reply() {
         if outcome.should_preserve_model_reply() {
             apply_agent_turn_outcome_with_model_reply(&mut output, &outcome);

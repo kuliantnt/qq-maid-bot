@@ -166,6 +166,7 @@ pub(super) struct TestProvider {
     tool_protocol: Option<ToolCallingProtocol>,
     stream_enabled: bool,
     emit_tool_progress: bool,
+    progress_tool_name: String,
 }
 
 impl TestProvider {
@@ -209,6 +210,7 @@ impl TestProvider {
             tool_protocol: None,
             stream_enabled: false,
             emit_tool_progress: true,
+            progress_tool_name: "mock_tool".to_owned(),
         }
     }
 
@@ -224,6 +226,11 @@ impl TestProvider {
 
     pub(super) fn without_tool_progress(mut self) -> Self {
         self.emit_tool_progress = false;
+        self
+    }
+
+    pub(super) fn with_progress_tool_name(mut self, tool_name: &str) -> Self {
+        self.progress_tool_name = tool_name.to_owned();
         self
     }
 
@@ -356,11 +363,11 @@ impl LlmProvider for TestProvider {
             && let Some(sink) = progress_sink
         {
             sink(ToolLoopProgressEvent::ToolCallStarted {
-                tool_name: "mock_tool".to_owned(),
+                tool_name: self.progress_tool_name.clone(),
             })
             .await?;
             sink(ToolLoopProgressEvent::ToolCallFinished {
-                tool_name: "mock_tool".to_owned(),
+                tool_name: self.progress_tool_name.clone(),
             })
             .await?;
         }

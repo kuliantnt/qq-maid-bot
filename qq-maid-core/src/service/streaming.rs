@@ -19,7 +19,7 @@ use crate::{
     error::LlmError,
     runtime::respond::{
         PlannedRespond, RespondPlan, RespondRequest, RespondResponse, RustRespondService,
-        StatusAudience, StatusHint, StatusPhase, status_hint_text,
+        StatusAudience, StatusHint, StatusPhase, status_hint_for_tool_name, status_hint_text,
     },
 };
 
@@ -350,6 +350,7 @@ async fn run_agent_runtime_respond(
         cancelled.clone(),
         progress_status.clone(),
         tool_activity_started.clone(),
+        eager_agent_status,
     );
     let finalizing_status_sent = Arc::new(AtomicBool::new(false));
     let final_delta_sink = if provider_stream_enabled {
@@ -516,26 +517,42 @@ fn tool_loop_progress_sink(
     cancelled: Arc<AtomicBool>,
     progress_status: ProgressStatusConfig,
     tool_activity_started: Arc<AtomicBool>,
+    eager_agent_status: bool,
 ) -> ToolLoopProgressSink {
+    let first_tool_event_seen = Arc::new(AtomicBool::new(false));
     std::sync::Arc::new(move |event| {
         let tx = tx.clone();
         let cancelled = cancelled.clone();
         let progress_status = progress_status.clone();
         let tool_activity_started = tool_activity_started.clone();
+        let first_tool_event_seen = first_tool_event_seen.clone();
         Box::pin(async move {
             tool_activity_started.store(true, Ordering::SeqCst);
-            let (kind, phase) = match event {
-                ToolLoopProgressEvent::ToolCallStarted { .. } => (
-                    CoreResponseStatusKind::ToolCallStarted,
-                    StatusPhase::Started,
-                ),
-                ToolLoopProgressEvent::ToolCallFinished { .. } => (
+            let is_first_tool_event = !first_tool_event_seen.swap(true, Ordering::SeqCst);
+            let (kind, phase, hint) = match event {
+                ToolLoopProgressEvent::ToolCallStarted { tool_name } => {
+                    let hint = status_hint_for_tool_name(&tool_name)
+                        .unwrap_or_else(StatusHint::processing);
+                    // 启动阶段已经发送同一条高置信状态时，不重复发送首个 ToolStarted；
+                    // 后续工具仍按真实结构化事件更新，避免状态停留在原始文本猜测上。
+                    if is_first_tool_event && eager_agent_status && hint == progress_status.hint {
+                        return Ok(());
+                    }
+                    (
+                        CoreResponseStatusKind::ToolCallStarted,
+                        StatusPhase::Started,
+                        hint,
+                    )
+                }
+                ToolLoopProgressEvent::ToolCallFinished { tool_name } => (
                     CoreResponseStatusKind::ToolCallFinished,
                     StatusPhase::Finalizing,
+                    status_hint_for_tool_name(&tool_name).unwrap_or_else(StatusHint::processing),
                 ),
-                ToolLoopProgressEvent::ToolCallFailed { .. } => (
+                ToolLoopProgressEvent::ToolCallFailed { tool_name } => (
                     CoreResponseStatusKind::ToolCallFailed,
                     StatusPhase::Finalizing,
+                    status_hint_for_tool_name(&tool_name).unwrap_or_else(StatusHint::processing),
                 ),
             };
             send_core_status(
@@ -544,7 +561,7 @@ fn tool_loop_progress_sink(
                 kind,
                 status_hint_text(
                     progress_status.audience,
-                    progress_status.hint,
+                    hint,
                     phase,
                     &progress_status.display_name,
                 ),

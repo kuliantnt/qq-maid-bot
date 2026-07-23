@@ -237,11 +237,6 @@ impl RustRespondService {
             LlmChatService::with_context_budget(self.provider.clone(), self.context_budget)
                 .with_bot_display_name(self.bot_display_name());
         let use_agent_runtime = respond_route.uses_agent_runtime();
-        let tool_turn_context = crate::runtime::tools::agent_turn::ToolTurnContext {
-            semantic_domain: status_hint.map(|hint| hint.subject.as_str()),
-            status_subject: status_hint.map(|hint| hint.subject.as_str()),
-            status_action: status_hint.map(|hint| hint.action.as_str()),
-        };
         let mut agent_finalization_error = None;
         let mut agent_exposed_tools = Vec::new();
         let (output, agent_turn_outcome, tool_turn_diagnostics) = if use_agent_runtime {
@@ -314,7 +309,7 @@ impl RustRespondService {
                 &meta,
                 &interaction_meta,
                 output,
-                tool_turn_context,
+                &req,
             )?;
             (
                 postprocess.output,

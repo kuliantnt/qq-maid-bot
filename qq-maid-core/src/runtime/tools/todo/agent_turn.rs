@@ -13,7 +13,7 @@ use crate::{
         session::{SessionMeta, SessionRecord},
         tools::{
             TaskStore,
-            agent_turn::{DomainTurnDiagnostics, IndexedToolOutcomes, ToolTurnContext},
+            agent_turn::{DomainTurnDiagnostics, IndexedToolOutcomes},
             todo,
         },
     },
@@ -96,16 +96,18 @@ pub(crate) fn validate_model_reply_success(
     todo::success_guard::validate_todo_success_reply(&output.reply, &output.agent.tool_results)
 }
 
-pub(crate) fn should_validate_success(context: &ToolTurnContext, output: &RespondOutput) -> bool {
+pub(crate) fn should_validate_success(
+    intent: todo::route::TodoIntent,
+    action: todo::route::TodoIntentAction,
+    output: &RespondOutput,
+) -> bool {
     output
         .agent
         .emitted_tools
         .iter()
         .any(|name| todo::success_guard::is_todo_write_tool(name))
         || todo::success_guard::has_todo_write_tool_result(&output.agent.tool_results)
-        || (context.semantic_domain == Some("todo")
-            && context.status_subject == Some("todo")
-            && matches!(context.status_action, Some("write" | "confirm" | "process")))
+        || (intent.is_confident() && !matches!(action, todo::route::TodoIntentAction::Query))
 }
 
 /// 最终模型轮次失败后，只在 Todo 写工具已有可信结果时构造确定性回执输入。

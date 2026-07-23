@@ -3,7 +3,8 @@ use super::*;
 #[tokio::test]
 async fn core_private_weather_chat_with_tool_capability_completes_without_synthetic_delta() {
     let provider = TestProvider::replying("工具完整回复")
-        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_progress_tool_name("get_weather");
     let state = test_state_with_tool_calling(provider.clone(), 5, true);
     let service = CoreHandle::new(state);
 
@@ -25,12 +26,6 @@ async fn core_private_weather_chat_with_tool_capability_completes_without_synthe
     assert_eq!(status.text, "小女仆正在查天气…");
 
     let Some(CoreResponseEvent::Status(status)) = stream.recv().await else {
-        panic!("expected tool call started status");
-    };
-    assert_eq!(status.kind, CoreResponseStatusKind::ToolCallStarted);
-    assert_eq!(status.text, "小女仆正在查天气…");
-
-    let Some(CoreResponseEvent::Status(status)) = stream.recv().await else {
         panic!("expected tool call finished status");
     };
     assert_eq!(status.kind, CoreResponseStatusKind::ToolCallFinished);
@@ -46,7 +41,8 @@ async fn core_private_weather_chat_with_tool_capability_completes_without_synthe
 #[tokio::test]
 async fn core_private_tool_status_uses_configured_display_name() {
     let provider = TestProvider::replying("工具完整回复")
-        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_progress_tool_name("get_weather");
     let mut state = test_state_with_tool_calling(provider.clone(), 5, true);
     state.config.bot_display_name = "助手".to_owned();
     let service = CoreHandle::new(state);
@@ -69,7 +65,8 @@ async fn core_private_tool_status_uses_configured_display_name() {
 #[tokio::test]
 async fn core_group_tool_status_uses_short_hint() {
     let provider = TestProvider::replying("群聊工具回复")
-        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_progress_tool_name("get_weather");
     let state = test_state_with_group_tool_calling(provider.clone(), 5, true, true);
     let service = CoreHandle::new(state);
 
@@ -86,6 +83,28 @@ async fn core_group_tool_status_uses_short_hint() {
 
     assert_eq!(status.kind, CoreResponseStatusKind::AgentStarted);
     assert_eq!(status.text, "正在查…");
+}
+
+#[tokio::test]
+async fn actual_web_search_tool_event_switches_to_search_status() {
+    let provider = TestProvider::replying("搜索完成")
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_progress_tool_name("web_search");
+    let state = test_state_with_tool_calling(provider, 5, true);
+    let service = CoreHandle::new(state);
+
+    let mut stream = expect_stream(
+        service
+            .respond(private_request("这个项目有什么资料"))
+            .await
+            .unwrap(),
+    );
+    let Some(CoreResponseEvent::Status(status)) = stream.recv().await else {
+        panic!("expected structured web search status");
+    };
+
+    assert_eq!(status.kind, CoreResponseStatusKind::ToolCallStarted);
+    assert_eq!(status.text, "小女仆正在查资料…");
 }
 
 #[tokio::test]
