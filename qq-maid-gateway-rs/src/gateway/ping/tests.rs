@@ -11,10 +11,10 @@ use crate::{
 use qq_maid_core::service::{CoreHealthSnapshot, UpstreamStatusSnapshot};
 
 use super::{
-    GatewayRuntimeStatus, PingMode, build_ping_reply,
+    GatewayRuntimeStatus, PingMode, PingReplyOptions, build_ping_reply,
     healthz::{LlmHealthSnapshot, LlmUpstreamSnapshot},
     is_ping_check_command, is_ping_command,
-    render::render_ping_reply_at_with_version,
+    render::{PingRenderOptions, render_ping_reply_at_with_version},
 };
 
 fn command_context(message: &C2cMessage) -> GatewayCommandContext {
@@ -46,9 +46,7 @@ fn render_c2c_ping_reply_at(
         runtime,
         token_snapshot,
         llm_health,
-        mode,
-        now_seconds,
-        env!("CARGO_PKG_VERSION"),
+        PingRenderOptions::new(mode, now_seconds, env!("CARGO_PKG_VERSION")),
     )
 }
 
@@ -67,8 +65,7 @@ async fn build_c2c_ping_reply_with_check_failure(
         runtime,
         &auth.snapshot().await,
         core_health,
-        check_failure,
-        env!("CARGO_PKG_VERSION"),
+        PingReplyOptions::new(check_failure, env!("CARGO_PKG_VERSION")),
     )
 }
 
@@ -679,9 +676,7 @@ fn group_ping_all_hides_configuration_and_stable_ids() {
         &GatewayRuntimeStatus::new_for_test(),
         &token_snapshot(),
         &health("ok(in-process)", LlmUpstreamSnapshot::Unverified),
-        PingMode::All,
-        1200,
-        env!("CARGO_PKG_VERSION"),
+        PingRenderOptions::new(PingMode::All, 1200, env!("CARGO_PKG_VERSION")),
     );
 
     assert!(!reply.contains("### 配置"));

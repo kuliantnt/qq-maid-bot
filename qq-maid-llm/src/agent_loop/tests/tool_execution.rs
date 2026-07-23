@@ -229,6 +229,40 @@ async fn duplicate_read_only_tool_call_replays_success_and_keeps_dependency_chai
 }
 
 #[tokio::test]
+async fn duplicate_web_search_executes_once_and_returns_cache_marker_to_model() {
+    let calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![Arc::new(NamedSlowReadOnlyTool {
+        name: "web_search",
+        calls: calls.clone(),
+        delay: std::time::Duration::ZERO,
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("web_search", "w1", r#"{"value":"rust"}"#)]),
+            tool_calls(vec![tool_call("web_search", "w2", r#"{"value":"rust"}"#)]),
+            final_reply("answer based on the first search"),
+        ],
+    ));
+    let observed = session.observed.clone();
+
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert_eq!(outcome.reply, "answer based on the first search");
+    assert_eq!(outcome.agent.executed_tools, ["web_search"]);
+    assert_eq!(outcome.agent.tool_results.len(), 2);
+    assert_eq!(outcome.agent.tool_results[0].output["value"], "rust");
+    assert_eq!(outcome.agent.tool_results[1].output["deduplicated"], true);
+    let observed = observed.lock().unwrap();
+    assert!(observed[1].0[0].output.contains("rust"));
+    assert!(observed[2].0[0].output.contains("deduplicated"));
+}
+
+#[tokio::test]
 async fn failed_tool_followed_by_same_singleton_call_is_recorded_as_retry() {
     let calls = Arc::new(StdMutex::new(0));
     let registry = registry_with(vec![Arc::new(FailOnceReadOnlyTool {

@@ -61,19 +61,13 @@ pub(super) fn has_non_tool_status_context(text: &str, lower: &str) -> bool {
         )
 }
 
-pub(super) fn has_local_text_processing_intent(text: &str, lower: &str) -> bool {
+pub(super) fn has_local_text_processing_intent(text: &str) -> bool {
     let Some(instruction) = local_text_processing_instruction(text) else {
         return false;
     };
-    let instruction_lower = instruction.to_ascii_lowercase();
-    if has_explicit_online_search_marker(instruction, &instruction_lower)
-        || has_explicit_online_search_marker(text, lower)
-    {
-        return false;
-    }
 
-    // 长粘贴内容里的“查询 / Search / Tool”等词只描述待处理文本，
-    // 路由以末尾短指令为准，避免文本整理请求误入 WebSearch。
+    // 长粘贴内容里的“查询 / Search / Tool”等词只描述待处理文本；搜索域会先
+    // 尊重这里识别出的末尾整理指令，避免正文里的明确句式误触发搜索预提示。
     contains_any(
         instruction,
         &[
@@ -129,27 +123,6 @@ fn local_text_processing_instruction(text: &str) -> Option<&str> {
         .rev()
         .map(str::trim)
         .find(|line| !line.is_empty() && line.chars().count() <= 80)
-}
-
-fn has_explicit_online_search_marker(text: &str, _lower: &str) -> bool {
-    contains_any(
-        text,
-        &[
-            "联网",
-            "上网查",
-            "网上查",
-            "网上有没有",
-            "网络查询",
-            "搜索",
-            "搜一下",
-            "查 GitHub",
-            "查 github",
-            "查资料",
-            "查新闻",
-            "最新消息",
-            "最新进展",
-        ],
-    )
 }
 
 fn is_plain_greeting(compact: &str) -> bool {

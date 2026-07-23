@@ -19,22 +19,42 @@ use super::{
     time::{diagnostic_time_option_text, time_or_placeholder},
 };
 
+/// `/ping` 渲染阶段的瞬时选项；运行事实仍由各自快照提供。
+pub(super) struct PingRenderOptions<'a> {
+    mode: PingMode,
+    now_seconds: i64,
+    application_version: &'a str,
+}
+
+impl<'a> PingRenderOptions<'a> {
+    pub(super) fn new(mode: PingMode, now_seconds: i64, application_version: &'a str) -> Self {
+        Self {
+            mode,
+            now_seconds,
+            application_version,
+        }
+    }
+}
+
 pub(super) fn render_ping_reply_at_with_version(
     context: &GatewayCommandContext,
     config: &AppConfig,
     runtime: &GatewayRuntimeStatus,
     token_snapshot: &AccessTokenSnapshot,
     llm_health: &LlmHealthSnapshot,
-    mode: PingMode,
-    now_seconds: i64,
-    application_version: &str,
+    options: PingRenderOptions<'_>,
 ) -> String {
     let snapshot = runtime.snapshot();
     let current_scope = context.scope_key().unwrap_or_else(|| "unknown".to_owned());
     // 私聊 `/ping` 直接回显当前用户自己的稳定 ID，便于配置本地运维白名单；
     // 消息 ID、scope、URL、Unix 秒等其他诊断细节仍只在 `/ping all` 脱敏展示。
-    let assessment =
-        assess_ping_status(&snapshot, runtime, token_snapshot, llm_health, now_seconds);
+    let assessment = assess_ping_status(
+        &snapshot,
+        runtime,
+        token_snapshot,
+        llm_health,
+        options.now_seconds,
+    );
     let title = match assessment.overall {
         PingSeverity::Normal => "# 🟢 服务运行正常",
         PingSeverity::Warning => "# 🟡 服务可用，但存在警告",
@@ -69,7 +89,7 @@ pub(super) fn render_ping_reply_at_with_version(
         "## 当前消息".to_owned(),
         "| 项目 | 内容 |".to_owned(),
         "|---|---|".to_owned(),
-        format!("| 版本 | {application_version} |"),
+        format!("| 版本 | {} |", options.application_version),
         format!("| 平台 | {} |", markdown_cell(context.platform_name)),
         format!("| 场景 | {} |", context.conversation.label()),
         format!("| 事件 | {} |", markdown_cell(context.event_name)),
@@ -99,7 +119,7 @@ pub(super) fn render_ping_reply_at_with_version(
         ),
     ]);
 
-    if matches!(mode, PingMode::All) {
+    if matches!(options.mode, PingMode::All) {
         lines.extend([String::new(), "## 调试详情".to_owned()]);
         lines.extend(render_ping_debug_details(
             context,

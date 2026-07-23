@@ -33,6 +33,21 @@ enum PingMode {
     Check,
 }
 
+/// `/ping` 编排层的附加输入，避免版本注入继续扩大稳定诊断接口的参数列表。
+pub(crate) struct PingReplyOptions<'a> {
+    check_failure: Option<&'a str>,
+    application_version: &'a str,
+}
+
+impl<'a> PingReplyOptions<'a> {
+    pub(crate) fn new(check_failure: Option<&'a str>, application_version: &'a str) -> Self {
+        Self {
+            check_failure,
+            application_version,
+        }
+    }
+}
+
 pub fn is_ping_command(text: &str) -> bool {
     parse_ping_mode(text).is_some()
 }
@@ -70,11 +85,10 @@ pub(crate) fn build_ping_reply(
     runtime: &GatewayRuntimeStatus,
     token_snapshot: &AccessTokenSnapshot,
     core_health: &CoreHealthSnapshot,
-    check_failure: Option<&str>,
-    application_version: &str,
+    options: PingReplyOptions<'_>,
 ) -> String {
     let mut llm_health = core_health_snapshot(core_health);
-    if let Some(summary) = check_failure {
+    if let Some(summary) = options.check_failure {
         // 主动检查的直接失败必须覆盖旧 healthz 快照，避免 `/ping check` 误报绿色。
         llm_health.upstream = LlmUpstreamSnapshot::Error {
             last_checked_at: Some(now_unix_seconds_marker()),
@@ -87,8 +101,10 @@ pub(crate) fn build_ping_reply(
         runtime,
         token_snapshot,
         &llm_health,
-        parse_ping_mode(command_text).unwrap_or(PingMode::Summary),
-        qq_maid_common::time_context::now_unix_seconds(),
-        application_version,
+        render::PingRenderOptions::new(
+            parse_ping_mode(command_text).unwrap_or(PingMode::Summary),
+            qq_maid_common::time_context::now_unix_seconds(),
+            options.application_version,
+        ),
     )
 }

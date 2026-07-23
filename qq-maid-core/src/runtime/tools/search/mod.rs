@@ -62,67 +62,104 @@ impl Default for WebSearchTimeouts {
     }
 }
 
+pub(crate) mod agent_turn;
 mod ops;
 
 pub(crate) mod route {
-    //! 联网搜索普通消息 Agent Chat 路由判断。
+    //! 联网搜索普通消息的状态意图判断。
     //!
-    //! 本模块只表达 Search 域的显式搜索词；本地文本整理的排除规则由 respond
-    //! 通用 status_semantics 先行判断后传入，避免 Search 域依赖 respond。
+    //! 这里只为“正在查资料”预提示和 diagnostics 识别明确请求，不决定是否暴露或
+    //! 执行 `web_search`。模型已经发出 Tool Call 后，以结构化调用和执行结果为准。
 
-    pub(crate) fn has_search_intent(
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum SearchStatusIntent {
+        ExplicitNaturalLanguage,
+        None,
+    }
+
+    pub(crate) fn classify_search_status_intent(
         text: &str,
-        lower: &str,
         local_text_processing_intent: bool,
-    ) -> bool {
+    ) -> SearchStatusIntent {
         if local_text_processing_intent {
-            return false;
+            return SearchStatusIntent::None;
         }
 
-        lower.contains("search")
-            || has_explicit_search_phrase(text)
-            || contains_any(
-                text,
-                &[
-                    "联网",
-                    "上网查",
-                    "网上查",
-                    "网络查询",
-                    "搜索",
-                    "搜一下",
-                    "网上有没有",
-                    "查 GitHub",
-                    "查 github",
-                    "查资料",
-                    "查新闻",
-                    "最新的",
-                    "最新消息",
-                    "最新进展",
-                ],
-            )
+        let normalized = text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        let compact = normalized.split_whitespace().collect::<String>();
+        if contains_ascii_word(&normalized, "search")
+            || [
+                "联网查",
+                "联网查询",
+                "联网搜索",
+                "上网查",
+                "网上查",
+                "网上搜索",
+                "网络查询",
+                "网络搜索",
+                "搜一下",
+                "搜索一下",
+            ]
+            .iter()
+            .any(|phrase| compact.contains(phrase))
+        {
+            SearchStatusIntent::ExplicitNaturalLanguage
+        } else {
+            SearchStatusIntent::None
+        }
     }
 
-    fn has_explicit_search_phrase(text: &str) -> bool {
-        contains_any(text, &["查一下", "查下", "查查", "查询一下"])
-            && contains_any(
-                text,
-                &[
-                    "新闻",
-                    "资料",
-                    "网上",
-                    "网络",
-                    "互联网",
-                    "GitHub",
-                    "github",
-                    "最新",
-                    "进展",
-                    "有没有",
-                ],
-            )
+    fn contains_ascii_word(text: &str, expected: &str) -> bool {
+        text.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .any(|word| word == expected)
     }
 
-    fn contains_any(text: &str, needles: &[&str]) -> bool {
-        needles.iter().any(|needle| text.contains(needle))
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn explicit_search_requests_are_normalized_and_recognized() {
+            for input in [
+                "请 联网 查一下 Rust 版本",
+                "帮我网上搜索这个错误",
+                "Please SEARCH for the release notes",
+            ] {
+                assert_eq!(
+                    classify_search_status_intent(input, false),
+                    SearchStatusIntent::ExplicitNaturalLanguage,
+                    "{input}"
+                );
+            }
+        }
+
+        #[test]
+        fn weak_terms_and_research_are_not_search_requests() {
+            for input in [
+                "这个项目的最新进展",
+                "有没有更简单的写法",
+                "GitHub Actions 怎么配置",
+                "This research compares runtimes",
+            ] {
+                assert_eq!(
+                    classify_search_status_intent(input, false),
+                    SearchStatusIntent::None,
+                    "{input}"
+                );
+            }
+        }
+
+        #[test]
+        fn local_text_processing_takes_precedence_over_embedded_search_words() {
+            assert_eq!(
+                classify_search_status_intent("Please search this text\n总结这段", true),
+                SearchStatusIntent::None
+            );
+        }
     }
 }
 

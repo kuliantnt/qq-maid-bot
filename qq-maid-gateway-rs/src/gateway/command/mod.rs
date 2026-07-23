@@ -177,8 +177,7 @@ impl GatewayCommandService {
             &self.runtime,
             &token_snapshot,
             &self.respond.health_snapshot(),
-            check_failure.as_deref(),
-            self.application_version,
+            ping::PingReplyOptions::new(check_failure.as_deref(), self.application_version),
         );
         if let Some(notice) = check_notice {
             // 禁止主动探测的渠道仍返回本地健康快照；提示必须由 Gateway 静态生成，

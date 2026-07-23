@@ -66,6 +66,7 @@ pub(crate) fn classify_status_hint(
     let has_recent_todo_context = interaction_state.has_recent_context(InteractionDomain::Todo);
     let lower = text.to_ascii_lowercase();
     let non_tool_context = status_semantics::has_non_tool_status_context(text, &lower);
+    let local_text_processing_intent = status_semantics::has_local_text_processing_intent(text);
     let todo_intent =
         todo::route::classify_todo_route(text, &lower, has_recent_todo_context, non_tool_context);
     if todo_intent.routes_to_tool_loop() {
@@ -90,21 +91,16 @@ pub(crate) fn classify_status_hint(
     if train::route::has_train_intent(text, &lower) {
         return Some(StatusHint::new(StatusSubject::Train, StatusAction::Query));
     }
-    if rss::route::has_rss_intent(text, &lower) {
+    if rss::route::has_rss_intent(text, local_text_processing_intent) {
         return Some(StatusHint::new(StatusSubject::Rss, StatusAction::Query));
     }
-    if has_search_intent(text, &lower) {
+    if matches!(
+        search::route::classify_search_status_intent(text, local_text_processing_intent),
+        search::route::SearchStatusIntent::ExplicitNaturalLanguage
+    ) {
         return Some(StatusHint::new(StatusSubject::Search, StatusAction::Query));
     }
     None
-}
-
-pub(crate) fn has_search_intent(text: &str, lower: &str) -> bool {
-    search::route::has_search_intent(
-        text,
-        lower,
-        status_semantics::has_local_text_processing_intent(text, lower),
-    )
 }
 
 #[cfg(test)]
@@ -149,7 +145,7 @@ mod tests {
                 StatusHint::new(StatusSubject::Todo, StatusAction::Confirm),
             ),
             (
-                "查一下今天 AI 新闻",
+                "联网查一下今天 AI 新闻",
                 StatusHint::new(StatusSubject::Search, StatusAction::Query),
             ),
         ];

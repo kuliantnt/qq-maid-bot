@@ -20,8 +20,8 @@ use crate::{
 use super::agent_presenters::{
     tool_outcome_from_knowledge_result, tool_outcome_from_rss_result,
     tool_outcome_from_train_result, tool_outcome_from_weather_result,
-    tool_outcome_from_web_search_result,
 };
+use super::search::agent_turn::{SearchResultProjection, project_result as project_search_result};
 
 pub(crate) type IndexedToolOutcomes = Vec<(usize, ToolExecutionOutcome)>;
 
@@ -216,8 +216,10 @@ fn project_tool_turn(
             outcomes.push(outcome);
         } else if let Some(outcome) = tool_outcome_from_rss_result(result) {
             outcomes.push(outcome);
-        } else if let Some(outcome) = tool_outcome_from_web_search_result(result) {
-            outcomes.push(outcome);
+        } else if let Some(projection) = project_search_result(result) {
+            if let SearchResultProjection::Visible(outcome) = projection {
+                outcomes.push(outcome);
+            }
         } else if let Some(outcome) = tool_outcome_from_knowledge_result(result) {
             outcomes.push(outcome);
         } else if let Some(outcome) = memory::agent_turn::tool_outcome_from_result(result) {
