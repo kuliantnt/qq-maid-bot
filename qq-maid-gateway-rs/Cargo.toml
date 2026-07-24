@@ -1,6 +1,6 @@
 [package]
 name = "qq-maid-gateway-rs"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2024"
 publish = false
 
@@ -10,6 +10,7 @@ aes = "0.9"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
+md-5 = "0.11"
 cbc = { version = "0.2", features = ["alloc"] }
 dotenvy = "0.15"
 futures-util = "0.3"

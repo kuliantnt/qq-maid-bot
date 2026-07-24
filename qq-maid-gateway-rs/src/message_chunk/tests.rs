@@ -60,6 +60,74 @@ fn plain_text_below_limit_single_chunk() {
 }
 
 #[test]
+fn c2c_passive_reply_plan_never_exceeds_four_visible_chunks() {
+    let source = OutboundMessage::Text {
+        text: "甲".repeat(400),
+    };
+    let limits = ChunkLimits::new(64, 64);
+    let (planned, planned_limits, truncated) =
+        plan_qq_passive_reply_outbounds(&[source], &limits, QQ_C2C_PASSIVE_REPLY_BUDGET);
+    let chunks = planned
+        .iter()
+        .flat_map(|outbound| chunk_outbound(outbound, &planned_limits))
+        .collect::<Vec<_>>();
+
+    assert_eq!(chunks.len(), 4);
+    assert!(truncated);
+    assert!(
+        chunks
+            .last()
+            .unwrap()
+            .fallback_text
+            .contains("平台被动回复上限截断")
+    );
+}
+
+#[test]
+fn group_passive_reply_plan_never_exceeds_five_visible_chunks() {
+    let source = OutboundMessage::Text {
+        text: "乙".repeat(500),
+    };
+    let limits = ChunkLimits::new(64, 64);
+    let (planned, planned_limits, truncated) =
+        plan_qq_passive_reply_outbounds(&[source], &limits, QQ_GROUP_PASSIVE_REPLY_BUDGET);
+    let chunks = planned
+        .iter()
+        .flat_map(|outbound| chunk_outbound(outbound, &planned_limits))
+        .collect::<Vec<_>>();
+
+    assert_eq!(chunks.len(), 5);
+    assert!(truncated);
+    assert!(
+        chunks
+            .last()
+            .unwrap()
+            .fallback_text
+            .contains("平台被动回复上限截断")
+    );
+}
+
+#[test]
+fn over_budget_media_fallback_still_has_visible_truncation_notice() {
+    let source = (0..6)
+        .map(|index| OutboundMessage::ImagePlaceholder {
+            fallback_text: format!("图片 {index}"),
+        })
+        .collect::<Vec<_>>();
+    let limits = ChunkLimits::new(64, 64);
+    let (planned, planned_limits, truncated) =
+        plan_qq_passive_reply_outbounds(&source, &limits, QQ_C2C_PASSIVE_REPLY_BUDGET);
+    let chunks = planned
+        .iter()
+        .flat_map(|outbound| chunk_outbound(outbound, &planned_limits))
+        .collect::<Vec<_>>();
+
+    assert_eq!(chunks.len(), 1);
+    assert!(truncated);
+    assert!(chunks[0].fallback_text.contains("平台被动回复上限截断"));
+}
+
+#[test]
 fn plain_text_over_limit_splits_by_unicode_scalar() {
     let text = "甲".repeat(4000);
     let chunks = chunk_plain_text(&text, 1800);

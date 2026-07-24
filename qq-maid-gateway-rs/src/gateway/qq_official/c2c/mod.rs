@@ -27,10 +27,13 @@ use super::super::{
     typing::{C2cTypingStatusGuard, TypingStopReason},
 };
 use crate::{
-    api::{OutboundSender, QqApiClient, SendMessageIds, send_outbound_with_fallback},
+    api::{OutboundSender, QqApiClient, SendMessageIds},
     config::AppConfig,
     gateway::event::strip_contaminated_quote_from_context,
-    message_chunk::{ChunkLimits, OutboundSendError, send_c2c_outbound_chunked},
+    message_chunk::{
+        ChunkLimits, OutboundSendError, QQ_C2C_PASSIVE_REPLY_BUDGET,
+        plan_qq_passive_reply_outbounds, send_c2c_outbound_chunked,
+    },
     render::{OutboundMessage, render_respond_response_parts_for_profile},
     respond::{RespondClient, build_respond_content, respond_error_to_qq_text},
 };
@@ -160,6 +163,16 @@ pub(crate) async fn send_c2c_respond_response_with_sender<S: OutboundSender + ?S
         config.markdown_chunk_soft_limit,
         config.text_chunk_soft_limit,
     );
+    let (outbounds, limits, truncated) =
+        plan_qq_passive_reply_outbounds(&outbounds, &limits, QQ_C2C_PASSIVE_REPLY_BUDGET);
+    if truncated {
+        warn!(
+            message_id = target.msg_id.as_deref().unwrap_or(""),
+            user = %masked_user,
+            reply_budget = QQ_C2C_PASSIVE_REPLY_BUDGET,
+            "QQ C2C passive reply was truncated before sending"
+        );
+    }
     // 普通回复统一走分段编排：长回复拆成多条逐段发送，段间失败返回 PartiallySent。
     let fallback_text = outbounds
         .iter()
@@ -269,16 +282,32 @@ pub(crate) async fn handle_c2c_message(
             inner: api,
             runtime,
         };
-        send_outbound_with_fallback(&sender, &target, &outbound)
-            .await
-            .inspect_err(|err| {
-                warn!(
-                    message_id = target.msg_id.as_deref().unwrap_or(""),
-                    user = %mask_openid(&target.user_openid),
-                    error = %err.log_summary(),
-                    "local /ping QQ reply send failed"
-                );
-            })?;
+        let limits = ChunkLimits::new(
+            config.markdown_chunk_soft_limit,
+            config.text_chunk_soft_limit,
+        );
+        let (outbounds, limits, truncated) =
+            plan_qq_passive_reply_outbounds(&[outbound], &limits, QQ_C2C_PASSIVE_REPLY_BUDGET);
+        if truncated {
+            warn!(
+                message_id = target.msg_id.as_deref().unwrap_or(""),
+                user = %mask_openid(&target.user_openid),
+                reply_budget = QQ_C2C_PASSIVE_REPLY_BUDGET,
+                "local /ping reply was truncated before sending"
+            );
+        }
+        for outbound in &outbounds {
+            send_c2c_outbound_chunked(&sender, &target, outbound, &limits, |_, _| {})
+                .await
+                .inspect_err(|err| {
+                    warn!(
+                        message_id = target.msg_id.as_deref().unwrap_or(""),
+                        user = %mask_openid(&target.user_openid),
+                        error = %err,
+                        "local /ping QQ reply send failed"
+                    );
+                })?;
+        }
         return Ok(());
     }
     let media_client = qq_maid_common::http_client::client();

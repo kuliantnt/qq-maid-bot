@@ -418,6 +418,16 @@ pub(crate) fn build_group_respond_content_with_prefix(
     platform::render_text_for_core(&inbound)
 }
 
+/// 群聊本地命令只允许使用用户本轮显式正文。ARK、平行消息和聊天记录的安全摘要
+/// 会进入 `input_parts` 供 Core 理解，但绝不能被 Gateway 当成用户输入的 slash 命令。
+pub(crate) fn build_group_command_content_with_prefix(
+    message: &GroupMessage,
+    active_keywords: &[String],
+    command_prefix: CommandPrefix,
+) -> String {
+    normalize_group_addressed_content(message, &message.content, active_keywords, command_prefix)
+}
+
 #[cfg(test)]
 pub(crate) fn normalized_group_inbound(
     message: &GroupMessage,

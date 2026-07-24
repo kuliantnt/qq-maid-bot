@@ -32,11 +32,12 @@ use super::super::{
     bot_identity::SharedBotIdentity,
     cache::BotOutboundCache,
     command::{GatewayCommandContext, GatewayCommandConversation, GatewayCommandService},
-    dedupe::MessageDedupe,
+    dedupe::{MessageDedupe, dedupe_qq_composite_key},
     event::{GroupEventType, GroupMessage},
     group_filter::{
         GroupCooldowns, group_message_addresses_bot, mentions_current_bot,
-        should_ignore_group_message, should_process_group_message_with_prefix,
+        normalize_current_bot_mentions, should_ignore_group_message,
+        should_process_group_message_with_prefix,
     },
     logging::{group_message_log_summary, mask_openid},
     media_fetch::{
@@ -54,9 +55,12 @@ use crate::{
     api::{GroupOutboundSender, QqApiClient, SendMessageIds},
     config::AppConfig,
     gateway::event::strip_contaminated_quote_from_context,
-    message_chunk::{ChunkLimits, OutboundSendError, send_group_outbound_chunked},
+    message_chunk::{
+        ChunkLimits, OutboundSendError, QQ_GROUP_PASSIVE_REPLY_BUDGET,
+        plan_qq_passive_reply_outbounds, send_group_outbound_chunked,
+    },
     render::{OutboundMessage, render_respond_response_parts_for_profile},
-    respond::{RespondClient, respond_error_to_qq_text},
+    respond::{RespondClient, build_group_command_content_with_prefix, respond_error_to_qq_text},
 };
 
 fn group_reply_mention_prefix(
@@ -183,9 +187,15 @@ pub(crate) async fn handle_group_message(
     runtime: &GatewayRuntimeStatus,
     ref_index: &SharedRefIndex,
 ) -> anyhow::Result<()> {
+    normalize_current_bot_mentions(&mut message, bot_identity);
     log_group_message_received(&message, config.verbose_log);
     let masked_group = mask_openid(&message.group_openid);
     let respond_content = crate::respond::build_group_respond_content_with_prefix(
+        &message,
+        &config.group_active_keywords,
+        config.command_prefix,
+    );
+    let command_content = build_group_command_content_with_prefix(
         &message,
         &config.group_active_keywords,
         config.command_prefix,
@@ -198,7 +208,17 @@ pub(crate) async fn handle_group_message(
     ) {
         return Ok(());
     }
-    if dedupe.is_duplicate(&message.message_id) {
+    // 使用 QQ 复合去重键（platform + scene + peer_id + message_id + msg_idx），
+    // 避免仅凭 message_id 错误去重（同一 message_id 可能对应多条拆分消息）。
+    let dedupe_key = dedupe_qq_composite_key(
+        "group",
+        &message.group_openid,
+        &message.message_id,
+        message.current_msg_idx.as_deref(),
+    );
+    if !dedupe_key.is_empty()
+        && dedupe.check_and_insert_many([dedupe_key], std::time::Instant::now())
+    {
         info!(
             message_id = %message.message_id,
             group = %masked_group,
@@ -218,7 +238,7 @@ pub(crate) async fn handle_group_message(
         attachment_count: message.attachments.len(),
     };
     if let Some(output) = commands
-        .try_handle(&respond_content, &command_context)
+        .try_handle(&command_content, &command_context)
         .await
     {
         info!(
@@ -241,7 +261,7 @@ pub(crate) async fn handle_group_message(
         &config.group_active_keywords,
         config.command_prefix,
         &message,
-        &respond_content,
+        &command_content,
         bot_identity,
         group_outbound_cache,
     ) {
@@ -469,6 +489,19 @@ async fn send_group_local_command(
         config.markdown_chunk_soft_limit,
         config.text_chunk_soft_limit,
     );
+    let (mut planned, limits, truncated) =
+        plan_qq_passive_reply_outbounds(&[outbound], &limits, QQ_GROUP_PASSIVE_REPLY_BUDGET);
+    let outbound = planned
+        .pop()
+        .expect("single local command outbound must produce a send plan");
+    if truncated {
+        warn!(
+            message_id = target.msg_id.as_deref().unwrap_or(""),
+            group = %mask_openid(&target.group_openid),
+            reply_budget = QQ_GROUP_PASSIVE_REPLY_BUDGET,
+            "QQ group passive reply was truncated before sending"
+        );
+    }
     send_group_outbound_chunked(&sender, &target, &outbound, &limits, |_, _| {})
         .await
         .map(|_| ())
@@ -526,6 +559,16 @@ async fn send_group_respond_response(
         config.markdown_chunk_soft_limit,
         config.text_chunk_soft_limit,
     );
+    let (outbounds, limits, truncated) =
+        plan_qq_passive_reply_outbounds(&outbounds, &limits, QQ_GROUP_PASSIVE_REPLY_BUDGET);
+    if truncated {
+        warn!(
+            message_id = target.msg_id.as_deref().unwrap_or(""),
+            group = %mask_openid(&target.group_openid),
+            reply_budget = QQ_GROUP_PASSIVE_REPLY_BUDGET,
+            "QQ group passive reply was truncated before sending"
+        );
+    }
     // 普通群回复统一走分段编排：每个成功发送并返回 message id 的分段写入
     // `BotOutboundCache`；失败分段不写，错误向上传递为 PartiallySent / NotSent。
     for outbound in &outbounds {
