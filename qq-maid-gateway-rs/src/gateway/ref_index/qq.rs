@@ -14,7 +14,10 @@ pub(crate) struct RawMessageScene {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub(crate) struct RawMsgElement {
+    /// 元素的 `msg_idx` 仅用于反序列化；按 QQ 最新文档，引用内容解析不再以
+    /// `msg_idx == ref_msg_idx` 筛选元素，因此本字段不再被业务代码读取。
     #[serde(default)]
+    #[allow(dead_code)]
     pub(crate) msg_idx: Option<String>,
     #[serde(default)]
     pub(crate) content: Option<String>,

@@ -11,7 +11,7 @@ use qq_maid_common::input_part::{
 
 mod quoted_payload;
 
-use quoted_payload::quoted_payload_fallback;
+use quoted_payload::{QuotedPayloadFallback, parse_quoted_message_elements};
 
 pub const EVENT_C2C_MESSAGE_CREATE: &str = "C2C_MESSAGE_CREATE";
 pub const EVENT_GROUP_AT_MESSAGE_CREATE: &str = "GROUP_AT_MESSAGE_CREATE";
@@ -166,8 +166,6 @@ struct RawC2cMessage {
     #[serde(default)]
     msg_elements: Vec<RawMsgElement>,
     #[serde(default)]
-    parallel_message: Option<RawParallelMessage>,
-    #[serde(default)]
     timestamp: Option<String>,
     #[serde(default)]
     attachments: Vec<Attachment>,
@@ -204,8 +202,6 @@ struct RawGroupMessage {
     message_type: Option<u64>,
     #[serde(default)]
     msg_elements: Vec<RawMsgElement>,
-    #[serde(default)]
-    parallel_message: Option<RawParallelMessage>,
     #[serde(default)]
     timestamp: Option<String>,
     #[serde(default)]
@@ -265,19 +261,6 @@ struct RawMessageReply {
     message_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct RawParallelMessage {
-    #[serde(default)]
-    msg_nodes: Vec<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct QuotedPayloadFallback {
-    content: Option<String>,
-    input_parts: Vec<MessageInputPart>,
-    media_summaries: Vec<QuotedMediaSummary>,
-}
-
 #[derive(Debug, Error)]
 pub enum EventError {
     #[error("invalid C2C message event: {0}")]
@@ -319,12 +302,7 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
         raw.reply.as_ref(),
         raw.quote.as_ref(),
         ref_indices.ref_msg_idx.clone(),
-        quoted_payload_fallback(
-            raw.message_type,
-            &raw.msg_elements,
-            raw.parallel_message.as_ref(),
-            ref_indices.ref_msg_idx.as_deref(),
-        ),
+        parse_quoted_message_elements(raw.message_type, &raw.msg_elements),
     );
     let timestamp = raw.timestamp;
     let input_parts = input_parts_from_content_and_attachments(
@@ -399,12 +377,7 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
         raw.reply.as_ref(),
         raw.quote.as_ref(),
         ref_indices.ref_msg_idx.clone(),
-        quoted_payload_fallback(
-            raw.message_type,
-            &raw.msg_elements,
-            raw.parallel_message.as_ref(),
-            ref_indices.ref_msg_idx.as_deref(),
-        ),
+        parse_quoted_message_elements(raw.message_type, &raw.msg_elements),
     );
     let input_parts = input_parts_from_content_and_attachments(
         &base_content,
@@ -474,6 +447,7 @@ fn raw_group_mention(mention: &RawMention) -> GroupMention {
 }
 
 // reply 只提取一层 message_id，不递归解析引用消息正文或其它扩展字段。
+// 当 msg_elements 已提供引用内容时，即使没有 reference_id 也应保留 payload。
 fn extract_message_reply(
     content: &str,
     reply: Option<&RawMessageReply>,
@@ -481,6 +455,9 @@ fn extract_message_reply(
     ref_msg_idx: Option<String>,
     fallback: QuotedPayloadFallback,
 ) -> Option<MessageReply> {
+    let has_payload = fallback.content.is_some()
+        || !fallback.input_parts.is_empty()
+        || !fallback.media_summaries.is_empty();
     let reference_id = reply
         .and_then(|item| item.message_id.as_deref())
         .or_else(|| quote.and_then(|item| item.message_id.as_deref()))
@@ -489,13 +466,19 @@ fn extract_message_reply(
         .or_else(|| extract_cq_reply_message_id(content))
         .map(str::to_owned)
         .or_else(|| ref_msg_idx.clone());
-    reference_id.map(|message_id| MessageReply {
-        message_id,
-        ref_msg_idx,
-        content: fallback.content,
-        input_parts: fallback.input_parts,
-        media_summaries: fallback.media_summaries,
-    })
+    // 即使没有 reference_id，只要 msg_elements 提供了引用内容，也保留 payload。
+    // 此时 RefIndex 查询和引用定位元数据降级为不可用，但引用正文和媒体仍可进入模型。
+    if reference_id.is_some() || has_payload {
+        Some(MessageReply {
+            message_id: reference_id.unwrap_or_default(),
+            ref_msg_idx,
+            content: fallback.content,
+            input_parts: fallback.input_parts,
+            media_summaries: fallback.media_summaries,
+        })
+    } else {
+        None
+    }
 }
 
 fn extract_cq_reply_message_id(content: &str) -> Option<&str> {

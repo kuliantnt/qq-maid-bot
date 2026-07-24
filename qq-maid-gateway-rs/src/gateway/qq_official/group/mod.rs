@@ -189,7 +189,6 @@ pub(crate) async fn handle_group_message(
         &config.group_active_keywords,
         config.command_prefix,
     );
-    observe_group_message_ref_index(&message, respond, ref_index);
     if should_ignore_group_message(
         &message,
         &respond_content,
@@ -470,25 +469,6 @@ async fn send_group_local_command(
             OutboundSendError::NotSent { source }
             | OutboundSendError::PartiallySent { source, .. } => source.into(),
         })
-}
-
-fn observe_group_message_ref_index(
-    message: &GroupMessage,
-    respond: &RespondClient,
-    ref_index: &SharedRefIndex,
-) {
-    if message.author_is_self || message.author_is_bot || message.current_msg_idx.is_none() {
-        return;
-    }
-    let inbound = respond.prepare_inbound(platform::qq_official::inbound_from_group(message));
-    match ref_index.lock() {
-        Ok(mut index) => index.insert_inbound(&inbound),
-        Err(_) => warn!(
-            message_id = %message.message_id,
-            group = %mask_openid(&message.group_openid),
-            "group inbound ref_index observe skipped because index lock is poisoned"
-        ),
-    }
 }
 
 async fn send_group_respond_response(

@@ -44,6 +44,61 @@ fn qq_quote_miss_keeps_metadata_without_unconfirmed_text() {
 }
 
 #[test]
+fn qq_quote_hit_uses_ref_index_text_over_payload_fallback() {
+    // RefIndex 命中时使用索引中保存的原文覆盖事件 payload。
+    let mut store = RefIndex::default();
+    store.insert_inbound(&group_inbound(
+        "gm-original",
+        Some("REFIDX_quoted"),
+        "索引中保存的原文",
+    ));
+    let mut current = group_inbound("gm-current", Some("REFIDX_current"), "引用内容查看");
+    // 模拟事件 payload 携带了不完整或展示用文本。
+    current.quoted = Some(QuotedMessageContext {
+        ref_msg_idx: Some("REFIDX_quoted".to_owned()),
+        text_summary: Some("payload 展示文本".to_owned()),
+        input_parts: vec![MessageInputPart::text("payload 展示文本")],
+        lookup_found: true,
+        fallback_reason: Some("pending_ref_index_lookup".to_owned()),
+        ..Default::default()
+    });
+
+    store.enrich_inbound(&mut current);
+
+    let quoted = current.quoted.as_ref().unwrap();
+    assert!(quoted.lookup_found);
+    assert_eq!(quoted.fallback_reason, None);
+    // RefIndex 原文覆盖 payload。
+    assert_eq!(quoted.text_summary.as_deref(), Some("索引中保存的原文"));
+    assert_eq!(
+        quoted.input_parts[0].text_content(),
+        Some("索引中保存的原文")
+    );
+}
+
+#[test]
+fn qq_quote_miss_with_payload_fallback_keeps_event_content() {
+    // RefIndex miss 但事件携带 msg_elements payload 时，使用 payload 内容。
+    let mut store = RefIndex::default();
+    let mut current = group_inbound("gm-current", Some("REFIDX_current"), "引用内容查看");
+    current.quoted = Some(QuotedMessageContext {
+        ref_msg_idx: Some("REFIDX_missing".to_owned()),
+        text_summary: Some("事件 payload 原文".to_owned()),
+        input_parts: vec![MessageInputPart::text("事件 payload 原文")],
+        lookup_found: true,
+        fallback_reason: Some("pending_ref_index_lookup".to_owned()),
+        ..Default::default()
+    });
+
+    store.enrich_inbound(&mut current);
+
+    let quoted = current.quoted.as_ref().unwrap();
+    assert!(quoted.lookup_found);
+    assert_eq!(quoted.fallback_reason.as_deref(), Some("quoted_payload"));
+    assert_eq!(quoted.text_summary.as_deref(), Some("事件 payload 原文"));
+}
+
+#[test]
 fn qq_current_message_is_not_saved_under_ref_msg_idx() {
     let mut store = RefIndex::default();
     let mut current = group_inbound("gm-current", Some("REFIDX_current"), "当前正文");

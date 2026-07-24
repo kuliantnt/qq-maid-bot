@@ -1,53 +1,37 @@
-//! QQ 引用正文、媒体与 payload fallback 组装。
+//! QQ 引用消息 msg_elements 递归解析。
+//!
+//! 根据 QQ 最新消息结构文档：
+//! - 顶层 `content` 是当前用户本轮发送的正文。
+//! - `message_type = 103` 时的 `msg_elements` 是引用消息的内容元素，可递归嵌套。
+//! - 不再要求元素的 `msg_idx` 必须等于 `ref_msg_idx`（官方事件不保证携带 `msg_idx`）。
+//! - `ref_msg_idx` 仅用于 RefIndex 查询和引用元数据展示。
 
 use qq_maid_common::input_part::{MessageInputPart, QuotedMediaSummary, TextSource};
-use serde_json::Value;
 
 use crate::gateway::ref_index::qq::{MSG_TYPE_QUOTE, RawMsgElement};
 
-use super::{
-    QuotedPayloadFallback, RawParallelMessage, input_parts_from_content_and_attachments,
-    parse_safe_content_parts,
-};
+use super::{input_parts_from_content_and_attachments, parse_safe_content_parts};
 
-pub(super) fn quoted_payload_fallback(
+/// 当 `message_type == 103` 时，按原始顺序递归解析全部 `msg_elements` 作为引用内容。
+///
+/// 无论元素是否携带 `msg_idx`，所有文字、附件及嵌套子元素均组成引用内容。
+/// `ref_msg_idx` 不参与元素筛选；调用方自行决定是否用于 RefIndex 查询和元数据展示。
+pub(super) fn parse_quoted_message_elements(
     message_type: Option<u64>,
     msg_elements: &[RawMsgElement],
-    parallel_message: Option<&RawParallelMessage>,
-    ref_msg_idx: Option<&str>,
 ) -> QuotedPayloadFallback {
     if message_type != Some(MSG_TYPE_QUOTE) {
         return QuotedPayloadFallback::default();
     }
-    let Some(ref_msg_idx) = ref_msg_idx else {
-        return QuotedPayloadFallback::default();
-    };
 
     let mut content_fragments = Vec::new();
     let mut input_parts = Vec::new();
-    // QQ 官方明确以 ref_msg_idx 定位被引用消息；无关顶层元素不得进入引用上下文。
-    if let Some(quoted_root) = msg_elements.iter().find(|element| {
-        element
-            .msg_idx
-            .as_deref()
-            .is_some_and(|idx| idx.trim() == ref_msg_idx)
-    }) {
-        append_quoted_element_parts(quoted_root, &mut content_fragments, &mut input_parts);
+
+    for element in msg_elements {
+        append_quoted_element_parts(element, &mut content_fragments, &mut input_parts);
     }
 
-    let mut content = content_fragments.join("\n");
-    if content.is_empty()
-        && let Some(fallback) = parallel_message_text_for_idx(parallel_message, ref_msg_idx)
-    {
-        content = fallback;
-        input_parts.insert(
-            0,
-            MessageInputPart::Text {
-                text: content.clone(),
-                source: Some(TextSource::Quote),
-            },
-        );
-    }
+    let content = content_fragments.join("\n");
     let media_summaries = input_parts
         .iter()
         .filter_map(QuotedMediaSummary::from_input_part)
@@ -87,43 +71,19 @@ fn append_quoted_element_parts(
     }
     input_parts.extend(element_parts);
 
+    // 递归解析嵌套子元素（图文引用可能含多级嵌套）。
     for child in &element.msg_elements {
         append_quoted_element_parts(child, content_fragments, input_parts);
     }
 }
 
-fn parallel_message_text_for_idx(
-    parallel_message: Option<&RawParallelMessage>,
-    ref_msg_idx: &str,
-) -> Option<String> {
-    let text = parallel_message?
-        .msg_nodes
-        .iter()
-        .filter(|node| parallel_message_node_idx(node) == Some(ref_msg_idx))
-        .filter_map(parallel_message_node_text)
-        .map(strip_qq_image_placeholders)
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    (!text.is_empty()).then_some(text)
-}
-
-fn parallel_message_node_idx(node: &Value) -> Option<&str> {
-    node.as_object()?
-        .get("msg_idx")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
-fn parallel_message_node_text(node: &Value) -> Option<&str> {
-    let object = node.as_object()?;
-    // 只读取显式带匹配索引节点的展示文本，不接受无索引字符串兜底。
-    ["content", "text", "msg_content"]
-        .into_iter()
-        .find_map(|key| object.get(key).and_then(Value::as_str))
-}
-
 fn strip_qq_image_placeholders(value: &str) -> String {
     value.replace("[图片]", "").trim().to_owned()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) struct QuotedPayloadFallback {
+    pub(super) content: Option<String>,
+    pub(super) input_parts: Vec<MessageInputPart>,
+    pub(super) media_summaries: Vec<QuotedMediaSummary>,
 }

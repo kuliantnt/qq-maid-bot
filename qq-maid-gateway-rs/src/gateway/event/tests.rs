@@ -762,7 +762,7 @@ fn parses_qq_quote_msg_element_as_payload_fallback() {
 }
 
 #[test]
-fn parses_plain_group_quote_from_structured_element_without_parallel_duplication() {
+fn parses_plain_group_quote_from_structured_msg_elements() {
     let envelope = GatewayEnvelope {
         op: 0,
         s: None,
@@ -781,9 +781,6 @@ fn parses_plain_group_quote_from_structured_element_without_parallel_duplication
                 ]
             },
             "message_type": 103,
-            "parallel_message": {
-                "msg_nodes": [{"message_type": 0, "content": "感谢"}]
-            },
             "msg_elements": [{
                 "msg_idx": "REFIDX_quoted",
                 "message_type": 103,
@@ -808,40 +805,9 @@ fn parses_plain_group_quote_from_structured_element_without_parallel_duplication
 }
 
 #[test]
-fn nested_quote_keeps_same_text_when_msg_idx_differs_from_current() {
-    let envelope = GatewayEnvelope {
-        op: 0,
-        s: None,
-        t: Some(EVENT_GROUP_AT_MESSAGE_CREATE.to_owned()),
-        id: None,
-        d: json!({
-            "id": "msg-current",
-            "group_openid": "group-1",
-            "author": {"member_openid": "member-1"},
-            "content": "同一句话",
-            "message_type": 103,
-            "message_scene": {"ext": [
-                "msg_idx=REFIDX_current",
-                "ref_msg_idx=REFIDX_quoted"
-            ]},
-            "msg_elements": [{
-                "msg_idx": "REFIDX_quoted",
-                "msg_elements": [
-                    {"msg_idx": "REFIDX_quoted_child", "content": "同一句话"}
-                ]
-            }]
-        }),
-    };
-
-    let message = parse_group_message(&envelope).unwrap().unwrap();
-    let reply = message.reply.as_ref().unwrap();
-
-    assert_eq!(reply.content.as_deref(), Some("同一句话"));
-    assert_eq!(reply.input_parts[0].text_content(), Some("同一句话"));
-}
-
-#[test]
-fn c2c_quote_keeps_current_text_out_of_quoted_payload() {
+fn msg_elements_are_all_treated_as_quote_content() {
+    // 根据 QQ 最新文档，msg_elements 中的全部元素均属于引用内容。
+    // 当前正文只从顶层 content 取得。
     let envelope = GatewayEnvelope {
         op: 0,
         s: None,
@@ -857,8 +823,7 @@ fn c2c_quote_keeps_current_text_out_of_quoted_payload() {
                 "ref_msg_idx=REFIDX_quoted"
             ]},
             "msg_elements": [
-                {"msg_idx": "REFIDX_quoted", "content": "OK"},
-                {"msg_idx": "REFIDX_current", "content": "这条正常么？"}
+                {"msg_idx": "REFIDX_quoted", "content": "OK"}
             ]
         }),
     };
@@ -873,7 +838,7 @@ fn c2c_quote_keeps_current_text_out_of_quoted_payload() {
 }
 
 #[test]
-fn nested_quoted_elements_keep_text_and_media_order_without_current_parts() {
+fn nested_quoted_elements_from_single_root_keep_text_and_media_order() {
     let envelope = GatewayEnvelope {
         op: 0,
         s: None,
@@ -897,8 +862,8 @@ fn nested_quoted_elements_keep_text_and_media_order_without_current_parts() {
             "msg_elements": [
                 {
                     "msg_idx": "REFIDX_quoted",
+                    "content": "引用第一段",
                     "msg_elements": [
-                        {"content": "引用第一段"},
                         {
                             "content": "[图片]引用第二段",
                             "attachments": [{
@@ -908,8 +873,7 @@ fn nested_quoted_elements_keep_text_and_media_order_without_current_parts() {
                             }]
                         }
                     ]
-                },
-                {"msg_idx": "REFIDX_current", "content": "解释引用图文"}
+                }
             ]
         }),
     };
@@ -939,7 +903,7 @@ fn nested_quoted_elements_keep_text_and_media_order_without_current_parts() {
 }
 
 #[test]
-fn quoted_images_keep_original_order_when_metadata_matches() {
+fn quoted_images_keep_original_order() {
     let envelope = GatewayEnvelope {
         op: 0,
         s: None,
@@ -952,9 +916,6 @@ fn quoted_images_keep_original_order_when_metadata_matches() {
             "content": "解释这些图",
             "message_type": 103,
             "message_scene": {"ext": ["ref_msg_idx=REFIDX_quoted"]},
-            "parallel_message": {
-                "msg_nodes": [{"content": "[图片][图片][图片] 展示文本"}]
-            },
             "msg_elements": [{
                 "msg_idx": "REFIDX_quoted",
                 "content": "[图片][图片][图片] 结构化正文",
@@ -1006,7 +967,7 @@ fn quoted_images_keep_original_order_when_metadata_matches() {
 }
 
 #[test]
-fn unindexed_parallel_text_is_not_used_as_quote_fallback() {
+fn msg_elements_with_only_attachments_no_text_is_not_empty() {
     let envelope = GatewayEnvelope {
         op: 0,
         s: None,
@@ -1019,9 +980,6 @@ fn unindexed_parallel_text_is_not_used_as_quote_fallback() {
             "content": "解释图片",
             "message_type": 103,
             "message_scene": {"ext": ["ref_msg_idx=REFIDX_quoted"]},
-            "parallel_message": {
-                "msg_nodes": [{"content": "[图片][图片] 展示兜底"}]
-            },
             "msg_elements": [{
                 "msg_idx": "REFIDX_quoted",
                 "attachments": [{
