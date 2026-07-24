@@ -577,21 +577,26 @@ fn resolve_upload_part_layout(
             ));
         }
         // QQ 的 part.index 从 1 开始，offset 只由顶层 block_size 决定；part.block_size
-        // 只描述本片实际长度，不能参与后续分片的偏移累计。
+        // 是本片请求长度，最后一片仍需按文件剩余字节裁剪。
         let offset = u64::from(part.index - 1)
             .checked_mul(stride)
             .ok_or(ApiError::InvalidMedia("invalid upload part layout"))?;
-        let part_size = if part.block_size > 0 {
+        if offset != covered_end || offset >= file_size {
+            return Err(ApiError::InvalidMedia("invalid upload part layout"));
+        }
+        let remaining = file_size - offset;
+        let requested_size = if part.block_size > 0 {
             part.block_size
         } else {
             stride
         };
-        let end = offset
-            .checked_add(part_size)
-            .ok_or(ApiError::InvalidMedia("invalid upload part layout"))?;
-        if offset != covered_end || offset >= file_size || end > file_size {
+        let actual_size = requested_size.min(remaining);
+        if actual_size == 0 {
             return Err(ApiError::InvalidMedia("invalid upload part layout"));
         }
+        let end = offset
+            .checked_add(actual_size)
+            .ok_or(ApiError::InvalidMedia("invalid upload part layout"))?;
         layout.push(UploadPartLayout {
             index: part.index,
             presigned_url: part.presigned_url,

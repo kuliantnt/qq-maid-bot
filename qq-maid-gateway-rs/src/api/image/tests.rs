@@ -441,6 +441,72 @@ async fn three_parts_use_one_based_stride_offsets_and_actual_finish_sizes() {
 }
 
 #[tokio::test]
+async fn final_part_with_default_size_is_trimmed_to_remaining_bytes() {
+    let (state, task) = upload_test_server().await;
+    *state.prepare_response.lock().unwrap() = PrepareResponseConfig {
+        block_size: Some(3),
+        parts: vec![
+            PreparedPart {
+                index: 1,
+                block_size: Some(0),
+            },
+            PreparedPart {
+                index: 2,
+                block_size: Some(0),
+            },
+            PreparedPart {
+                index: 3,
+                block_size: Some(0),
+            },
+        ],
+    };
+
+    upload_bytes_media(
+        &qq_maid_common::http_client::client(),
+        &state.base_url,
+        UploadScene::C2c,
+        "user",
+        "QQBot test",
+        b"abcdefgh",
+        "image.png",
+    )
+    .await
+    .unwrap();
+    task.abort();
+
+    let expected_blocks = [
+        (1, b"abc".as_slice()),
+        (2, b"def".as_slice()),
+        (3, b"gh".as_slice()),
+    ];
+    assert_eq!(
+        state.put_parts.lock().unwrap().as_slice(),
+        &expected_blocks
+            .iter()
+            .map(|(index, block)| (*index, block.to_vec()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        state.finish_payloads.lock().unwrap().as_slice(),
+        &expected_blocks
+            .iter()
+            .map(|(index, block)| {
+                json!({
+                    "upload_id": "upload-1",
+                    "part_index": index,
+                    "block_size": block.len(),
+                    "md5": hex_digest::<Md5>(block),
+                })
+            })
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        state.file_payloads.lock().unwrap().as_slice(),
+        &[json!({"upload_id": "upload-1"})]
+    );
+}
+
+#[tokio::test]
 async fn invalid_part_layouts_fail_before_put_or_merge() {
     let cases = [
         (
@@ -518,16 +584,6 @@ async fn invalid_part_layouts_fail_before_put_or_merge() {
                         block_size: Some(2),
                     },
                 ],
-            },
-            "invalid upload part layout",
-        ),
-        (
-            PrepareResponseConfig {
-                block_size: Some(5),
-                parts: vec![PreparedPart {
-                    index: 1,
-                    block_size: Some(6),
-                }],
             },
             "invalid upload part layout",
         ),
