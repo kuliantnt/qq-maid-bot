@@ -4,13 +4,17 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::gateway::logging::mask_openid;
-use crate::gateway::ref_index::qq::{RawMessageScene, RawMsgElement, parse_ref_indices};
+use crate::gateway::ref_index::qq::{
+    RawArkData, RawMessageScene, RawMsgElement, parse_ref_indices,
+};
 use qq_maid_common::input_part::{
     MediaStatus, MessageInputPart, MessageMedia, QuotedMediaSummary, TextSource,
 };
 
+mod content_normalizer;
 mod quoted_payload;
 
+use content_normalizer::normalize_qq_inbound_content;
 pub(crate) use quoted_payload::strip_contaminated_quote_from_context;
 use quoted_payload::{QuotedPayloadFallback, parse_quoted_message_elements};
 
@@ -167,6 +171,8 @@ struct RawC2cMessage {
     #[serde(default)]
     msg_elements: Vec<RawMsgElement>,
     #[serde(default)]
+    ark_data: Option<RawArkData>,
+    #[serde(default)]
     timestamp: Option<String>,
     #[serde(default)]
     attachments: Vec<Attachment>,
@@ -203,6 +209,8 @@ struct RawGroupMessage {
     message_type: Option<u64>,
     #[serde(default)]
     msg_elements: Vec<RawMsgElement>,
+    #[serde(default)]
+    ark_data: Option<RawArkData>,
     #[serde(default)]
     timestamp: Option<String>,
     #[serde(default)]
@@ -295,8 +303,14 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
         raw.openid.as_deref(),
     )
     .ok_or(EventError::MissingUserOpenid)?;
-    let parsed_content = parse_safe_content_parts(&raw.content.unwrap_or_default(), "qq_official");
-    let base_content = parsed_content.text.trim().to_owned();
+    let normalized = normalize_qq_inbound_content(
+        raw.message_type,
+        raw.content.as_deref().unwrap_or_default(),
+        &raw.attachments,
+        raw.ark_data.as_ref(),
+        &raw.msg_elements,
+    );
+    let base_content = normalized.text;
     let ref_indices = parse_ref_indices(raw.message_scene.as_ref());
     let reply = extract_message_reply(
         &base_content,
@@ -306,13 +320,6 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
         parse_quoted_message_elements(raw.message_type, &raw.msg_elements),
     );
     let timestamp = raw.timestamp;
-    let input_parts = input_parts_from_content_and_attachments(
-        &base_content,
-        parsed_content.input_parts,
-        &raw.attachments,
-        "qq_official",
-        TextSource::Transcript,
-    );
     Ok(Some(C2cMessage {
         source_message_ids: vec![message_id.clone()],
         source_event_ids: event_id.iter().cloned().collect(),
@@ -325,7 +332,7 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
         first_message_timestamp: timestamp.clone(),
         last_message_timestamp: timestamp.clone(),
         timestamp,
-        input_parts,
+        input_parts: normalized.input_parts,
         attachments: raw.attachments,
     }))
 }
@@ -370,8 +377,14 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
             .as_ref()
             .and_then(|author| author.self_sent.or(author.is_self))
             .unwrap_or(false);
-    let parsed_content = parse_safe_content_parts(&raw.content.unwrap_or_default(), "qq_official");
-    let base_content = parsed_content.text.trim().to_owned();
+    let normalized = normalize_qq_inbound_content(
+        raw.message_type,
+        raw.content.as_deref().unwrap_or_default(),
+        &raw.attachments,
+        raw.ark_data.as_ref(),
+        &raw.msg_elements,
+    );
+    let base_content = normalized.text;
     let ref_indices = parse_ref_indices(raw.message_scene.as_ref());
     let reply = extract_message_reply(
         &base_content,
@@ -379,13 +392,6 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
         raw.quote.as_ref(),
         ref_indices.ref_msg_idx.clone(),
         parse_quoted_message_elements(raw.message_type, &raw.msg_elements),
-    );
-    let input_parts = input_parts_from_content_and_attachments(
-        &base_content,
-        parsed_content.input_parts,
-        &raw.attachments,
-        "qq_official",
-        TextSource::Transcript,
     );
     Ok(Some(GroupMessage {
         message_id,
@@ -401,7 +407,7 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
             .collect::<Vec<_>>(),
         reply,
         timestamp: raw.timestamp,
-        input_parts,
+        input_parts: normalized.input_parts,
         attachments: raw.attachments,
         event_type,
         author_is_bot,
@@ -430,14 +436,14 @@ fn resolve_group_member_role(
 
 fn raw_group_mention(mention: &RawMention) -> GroupMention {
     GroupMention {
-        // 官方结构化 mention 里的 is_you 是普通群消息判断“是否 @ 当前机器人”的可信来源。
+        // `is_you` 仅作为没有稳定 ID 的旧事件兼容；群处理入口会优先用 target_id 匹配 READY 身份。
         is_you: mention.is_you.unwrap_or(false),
         member_role: mention
             .member_role
             .as_deref()
             .map(GroupMemberRole::from_raw),
         // 群场景优先 member openid，其次 user openid / openid / id；
-        // 都缺失时返回 None，上游据此降级为 TextWeak 弱候选或丢弃。
+        // 都缺失时返回 None，上游才可使用 is_you 兼容旧事件。
         target_id: first_non_empty([
             mention.member_openid.as_deref(),
             mention.user_openid.as_deref(),

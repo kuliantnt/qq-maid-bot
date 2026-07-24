@@ -54,6 +54,10 @@ pub struct ChunkLimits {
 // 默认软限制常量统一定义在 `crate::config`，避免双源漂移。
 /// 软限制允许的下限；低于此值没有实际分段意义，且无法容纳 synthetic fence。
 const MIN_CHUNK_SOFT_LIMIT: usize = 64;
+/// QQ 官方文档规定的同一被动消息最大可见回复数。
+pub(crate) const QQ_C2C_PASSIVE_REPLY_BUDGET: usize = 4;
+pub(crate) const QQ_GROUP_PASSIVE_REPLY_BUDGET: usize = 5;
+const PASSIVE_REPLY_TRUNCATION_NOTICE: &str = "\n\n[回复过长，已按平台被动回复上限截断]";
 
 impl ChunkLimits {
     pub fn new(markdown_soft_limit: usize, text_soft_limit: usize) -> Self {
@@ -554,6 +558,96 @@ pub fn chunk_outbound(message: &OutboundMessage, limits: &ChunkLimits) -> Vec<Ou
             chunk_plain_text(fallback_text, limits.text_soft_limit)
         }
     }
+}
+
+/// 在发送前统一规划同一 QQ 被动消息的全部输出部分，保证不会先发若干段再撞到次数上限。
+///
+/// 先按现有软限制统计；超限时以两个现有限制中较大的一个重新分段，并合并相邻同类正文。
+/// 仍超限才将所有可见 fallback 按原顺序收敛为文本，并在最后保留明确截断提示。没有
+/// `msg_id` 的主动推送不调用本函数，仍可按原有分段策略发送。
+pub(crate) fn plan_qq_passive_reply_outbounds(
+    outbounds: &[OutboundMessage],
+    limits: &ChunkLimits,
+    max_visible_replies: usize,
+) -> (Vec<OutboundMessage>, ChunkLimits, bool) {
+    if count_outbound_chunks(outbounds, limits) <= max_visible_replies {
+        return (outbounds.to_vec(), *limits, false);
+    }
+
+    // 两个通道同段发送时以较大的既有单条限制重新切分，减少配置不一致造成的碎片。
+    let expanded_limit = limits.markdown_soft_limit.max(limits.text_soft_limit);
+    let expanded = ChunkLimits::new(expanded_limit, expanded_limit);
+    let merged = merge_adjacent_text_outbounds(outbounds);
+    if count_outbound_chunks(&merged, &expanded) <= max_visible_replies {
+        return (merged, expanded, false);
+    }
+
+    // 到这里继续保留多媒体或 Markdown 都会产生超预算回复。收敛为可见 fallback 文本可保证
+    // 原有顺序不乱、没有半截发送；图片仅在这个异常长回复场景降级为既有 fallback 文案。
+    let combined = merged
+        .iter()
+        .map(OutboundMessage::fallback_text)
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let max_chars = max_visible_replies.saturating_mul(expanded.text_soft_limit);
+    let text = truncate_for_passive_budget(&combined, max_chars, true);
+    (vec![OutboundMessage::Text { text }], expanded, true)
+}
+
+fn count_outbound_chunks(outbounds: &[OutboundMessage], limits: &ChunkLimits) -> usize {
+    outbounds
+        .iter()
+        .map(|outbound| chunk_outbound(outbound, limits).len())
+        .sum()
+}
+
+fn merge_adjacent_text_outbounds(outbounds: &[OutboundMessage]) -> Vec<OutboundMessage> {
+    let mut merged = Vec::with_capacity(outbounds.len());
+    for outbound in outbounds {
+        match (merged.last_mut(), outbound) {
+            (Some(OutboundMessage::Text { text }), OutboundMessage::Text { text: next }) => {
+                append_outbound_text(text, next);
+            }
+            (
+                Some(OutboundMessage::Markdown {
+                    markdown,
+                    fallback_text,
+                }),
+                OutboundMessage::Markdown {
+                    markdown: next_markdown,
+                    fallback_text: next_fallback,
+                },
+            ) => {
+                append_outbound_text(&mut markdown.content, &next_markdown.content);
+                append_outbound_text(fallback_text, next_fallback);
+            }
+            _ => merged.push(outbound.clone()),
+        }
+    }
+    merged
+}
+
+fn append_outbound_text(target: &mut String, next: &str) {
+    if target.is_empty() {
+        target.push_str(next);
+    } else if !next.is_empty() {
+        target.push_str("\n\n");
+        target.push_str(next);
+    }
+}
+
+fn truncate_for_passive_budget(text: &str, max_chars: usize, force_notice: bool) -> String {
+    if !force_notice && text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    let suffix_chars = PASSIVE_REPLY_TRUNCATION_NOTICE.chars().count();
+    let prefix_len = max_chars
+        .saturating_sub(suffix_chars)
+        .min(text.chars().count());
+    let mut result = text.chars().take(prefix_len).collect::<String>();
+    result.push_str(PASSIVE_REPLY_TRUNCATION_NOTICE);
+    result
 }
 
 fn chunk_plain_text(text: &str, limit: usize) -> Vec<OutboundChunk> {

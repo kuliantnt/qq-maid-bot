@@ -45,6 +45,70 @@ fn parses_c2c_message_create() {
 }
 
 #[test]
+fn normalizes_ark_parallel_and_chat_history_without_turning_them_into_commands() {
+    let ark = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
+        id: None,
+        d: json!({
+            "id": "ark-1",
+            "author": {"user_openid": "user-1"},
+            "content": "",
+            "message_type": 3,
+            "message_scene": {"ext": ["msg_idx=idx-ark", "auth_token=should-not-propagate"]},
+            "ark_data": {"prompt": "分享", "type": "news", "ark_name": "图文", "fields": {"title": "标题", "jump_url": "https://example.test/card?token=secret"}}
+        }),
+    };
+    let ark_message = parse_c2c_message(&ark).unwrap().unwrap();
+    assert!(ark_message.content.is_empty());
+    let ark_summary = ark_message.input_parts[0].text_content().unwrap();
+    assert!(ark_summary.contains("[ARK 卡片]"));
+    assert!(ark_summary.contains("url: https://example.test/card?token=***"));
+    assert!(!ark_summary.contains("auth_token"));
+    assert!(!ark_summary.contains("token=secret"));
+
+    let parallel = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
+        id: None,
+        d: json!({
+            "id": "parallel-1",
+            "author": {"user_openid": "user-1"},
+            "content": "当前正文",
+            "message_type": 101,
+            "msg_elements": [{"content": "第一段"}, {"content": "第二段", "msg_elements": [{"content": "第三段"}]}]
+        }),
+    };
+    let parallel_message = parse_c2c_message(&parallel).unwrap().unwrap();
+    let texts = parallel_message
+        .input_parts
+        .iter()
+        .filter_map(MessageInputPart::text_content)
+        .collect::<Vec<_>>();
+    assert_eq!(texts, vec!["当前正文", "第一段", "第二段", "第三段"]);
+
+    let history = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
+        id: None,
+        d: json!({
+            "id": "history-1",
+            "author": {"user_openid": "user-1"},
+            "message_type": 102,
+            "msg_elements": [{"content": "聊天记录"}]
+        }),
+    };
+    let history_message = parse_c2c_message(&history).unwrap().unwrap();
+    assert_eq!(
+        history_message.input_parts[0].text_content(),
+        Some("聊天记录")
+    );
+}
+
+#[test]
 fn injects_qq_audio_asr_as_user_text_and_keeps_wav_url() {
     let envelope = GatewayEnvelope {
         op: 0,

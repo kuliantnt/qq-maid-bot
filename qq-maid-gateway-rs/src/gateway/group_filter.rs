@@ -107,7 +107,8 @@ pub(crate) fn should_ignore_group_message(
 
 /// 按群消息模式策略判断是否应处理该消息。
 ///
-/// QQ 官方 at 事件和普通群消息中的结构化 `is_you` 都归一为“提到当前机器人”。
+/// QQ 官方 at 事件直接视为提到当前机器人；普通群消息优先由 READY 阶段学习的稳定身份
+/// 字段匹配，`is_you` 仅用于没有稳定身份字段的旧事件兼容。
 /// 后续只按群消息模式决定是否进入 Core：
 /// - Off：不处理；
 /// - 其他模式：先放行斜杠命令候选，再应用各自的唤醒规则；
@@ -123,7 +124,7 @@ pub(crate) fn should_process_group_message(
     active_keywords: &[String],
     message: &GroupMessage,
     respond_content: &str,
-    _bot_identity: &SharedBotIdentity,
+    bot_identity: &SharedBotIdentity,
     bot_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
 ) -> bool {
     should_process_group_message_with_prefix(
@@ -132,7 +133,7 @@ pub(crate) fn should_process_group_message(
         CommandPrefix::default(),
         message,
         respond_content,
-        _bot_identity,
+        bot_identity,
         bot_outbound_cache,
     )
 }
@@ -168,6 +169,30 @@ pub(crate) fn should_process_group_message_with_prefix(
             is_structured_mention_command
                 || mentions_current_bot
                 || contains_active_keyword(&message.content, active_keywords)
+        }
+    }
+}
+
+/// 在普通群消息进入过滤、命令和 Core adapter 前统一解析“是否 @ 当前机器人”。
+/// 稳定 ID 的判断优先级高于旧 `is_you`：即便旧字段为 true，只要事件同时给出
+/// 不匹配的稳定 ID，也不能把任意 mention 误判为当前机器人。
+pub(crate) fn normalize_current_bot_mentions(
+    message: &mut GroupMessage,
+    bot_identity: &SharedBotIdentity,
+) {
+    if message.event_type == GroupEventType::GroupAtMessage {
+        return;
+    }
+    for mention in &mut message.mentions {
+        if let Some(target_id) = mention.target_id.as_deref() {
+            mention.is_you = bot_identity.contains(target_id);
+        } else if mention.is_you {
+            // 旧事件没有稳定 mention ID 时才接受 is_you；不记录用户或群完整 ID。
+            debug!(
+                event_type = "group_message",
+                mention_identity_source = "legacy_is_you",
+                "QQ group mention used legacy is_you fallback"
+            );
         }
     }
 }
@@ -730,6 +755,46 @@ mod tests {
             &bot_identity(),
             &cache
         ));
+    }
+
+    #[test]
+    fn normalizes_group_mentions_by_stable_bot_identity_before_legacy_is_you() {
+        let identity = Arc::new(BotIdentity::new("appid", &["bot-openid".to_owned()]));
+        let mut stable_match = group_message("hello", GroupEventType::GroupMessage);
+        stable_match.mentions = vec![GroupMention {
+            is_you: false,
+            member_role: None,
+            target_id: Some("bot-openid".to_owned()),
+        }];
+        normalize_current_bot_mentions(&mut stable_match, &identity);
+        assert!(mentions_current_bot(&stable_match));
+
+        let mut stable_mismatch = group_message("hello", GroupEventType::GroupMessage);
+        stable_mismatch.mentions = vec![GroupMention {
+            is_you: true,
+            member_role: None,
+            target_id: Some("another-member".to_owned()),
+        }];
+        normalize_current_bot_mentions(&mut stable_mismatch, &identity);
+        assert!(!mentions_current_bot(&stable_mismatch));
+
+        let mut legacy = group_message("hello", GroupEventType::GroupMessage);
+        legacy.mentions = vec![GroupMention {
+            is_you: true,
+            member_role: None,
+            target_id: None,
+        }];
+        normalize_current_bot_mentions(&mut legacy, &identity);
+        assert!(mentions_current_bot(&legacy));
+
+        let mut at_event = group_message("hello", GroupEventType::GroupAtMessage);
+        at_event.mentions = vec![GroupMention {
+            is_you: false,
+            member_role: None,
+            target_id: Some("another-member".to_owned()),
+        }];
+        normalize_current_bot_mentions(&mut at_event, &identity);
+        assert!(mentions_current_bot(&at_event));
     }
 
     #[test]

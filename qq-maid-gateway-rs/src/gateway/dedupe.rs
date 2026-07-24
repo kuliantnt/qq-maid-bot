@@ -228,6 +228,39 @@ pub(super) fn dedupe_event_key(event_id: &str) -> String {
     }
 }
 
+/// 构建 QQ 官方入站消息的复合去重键。
+///
+/// 规则：platform + scene + peer_id + message_id + msg_idx。
+/// - scene 至少区分 C2C 和群聊。
+/// - peer_id 使用当前私聊用户或群聊 group_openid。
+/// - msg_idx 存在时必须进入去重键；缺失时回退到纯 message_id 兼容行为。
+pub(super) fn dedupe_qq_composite_key(
+    scene: &str,
+    peer_id: &str,
+    message_id: &str,
+    msg_idx: Option<&str>,
+) -> String {
+    let message_id = message_id.trim();
+    let peer_id = peer_id.trim();
+    if message_id.is_empty() || peer_id.is_empty() {
+        return String::new();
+    }
+    match msg_idx.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(idx) => format!(
+            "qq:{scene}:peer={}:{}:message={}:{}:idx={}:{}",
+            peer_id.len(),
+            peer_id,
+            message_id.len(),
+            message_id,
+            idx.len(),
+            idx
+        ),
+        // 旧事件没有 msg_idx 时必须保持历史 `message_id` 去重语义，避免重放恢复期
+        // 因新协议键切换而重复投递。带 msg_idx 的新事件则不会发生跨会话碰撞。
+        None => dedupe_message_key(message_id),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +381,60 @@ mod tests {
         old.rollback();
         stale_after_newer.rollback_inner();
         assert!(dedupe.contains_recent_message("m2", now));
+    }
+
+    // --- QQ 复合去重键测试 ---
+
+    #[test]
+    fn qq_composite_key_same_msg_id_and_msg_idx_is_duplicate() {
+        let key1 = dedupe_qq_composite_key("c2c", "user-1", "msg-1", Some("idx-1"));
+        let key2 = dedupe_qq_composite_key("c2c", "user-1", "msg-1", Some("idx-1"));
+        assert_eq!(key1, key2);
+        assert!(!key1.is_empty());
+
+        let dedupe = MessageDedupe::new(Duration::from_secs(10));
+        let now = Instant::now();
+        assert!(!dedupe.check_and_insert(&key1, now));
+        assert!(dedupe.check_and_insert(&key2, now));
+    }
+
+    #[test]
+    fn qq_composite_key_same_msg_id_different_msg_idx_not_duplicate() {
+        let key1 = dedupe_qq_composite_key("c2c", "user-1", "msg-1", Some("idx-1"));
+        let key2 = dedupe_qq_composite_key("c2c", "user-1", "msg-1", Some("idx-2"));
+        assert_ne!(key1, key2);
+
+        let dedupe = MessageDedupe::new(Duration::from_secs(10));
+        let now = Instant::now();
+        assert!(!dedupe.check_and_insert(&key1, now));
+        assert!(!dedupe.check_and_insert(&key2, now));
+    }
+
+    #[test]
+    fn qq_composite_key_different_sessions_no_cross_collision() {
+        let key1 = dedupe_qq_composite_key("c2c", "user-1", "msg-1", Some("idx-1"));
+        let key2 = dedupe_qq_composite_key("c2c", "user-2", "msg-1", Some("idx-1"));
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn qq_composite_key_missing_msg_idx_compatible() {
+        let key1 = dedupe_qq_composite_key("c2c", "user-1", "msg-1", None);
+        let key2 = dedupe_qq_composite_key("c2c", "user-1", "msg-1", None);
+        assert_eq!(key1, key2);
+        assert_eq!(key1, dedupe_message_key("msg-1"));
+    }
+
+    #[test]
+    fn qq_composite_key_cross_scene_no_collision() {
+        let c2c_key = dedupe_qq_composite_key("c2c", "peer-1", "msg-1", Some("idx-1"));
+        let group_key = dedupe_qq_composite_key("group", "peer-1", "msg-1", Some("idx-1"));
+        assert_ne!(c2c_key, group_key);
+    }
+
+    #[test]
+    fn qq_composite_key_empty_input_returns_empty() {
+        assert!(dedupe_qq_composite_key("c2c", "", "msg-1", None).is_empty());
+        assert!(dedupe_qq_composite_key("c2c", "user-1", "", None).is_empty());
     }
 }

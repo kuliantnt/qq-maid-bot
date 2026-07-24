@@ -3,6 +3,7 @@
 //! QQ 官方在 `message_scene.ext` 中分别下发当前消息与被引用消息的索引。
 
 use serde::Deserialize;
+use serde_json::{Map, Value};
 
 pub(crate) const MSG_TYPE_QUOTE: u64 = 103;
 
@@ -22,10 +23,33 @@ pub(crate) struct RawMsgElement {
     #[serde(default)]
     pub(crate) content: Option<String>,
     #[serde(default)]
+    pub(crate) message_type: Option<u64>,
+    #[serde(default)]
     pub(crate) attachments: Vec<crate::gateway::event::Attachment>,
+    #[serde(default)]
+    pub(crate) ark_data: Option<RawArkData>,
     /// 引用根元素可能继续包含有序子元素；只有根元素及其后代属于被引用消息。
     #[serde(default)]
     pub(crate) msg_elements: Vec<RawMsgElement>,
+}
+
+/// QQ ARK 卡片的最小安全 DTO。`fields` 保持为动态对象，只读取明确白名单字段，
+/// 避免平台新增的任意嵌套结构直接进入 Gateway 或模型上下文。
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct RawArkData {
+    #[serde(default)]
+    pub(crate) prompt: Option<String>,
+    #[serde(default, rename = "type")]
+    pub(crate) ark_type: Option<Value>,
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) ark_name: Option<String>,
+    #[serde(default)]
+    pub(crate) fields: Map<String, Value>,
+    /// 官方卡片的展示字段可能直接位于 `ark_data` 顶层；仍只由 normalizer 读取白名单键。
+    #[serde(default, flatten)]
+    pub(crate) extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
