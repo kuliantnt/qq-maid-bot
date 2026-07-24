@@ -312,12 +312,12 @@ fn non_quote_message_ignores_msg_elements() {
     assert!(message.reply.is_none());
 }
 
-/// msg_elements 引用文字与当前正文混合时，丢弃被污染的引用文字，保留引用媒体。
+/// msg_elements 引用文字与当前正文混合时，事件解析层保留原始 payload。
 ///
-/// 用例：raw.content=引用内容查看，msg_elements[0].content=测试引用内容查看。
-/// "测试引用内容查看" 以当前正文 "引用内容查看" 结尾且不等同，判定为混合串。
+/// 污染检测已移至群聊/C2C 处理层（正文归一化后、RefIndex enrich 前），
+/// 事件解析层不再执行剥离。
 #[test]
-fn contaminated_element_content_removes_text_keeps_media() {
+fn contaminated_element_content_preserved_at_event_parse_level() {
     let envelope = GatewayEnvelope {
         op: 0,
         s: None,
@@ -349,20 +349,22 @@ fn contaminated_element_content_removes_text_keeps_media() {
     // 当前正文只出现一次。
     assert_eq!(message.content, "引用内容查看");
 
-    // 被污染的引用文字已丢弃。
-    assert_eq!(reply.content, None);
+    // 事件解析层不再剥离污染文字；payload 保留原始引用内容。
+    // 污染检测在群聊处理层执行（正文归一化后）。
+    assert!(reply.content.is_some());
     assert!(
         reply
             .input_parts
             .iter()
-            .all(|part| !matches!(part, MessageInputPart::Text { .. }))
+            .any(|part| matches!(part, MessageInputPart::Text { .. }))
     );
 
     // 引用图片保留。
-    assert_eq!(reply.input_parts.len(), 1);
-    assert!(matches!(
-        reply.input_parts[0],
-        MessageInputPart::Image { .. }
-    ));
-    assert_eq!(reply.media_summaries.len(), 1);
+    assert!(
+        reply
+            .input_parts
+            .iter()
+            .any(|part| matches!(part, MessageInputPart::Image { .. }))
+    );
+    assert!(!reply.media_summaries.is_empty());
 }

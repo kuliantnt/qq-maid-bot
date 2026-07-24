@@ -788,7 +788,9 @@ mod tests {
         Attachment, C2cMessage, GroupEventType, GroupMemberRole, GroupMention, GroupMessage,
         MessageReply,
     };
+    use crate::gateway::event::strip_contaminated_quote_from_context;
     use qq_maid_common::input_part::MessageMedia;
+    use qq_maid_common::input_part::TextSource;
     use qq_maid_core::service::{
         CoreConversation, CoreGroupMemberRole, CoreHealthSnapshot, CoreInboundClassification,
         CoreRequest, CoreRespondOutput, Platform, UpstreamStatusSnapshot,
@@ -1449,5 +1451,64 @@ mod tests {
 
         assert_eq!(text, "请求格式有误，请调整后再试");
         assert!(!text.contains("sk-secret"));
+    }
+
+    /// 群聊寻址前缀下的污染检测：raw.content 包含 @机器人 前缀，
+    /// 归一化后正文才能正确匹配 msg_elements 引用文字的混合串。
+    ///
+    /// 流程：事件解析 → 群聊正文归一化 → 污染检测 → 验证。
+    /// RefIndex 命中时由索引原文覆盖，因此本检测只影响 miss 状态。
+    #[test]
+    fn group_addressed_prefix_contamination_detected_after_normalization() {
+        let mut message = group_message("@机器人 引用内容查看", Some("member-1"));
+        message.event_type = GroupEventType::GroupAtMessage;
+        message.reply = Some(MessageReply {
+            message_id: String::new(),
+            ref_msg_idx: Some("REFIDX_quoted".to_owned()),
+            content: Some("测试引用内容查看".to_owned()),
+            input_parts: vec![
+                MessageInputPart::Text {
+                    text: "测试引用内容查看".to_owned(),
+                    source: Some(TextSource::Quote),
+                },
+                MessageInputPart::image(MessageMedia {
+                    mime_type: Some("image/png".to_owned()),
+                    filename: Some("quoted.png".to_owned()),
+                    url: Some("https://example.test/quoted.png".to_owned()),
+                    ..Default::default()
+                }),
+            ],
+            media_summaries: Vec::new(),
+        });
+
+        // 群聊正文归一化后 "@机器人" 被移除。
+        let mut inbound = normalized_group_inbound_with_prefix(
+            &message,
+            &["机器人".to_owned()],
+            CommandPrefix::default(),
+        );
+        assert_eq!(inbound.text, "引用内容查看");
+
+        // 污染检测使用归一化后的当前正文。
+        if let Some(ref mut quoted) = inbound.quoted {
+            strip_contaminated_quote_from_context(quoted, &inbound.text);
+        }
+        let quoted = inbound.quoted.as_ref().unwrap();
+
+        // 被污染的引用文字 "测试引用内容查看" 已丢弃。
+        assert_eq!(quoted.text_summary, None);
+        assert!(
+            quoted
+                .input_parts
+                .iter()
+                .all(|part| !matches!(part, MessageInputPart::Text { .. }))
+        );
+
+        // 引用图片保留。
+        assert_eq!(quoted.input_parts.len(), 1);
+        assert!(matches!(
+            quoted.input_parts[0],
+            MessageInputPart::Image { .. }
+        ));
     }
 }

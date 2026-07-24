@@ -6,19 +6,22 @@
 //! - 不再要求元素的 `msg_idx` 必须等于 `ref_msg_idx`（官方事件不保证携带 `msg_idx`）。
 //! - `ref_msg_idx` 仅用于 RefIndex 查询和引用元数据展示。
 
-use qq_maid_common::input_part::{MessageInputPart, QuotedMediaSummary, TextSource};
+use qq_maid_common::input_part::{
+    MessageInputPart, QuotedMediaSummary, QuotedMessageContext, TextSource,
+};
 
 use crate::gateway::ref_index::qq::{MSG_TYPE_QUOTE, RawMsgElement};
 
 use super::{input_parts_from_content_and_attachments, parse_safe_content_parts};
 
-/// 检测并移除被当前正文污染的引用文字。
+/// 使用归一化后的当前正文检测并移除 `QuotedMessageContext` 中被污染的引用文字。
 ///
-/// 当 msg_elements 中元素的 content 以当前正文结尾且二者不等时，
-/// QQ 可能把当前正文追加到了引用元素末尾形成混合串。
-/// 无可靠证据拆分时直接丢弃该引用文字，保留图片和其他媒体。
-pub(super) fn strip_contaminated_quote_text(
-    fallback: &mut QuotedPayloadFallback,
+/// 应在群聊 inbound 完成 @机器人/唤醒词/分隔符剥离后、RefIndex enrich 前调用，
+/// 确保检测用的当前正文与最终进入 Core 的正文一致。
+///
+/// RefIndex 命中时会用索引原文覆盖 `input_parts`，因此本函数只影响 RefIndex miss 的最终状态。
+pub(crate) fn strip_contaminated_quote_from_context(
+    quoted: &mut QuotedMessageContext,
     current_body: &str,
 ) {
     let current_body = current_body.trim();
@@ -26,7 +29,7 @@ pub(super) fn strip_contaminated_quote_text(
         return;
     }
 
-    let has_text = fallback
+    let has_text = quoted
         .input_parts
         .iter()
         .any(|part| matches!(part, MessageInputPart::Text { .. }));
@@ -34,8 +37,7 @@ pub(super) fn strip_contaminated_quote_text(
         return;
     }
 
-    // 检查每个文本 part 是否被当前正文污染（以当前正文结尾且不等同）。
-    let any_contaminated = fallback.input_parts.iter().any(|part| {
+    let any_contaminated = quoted.input_parts.iter().any(|part| {
         if let MessageInputPart::Text { text, .. } = part {
             let trimmed = text.trim();
             trimmed != current_body && trimmed.ends_with(current_body)
@@ -49,11 +51,10 @@ pub(super) fn strip_contaminated_quote_text(
     }
 
     // 丢弃所有引用文字，保留图片和其他媒体。
-    fallback
+    quoted
         .input_parts
         .retain(|part| !matches!(part, MessageInputPart::Text { .. }));
-    fallback.content = None;
-    // media_summaries 在构造时已从 input_parts 推导，无需重建。
+    quoted.text_summary = None;
 }
 
 /// 当 `message_type == 103` 时，按原始顺序递归解析全部 `msg_elements` 作为引用内容。

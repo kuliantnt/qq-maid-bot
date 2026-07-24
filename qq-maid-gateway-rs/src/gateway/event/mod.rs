@@ -11,6 +11,7 @@ use qq_maid_common::input_part::{
 
 mod quoted_payload;
 
+pub(crate) use quoted_payload::strip_contaminated_quote_from_context;
 use quoted_payload::{QuotedPayloadFallback, parse_quoted_message_elements};
 
 pub const EVENT_C2C_MESSAGE_CREATE: &str = "C2C_MESSAGE_CREATE";
@@ -455,10 +456,7 @@ fn extract_message_reply(
     ref_msg_idx: Option<String>,
     fallback: QuotedPayloadFallback,
 ) -> Option<MessageReply> {
-    let mut fallback = fallback;
-    // 检测并移除被当前正文污染的引用文字（混合串）。
-    // RefIndex 命中时会用索引原文覆盖，因此本处只影响 RefIndex miss 的最终状态。
-    quoted_payload::strip_contaminated_quote_text(&mut fallback, content);
+    // 污染检测已移至群聊/C2C 处理层，在归一化正文后、RefIndex enrich 之前执行。
     let has_payload = fallback.content.is_some()
         || !fallback.input_parts.is_empty()
         || !fallback.media_summaries.is_empty();

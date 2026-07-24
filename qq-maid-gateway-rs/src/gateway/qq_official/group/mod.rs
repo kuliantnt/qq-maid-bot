@@ -53,6 +53,7 @@ use super::super::{
 use crate::{
     api::{GroupOutboundSender, QqApiClient, SendMessageIds},
     config::AppConfig,
+    gateway::event::strip_contaminated_quote_from_context,
     message_chunk::{ChunkLimits, OutboundSendError, send_group_outbound_chunked},
     render::{OutboundMessage, render_respond_response_parts_for_profile},
     respond::{RespondClient, respond_error_to_qq_text},
@@ -343,6 +344,12 @@ pub(crate) async fn handle_group_message(
             &config.group_active_keywords,
             config.command_prefix,
         ));
+    // 在群聊归一化正文后、RefIndex enrich 前检测引用文字污染。
+    // 归一化已移除 @机器人/唤醒词/分隔符，此时当前正文与 Core 最终一致。
+    // RefIndex 命中时会用索引原文覆盖 input_parts，因此本处只影响 miss 的最终状态。
+    if let Some(ref mut quoted) = inbound.quoted {
+        strip_contaminated_quote_from_context(quoted, &inbound.text);
+    }
     {
         let mut index = ref_index.lock().unwrap();
         index.enrich_inbound(&mut inbound);
