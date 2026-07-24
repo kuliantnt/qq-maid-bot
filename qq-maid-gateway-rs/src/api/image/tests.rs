@@ -30,22 +30,22 @@ const MINIMAL_JPEG_BASE64: &str = concat!(
 #[derive(Clone)]
 struct PreparedPart {
     index: u32,
-    block_size: Option<&'static str>,
+    block_size: Option<u64>,
 }
 
 #[derive(Clone)]
 struct PrepareResponseConfig {
-    block_size: Option<&'static str>,
+    block_size: Option<u64>,
     parts: Vec<PreparedPart>,
 }
 
 impl Default for PrepareResponseConfig {
     fn default() -> Self {
         Self {
-            block_size: Some("5"),
+            block_size: Some(5),
             parts: vec![PreparedPart {
-                index: 0,
-                block_size: Some("5"),
+                index: 1,
+                block_size: Some(5),
             }],
         }
     }
@@ -56,6 +56,7 @@ struct UploadTestState {
     base_url: String,
     failure_phase: Arc<Mutex<Option<&'static str>>>,
     prepare_response: Arc<Mutex<PrepareResponseConfig>>,
+    prepare_payloads: Arc<Mutex<Vec<Value>>>,
     file_payloads: Arc<Mutex<Vec<Value>>>,
     finish_payloads: Arc<Mutex<Vec<Value>>>,
     put_parts: UploadedParts,
@@ -83,7 +84,11 @@ async fn files_handler(
     .into_response()
 }
 
-async fn prepare_handler(State(state): State<UploadTestState>) -> impl IntoResponse {
+async fn prepare_handler(
+    State(state): State<UploadTestState>,
+    Json(payload): Json<Value>,
+) -> impl IntoResponse {
+    state.prepare_payloads.lock().unwrap().push(payload);
     if *state.failure_phase.lock().unwrap() == Some("prepare") {
         return (
             StatusCode::BAD_GATEWAY,
@@ -163,6 +168,7 @@ async fn upload_test_server() -> (UploadTestState, tokio::task::JoinHandle<()>) 
         base_url,
         failure_phase: Arc::new(Mutex::new(None)),
         prepare_response: Arc::new(Mutex::new(PrepareResponseConfig::default())),
+        prepare_payloads: Arc::new(Mutex::new(Vec::new())),
         file_payloads: Arc::new(Mutex::new(Vec::new())),
         finish_payloads: Arc::new(Mutex::new(Vec::new())),
         put_parts: Arc::new(Mutex::new(Vec::new())),
@@ -179,12 +185,10 @@ async fn upload_test_server() -> (UploadTestState, tokio::task::JoinHandle<()>) 
 
 #[test]
 fn url_upload_payload_uses_only_documented_fields() {
-    let payload = serde_json::to_value(UploadMergePayload {
+    let payload = serde_json::to_value(UploadUrlPayload {
         file_type: 1,
-        url: Some("https://example.test/image.png"),
+        url: "https://example.test/image.png",
         srv_send_msg: false,
-        file_name: None,
-        upload_id: None,
     })
     .unwrap();
 
@@ -298,11 +302,10 @@ async fn url_upload_uses_files_endpoint_and_never_sends_file_data() {
 }
 
 #[tokio::test]
-async fn byte_images_use_prepare_put_finish_and_merge_without_cache() {
+async fn single_part_upload_uses_numeric_fields_and_minimal_complete_payload() {
     let (state, task) = upload_test_server().await;
-    let client = qq_maid_common::http_client::client();
     upload_bytes_media(
-        &client,
+        &qq_maid_common::http_client::client(),
         &state.base_url,
         UploadScene::C2c,
         "user",
@@ -312,64 +315,86 @@ async fn byte_images_use_prepare_put_finish_and_merge_without_cache() {
     )
     .await
     .unwrap();
-
-    upload_bytes_media(
-        &client,
-        &state.base_url,
-        UploadScene::C2c,
-        "user",
-        "QQBot test",
-        b"local",
-        "local.jpg",
-    )
-    .await
-    .unwrap();
     task.abort();
 
     assert_eq!(
         state.put_parts.lock().unwrap().as_slice(),
-        &[(0, b"hello".to_vec()), (0, b"local".to_vec())]
+        &[(1, b"hello".to_vec())]
     );
-    let payloads = state.file_payloads.lock().unwrap();
+    let prepare_payloads = state.prepare_payloads.lock().unwrap();
     assert_eq!(
-        payloads.len(),
-        2,
-        "ttl=1 response must not create an unbounded file_info cache"
+        prepare_payloads.as_slice(),
+        &[json!({
+            "file_type": 1,
+            "file_size": 5,
+            "file_name": "image.png",
+            "md5": hex_digest::<Md5>(b"hello"),
+            "sha1": hex_digest::<Sha1>(b"hello"),
+            "md5_10m": hex_digest::<Md5>(b"hello"),
+        })]
     );
-    assert!(
-        payloads
-            .iter()
-            .all(|payload| payload.get("upload_id").is_some())
+    assert_eq!(
+        state.finish_payloads.lock().unwrap().as_slice(),
+        &[json!({
+            "upload_id": "upload-1",
+            "part_index": 1,
+            "block_size": 5,
+            "md5": hex_digest::<Md5>(b"hello"),
+        })]
     );
-    assert!(
-        payloads
-            .iter()
-            .all(|payload| payload.get("file_data").is_none())
+    assert_eq!(
+        state.file_payloads.lock().unwrap().as_slice(),
+        &[json!({"upload_id": "upload-1"})]
     );
 }
 
 #[tokio::test]
-async fn unordered_parts_with_individual_sizes_upload_correct_blocks_and_finish_payloads() {
+async fn byte_upload_does_not_cache_expiring_file_info() {
+    let (state, task) = upload_test_server().await;
+    let client = qq_maid_common::http_client::client();
+    for bytes in [b"hello".as_slice(), b"local".as_slice()] {
+        upload_bytes_media(
+            &client,
+            &state.base_url,
+            UploadScene::C2c,
+            "user",
+            "QQBot test",
+            bytes,
+            "image.png",
+        )
+        .await
+        .unwrap();
+    }
+    task.abort();
+
+    assert_eq!(
+        state.file_payloads.lock().unwrap().len(),
+        2,
+        "ttl=1 response must not create an unbounded file_info cache"
+    );
+}
+
+#[tokio::test]
+async fn three_parts_use_one_based_stride_offsets_and_actual_finish_sizes() {
     let (state, task) = upload_test_server().await;
     *state.prepare_response.lock().unwrap() = PrepareResponseConfig {
-        // 顶层值为空时，每个 part 的独立 block_size 必须足以完成上传。
-        block_size: Some(""),
+        block_size: Some(4),
         parts: vec![
             PreparedPart {
-                index: 2,
-                block_size: Some("9"),
-            },
-            PreparedPart {
-                index: 0,
-                block_size: Some("4"),
+                index: 3,
+                block_size: Some(2),
             },
             PreparedPart {
                 index: 1,
-                block_size: Some("3"),
+                block_size: None,
+            },
+            PreparedPart {
+                index: 2,
+                block_size: Some(4),
             },
         ],
     };
-    let bytes = b"abcdefghijkl";
+    let bytes = b"abcdefghij";
 
     upload_bytes_media(
         &qq_maid_common::http_client::client(),
@@ -385,9 +410,9 @@ async fn unordered_parts_with_individual_sizes_upload_correct_blocks_and_finish_
     task.abort();
 
     let expected_blocks = [
-        (0, b"abcd".as_slice()),
-        (1, b"efg".as_slice()),
-        (2, b"hijkl".as_slice()),
+        (1, b"abcd".as_slice()),
+        (2, b"efgh".as_slice()),
+        (3, b"ij".as_slice()),
     ];
     assert_eq!(
         state.put_parts.lock().unwrap().as_slice(),
@@ -403,7 +428,7 @@ async fn unordered_parts_with_individual_sizes_upload_correct_blocks_and_finish_
             json!({
                 "upload_id": "upload-1",
                 "part_index": index,
-                "block_size": block.len().to_string(),
+                "block_size": block.len(),
                 "md5": hex_digest::<Md5>(block),
             })
         })
@@ -416,63 +441,29 @@ async fn unordered_parts_with_individual_sizes_upload_correct_blocks_and_finish_
 }
 
 #[tokio::test]
-async fn missing_part_sizes_use_top_level_block_size() {
-    let (state, task) = upload_test_server().await;
-    *state.prepare_response.lock().unwrap() = PrepareResponseConfig {
-        block_size: Some("3"),
-        parts: vec![
-            PreparedPart {
-                index: 2,
-                block_size: None,
-            },
-            PreparedPart {
-                index: 0,
-                block_size: None,
-            },
-            PreparedPart {
-                index: 1,
-                block_size: None,
-            },
-        ],
-    };
-
-    upload_bytes_media(
-        &qq_maid_common::http_client::client(),
-        &state.base_url,
-        UploadScene::C2c,
-        "user",
-        "QQBot test",
-        b"abcdefgh",
-        "image.jpg",
-    )
-    .await
-    .unwrap();
-    task.abort();
-
-    assert_eq!(
-        state.put_parts.lock().unwrap().as_slice(),
-        &[
-            (0, b"abc".to_vec()),
-            (1, b"def".to_vec()),
-            (2, b"gh".to_vec()),
-        ]
-    );
-}
-
-#[tokio::test]
 async fn invalid_part_layouts_fail_before_put_or_merge() {
     let cases = [
         (
             PrepareResponseConfig {
-                block_size: Some("5"),
+                block_size: Some(5),
+                parts: vec![PreparedPart {
+                    index: 0,
+                    block_size: Some(5),
+                }],
+            },
+            "upload prepare response has invalid part index",
+        ),
+        (
+            PrepareResponseConfig {
+                block_size: Some(3),
                 parts: vec![
                     PreparedPart {
-                        index: 0,
-                        block_size: Some("5"),
+                        index: 1,
+                        block_size: Some(3),
                     },
                     PreparedPart {
-                        index: 0,
-                        block_size: Some("5"),
+                        index: 1,
+                        block_size: Some(2),
                     },
                 ],
             },
@@ -480,15 +471,15 @@ async fn invalid_part_layouts_fail_before_put_or_merge() {
         ),
         (
             PrepareResponseConfig {
-                block_size: Some("5"),
+                block_size: Some(3),
                 parts: vec![
                     PreparedPart {
-                        index: 0,
-                        block_size: Some("5"),
+                        index: 1,
+                        block_size: Some(3),
                     },
                     PreparedPart {
-                        index: 2,
-                        block_size: Some("5"),
+                        index: 3,
+                        block_size: Some(2),
                     },
                 ],
             },
@@ -496,29 +487,65 @@ async fn invalid_part_layouts_fail_before_put_or_merge() {
         ),
         (
             PrepareResponseConfig {
-                block_size: Some("2"),
-                parts: vec![
-                    PreparedPart {
-                        index: 0,
-                        block_size: Some("2"),
-                    },
-                    PreparedPart {
-                        index: 1,
-                        block_size: Some("2"),
-                    },
-                ],
+                block_size: Some(0),
+                parts: vec![PreparedPart {
+                    index: 1,
+                    block_size: Some(5),
+                }],
             },
-            "upload prepare parts do not cover the complete image",
+            "invalid upload block_size",
         ),
         (
             PrepareResponseConfig {
                 block_size: None,
                 parts: vec![PreparedPart {
-                    index: 0,
-                    block_size: None,
+                    index: 1,
+                    block_size: Some(5),
                 }],
             },
             "invalid upload block_size",
+        ),
+        (
+            PrepareResponseConfig {
+                block_size: Some(2),
+                parts: vec![
+                    PreparedPart {
+                        index: 1,
+                        block_size: Some(3),
+                    },
+                    PreparedPart {
+                        index: 2,
+                        block_size: Some(2),
+                    },
+                ],
+            },
+            "invalid upload part layout",
+        ),
+        (
+            PrepareResponseConfig {
+                block_size: Some(5),
+                parts: vec![PreparedPart {
+                    index: 1,
+                    block_size: Some(6),
+                }],
+            },
+            "invalid upload part layout",
+        ),
+        (
+            PrepareResponseConfig {
+                block_size: Some(2),
+                parts: vec![
+                    PreparedPart {
+                        index: 1,
+                        block_size: Some(2),
+                    },
+                    PreparedPart {
+                        index: 2,
+                        block_size: Some(2),
+                    },
+                ],
+            },
+            "upload prepare parts do not cover the complete image",
         ),
     ];
 

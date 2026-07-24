@@ -104,21 +104,21 @@ impl UploadScene {
 }
 
 #[derive(Debug, Serialize)]
-struct UploadMergePayload<'a> {
+struct UploadUrlPayload<'a> {
     file_type: u8,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    url: Option<&'a str>,
+    url: &'a str,
     srv_send_msg: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    file_name: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    upload_id: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+struct UploadCompletePayload<'a> {
+    upload_id: &'a str,
 }
 
 #[derive(Debug, Serialize)]
 struct UploadPreparePayload<'a> {
     file_type: u8,
-    file_size: String,
+    file_size: u64,
     file_name: &'a str,
     md5: String,
     sha1: String,
@@ -129,7 +129,7 @@ struct UploadPreparePayload<'a> {
 struct UploadPartFinishPayload<'a> {
     upload_id: &'a str,
     part_index: u32,
-    block_size: String,
+    block_size: u64,
     md5: String,
 }
 
@@ -150,7 +150,7 @@ struct UploadPrepareResponse {
     #[serde(default)]
     upload_id: String,
     #[serde(default)]
-    block_size: String,
+    block_size: u64,
     #[serde(default)]
     parts: Vec<UploadPart>,
     #[serde(default)]
@@ -162,7 +162,7 @@ struct UploadPart {
     index: u32,
     presigned_url: String,
     #[serde(default)]
-    block_size: String,
+    block_size: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -379,12 +379,10 @@ async fn upload_url_media(
     url: &str,
 ) -> Result<ImagePayload, ApiError> {
     let endpoint = upload_endpoint(api_base, scene, peer_id, "files");
-    let payload = UploadMergePayload {
+    let payload = UploadUrlPayload {
         file_type: MediaFileType::Image.code(),
-        url: Some(url),
+        url,
         srv_send_msg: false,
-        file_name: None,
-        upload_id: None,
     };
     let uploaded = post_upload_json(client, endpoint, authorization, &payload, scene).await?;
     uploaded_image_payload(uploaded, scene)
@@ -400,9 +398,11 @@ async fn upload_bytes_media(
     file_name: &str,
 ) -> Result<ImagePayload, ApiError> {
     let prepare_endpoint = upload_endpoint(api_base, scene, peer_id, "upload_prepare");
+    let file_size = u64::try_from(bytes.len())
+        .map_err(|_| ApiError::InvalidMedia("image is too large to upload"))?;
     let prepare = UploadPreparePayload {
         file_type: MediaFileType::Image.code(),
-        file_size: bytes.len().to_string(),
+        file_size,
         file_name,
         md5: hex_digest::<Md5>(bytes),
         sha1: hex_digest::<Sha1>(bytes),
@@ -417,7 +417,7 @@ async fn upload_bytes_media(
         ));
     }
     if let Some(config) = prepared.upload_config.as_ref() {
-        // 当前按服务端给出的 parts 顺序串行上传；配置仅作脱敏诊断，避免把预签名 URL 写入日志。
+        // 当前按校验后的 1-based index 顺序串行上传；配置仅作脱敏诊断，避免把预签名 URL 写入日志。
         debug!(
             scene = scene.label(),
             concurrency = config.concurrency.unwrap_or(1),
@@ -427,7 +427,7 @@ async fn upload_bytes_media(
         );
     }
 
-    let parts = resolve_upload_part_layout(prepared.parts, &prepared.block_size, bytes.len())?;
+    let parts = resolve_upload_part_layout(prepared.parts, prepared.block_size, bytes.len())?;
     for part in parts {
         let block = &bytes[part.offset..part.end];
         put_upload_part(client, &part.presigned_url, block).await?;
@@ -435,7 +435,8 @@ async fn upload_bytes_media(
         let finish = UploadPartFinishPayload {
             upload_id,
             part_index: part.index,
-            block_size: block.len().to_string(),
+            block_size: u64::try_from(block.len())
+                .map_err(|_| ApiError::InvalidMedia("upload part is too large"))?,
             md5: hex_digest::<Md5>(block),
         };
         let _: serde_json::Value =
@@ -443,13 +444,8 @@ async fn upload_bytes_media(
     }
 
     let merge_endpoint = upload_endpoint(api_base, scene, peer_id, "files");
-    let merge = UploadMergePayload {
-        file_type: MediaFileType::Image.code(),
-        url: None,
-        srv_send_msg: false,
-        file_name: Some(file_name),
-        upload_id: Some(upload_id),
-    };
+    // 官方完成上传请求只接受 upload_id，不复用 URL 上传字段。
+    let merge = UploadCompletePayload { upload_id };
     let uploaded = post_upload_json(client, merge_endpoint, authorization, &merge, scene).await?;
     uploaded_image_payload(uploaded, scene)
 }
@@ -536,25 +532,24 @@ fn uploaded_image_payload(
     Ok(ImagePayload::new(file_info))
 }
 
-fn parse_block_size(value: &str) -> Result<usize, ApiError> {
-    value
-        .trim()
-        .parse::<usize>()
-        .ok()
-        .filter(|size| *size > 0)
-        .ok_or(ApiError::InvalidMedia("invalid upload block_size"))
-}
-
 fn resolve_upload_part_layout(
     mut parts: Vec<UploadPart>,
-    default_block_size: &str,
+    stride: u64,
     file_size: usize,
 ) -> Result<Vec<UploadPartLayout>, ApiError> {
     if file_size == 0 {
         return Err(ApiError::InvalidMedia("cannot upload an empty image"));
     }
+    if stride == 0 {
+        return Err(ApiError::InvalidMedia("invalid upload block_size"));
+    }
 
     let mut indexes = HashSet::with_capacity(parts.len());
+    if parts.iter().any(|part| part.index == 0) {
+        return Err(ApiError::InvalidMedia(
+            "upload prepare response has invalid part index",
+        ));
+    }
     if parts.iter().any(|part| !indexes.insert(part.index)) {
         return Err(ApiError::InvalidMedia(
             "upload prepare response has duplicate part index",
@@ -564,22 +559,16 @@ fn resolve_upload_part_layout(
     if parts
         .iter()
         .enumerate()
-        .any(|(expected, part)| part.index != expected as u32)
+        .any(|(expected, part)| part.index != expected as u32 + 1)
     {
         return Err(ApiError::InvalidMedia(
             "upload prepare response has missing part index",
         ));
     }
 
-    // QQ 可为每个 part 单独给出大小。只有存在缺失值时才读取顶层默认值，
-    // 以兼容顶层 block_size 为空但各 part 完整的响应。
-    let fallback_block_size = if parts.iter().any(|part| part.block_size.trim().is_empty()) {
-        Some(parse_block_size(default_block_size)?)
-    } else {
-        None
-    };
-
-    let mut offset = 0usize;
+    let file_size = u64::try_from(file_size)
+        .map_err(|_| ApiError::InvalidMedia("image is too large to upload"))?;
+    let mut covered_end = 0u64;
     let mut layout = Vec::with_capacity(parts.len());
     for part in parts {
         if part.presigned_url.trim().is_empty() {
@@ -587,27 +576,33 @@ fn resolve_upload_part_layout(
                 "upload prepare response has empty part URL",
             ));
         }
-        let part_size = if part.block_size.trim().is_empty() {
-            fallback_block_size.ok_or(ApiError::InvalidMedia("invalid upload block_size"))?
+        // QQ 的 part.index 从 1 开始，offset 只由顶层 block_size 决定；part.block_size
+        // 只描述本片实际长度，不能参与后续分片的偏移累计。
+        let offset = u64::from(part.index - 1)
+            .checked_mul(stride)
+            .ok_or(ApiError::InvalidMedia("invalid upload part layout"))?;
+        let part_size = if part.block_size > 0 {
+            part.block_size
         } else {
-            parse_block_size(&part.block_size)?
+            stride
         };
-        if offset >= file_size {
-            return Err(ApiError::InvalidMedia("invalid upload part layout"));
-        }
-        let end = offset.saturating_add(part_size).min(file_size);
-        if end == offset {
+        let end = offset
+            .checked_add(part_size)
+            .ok_or(ApiError::InvalidMedia("invalid upload part layout"))?;
+        if offset != covered_end || offset >= file_size || end > file_size {
             return Err(ApiError::InvalidMedia("invalid upload part layout"));
         }
         layout.push(UploadPartLayout {
             index: part.index,
             presigned_url: part.presigned_url,
-            offset,
-            end,
+            offset: usize::try_from(offset)
+                .map_err(|_| ApiError::InvalidMedia("invalid upload part layout"))?,
+            end: usize::try_from(end)
+                .map_err(|_| ApiError::InvalidMedia("invalid upload part layout"))?,
         });
-        offset = end;
+        covered_end = end;
     }
-    if offset != file_size {
+    if covered_end != file_size {
         return Err(ApiError::InvalidMedia(
             "upload prepare parts do not cover the complete image",
         ));
