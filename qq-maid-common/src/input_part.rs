@@ -216,7 +216,44 @@ impl MessageInputPart {
 }
 
 impl QuotedMessageContext {
+    /// 渲染引用定位与发送者等元信息，不包含引用正文和媒体摘要。
+    ///
+    /// 当调用方已经持有 `input_parts` 时，应使用本方法提供引用边界，正文和媒体
+    /// 则由结构化 parts 承载，避免同一内容同时从摘要和原始 parts 进入模型。
+    pub fn metadata_text(&self) -> String {
+        let mut lines = self.metadata_lines();
+        if !self.lookup_found {
+            lines.push(self.lookup_failure_text());
+        }
+        lines.join("\n")
+    }
+
     pub fn fallback_text(&self) -> String {
+        let mut lines = self.metadata_lines();
+        let metadata_len = lines.len();
+        if self.lookup_found {
+            if let Some(text) = self
+                .text_summary
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                lines.push(format!("引用文本：{text}"));
+            }
+            for media in &self.media_summaries {
+                if !media.summary.trim().is_empty() {
+                    lines.push(format!("引用媒体：{}", media.summary));
+                }
+            }
+            if lines.len() == metadata_len {
+                lines.push("引用消息为空或只有暂不可读内容。".to_owned());
+            }
+        } else {
+            lines.push(self.lookup_failure_text());
+        }
+        lines.join("\n")
+    }
+
+    fn metadata_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
         let from = match self.from_bot {
             Some(true) => "bot",
@@ -260,31 +297,16 @@ impl QuotedMessageContext {
         if let Some(summary) = sender_summary {
             lines.push(format!("引用发送者：{summary}"));
         }
-        if self.lookup_found {
-            if let Some(text) = self
-                .text_summary
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-            {
-                lines.push(format!("引用文本：{text}"));
-            }
-            for media in &self.media_summaries {
-                if !media.summary.trim().is_empty() {
-                    lines.push(format!("引用媒体：{}", media.summary));
-                }
-            }
-            if lines.len() == 1 {
-                lines.push("引用消息为空或只有暂不可读内容。".to_owned());
-            }
-        } else {
-            let reason = self
-                .fallback_reason
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or("not_found");
-            lines.push(format!("引用内容不可用：{reason}"));
-        }
-        lines.join("\n")
+        lines
+    }
+
+    fn lookup_failure_text(&self) -> String {
+        let reason = self
+            .fallback_reason
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("not_found");
+        format!("引用内容不可用：{reason}")
     }
 }
 
@@ -405,6 +427,61 @@ mod tests {
             MessageInputPart::image(media).fallback_text(),
             "[图片 image/jpeg: ticket.jpg]"
         );
+    }
+
+    #[test]
+    fn quoted_metadata_omits_body_summaries() {
+        let quoted = QuotedMessageContext {
+            reference_id: Some("REFIDX_1".to_owned()),
+            lookup_found: true,
+            text_summary: Some("OK".to_owned()),
+            media_summaries: vec![QuotedMediaSummary {
+                kind: QuotedMediaKind::Image,
+                summary: "[图片 image/png: a.png]".to_owned(),
+                media: None,
+            }],
+            ..Default::default()
+        };
+
+        let metadata = quoted.metadata_text();
+        assert!(metadata.contains("reference=REFIDX_1"));
+        assert!(!metadata.contains("OK"));
+        assert!(!metadata.contains("a.png"));
+
+        let fallback = quoted.fallback_text();
+        assert!(fallback.contains("引用文本：OK"));
+        assert!(fallback.contains("引用媒体：[图片 image/png: a.png]"));
+    }
+
+    #[test]
+    fn empty_quote_with_sender_keeps_empty_content_hint() {
+        let quoted = QuotedMessageContext {
+            lookup_found: true,
+            sender: Some(MessageActorContext::default()),
+            ..Default::default()
+        };
+
+        assert!(
+            quoted
+                .fallback_text()
+                .contains("引用消息为空或只有暂不可读内容。")
+        );
+    }
+
+    #[test]
+    fn quoted_metadata_keeps_lookup_failure_reason() {
+        let quoted = QuotedMessageContext {
+            reference_id: Some("missing-ref".to_owned()),
+            fallback_reason: Some("ref_index_miss".to_owned()),
+            ..Default::default()
+        };
+
+        assert!(
+            quoted
+                .metadata_text()
+                .contains("引用内容不可用：ref_index_miss")
+        );
+        assert_eq!(quoted.metadata_text(), quoted.fallback_text());
     }
 
     #[test]

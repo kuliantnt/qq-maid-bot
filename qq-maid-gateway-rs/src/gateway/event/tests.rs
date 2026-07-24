@@ -1,6 +1,8 @@
 use super::*;
 use serde_json::json;
 
+mod quote_boundary;
+
 #[test]
 fn parses_c2c_message_create() {
     let envelope = GatewayEnvelope {
@@ -727,7 +729,10 @@ fn parses_qq_quote_msg_element_as_payload_fallback() {
             "content": "查看这条",
             "message_type": 103,
             "message_scene": {
-                "ext": ["msg_idx=REFIDX_current"]
+                "ext": [
+                    "msg_idx=REFIDX_current",
+                    "ref_msg_idx=REFIDX_quoted"
+                ]
             },
             "msg_elements": [{
                 "msg_idx": "REFIDX_quoted",
@@ -757,7 +762,7 @@ fn parses_qq_quote_msg_element_as_payload_fallback() {
 }
 
 #[test]
-fn parses_plain_group_quote_from_structured_element_without_parallel_duplication() {
+fn parses_plain_group_quote_from_structured_msg_elements() {
     let envelope = GatewayEnvelope {
         op: 0,
         s: None,
@@ -776,9 +781,6 @@ fn parses_plain_group_quote_from_structured_element_without_parallel_duplication
                 ]
             },
             "message_type": 103,
-            "parallel_message": {
-                "msg_nodes": [{"message_type": 0, "content": "感谢"}]
-            },
             "msg_elements": [{
                 "msg_idx": "REFIDX_quoted",
                 "message_type": 103,
@@ -803,7 +805,105 @@ fn parses_plain_group_quote_from_structured_element_without_parallel_duplication
 }
 
 #[test]
-fn quoted_images_keep_original_order_when_metadata_matches() {
+fn msg_elements_are_all_treated_as_quote_content() {
+    // 根据 QQ 最新文档，msg_elements 中的全部元素均属于引用内容。
+    // 当前正文只从顶层 content 取得。
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_C2C_MESSAGE_CREATE.to_owned()),
+        id: Some("event-current".to_owned()),
+        d: json!({
+            "id": "msg-current",
+            "author": {"user_openid": "user-1"},
+            "content": "这条正常么？",
+            "message_type": 103,
+            "message_scene": {"ext": [
+                "msg_idx=REFIDX_current",
+                "ref_msg_idx=REFIDX_quoted"
+            ]},
+            "msg_elements": [
+                {"msg_idx": "REFIDX_quoted", "content": "OK"}
+            ]
+        }),
+    };
+
+    let message = parse_c2c_message(&envelope).unwrap().unwrap();
+    let reply = message.reply.as_ref().unwrap();
+
+    assert_eq!(message.content, "这条正常么？");
+    assert_eq!(message.input_parts[0].text_content(), Some("这条正常么？"));
+    assert_eq!(reply.content.as_deref(), Some("OK"));
+    assert_eq!(reply.input_parts[0].text_content(), Some("OK"));
+}
+
+#[test]
+fn nested_quoted_elements_from_single_root_keep_text_and_media_order() {
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+        id: None,
+        d: json!({
+            "id": "msg-current",
+            "group_openid": "group-1",
+            "author": {"member_openid": "member-1"},
+            "content": "解释引用图文",
+            "attachments": [{
+                "content_type": "image/png",
+                "filename": "current.png",
+                "url": "https://example.test/current.png"
+            }],
+            "message_type": 103,
+            "message_scene": {"ext": [
+                "msg_idx=REFIDX_current",
+                "ref_msg_idx=REFIDX_quoted"
+            ]},
+            "msg_elements": [
+                {
+                    "msg_idx": "REFIDX_quoted",
+                    "content": "引用第一段",
+                    "msg_elements": [
+                        {
+                            "content": "[图片]引用第二段",
+                            "attachments": [{
+                                "content_type": "image/png",
+                                "filename": "quoted.png",
+                                "url": "https://example.test/quoted.png"
+                            }]
+                        }
+                    ]
+                }
+            ]
+        }),
+    };
+
+    let message = parse_group_message(&envelope).unwrap().unwrap();
+    let reply = message.reply.as_ref().unwrap();
+
+    assert_eq!(message.content, "解释引用图文");
+    assert!(
+        message
+            .attachments
+            .iter()
+            .any(|item| item.filename.as_deref() == Some("current.png"))
+    );
+    assert_eq!(reply.content.as_deref(), Some("引用第一段\n引用第二段"));
+    assert_eq!(reply.input_parts[0].text_content(), Some("引用第一段"));
+    assert_eq!(reply.input_parts[1].text_content(), Some("引用第二段"));
+    assert_eq!(
+        reply.input_parts[2]
+            .media()
+            .and_then(|media| media.filename.as_deref()),
+        Some("quoted.png")
+    );
+    assert!(!reply.input_parts.iter().any(|part| {
+        part.media().and_then(|media| media.filename.as_deref()) == Some("current.png")
+    }));
+}
+
+#[test]
+fn quoted_images_keep_original_order() {
     let envelope = GatewayEnvelope {
         op: 0,
         s: None,
@@ -815,9 +915,7 @@ fn quoted_images_keep_original_order_when_metadata_matches() {
             "author": {"member_openid": "member-1"},
             "content": "解释这些图",
             "message_type": 103,
-            "parallel_message": {
-                "msg_nodes": [{"content": "[图片][图片][图片] 展示文本"}]
-            },
+            "message_scene": {"ext": ["ref_msg_idx=REFIDX_quoted"]},
             "msg_elements": [{
                 "msg_idx": "REFIDX_quoted",
                 "content": "[图片][图片][图片] 结构化正文",
@@ -869,7 +967,7 @@ fn quoted_images_keep_original_order_when_metadata_matches() {
 }
 
 #[test]
-fn parallel_message_is_only_used_when_structured_quote_text_is_missing() {
+fn msg_elements_with_only_attachments_no_text_is_not_empty() {
     let envelope = GatewayEnvelope {
         op: 0,
         s: None,
@@ -881,9 +979,7 @@ fn parallel_message_is_only_used_when_structured_quote_text_is_missing() {
             "author": {"member_openid": "member-1"},
             "content": "解释图片",
             "message_type": 103,
-            "parallel_message": {
-                "msg_nodes": [{"content": "[图片][图片] 展示兜底"}]
-            },
+            "message_scene": {"ext": ["ref_msg_idx=REFIDX_quoted"]},
             "msg_elements": [{
                 "msg_idx": "REFIDX_quoted",
                 "attachments": [{
@@ -898,13 +994,10 @@ fn parallel_message_is_only_used_when_structured_quote_text_is_missing() {
     let message = parse_group_message(&envelope).unwrap().unwrap();
     let reply = message.reply.unwrap();
 
-    assert_eq!(reply.content.as_deref(), Some("展示兜底"));
+    assert_eq!(reply.content, None);
+    assert_eq!(reply.input_parts.len(), 1);
     assert!(matches!(
-        &reply.input_parts[0],
-        MessageInputPart::Text { text, source: Some(TextSource::Quote) } if text == "展示兜底"
-    ));
-    assert!(matches!(
-        reply.input_parts[1],
+        reply.input_parts[0],
         MessageInputPart::Image { .. }
     ));
 }
@@ -922,6 +1015,7 @@ fn parses_quoted_audio_asr_as_quoted_user_content() {
             "author": {"member_openid": "member-1"},
             "content": "这段说了什么",
             "message_type": 103,
+            "message_scene": {"ext": ["ref_msg_idx=REFIDX_voice"]},
             "msg_elements": [{
                 "msg_idx": "REFIDX_voice",
                 "attachments": [{

@@ -7,11 +7,12 @@ use qq_maid_common::{
         ConversationContext, IdentitySource, MentionConfidence, MentionIdentity,
         MessageActorContext, MessageContext,
     },
-    input_part::{MessageInputPart, MessageMedia, QuotedMessageContext, TextSource},
+    input_part::{MediaStatus, MessageInputPart, MessageMedia, QuotedMessageContext, TextSource},
 };
 use qq_maid_llm::provider::types::TokenUsage;
 
 mod history;
+mod quote_boundary;
 
 fn message_contents_with_time_marker(messages: &[ChatMessage]) -> Vec<String> {
     messages
@@ -286,6 +287,48 @@ fn build_chat_messages_includes_quoted_text_context() {
 }
 
 #[test]
+fn quoted_text_uses_input_parts_without_repeating_summary() {
+    let req = RespondRequest {
+        purpose: RespondPurpose::Chat,
+        user_text: "继续".to_owned(),
+        input_parts: vec![MessageInputPart::text("继续")],
+        quoted: Some(QuotedMessageContext {
+            reference_id: Some("REFIDX_text".to_owned()),
+            lookup_found: true,
+            text_summary: Some("OK".to_owned()),
+            input_parts: vec![MessageInputPart::Text {
+                text: "OK".to_owned(),
+                source: Some(TextSource::Quote),
+            }],
+            from_bot: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let messages = build_respond_messages(&req);
+    let current = messages.last().unwrap();
+    let ok_count = current
+        .content_parts
+        .iter()
+        .map(MessageInputPart::fallback_text)
+        .map(|text| text.matches("OK").count())
+        .sum::<usize>();
+
+    assert_eq!(ok_count, 1);
+    assert!(
+        !current.content_parts[0]
+            .fallback_text()
+            .contains("引用文本")
+    );
+    assert_eq!(
+        current.content_parts[1].text_content(),
+        Some("引用文本：OK")
+    );
+    assert_eq!(current.content_parts[2].text_content(), Some("继续"));
+}
+
+#[test]
 fn build_chat_messages_includes_quoted_sender_summary_when_backfilled() {
     // ref_index 回填 sender 后，LLM 引用上下文应展示发送者稳定身份摘要。
     use qq_maid_common::identity_context::{IdentitySource, MessageActorContext};
@@ -297,6 +340,10 @@ fn build_chat_messages_includes_quoted_sender_summary_when_backfilled() {
             reference_id: Some("REFIDX_sender".to_owned()),
             lookup_found: true,
             text_summary: Some("用户上一条".to_owned()),
+            input_parts: vec![MessageInputPart::Text {
+                text: "用户上一条".to_owned(),
+                source: Some(TextSource::Quote),
+            }],
             from_bot: Some(false),
             sender: Some(MessageActorContext {
                 user_id: Some("member-9".to_owned()),
@@ -318,6 +365,11 @@ fn build_chat_messages_includes_quoted_sender_summary_when_backfilled() {
     assert!(quote_text.contains("小明"));
     assert!(quote_text.contains("member-9"));
     assert!(quote_text.contains("身份来源=event"));
+    assert!(!quote_text.contains("用户上一条"));
+    assert_eq!(
+        current.content_parts[1].text_content(),
+        Some("引用文本：用户上一条")
+    );
 }
 
 #[test]
@@ -367,6 +419,80 @@ fn quoted_image_is_preserved_for_vision_model_and_downgraded_without_vision() {
             .iter()
             .any(|part| part.fallback_text().contains("当前模型不支持读取"))
     );
+}
+
+#[test]
+fn quoted_unreadable_image_keeps_media_status_hint() {
+    let req = RespondRequest {
+        purpose: RespondPurpose::Chat,
+        user_text: "这张图呢".to_owned(),
+        quoted: Some(QuotedMessageContext {
+            reference_id: Some("REFIDX_unreadable".to_owned()),
+            lookup_found: true,
+            input_parts: vec![MessageInputPart::image(MessageMedia {
+                mime_type: Some("image/png".to_owned()),
+                filename: Some("expired.png".to_owned()),
+                status: MediaStatus::MissingReadableUrl,
+                ..Default::default()
+            })],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let messages = build_respond_messages_for_model(&req, true);
+    let current = messages.last().unwrap();
+    assert!(
+        current
+            .content_parts
+            .iter()
+            .any(|part| part.fallback_text().contains("缺少可读取地址"))
+    );
+}
+
+#[test]
+fn quoted_mixed_parts_keep_their_order_for_vision_and_text_fallback() {
+    let image = MessageInputPart::image(MessageMedia {
+        mime_type: Some("image/png".to_owned()),
+        filename: Some("middle.png".to_owned()),
+        url: Some("https://example.test/middle.png".to_owned()),
+        ..Default::default()
+    });
+    let req = RespondRequest {
+        purpose: RespondPurpose::Chat,
+        user_text: "继续".to_owned(),
+        input_parts: vec![MessageInputPart::text("继续")],
+        quoted: Some(QuotedMessageContext {
+            reference_id: Some("REFIDX_mixed".to_owned()),
+            lookup_found: true,
+            input_parts: vec![
+                MessageInputPart::Text {
+                    text: "图前".to_owned(),
+                    source: Some(TextSource::Quote),
+                },
+                image,
+                MessageInputPart::Text {
+                    text: "图后".to_owned(),
+                    source: Some(TextSource::Quote),
+                },
+            ],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let vision_messages = build_respond_messages_for_model(&req, true);
+    let vision = &vision_messages.last().unwrap().content_parts;
+    assert_eq!(vision[1].text_content(), Some("引用文本：图前"));
+    assert!(matches!(vision[2], MessageInputPart::Image { .. }));
+    assert_eq!(vision[3].text_content(), Some("引用文本：图后"));
+
+    let no_vision_messages = build_respond_messages_for_model(&req, false);
+    let no_vision = &no_vision_messages.last().unwrap().content_parts;
+    assert_eq!(no_vision[1].text_content(), Some("引用文本：图前"));
+    assert!(no_vision[2].fallback_text().starts_with("引用媒体："));
+    assert!(no_vision[2].fallback_text().contains("当前模型不支持读取"));
+    assert_eq!(no_vision[3].text_content(), Some("引用文本：图后"));
 }
 
 #[test]

@@ -788,7 +788,10 @@ mod tests {
         Attachment, C2cMessage, GroupEventType, GroupMemberRole, GroupMention, GroupMessage,
         MessageReply,
     };
+    use crate::gateway::event::strip_contaminated_quote_from_context;
     use qq_maid_common::input_part::MessageMedia;
+    use qq_maid_common::input_part::QuotedMessageContext;
+    use qq_maid_common::input_part::TextSource;
     use qq_maid_core::service::{
         CoreConversation, CoreGroupMemberRole, CoreHealthSnapshot, CoreInboundClassification,
         CoreRequest, CoreRespondOutput, Platform, UpstreamStatusSnapshot,
@@ -1449,5 +1452,119 @@ mod tests {
 
         assert_eq!(text, "请求格式有误，请调整后再试");
         assert!(!text.contains("sk-secret"));
+    }
+
+    /// 群聊寻址前缀下的污染检测：raw.content 包含 @机器人 前缀，
+    /// 归一化后正文才能正确匹配 msg_elements 引用文字的混合串。
+    ///
+    /// 流程：事件解析 → 群聊正文归一化 → 污染检测 → 验证。
+    /// RefIndex 命中时由索引原文覆盖，因此本检测只影响 miss 状态。
+    #[test]
+    fn group_addressed_prefix_contamination_detected_after_normalization() {
+        let mut message = group_message("@机器人 引用内容查看", Some("member-1"));
+        message.event_type = GroupEventType::GroupAtMessage;
+        message.reply = Some(MessageReply {
+            message_id: String::new(),
+            ref_msg_idx: Some("REFIDX_quoted".to_owned()),
+            content: Some("测试引用内容查看".to_owned()),
+            input_parts: vec![
+                MessageInputPart::Text {
+                    text: "测试引用内容查看".to_owned(),
+                    source: Some(TextSource::Quote),
+                },
+                MessageInputPart::image(MessageMedia {
+                    mime_type: Some("image/png".to_owned()),
+                    filename: Some("quoted.png".to_owned()),
+                    url: Some("https://example.test/quoted.png".to_owned()),
+                    ..Default::default()
+                }),
+            ],
+            media_summaries: Vec::new(),
+        });
+
+        // 群聊正文归一化后 "@机器人" 被移除。
+        let mut inbound = normalized_group_inbound_with_prefix(
+            &message,
+            &["机器人".to_owned()],
+            CommandPrefix::default(),
+        );
+        assert_eq!(inbound.text, "引用内容查看");
+
+        // 污染检测使用归一化后的当前正文。
+        if let Some(ref mut quoted) = inbound.quoted {
+            strip_contaminated_quote_from_context(quoted, &inbound.text);
+        }
+        let quoted = inbound.quoted.as_ref().unwrap();
+
+        // 被污染的引用文字 "测试引用内容查看" 已丢弃。
+        assert_eq!(quoted.text_summary, None);
+        assert!(
+            quoted
+                .input_parts
+                .iter()
+                .all(|part| !matches!(part, MessageInputPart::Text { .. }))
+        );
+
+        // 引用图片保留。
+        assert_eq!(quoted.input_parts.len(), 1);
+        assert!(matches!(
+            quoted.input_parts[0],
+            MessageInputPart::Image { .. }
+        ));
+    }
+
+    /// 反例：引用正文以当前正文结尾但为独立语义时，不应判定为污染。
+    ///
+    /// 引用正文 "这个方案很好" 以当前正文 "好" 结尾，但二者是独立内容，
+    /// 不属于 QQ msg_elements 混合串污染形态。
+    #[test]
+    fn short_current_body_ending_match_is_not_contamination() {
+        let mut quoted = QuotedMessageContext {
+            text_summary: Some("这个方案很好".to_owned()),
+            input_parts: vec![MessageInputPart::Text {
+                text: "这个方案很好".to_owned(),
+                source: Some(TextSource::Quote),
+            }],
+            ..Default::default()
+        };
+
+        strip_contaminated_quote_from_context(&mut quoted, "好");
+
+        // 引用正文不应被删除。
+        assert_eq!(quoted.text_summary.as_deref(), Some("这个方案很好"));
+        assert_eq!(quoted.input_parts.len(), 1);
+        assert_eq!(quoted.input_parts[0].text_content(), Some("这个方案很好"));
+    }
+
+    /// 多 Text part 的引用上下文不触发污染检测。
+    ///
+    /// 多个文字段落说明不是 QQ 引用消息的单一混合串形态，
+    /// 即使某一段落以后缀命中也不应删除全部引用文字。
+    #[test]
+    fn multiple_text_parts_does_not_trigger_contamination() {
+        let mut quoted = QuotedMessageContext {
+            text_summary: Some("第一段文字\n第二段 引用内容查看".to_owned()),
+            input_parts: vec![
+                MessageInputPart::Text {
+                    text: "第一段文字".to_owned(),
+                    source: Some(TextSource::Quote),
+                },
+                MessageInputPart::Text {
+                    text: "第二段 引用内容查看".to_owned(),
+                    source: Some(TextSource::Quote),
+                },
+            ],
+            ..Default::default()
+        };
+
+        strip_contaminated_quote_from_context(&mut quoted, "引用内容查看");
+
+        // 多段落不触发，引用文字全部保留。
+        assert_eq!(quoted.input_parts.len(), 2);
+        assert_eq!(quoted.input_parts[0].text_content(), Some("第一段文字"));
+        assert_eq!(
+            quoted.input_parts[1].text_content(),
+            Some("第二段 引用内容查看")
+        );
     }
 }

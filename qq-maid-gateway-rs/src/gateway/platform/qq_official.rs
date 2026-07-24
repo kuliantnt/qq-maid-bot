@@ -273,23 +273,22 @@ fn quoted_from_qq(
     current_message_id: &str,
     current_msg_idx: Option<&str>,
 ) -> qq_maid_common::input_part::QuotedMessageContext {
+    let has_payload = value.content.is_some()
+        || !value.media_summaries.is_empty()
+        || !value.input_parts.is_empty();
     qq_maid_common::input_part::QuotedMessageContext {
         current_message_id: Some(current_message_id.to_owned()),
         current_msg_idx: current_msg_idx.map(str::to_owned),
-        reference_id: Some(value.message_id.clone()),
+        // reference_id 为空时不在 QuotedMessageContext 中生成 Some("")。
+        reference_id: (!value.message_id.is_empty()).then(|| value.message_id.clone()),
         // QQ 引用恢复只能使用官方下发的 ref_msg_idx/REFIDX；reply.message_id
         // 保留为原始引用字段，不伪造成 ref_index lookup key。
         ref_msg_idx: value.ref_msg_idx.clone(),
         text_summary: value.content.clone(),
         media_summaries: value.media_summaries.clone(),
         input_parts: value.input_parts.clone(),
-        lookup_found: value.content.is_some()
-            || !value.media_summaries.is_empty()
-            || !value.input_parts.is_empty(),
-        fallback_reason: (value.content.is_none()
-            && value.media_summaries.is_empty()
-            && value.input_parts.is_empty())
-        .then(|| "pending_ref_index_lookup".to_owned()),
+        lookup_found: has_payload,
+        fallback_reason: (!has_payload).then(|| "pending_ref_index_lookup".to_owned()),
         ..Default::default()
     }
 }

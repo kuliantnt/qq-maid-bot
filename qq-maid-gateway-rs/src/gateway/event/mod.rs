@@ -4,12 +4,15 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::gateway::logging::mask_openid;
-use crate::gateway::ref_index::qq::{
-    MSG_TYPE_QUOTE, RawMessageScene, RawMsgElement, parse_ref_indices,
-};
+use crate::gateway::ref_index::qq::{RawMessageScene, RawMsgElement, parse_ref_indices};
 use qq_maid_common::input_part::{
     MediaStatus, MessageInputPart, MessageMedia, QuotedMediaSummary, TextSource,
 };
+
+mod quoted_payload;
+
+pub(crate) use quoted_payload::strip_contaminated_quote_from_context;
+use quoted_payload::{QuotedPayloadFallback, parse_quoted_message_elements};
 
 pub const EVENT_C2C_MESSAGE_CREATE: &str = "C2C_MESSAGE_CREATE";
 pub const EVENT_GROUP_AT_MESSAGE_CREATE: &str = "GROUP_AT_MESSAGE_CREATE";
@@ -164,8 +167,6 @@ struct RawC2cMessage {
     #[serde(default)]
     msg_elements: Vec<RawMsgElement>,
     #[serde(default)]
-    parallel_message: Option<RawParallelMessage>,
-    #[serde(default)]
     timestamp: Option<String>,
     #[serde(default)]
     attachments: Vec<Attachment>,
@@ -202,8 +203,6 @@ struct RawGroupMessage {
     message_type: Option<u64>,
     #[serde(default)]
     msg_elements: Vec<RawMsgElement>,
-    #[serde(default)]
-    parallel_message: Option<RawParallelMessage>,
     #[serde(default)]
     timestamp: Option<String>,
     #[serde(default)]
@@ -263,19 +262,6 @@ struct RawMessageReply {
     message_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct RawParallelMessage {
-    #[serde(default)]
-    msg_nodes: Vec<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct QuotedPayloadFallback {
-    content: Option<String>,
-    input_parts: Vec<MessageInputPart>,
-    media_summaries: Vec<QuotedMediaSummary>,
-}
-
 #[derive(Debug, Error)]
 pub enum EventError {
     #[error("invalid C2C message event: {0}")]
@@ -311,21 +297,13 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
     .ok_or(EventError::MissingUserOpenid)?;
     let parsed_content = parse_safe_content_parts(&raw.content.unwrap_or_default(), "qq_official");
     let base_content = parsed_content.text.trim().to_owned();
-    let ref_indices = parse_ref_indices(
-        raw.message_scene.as_ref(),
-        raw.message_type,
-        &raw.msg_elements,
-    );
+    let ref_indices = parse_ref_indices(raw.message_scene.as_ref());
     let reply = extract_message_reply(
         &base_content,
         raw.reply.as_ref(),
         raw.quote.as_ref(),
         ref_indices.ref_msg_idx.clone(),
-        quoted_payload_fallback(
-            raw.message_type,
-            &raw.msg_elements,
-            raw.parallel_message.as_ref(),
-        ),
+        parse_quoted_message_elements(raw.message_type, &raw.msg_elements),
     );
     let timestamp = raw.timestamp;
     let input_parts = input_parts_from_content_and_attachments(
@@ -394,21 +372,13 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
             .unwrap_or(false);
     let parsed_content = parse_safe_content_parts(&raw.content.unwrap_or_default(), "qq_official");
     let base_content = parsed_content.text.trim().to_owned();
-    let ref_indices = parse_ref_indices(
-        raw.message_scene.as_ref(),
-        raw.message_type,
-        &raw.msg_elements,
-    );
+    let ref_indices = parse_ref_indices(raw.message_scene.as_ref());
     let reply = extract_message_reply(
         &base_content,
         raw.reply.as_ref(),
         raw.quote.as_ref(),
         ref_indices.ref_msg_idx.clone(),
-        quoted_payload_fallback(
-            raw.message_type,
-            &raw.msg_elements,
-            raw.parallel_message.as_ref(),
-        ),
+        parse_quoted_message_elements(raw.message_type, &raw.msg_elements),
     );
     let input_parts = input_parts_from_content_and_attachments(
         &base_content,
@@ -478,6 +448,7 @@ fn raw_group_mention(mention: &RawMention) -> GroupMention {
 }
 
 // reply 只提取一层 message_id，不递归解析引用消息正文或其它扩展字段。
+// 当 msg_elements 已提供引用内容时，即使没有 reference_id 也应保留 payload。
 fn extract_message_reply(
     content: &str,
     reply: Option<&RawMessageReply>,
@@ -485,6 +456,10 @@ fn extract_message_reply(
     ref_msg_idx: Option<String>,
     fallback: QuotedPayloadFallback,
 ) -> Option<MessageReply> {
+    // 污染检测已移至群聊/C2C 处理层，在归一化正文后、RefIndex enrich 之前执行。
+    let has_payload = fallback.content.is_some()
+        || !fallback.input_parts.is_empty()
+        || !fallback.media_summaries.is_empty();
     let reference_id = reply
         .and_then(|item| item.message_id.as_deref())
         .or_else(|| quote.and_then(|item| item.message_id.as_deref()))
@@ -493,103 +468,19 @@ fn extract_message_reply(
         .or_else(|| extract_cq_reply_message_id(content))
         .map(str::to_owned)
         .or_else(|| ref_msg_idx.clone());
-    reference_id.map(|message_id| MessageReply {
-        message_id,
-        ref_msg_idx,
-        content: fallback.content,
-        input_parts: fallback.input_parts,
-        media_summaries: fallback.media_summaries,
-    })
-}
-
-fn quoted_payload_fallback(
-    message_type: Option<u64>,
-    msg_elements: &[RawMsgElement],
-    parallel_message: Option<&RawParallelMessage>,
-) -> QuotedPayloadFallback {
-    if message_type != Some(MSG_TYPE_QUOTE) {
-        return QuotedPayloadFallback::default();
+    // 即使没有 reference_id，只要 msg_elements 提供了引用内容，也保留 payload。
+    // 此时 RefIndex 查询和引用定位元数据降级为不可用，但引用正文和媒体仍可进入模型。
+    if reference_id.is_some() || has_payload {
+        Some(MessageReply {
+            message_id: reference_id.unwrap_or_default(),
+            ref_msg_idx,
+            content: fallback.content,
+            input_parts: fallback.input_parts,
+            media_summaries: fallback.media_summaries,
+        })
+    } else {
+        None
     }
-
-    // QQ 可能把一条引用消息拆成多个 element。解析层先按原始顺序完整保留；
-    // 媒体取回阶段再依据 QQ 官方实测的稳定文件名规则收敛重复图片。
-    let mut content_fragments = Vec::new();
-    let mut input_parts = Vec::new();
-    for element in msg_elements {
-        let raw_content = element.content.as_deref().unwrap_or_default();
-        let cleaned_content = strip_qq_image_placeholders(raw_content);
-        let parsed = parse_safe_content_parts(&cleaned_content, "qq_official");
-        let element_content = parsed.text.trim().to_owned();
-        if !element_content.is_empty() {
-            content_fragments.push(element_content.clone());
-        }
-        let mut element_parts = input_parts_from_content_and_attachments(
-            &element_content,
-            parsed.input_parts,
-            &element.attachments,
-            "qq_official",
-            TextSource::Quote,
-        );
-        for part in &mut element_parts {
-            if let MessageInputPart::Text { source, .. } = part {
-                *source = Some(TextSource::Quote);
-            }
-        }
-        input_parts.extend(element_parts);
-    }
-
-    let mut content = content_fragments.join("\n");
-    if content.is_empty()
-        && let Some(fallback) = parallel_message_display_text(parallel_message)
-    {
-        content = fallback;
-        input_parts.insert(
-            0,
-            MessageInputPart::Text {
-                text: content.clone(),
-                source: Some(TextSource::Quote),
-            },
-        );
-    }
-    let media_summaries = input_parts
-        .iter()
-        .filter_map(QuotedMediaSummary::from_input_part)
-        .collect::<Vec<_>>();
-
-    QuotedPayloadFallback {
-        content: (!content.is_empty()).then_some(content),
-        input_parts,
-        media_summaries,
-    }
-}
-
-fn parallel_message_display_text(parallel_message: Option<&RawParallelMessage>) -> Option<String> {
-    let parallel_message = parallel_message?;
-    let text = parallel_message
-        .msg_nodes
-        .iter()
-        .filter_map(parallel_message_node_text)
-        .map(strip_qq_image_placeholders)
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    (!text.is_empty()).then_some(text)
-}
-
-fn parallel_message_node_text(node: &Value) -> Option<&str> {
-    if let Some(text) = node.as_str() {
-        return Some(text);
-    }
-    let object = node.as_object()?;
-    // 只读取明确的展示文本键，避免把 message_scene.ext 中的 auth_token 等
-    // 临时凭证混入模型上下文或日志。
-    ["content", "text", "msg_content"]
-        .into_iter()
-        .find_map(|key| object.get(key).and_then(Value::as_str))
-}
-
-fn strip_qq_image_placeholders(value: &str) -> String {
-    value.replace("[图片]", "").trim().to_owned()
 }
 
 fn extract_cq_reply_message_id(content: &str) -> Option<&str> {

@@ -29,6 +29,7 @@ use super::super::{
 use crate::{
     api::{OutboundSender, QqApiClient, SendMessageIds, send_outbound_with_fallback},
     config::AppConfig,
+    gateway::event::strip_contaminated_quote_from_context,
     message_chunk::{ChunkLimits, OutboundSendError, send_c2c_outbound_chunked},
     render::{OutboundMessage, render_respond_response_parts_for_profile},
     respond::{RespondClient, build_respond_content, respond_error_to_qq_text},
@@ -309,6 +310,11 @@ pub(crate) async fn handle_c2c_message(
     .await;
 
     let mut inbound = respond.prepare_inbound(platform::qq_official::inbound_from_c2c(&message));
+    // C2C 正文无寻址前缀，raw == 归一化正文，但仍在此统一执行污染检测。
+    // RefIndex 命中时会用索引原文覆盖 input_parts，本处只影响 miss 的最终状态。
+    if let Some(ref mut quoted) = inbound.quoted {
+        strip_contaminated_quote_from_context(quoted, &inbound.text);
+    }
     {
         let mut index = ref_index.lock().unwrap();
         index.enrich_inbound(&mut inbound);
