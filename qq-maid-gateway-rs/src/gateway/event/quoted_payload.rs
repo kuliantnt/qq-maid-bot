@@ -20,6 +20,9 @@ use super::{input_parts_from_content_and_attachments, parse_safe_content_parts};
 /// 确保检测用的当前正文与最终进入 Core 的正文一致。
 ///
 /// RefIndex 命中时会用索引原文覆盖 `input_parts`，因此本函数只影响 RefIndex miss 的最终状态。
+///
+/// 仅在引用上下文恰好只有一个非空 Text part 时启用检测——
+/// 这是 QQ msg_elements 引用消息中最常见的混合形态。多段落或零文字不触发。
 pub(crate) fn strip_contaminated_quote_from_context(
     quoted: &mut QuotedMessageContext,
     current_body: &str,
@@ -29,32 +32,41 @@ pub(crate) fn strip_contaminated_quote_from_context(
         return;
     }
 
-    let has_text = quoted
+    // 只收集非空 Text part。
+    let text_parts: Vec<&str> = quoted
         .input_parts
         .iter()
-        .any(|part| matches!(part, MessageInputPart::Text { .. }));
-    if !has_text {
+        .filter_map(|part| {
+            if let MessageInputPart::Text { text, .. } = part {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed);
+                }
+            }
+            None
+        })
+        .collect();
+
+    // 仅在引用上下文恰好只有一个非空 Text part 时启用检测——
+    // 这是 QQ 引用消息中最常见的混合形态。多个文字段落不触发，
+    // 避免误删独立的引用正文。
+    if text_parts.len() != 1 {
         return;
     }
 
-    let any_contaminated = quoted.input_parts.iter().any(|part| {
-        if let MessageInputPart::Text { text, .. } = part {
-            let trimmed = text.trim();
-            trimmed != current_body && trimmed.ends_with(current_body)
-        } else {
-            false
-        }
-    });
-
-    if !any_contaminated {
+    // 当前正文过短（如单字 "好"）时后缀匹配无区分力，不触发。
+    if current_body.chars().count() < 2 {
         return;
     }
 
-    // 丢弃所有引用文字，保留图片和其他媒体。
-    quoted
-        .input_parts
-        .retain(|part| !matches!(part, MessageInputPart::Text { .. }));
-    quoted.text_summary = None;
+    let text = text_parts[0];
+    // 以当前正文结尾且不等同 → 判定为混合串，丢弃引用文字。
+    if text != current_body && text.ends_with(current_body) {
+        quoted
+            .input_parts
+            .retain(|part| !matches!(part, MessageInputPart::Text { .. }));
+        quoted.text_summary = None;
+    }
 }
 
 /// 当 `message_type == 103` 时，按原始顺序递归解析全部 `msg_elements` 作为引用内容。

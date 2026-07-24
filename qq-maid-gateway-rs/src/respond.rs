@@ -790,6 +790,7 @@ mod tests {
     };
     use crate::gateway::event::strip_contaminated_quote_from_context;
     use qq_maid_common::input_part::MessageMedia;
+    use qq_maid_common::input_part::QuotedMessageContext;
     use qq_maid_common::input_part::TextSource;
     use qq_maid_core::service::{
         CoreConversation, CoreGroupMemberRole, CoreHealthSnapshot, CoreInboundClassification,
@@ -1510,5 +1511,60 @@ mod tests {
             quoted.input_parts[0],
             MessageInputPart::Image { .. }
         ));
+    }
+
+    /// 反例：引用正文以当前正文结尾但为独立语义时，不应判定为污染。
+    ///
+    /// 引用正文 "这个方案很好" 以当前正文 "好" 结尾，但二者是独立内容，
+    /// 不属于 QQ msg_elements 混合串污染形态。
+    #[test]
+    fn short_current_body_ending_match_is_not_contamination() {
+        let mut quoted = QuotedMessageContext {
+            text_summary: Some("这个方案很好".to_owned()),
+            input_parts: vec![MessageInputPart::Text {
+                text: "这个方案很好".to_owned(),
+                source: Some(TextSource::Quote),
+            }],
+            ..Default::default()
+        };
+
+        strip_contaminated_quote_from_context(&mut quoted, "好");
+
+        // 引用正文不应被删除。
+        assert_eq!(quoted.text_summary.as_deref(), Some("这个方案很好"));
+        assert_eq!(quoted.input_parts.len(), 1);
+        assert_eq!(quoted.input_parts[0].text_content(), Some("这个方案很好"));
+    }
+
+    /// 多 Text part 的引用上下文不触发污染检测。
+    ///
+    /// 多个文字段落说明不是 QQ 引用消息的单一混合串形态，
+    /// 即使某一段落以后缀命中也不应删除全部引用文字。
+    #[test]
+    fn multiple_text_parts_does_not_trigger_contamination() {
+        let mut quoted = QuotedMessageContext {
+            text_summary: Some("第一段文字\n第二段 引用内容查看".to_owned()),
+            input_parts: vec![
+                MessageInputPart::Text {
+                    text: "第一段文字".to_owned(),
+                    source: Some(TextSource::Quote),
+                },
+                MessageInputPart::Text {
+                    text: "第二段 引用内容查看".to_owned(),
+                    source: Some(TextSource::Quote),
+                },
+            ],
+            ..Default::default()
+        };
+
+        strip_contaminated_quote_from_context(&mut quoted, "引用内容查看");
+
+        // 多段落不触发，引用文字全部保留。
+        assert_eq!(quoted.input_parts.len(), 2);
+        assert_eq!(quoted.input_parts[0].text_content(), Some("第一段文字"));
+        assert_eq!(
+            quoted.input_parts[1].text_content(),
+            Some("第二段 引用内容查看")
+        );
     }
 }
