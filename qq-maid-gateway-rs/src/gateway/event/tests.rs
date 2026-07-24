@@ -729,7 +729,10 @@ fn parses_qq_quote_msg_element_as_payload_fallback() {
             "content": "查看这条",
             "message_type": 103,
             "message_scene": {
-                "ext": ["msg_idx=REFIDX_current"]
+                "ext": [
+                    "msg_idx=REFIDX_current",
+                    "ref_msg_idx=REFIDX_quoted"
+                ]
             },
             "msg_elements": [{
                 "msg_idx": "REFIDX_quoted",
@@ -805,71 +808,6 @@ fn parses_plain_group_quote_from_structured_element_without_parallel_duplication
 }
 
 #[test]
-fn group_quote_keeps_current_text_out_of_quoted_payload() {
-    let envelope = GatewayEnvelope {
-        op: 0,
-        s: None,
-        t: Some(EVENT_GROUP_AT_MESSAGE_CREATE.to_owned()),
-        id: Some("event-current".to_owned()),
-        d: json!({
-            "id": "msg-current",
-            "group_openid": "group-1",
-            "author": {"member_openid": "member-1"},
-            "content": "这条正常么？",
-            "mentions": [{"is_you": true, "member_openid": "bot-1"}],
-            "message_type": 103,
-            "msg_elements": [
-                {"msg_idx": "REFIDX_quoted", "content": "OK"},
-                {"msg_idx": "REFIDX_equivalent", "content": "OK"},
-                {"msg_idx": "REFIDX_current", "content": "这条正常么？"}
-            ]
-        }),
-    };
-
-    let message = parse_group_message(&envelope).unwrap().unwrap();
-    let reply = message.reply.as_ref().unwrap();
-
-    assert_eq!(message.content, "这条正常么？");
-    assert!(message.mentions.iter().any(|mention| mention.is_you));
-    assert_eq!(reply.content.as_deref(), Some("OK"));
-    assert_eq!(reply.input_parts.len(), 1);
-    assert_eq!(reply.input_parts[0].text_content(), Some("OK"));
-}
-
-#[test]
-fn nested_group_quote_excludes_current_text_from_payload() {
-    let envelope = GatewayEnvelope {
-        op: 0,
-        s: None,
-        t: Some(EVENT_GROUP_AT_MESSAGE_CREATE.to_owned()),
-        id: Some("event-current".to_owned()),
-        d: json!({
-            "id": "msg-current",
-            "group_openid": "group-1",
-            "author": {"member_openid": "member-1"},
-            "content": "查看引用内容",
-            "message_type": 103,
-            "message_scene": {"ext": ["msg_idx=REFIDX_current"]},
-            "msg_elements": [{
-                "msg_idx": "REFIDX_quoted",
-                "content": "测试",
-                "msg_elements": [
-                    {"msg_idx": "REFIDX_current", "content": "查看引用内容"}
-                ]
-            }]
-        }),
-    };
-
-    let message = parse_group_message(&envelope).unwrap().unwrap();
-    let reply = message.reply.as_ref().unwrap();
-
-    assert_eq!(message.content, "查看引用内容");
-    assert_eq!(reply.content.as_deref(), Some("测试"));
-    assert_eq!(reply.input_parts.len(), 1);
-    assert_eq!(reply.input_parts[0].text_content(), Some("测试"));
-}
-
-#[test]
 fn nested_quote_keeps_same_text_when_msg_idx_differs_from_current() {
     let envelope = GatewayEnvelope {
         op: 0,
@@ -882,7 +820,10 @@ fn nested_quote_keeps_same_text_when_msg_idx_differs_from_current() {
             "author": {"member_openid": "member-1"},
             "content": "同一句话",
             "message_type": 103,
-            "message_scene": {"ext": ["msg_idx=REFIDX_current"]},
+            "message_scene": {"ext": [
+                "msg_idx=REFIDX_current",
+                "ref_msg_idx=REFIDX_quoted"
+            ]},
             "msg_elements": [{
                 "msg_idx": "REFIDX_quoted",
                 "msg_elements": [
@@ -911,6 +852,10 @@ fn c2c_quote_keeps_current_text_out_of_quoted_payload() {
             "author": {"user_openid": "user-1"},
             "content": "这条正常么？",
             "message_type": 103,
+            "message_scene": {"ext": [
+                "msg_idx=REFIDX_current",
+                "ref_msg_idx=REFIDX_quoted"
+            ]},
             "msg_elements": [
                 {"msg_idx": "REFIDX_quoted", "content": "OK"},
                 {"msg_idx": "REFIDX_current", "content": "这条正常么？"}
@@ -945,6 +890,10 @@ fn nested_quoted_elements_keep_text_and_media_order_without_current_parts() {
                 "url": "https://example.test/current.png"
             }],
             "message_type": 103,
+            "message_scene": {"ext": [
+                "msg_idx=REFIDX_current",
+                "ref_msg_idx=REFIDX_quoted"
+            ]},
             "msg_elements": [
                 {
                     "msg_idx": "REFIDX_quoted",
@@ -1002,6 +951,7 @@ fn quoted_images_keep_original_order_when_metadata_matches() {
             "author": {"member_openid": "member-1"},
             "content": "解释这些图",
             "message_type": 103,
+            "message_scene": {"ext": ["ref_msg_idx=REFIDX_quoted"]},
             "parallel_message": {
                 "msg_nodes": [{"content": "[图片][图片][图片] 展示文本"}]
             },
@@ -1068,6 +1018,7 @@ fn unindexed_parallel_text_is_not_used_as_quote_fallback() {
             "author": {"member_openid": "member-1"},
             "content": "解释图片",
             "message_type": 103,
+            "message_scene": {"ext": ["ref_msg_idx=REFIDX_quoted"]},
             "parallel_message": {
                 "msg_nodes": [{"content": "[图片][图片] 展示兜底"}]
             },
@@ -1106,6 +1057,7 @@ fn parses_quoted_audio_asr_as_quoted_user_content() {
             "author": {"member_openid": "member-1"},
             "content": "这段说了什么",
             "message_type": 103,
+            "message_scene": {"ext": ["ref_msg_idx=REFIDX_voice"]},
             "msg_elements": [{
                 "msg_idx": "REFIDX_voice",
                 "attachments": [{

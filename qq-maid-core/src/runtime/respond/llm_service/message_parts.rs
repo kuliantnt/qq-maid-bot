@@ -173,10 +173,6 @@ fn quoted_input_parts_for_model(
     let mut parts = Vec::new();
     for part in input_parts {
         match part {
-            MessageInputPart::Text {
-                source: Some(TextSource::QuoteContaminated),
-                ..
-            } => {}
             MessageInputPart::Text { text, .. } if !text.trim().is_empty() => {
                 // Provider 不接收 TextSource，标签必须与原始引用文字留在同一个 part 内。
                 parts.push(MessageInputPart::Text {

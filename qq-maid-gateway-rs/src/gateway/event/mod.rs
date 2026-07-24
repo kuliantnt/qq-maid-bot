@@ -9,7 +9,6 @@ use qq_maid_common::input_part::{
     MediaStatus, MessageInputPart, MessageMedia, QuotedMediaSummary, TextSource,
 };
 
-mod quote_evidence;
 mod quoted_payload;
 
 use quoted_payload::quoted_payload_fallback;
@@ -314,11 +313,7 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
     .ok_or(EventError::MissingUserOpenid)?;
     let parsed_content = parse_safe_content_parts(&raw.content.unwrap_or_default(), "qq_official");
     let base_content = parsed_content.text.trim().to_owned();
-    let ref_indices = parse_ref_indices(
-        raw.message_scene.as_ref(),
-        raw.message_type,
-        &raw.msg_elements,
-    );
+    let ref_indices = parse_ref_indices(raw.message_scene.as_ref());
     let reply = extract_message_reply(
         &base_content,
         raw.reply.as_ref(),
@@ -328,10 +323,7 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
             raw.message_type,
             &raw.msg_elements,
             raw.parallel_message.as_ref(),
-            ref_indices.msg_idx.as_deref(),
             ref_indices.ref_msg_idx.as_deref(),
-            ref_indices.ref_msg_idx_inferred,
-            &base_content,
         ),
     );
     let timestamp = raw.timestamp;
@@ -399,27 +391,9 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
             .as_ref()
             .and_then(|author| author.self_sent.or(author.is_self))
             .unwrap_or(false);
-    let mentions = raw
-        .mentions
-        .iter()
-        .map(raw_group_mention)
-        .collect::<Vec<_>>();
     let parsed_content = parse_safe_content_parts(&raw.content.unwrap_or_default(), "qq_official");
     let base_content = parsed_content.text.trim().to_owned();
-    // 引用边界必须使用群聊现有的正文标准化逻辑；这里只处理平台结构化寻址，配置相关
-    // 唤醒词仍由正式响应入口按运行配置继续标准化。
-    let normalized_current_content = crate::respond::normalize_group_addressed_content(
-        &base_content,
-        &mentions,
-        event_type,
-        &[],
-        qq_maid_common::command_prefix::CommandPrefix::default(),
-    );
-    let ref_indices = parse_ref_indices(
-        raw.message_scene.as_ref(),
-        raw.message_type,
-        &raw.msg_elements,
-    );
+    let ref_indices = parse_ref_indices(raw.message_scene.as_ref());
     let reply = extract_message_reply(
         &base_content,
         raw.reply.as_ref(),
@@ -429,10 +403,7 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
             raw.message_type,
             &raw.msg_elements,
             raw.parallel_message.as_ref(),
-            ref_indices.msg_idx.as_deref(),
             ref_indices.ref_msg_idx.as_deref(),
-            ref_indices.ref_msg_idx_inferred,
-            &normalized_current_content,
         ),
     );
     let input_parts = input_parts_from_content_and_attachments(
@@ -449,7 +420,11 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
         member_openid,
         member_role,
         content: base_content,
-        mentions,
+        mentions: raw
+            .mentions
+            .iter()
+            .map(raw_group_mention)
+            .collect::<Vec<_>>(),
         reply,
         timestamp: raw.timestamp,
         input_parts,

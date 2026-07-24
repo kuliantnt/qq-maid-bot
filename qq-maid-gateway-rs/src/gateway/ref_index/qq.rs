@@ -1,7 +1,6 @@
 //! QQ 官方引用索引字段解析。
 //!
-//! QQ 引用消息常见只下发 `REFIDX_*`，字段位于 `message_scene.ext`；
-//! 引用消息类型下 `msg_elements[0].msg_idx` 更接近被引用消息索引。
+//! QQ 官方在 `message_scene.ext` 中分别下发当前消息与被引用消息的索引。
 
 use serde::Deserialize;
 
@@ -30,15 +29,9 @@ pub(crate) struct RawMsgElement {
 pub(crate) struct QqRefIndices {
     pub(crate) msg_idx: Option<String>,
     pub(crate) ref_msg_idx: Option<String>,
-    /// `true` 表示引用索引只由首元素推断，不能再用它反向证明该元素可信。
-    pub(crate) ref_msg_idx_inferred: bool,
 }
 
-pub(crate) fn parse_ref_indices(
-    scene: Option<&RawMessageScene>,
-    message_type: Option<u64>,
-    msg_elements: &[RawMsgElement],
-) -> QqRefIndices {
+pub(crate) fn parse_ref_indices(scene: Option<&RawMessageScene>) -> QqRefIndices {
     let mut indices = QqRefIndices::default();
     if let Some(scene) = scene {
         for item in &scene.ext {
@@ -49,15 +42,6 @@ pub(crate) fn parse_ref_indices(
                 indices.ref_msg_idx = clean_idx(value);
             }
         }
-    }
-    if indices.ref_msg_idx.is_none()
-        && message_type == Some(MSG_TYPE_QUOTE)
-        && let Some(value) = msg_elements
-            .first()
-            .and_then(|item| item.msg_idx.as_deref())
-    {
-        indices.ref_msg_idx = clean_idx(value);
-        indices.ref_msg_idx_inferred = indices.ref_msg_idx.is_some();
     }
     indices
 }
@@ -80,45 +64,21 @@ mod tests {
             ],
         };
 
-        let indices = parse_ref_indices(Some(&scene), None, &[]);
+        let indices = parse_ref_indices(Some(&scene));
 
         assert_eq!(indices.msg_idx.as_deref(), Some("REFIDX_current"));
         assert_eq!(indices.ref_msg_idx.as_deref(), Some("REFIDX_old"));
     }
 
     #[test]
-    fn explicit_scene_reference_wins_over_first_msg_element() {
-        let scene = RawMessageScene {
-            ext: vec!["ref_msg_idx=REFIDX_ext".to_owned()],
-        };
-        let elements = vec![RawMsgElement {
-            msg_idx: Some("REFIDX_element".to_owned()),
-            content: None,
-            attachments: Vec::new(),
-            msg_elements: Vec::new(),
-        }];
-
-        let indices = parse_ref_indices(Some(&scene), Some(MSG_TYPE_QUOTE), &elements);
-
-        assert_eq!(indices.ref_msg_idx.as_deref(), Some("REFIDX_ext"));
-        assert!(!indices.ref_msg_idx_inferred);
-    }
-
-    #[test]
-    fn quote_message_type_infers_reference_from_first_element_when_scene_omits_it() {
+    fn missing_scene_reference_is_not_inferred_from_elements() {
         let scene = RawMessageScene {
             ext: vec!["msg_idx=REFIDX_current".to_owned()],
         };
-        let elements = vec![RawMsgElement {
-            msg_idx: Some("REFIDX_element".to_owned()),
-            content: None,
-            attachments: Vec::new(),
-            msg_elements: Vec::new(),
-        }];
 
-        let indices = parse_ref_indices(Some(&scene), Some(MSG_TYPE_QUOTE), &elements);
+        let indices = parse_ref_indices(Some(&scene));
 
-        assert_eq!(indices.ref_msg_idx.as_deref(), Some("REFIDX_element"));
-        assert!(indices.ref_msg_idx_inferred);
+        assert_eq!(indices.msg_idx.as_deref(), Some("REFIDX_current"));
+        assert_eq!(indices.ref_msg_idx, None);
     }
 }

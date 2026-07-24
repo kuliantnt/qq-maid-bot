@@ -47,34 +47,3 @@ fn ref_index_hit_and_payload_miss_keep_quote_and_current_once_in_provider_parts(
         assert!(!payload_text.contains("测试引用内容查看"), "case={case}");
     }
 }
-
-#[test]
-fn contaminated_quote_marker_never_reaches_provider_parts() {
-    let req = RespondRequest {
-        purpose: RespondPurpose::Chat,
-        user_text: "引用内容查看".to_owned(),
-        input_parts: vec![MessageInputPart::text("引用内容查看")],
-        quoted: Some(QuotedMessageContext {
-            reference_id: Some("REFIDX_missing".to_owned()),
-            lookup_found: true,
-            input_parts: vec![MessageInputPart::Text {
-                text: "测试引用内容查看".to_owned(),
-                source: Some(TextSource::QuoteContaminated),
-            }],
-            fallback_reason: Some("quoted_payload".to_owned()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    let messages = build_respond_messages_for_model(&req, true);
-    let provider_parts = &messages.last().unwrap().content_parts;
-    let payload_text = provider_parts
-        .iter()
-        .map(MessageInputPart::fallback_text)
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    assert_eq!(payload_text.matches("引用内容查看").count(), 1);
-    assert!(!payload_text.contains("测试引用内容查看"));
-}

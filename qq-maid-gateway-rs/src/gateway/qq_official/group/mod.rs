@@ -189,13 +189,7 @@ pub(crate) async fn handle_group_message(
         &config.group_active_keywords,
         config.command_prefix,
     );
-    observe_group_message_ref_index(
-        &message,
-        respond,
-        ref_index,
-        &config.group_active_keywords,
-        config.command_prefix,
-    );
+    observe_group_message_ref_index(&message, respond, ref_index);
     if should_ignore_group_message(
         &message,
         &respond_content,
@@ -482,19 +476,11 @@ fn observe_group_message_ref_index(
     message: &GroupMessage,
     respond: &RespondClient,
     ref_index: &SharedRefIndex,
-    active_keywords: &[String],
-    command_prefix: qq_maid_common::command_prefix::CommandPrefix,
 ) {
     if message.author_is_self || message.author_is_bot || message.current_msg_idx.is_none() {
         return;
     }
-    // 首次观察即使用标准化正文，避免同一 current_msg_idx 先写入带 @ 前缀的长文本，
-    // 随后又在正式处理阶段用去前缀正文覆盖，形成短暂污染窗口。
-    let inbound = respond.prepare_inbound(crate::respond::normalized_group_inbound_with_prefix(
-        message,
-        active_keywords,
-        command_prefix,
-    ));
+    let inbound = respond.prepare_inbound(platform::qq_official::inbound_from_group(message));
     match ref_index.lock() {
         Ok(mut index) => index.insert_inbound(&inbound),
         Err(_) => warn!(

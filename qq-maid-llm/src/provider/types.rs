@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use qq_maid_common::input_part::{MessageInputPart, TextSource};
+use qq_maid_common::input_part::MessageInputPart;
 use serde::{Deserialize, Serialize};
 
 use crate::{context_budget::ContextBudgetConfig, error::LlmError};
@@ -335,22 +335,7 @@ impl ChatMessage {
     /// 返回 provider 应发送的内容块；旧纯文本消息自动兼容为 text part。
     pub fn effective_content_parts(&self) -> Vec<MessageInputPart> {
         if !self.content_parts.is_empty() {
-            // Gateway/Core 都应先移除不可信引用文字；Provider 边界再做一次兜底，避免
-            // 任一调用方误把污染标记序列化到外部模型请求。
-            return self
-                .content_parts
-                .iter()
-                .filter(|part| {
-                    !matches!(
-                        part,
-                        MessageInputPart::Text {
-                            source: Some(TextSource::QuoteContaminated),
-                            ..
-                        }
-                    )
-                })
-                .cloned()
-                .collect();
+            return self.content_parts.clone();
         }
         let text = self.content.trim();
         if text.is_empty() {

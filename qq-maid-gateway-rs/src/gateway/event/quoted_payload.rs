@@ -1,59 +1,43 @@
 //! QQ 引用正文、媒体与 payload fallback 组装。
 
 use qq_maid_common::input_part::{MessageInputPart, QuotedMediaSummary, TextSource};
+use serde_json::Value;
 
 use crate::gateway::ref_index::qq::{MSG_TYPE_QUOTE, RawMsgElement};
 
 use super::{
     QuotedPayloadFallback, RawParallelMessage, input_parts_from_content_and_attachments,
     parse_safe_content_parts,
-    quote_evidence::{
-        QuotedRootText, has_contaminated_quote_marker, resolve_quoted_root_text,
-        strip_qq_image_placeholders, trusted_parallel_ref_text,
-    },
 };
 
 pub(super) fn quoted_payload_fallback(
     message_type: Option<u64>,
     msg_elements: &[RawMsgElement],
     parallel_message: Option<&RawParallelMessage>,
-    current_msg_idx: Option<&str>,
     ref_msg_idx: Option<&str>,
-    ref_msg_idx_inferred: bool,
-    normalized_current_content: &str,
 ) -> QuotedPayloadFallback {
     if message_type != Some(MSG_TYPE_QUOTE) {
         return QuotedPayloadFallback::default();
     }
+    let Some(ref_msg_idx) = ref_msg_idx else {
+        return QuotedPayloadFallback::default();
+    };
 
-    // 只有首个顶层元素属于引用根；后续顶层元素可能是等价表示或当前消息内容。
     let mut content_fragments = Vec::new();
     let mut input_parts = Vec::new();
-    if let Some(quoted_root) = msg_elements.first() {
-        let root_text = resolve_quoted_root_text(
-            quoted_root,
-            parallel_message,
-            ref_msg_idx,
-            ref_msg_idx_inferred,
-            current_msg_idx,
-            normalized_current_content,
-        );
-        append_quoted_element_parts(
-            quoted_root,
-            current_msg_idx,
-            normalized_current_content,
-            true,
-            Some(&root_text),
-            false,
-            &mut content_fragments,
-            &mut input_parts,
-        );
+    // QQ 官方明确以 ref_msg_idx 定位被引用消息；无关顶层元素不得进入引用上下文。
+    if let Some(quoted_root) = msg_elements.iter().find(|element| {
+        element
+            .msg_idx
+            .as_deref()
+            .is_some_and(|idx| idx.trim() == ref_msg_idx)
+    }) {
+        append_quoted_element_parts(quoted_root, &mut content_fragments, &mut input_parts);
     }
 
     let mut content = content_fragments.join("\n");
     if content.is_empty()
-        && !has_contaminated_quote_marker(&input_parts)
-        && let Some(fallback) = trusted_parallel_ref_text(parallel_message, ref_msg_idx)
+        && let Some(fallback) = parallel_message_text_for_idx(parallel_message, ref_msg_idx)
     {
         content = fallback;
         input_parts.insert(
@@ -76,93 +60,70 @@ pub(super) fn quoted_payload_fallback(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn append_quoted_element_parts(
     element: &RawMsgElement,
-    current_msg_idx: Option<&str>,
-    current_content: &str,
-    is_quoted_root: bool,
-    root_text: Option<&QuotedRootText>,
-    discard_text: bool,
     content_fragments: &mut Vec<String>,
     input_parts: &mut Vec<MessageInputPart>,
 ) {
     let raw_content = element.content.as_deref().unwrap_or_default();
     let cleaned_content = strip_qq_image_placeholders(raw_content);
     let parsed = parse_safe_content_parts(&cleaned_content, "qq_official");
-    let parsed_element_content = parsed.text.trim().to_owned();
-    let root_is_contaminated = matches!(root_text, Some(QuotedRootText::Contaminated));
-    let element_content = match root_text {
-        Some(QuotedRootText::Trusted(text)) => text.clone(),
-        Some(QuotedRootText::Contaminated | QuotedRootText::Unresolved) => String::new(),
-        None if discard_text => String::new(),
-        None => parsed_element_content.clone(),
-    };
-
-    let matches_current_idx =
-        current_msg_idx.is_some_and(|idx| element.msg_idx.as_deref() == Some(idx));
-    let lacks_comparable_idx = current_msg_idx.is_none() || element.msg_idx.is_none();
-    let matches_current_content = lacks_comparable_idx
-        && !current_content.is_empty()
-        && parsed_element_content == current_content;
-    if !is_quoted_root && (matches_current_idx || matches_current_content) {
-        return;
-    }
+    let element_content = parsed.text.trim().to_owned();
     if !element_content.is_empty() {
         content_fragments.push(element_content.clone());
     }
 
-    let mut parsed_parts = parsed.input_parts;
-    if discard_text {
-        parsed_parts.retain(|part| !matches!(part, MessageInputPart::Text { .. }));
-    }
-    if let Some(resolution) = root_text {
-        parsed_parts.retain(|part| !matches!(part, MessageInputPart::Text { .. }));
-        if !element_content.is_empty() {
-            parsed_parts.insert(
-                0,
-                MessageInputPart::Text {
-                    text: element_content.clone(),
-                    source: Some(TextSource::Quote),
-                },
-            );
-        }
-        if matches!(resolution, QuotedRootText::Contaminated) {
-            parsed_parts.insert(
-                0,
-                MessageInputPart::Text {
-                    text: String::new(),
-                    source: Some(TextSource::QuoteContaminated),
-                },
-            );
-        }
-    }
     let mut element_parts = input_parts_from_content_and_attachments(
         &element_content,
-        parsed_parts,
+        parsed.input_parts,
         &element.attachments,
         "qq_official",
         TextSource::Quote,
     );
     for part in &mut element_parts {
-        if let MessageInputPart::Text { source, .. } = part
-            && *source != Some(TextSource::QuoteContaminated)
-        {
+        if let MessageInputPart::Text { source, .. } = part {
             *source = Some(TextSource::Quote);
         }
     }
     input_parts.extend(element_parts);
 
     for child in &element.msg_elements {
-        append_quoted_element_parts(
-            child,
-            current_msg_idx,
-            current_content,
-            false,
-            None,
-            discard_text || root_is_contaminated,
-            content_fragments,
-            input_parts,
-        );
+        append_quoted_element_parts(child, content_fragments, input_parts);
     }
+}
+
+fn parallel_message_text_for_idx(
+    parallel_message: Option<&RawParallelMessage>,
+    ref_msg_idx: &str,
+) -> Option<String> {
+    let text = parallel_message?
+        .msg_nodes
+        .iter()
+        .filter(|node| parallel_message_node_idx(node) == Some(ref_msg_idx))
+        .filter_map(parallel_message_node_text)
+        .map(strip_qq_image_placeholders)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then_some(text)
+}
+
+fn parallel_message_node_idx(node: &Value) -> Option<&str> {
+    node.as_object()?
+        .get("msg_idx")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn parallel_message_node_text(node: &Value) -> Option<&str> {
+    let object = node.as_object()?;
+    // 只读取显式带匹配索引节点的展示文本，不接受无索引字符串兜底。
+    ["content", "text", "msg_content"]
+        .into_iter()
+        .find_map(|key| object.get(key).and_then(Value::as_str))
+}
+
+fn strip_qq_image_placeholders(value: &str) -> String {
+    value.replace("[图片]", "").trim().to_owned()
 }
