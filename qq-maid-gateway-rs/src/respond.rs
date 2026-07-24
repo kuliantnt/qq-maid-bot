@@ -432,8 +432,9 @@ pub(crate) fn normalized_group_inbound_with_prefix(
     command_prefix: CommandPrefix,
 ) -> platform::InboundMessage {
     let content = normalize_group_addressed_content(
-        message,
         &message.content,
+        &message.mentions,
+        message.event_type,
         active_keywords,
         command_prefix,
     );
@@ -445,7 +446,13 @@ pub(crate) fn normalized_group_inbound_with_prefix(
     if content != message.content
         && let Some(MessageInputPart::Text { text, .. }) = inbound.input_parts.first_mut()
     {
-        *text = normalize_group_addressed_content(message, text, active_keywords, command_prefix);
+        *text = normalize_group_addressed_content(
+            text,
+            &message.mentions,
+            message.event_type,
+            active_keywords,
+            command_prefix,
+        );
         if text.is_empty() {
             inbound.input_parts.remove(0);
         }
@@ -454,9 +461,10 @@ pub(crate) fn normalized_group_inbound_with_prefix(
     inbound
 }
 
-fn normalize_group_addressed_content(
-    message: &GroupMessage,
+pub(crate) fn normalize_group_addressed_content(
     content: &str,
+    mentions: &[crate::event::GroupMention],
+    event_type: crate::event::GroupEventType,
     active_keywords: &[String],
     command_prefix: CommandPrefix,
 ) -> String {
@@ -470,7 +478,8 @@ fn normalize_group_addressed_content(
         }
         if let Some((rest, prefix_kind)) = strip_group_command_prefix(
             candidate,
-            message,
+            mentions,
+            event_type,
             active_keywords,
             mention_index,
             stripped_mention,
@@ -485,7 +494,8 @@ fn normalize_group_addressed_content(
         }
         break;
     }
-    if let Some(rest) = strip_group_command_suffix(candidate, message, active_keywords) {
+    if let Some(rest) = strip_group_command_suffix(candidate, mentions, event_type, active_keywords)
+    {
         candidate = rest;
         stripped_address = true;
     }
@@ -533,24 +543,37 @@ enum GroupAddressPrefixKind {
 
 fn strip_group_command_prefix<'a>(
     text: &'a str,
-    message: &GroupMessage,
+    mentions: &[crate::event::GroupMention],
+    event_type: crate::event::GroupEventType,
     active_keywords: &[String],
     mention_index: usize,
     stripped_mention: bool,
 ) -> Option<(&'a str, GroupAddressPrefixKind)> {
     let text = text.trim_start();
     if let Some((rest, target_id)) = strip_cq_at_prefix(text)
-        && can_strip_encoded_mention(message, mention_index, stripped_mention, target_id)
+        && can_strip_encoded_mention(
+            mentions,
+            event_type,
+            mention_index,
+            stripped_mention,
+            target_id,
+        )
     {
         return Some((rest, GroupAddressPrefixKind::Mention));
     }
     if let Some((rest, target_id)) = strip_angle_mention_prefix(text)
-        && can_strip_encoded_mention(message, mention_index, stripped_mention, target_id)
+        && can_strip_encoded_mention(
+            mentions,
+            event_type,
+            mention_index,
+            stripped_mention,
+            target_id,
+        )
     {
         return Some((rest, GroupAddressPrefixKind::Mention));
     }
     if let Some((rest, display_name)) = strip_display_mention_prefix(text)
-        && can_strip_display_mention(message, active_keywords, mention_index, display_name)
+        && can_strip_display_mention(mentions, active_keywords, mention_index, display_name)
     {
         return Some((rest, GroupAddressPrefixKind::Mention));
     }
@@ -560,22 +583,23 @@ fn strip_group_command_prefix<'a>(
 
 fn strip_group_command_suffix<'a>(
     text: &'a str,
-    message: &GroupMessage,
+    mentions: &[crate::event::GroupMention],
+    event_type: crate::event::GroupEventType,
     active_keywords: &[String],
 ) -> Option<&'a str> {
     let text = text.trim_end();
     if let Some((rest, target_id)) = strip_cq_at_suffix(text)
-        && can_strip_encoded_mention_suffix(message, target_id)
+        && can_strip_encoded_mention_suffix(mentions, event_type, target_id)
     {
         return Some(trim_group_address_suffix(rest));
     }
     if let Some((rest, target_id)) = strip_angle_mention_suffix(text)
-        && can_strip_encoded_mention_suffix(message, target_id)
+        && can_strip_encoded_mention_suffix(mentions, event_type, target_id)
     {
         return Some(trim_group_address_suffix(rest));
     }
     if let Some((rest, display_name)) = strip_display_mention_suffix(text)
-        && can_strip_display_mention_suffix(message, active_keywords, display_name)
+        && can_strip_display_mention_suffix(mentions, active_keywords, display_name)
     {
         return Some(trim_group_address_suffix(rest));
     }
@@ -628,28 +652,29 @@ fn strip_display_mention_suffix(text: &str) -> Option<(&str, &str)> {
 }
 
 fn can_strip_encoded_mention(
-    message: &GroupMessage,
+    mentions: &[crate::event::GroupMention],
+    event_type: crate::event::GroupEventType,
     mention_index: usize,
     stripped_mention: bool,
     target_id: &str,
 ) -> bool {
-    if let Some(mention) = message.mentions.get(mention_index) {
+    if let Some(mention) = mentions.get(mention_index) {
         return mention.is_you
             && mention
                 .target_id
                 .as_deref()
                 .is_none_or(|expected| expected == target_id);
     }
-    !stripped_mention && message.event_type == crate::event::GroupEventType::GroupAtMessage
+    !stripped_mention && event_type == crate::event::GroupEventType::GroupAtMessage
 }
 
 fn can_strip_display_mention(
-    message: &GroupMessage,
+    mentions: &[crate::event::GroupMention],
     active_keywords: &[String],
     mention_index: usize,
     display_name: &str,
 ) -> bool {
-    if let Some(mention) = message.mentions.get(mention_index) {
+    if let Some(mention) = mentions.get(mention_index) {
         return mention.is_you;
     }
     // 缺少结构化身份时只兼容已配置的机器人展示名，不能把任意 @群成员当作寻址前缀。
@@ -659,23 +684,27 @@ fn can_strip_display_mention(
     })
 }
 
-fn can_strip_encoded_mention_suffix(message: &GroupMessage, target_id: &str) -> bool {
-    if let Some(mention) = message.mentions.last() {
+fn can_strip_encoded_mention_suffix(
+    mentions: &[crate::event::GroupMention],
+    event_type: crate::event::GroupEventType,
+    target_id: &str,
+) -> bool {
+    if let Some(mention) = mentions.last() {
         return mention.is_you
             && mention
                 .target_id
                 .as_deref()
                 .is_none_or(|expected| expected == target_id);
     }
-    message.event_type == crate::event::GroupEventType::GroupAtMessage
+    event_type == crate::event::GroupEventType::GroupAtMessage
 }
 
 fn can_strip_display_mention_suffix(
-    message: &GroupMessage,
+    mentions: &[crate::event::GroupMention],
     active_keywords: &[String],
     display_name: &str,
 ) -> bool {
-    if let Some(mention) = message.mentions.last() {
+    if let Some(mention) = mentions.last() {
         return mention.is_you;
     }
     active_keywords.iter().any(|keyword| {

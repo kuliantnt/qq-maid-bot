@@ -8,8 +8,8 @@ use super::{
     QuotedPayloadFallback, RawParallelMessage, input_parts_from_content_and_attachments,
     parse_safe_content_parts,
     quote_evidence::{
-        QuotedRootText, has_contaminated_quote_marker, parallel_message_display_text,
-        resolve_quoted_root_text, strip_qq_image_placeholders,
+        QuotedRootText, has_contaminated_quote_marker, resolve_quoted_root_text,
+        strip_qq_image_placeholders, trusted_parallel_ref_text,
     },
 };
 
@@ -19,7 +19,8 @@ pub(super) fn quoted_payload_fallback(
     parallel_message: Option<&RawParallelMessage>,
     current_msg_idx: Option<&str>,
     ref_msg_idx: Option<&str>,
-    current_content: &str,
+    ref_msg_idx_inferred: bool,
+    normalized_current_content: &str,
 ) -> QuotedPayloadFallback {
     if message_type != Some(MSG_TYPE_QUOTE) {
         return QuotedPayloadFallback::default();
@@ -29,14 +30,21 @@ pub(super) fn quoted_payload_fallback(
     let mut content_fragments = Vec::new();
     let mut input_parts = Vec::new();
     if let Some(quoted_root) = msg_elements.first() {
-        let root_text =
-            resolve_quoted_root_text(quoted_root, parallel_message, ref_msg_idx, current_msg_idx);
+        let root_text = resolve_quoted_root_text(
+            quoted_root,
+            parallel_message,
+            ref_msg_idx,
+            ref_msg_idx_inferred,
+            current_msg_idx,
+            normalized_current_content,
+        );
         append_quoted_element_parts(
             quoted_root,
             current_msg_idx,
-            current_content,
+            normalized_current_content,
             true,
             Some(&root_text),
+            false,
             &mut content_fragments,
             &mut input_parts,
         );
@@ -45,8 +53,7 @@ pub(super) fn quoted_payload_fallback(
     let mut content = content_fragments.join("\n");
     if content.is_empty()
         && !has_contaminated_quote_marker(&input_parts)
-        && let Some(fallback) =
-            parallel_message_display_text(parallel_message, ref_msg_idx, current_msg_idx)
+        && let Some(fallback) = trusted_parallel_ref_text(parallel_message, ref_msg_idx)
     {
         content = fallback;
         input_parts.insert(
@@ -76,6 +83,7 @@ fn append_quoted_element_parts(
     current_content: &str,
     is_quoted_root: bool,
     root_text: Option<&QuotedRootText>,
+    discard_text: bool,
     content_fragments: &mut Vec<String>,
     input_parts: &mut Vec<MessageInputPart>,
 ) {
@@ -83,9 +91,13 @@ fn append_quoted_element_parts(
     let cleaned_content = strip_qq_image_placeholders(raw_content);
     let parsed = parse_safe_content_parts(&cleaned_content, "qq_official");
     let parsed_element_content = parsed.text.trim().to_owned();
-    let element_content = root_text
-        .and_then(|resolution| resolution.override_text.clone())
-        .unwrap_or_else(|| parsed_element_content.clone());
+    let root_is_contaminated = matches!(root_text, Some(QuotedRootText::Contaminated));
+    let element_content = match root_text {
+        Some(QuotedRootText::Trusted(text)) => text.clone(),
+        Some(QuotedRootText::Contaminated | QuotedRootText::Unresolved) => String::new(),
+        None if discard_text => String::new(),
+        None => parsed_element_content.clone(),
+    };
 
     let matches_current_idx =
         current_msg_idx.is_some_and(|idx| element.msg_idx.as_deref() == Some(idx));
@@ -101,9 +113,10 @@ fn append_quoted_element_parts(
     }
 
     let mut parsed_parts = parsed.input_parts;
-    if let Some(resolution) = root_text
-        && resolution.override_text.is_some()
-    {
+    if discard_text {
+        parsed_parts.retain(|part| !matches!(part, MessageInputPart::Text { .. }));
+    }
+    if let Some(resolution) = root_text {
         parsed_parts.retain(|part| !matches!(part, MessageInputPart::Text { .. }));
         if !element_content.is_empty() {
             parsed_parts.insert(
@@ -114,7 +127,7 @@ fn append_quoted_element_parts(
                 },
             );
         }
-        if resolution.contaminated {
+        if matches!(resolution, QuotedRootText::Contaminated) {
             parsed_parts.insert(
                 0,
                 MessageInputPart::Text {
@@ -147,6 +160,7 @@ fn append_quoted_element_parts(
             current_content,
             false,
             None,
+            discard_text || root_is_contaminated,
             content_fragments,
             input_parts,
         );

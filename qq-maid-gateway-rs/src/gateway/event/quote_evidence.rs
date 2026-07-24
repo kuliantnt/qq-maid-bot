@@ -1,7 +1,7 @@
 //! QQ 引用 payload 的结构证据解析。
 //!
-//! 这里只在 `parallel_message` 节点与 ref/current idx 能互相印证时判断引用根混入
-//! 当前正文；无法确认引用文字边界时返回污染标记，让上层保留元数据和媒体并丢弃文字。
+//! 只有明确进入 [`QuotedRootText::Trusted`] 的文字才允许进入引用上下文；污染或证据
+//! 不足时都由上层保留元数据和媒体、丢弃根文字。
 
 use qq_maid_common::input_part::{MessageInputPart, TextSource};
 use serde_json::Value;
@@ -10,52 +10,55 @@ use crate::gateway::ref_index::qq::RawMsgElement;
 
 use super::RawParallelMessage;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(super) struct QuotedRootText {
-    pub(super) override_text: Option<String>,
-    pub(super) contaminated: bool,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum QuotedRootText {
+    Trusted(String),
+    Contaminated,
+    Unresolved,
 }
 
 pub(super) fn resolve_quoted_root_text(
     quoted_root: &RawMsgElement,
     parallel_message: Option<&RawParallelMessage>,
     ref_msg_idx: Option<&str>,
+    ref_msg_idx_inferred: bool,
     current_msg_idx: Option<&str>,
+    normalized_current_text: &str,
 ) -> QuotedRootText {
-    let (Some(ref_msg_idx), Some(current_msg_idx)) = (ref_msg_idx, current_msg_idx) else {
-        return QuotedRootText::default();
-    };
-    if ref_msg_idx == current_msg_idx || quoted_root.msg_idx.as_deref() != Some(ref_msg_idx) {
-        return QuotedRootText::default();
-    }
-    let Some(current_text) = parallel_message_text_for_idx(parallel_message, current_msg_idx)
-    else {
-        return QuotedRootText::default();
-    };
     let root_text = strip_qq_image_placeholders(quoted_root.content.as_deref().unwrap_or_default());
-    if root_text.is_empty()
-        || current_text.is_empty()
-        || root_text.chars().count() <= current_text.chars().count()
-        || !root_text.ends_with(&current_text)
+    if root_text.is_empty() {
+        return QuotedRootText::Unresolved;
+    }
+    let current_text = strip_qq_image_placeholders(normalized_current_text);
+    let indices_conflict = ref_msg_idx.is_some_and(|ref_idx| {
+        !ref_msg_idx_inferred && quoted_root.msg_idx.as_deref() != Some(ref_idx)
+    });
+
+    if let Some(ref_idx) = ref_msg_idx
+        && current_msg_idx != Some(ref_idx)
+        && let Some(quoted_text) = parallel_message_text_for_idx(parallel_message, ref_idx)
     {
-        return QuotedRootText::default();
+        if root_text == quoted_text {
+            return QuotedRootText::Trusted(quoted_text);
+        }
+        if !current_text.is_empty() && root_text == format!("{quoted_text}{current_text}") {
+            // ref 节点原文与标准化当前正文已完整重建混合根，不要求 parallel 再提供 current 节点。
+            return QuotedRootText::Trusted(quoted_text);
+        }
     }
 
-    if let Some(quoted_text) = parallel_message_text_for_idx(parallel_message, ref_msg_idx)
-        && root_text == format!("{quoted_text}{current_text}")
-    {
-        // 两个不同 idx 的 parallel 节点完整重建了混合根，可直接采用引用节点原文。
-        return QuotedRootText {
-            override_text: Some(quoted_text),
-            contaminated: false,
-        };
+    if !current_text.is_empty() && root_text.contains(&current_text) {
+        // 能确认根文本混入当前正文，却没有可信 ref 原文重建前半段，整段文字 fail-closed。
+        return QuotedRootText::Contaminated;
     }
 
-    // current 节点证明根文本尾部混入本轮正文，但缺少可信引用原文；整段文字 fail-closed。
-    QuotedRootText {
-        override_text: Some(String::new()),
-        contaminated: true,
+    if current_text.is_empty() || indices_conflict {
+        return QuotedRootText::Unresolved;
     }
+
+    // 首元素属于引用根，且标准化当前正文未出现在其中；这里不使用由首元素自身推断的
+    // ref_msg_idx 反向证明可信，避免形成循环证据。
+    QuotedRootText::Trusted(root_text)
 }
 
 pub(super) fn has_contaminated_quote_marker(input_parts: &[MessageInputPart]) -> bool {
@@ -70,29 +73,11 @@ pub(super) fn has_contaminated_quote_marker(input_parts: &[MessageInputPart]) ->
     })
 }
 
-pub(super) fn parallel_message_display_text(
+pub(super) fn trusted_parallel_ref_text(
     parallel_message: Option<&RawParallelMessage>,
     ref_msg_idx: Option<&str>,
-    current_msg_idx: Option<&str>,
 ) -> Option<String> {
-    let parallel_message = parallel_message?;
-    if let Some(ref_msg_idx) = ref_msg_idx
-        && let Some(text) = parallel_message_text_for_idx(Some(parallel_message), ref_msg_idx)
-    {
-        return Some(text);
-    }
-    let text = parallel_message
-        .msg_nodes
-        .iter()
-        .filter(|node| {
-            current_msg_idx.is_none_or(|idx| parallel_message_node_idx(node) != Some(idx))
-        })
-        .filter_map(parallel_message_node_text)
-        .map(strip_qq_image_placeholders)
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    (!text.is_empty()).then_some(text)
+    parallel_message_text_for_idx(parallel_message, ref_msg_idx?)
 }
 
 pub(super) fn strip_qq_image_placeholders(value: &str) -> String {

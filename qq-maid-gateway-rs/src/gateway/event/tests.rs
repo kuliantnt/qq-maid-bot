@@ -1056,7 +1056,7 @@ fn quoted_images_keep_original_order_when_metadata_matches() {
 }
 
 #[test]
-fn parallel_message_is_only_used_when_structured_quote_text_is_missing() {
+fn unindexed_parallel_text_is_not_used_as_quote_fallback() {
     let envelope = GatewayEnvelope {
         op: 0,
         s: None,
@@ -1085,13 +1085,10 @@ fn parallel_message_is_only_used_when_structured_quote_text_is_missing() {
     let message = parse_group_message(&envelope).unwrap().unwrap();
     let reply = message.reply.unwrap();
 
-    assert_eq!(reply.content.as_deref(), Some("展示兜底"));
+    assert_eq!(reply.content, None);
+    assert_eq!(reply.input_parts.len(), 1);
     assert!(matches!(
-        &reply.input_parts[0],
-        MessageInputPart::Text { text, source: Some(TextSource::Quote) } if text == "展示兜底"
-    ));
-    assert!(matches!(
-        reply.input_parts[1],
+        reply.input_parts[0],
         MessageInputPart::Image { .. }
     ));
 }

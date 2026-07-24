@@ -30,6 +30,8 @@ pub(crate) struct RawMsgElement {
 pub(crate) struct QqRefIndices {
     pub(crate) msg_idx: Option<String>,
     pub(crate) ref_msg_idx: Option<String>,
+    /// `true` 表示引用索引只由首元素推断，不能再用它反向证明该元素可信。
+    pub(crate) ref_msg_idx_inferred: bool,
 }
 
 pub(crate) fn parse_ref_indices(
@@ -48,12 +50,14 @@ pub(crate) fn parse_ref_indices(
             }
         }
     }
-    if message_type == Some(MSG_TYPE_QUOTE)
+    if indices.ref_msg_idx.is_none()
+        && message_type == Some(MSG_TYPE_QUOTE)
         && let Some(value) = msg_elements
             .first()
             .and_then(|item| item.msg_idx.as_deref())
     {
         indices.ref_msg_idx = clean_idx(value);
+        indices.ref_msg_idx_inferred = indices.ref_msg_idx.is_some();
     }
     indices
 }
@@ -83,7 +87,7 @@ mod tests {
     }
 
     #[test]
-    fn quote_message_type_uses_first_msg_element_as_reference() {
+    fn explicit_scene_reference_wins_over_first_msg_element() {
         let scene = RawMessageScene {
             ext: vec!["ref_msg_idx=REFIDX_ext".to_owned()],
         };
@@ -96,6 +100,25 @@ mod tests {
 
         let indices = parse_ref_indices(Some(&scene), Some(MSG_TYPE_QUOTE), &elements);
 
+        assert_eq!(indices.ref_msg_idx.as_deref(), Some("REFIDX_ext"));
+        assert!(!indices.ref_msg_idx_inferred);
+    }
+
+    #[test]
+    fn quote_message_type_infers_reference_from_first_element_when_scene_omits_it() {
+        let scene = RawMessageScene {
+            ext: vec!["msg_idx=REFIDX_current".to_owned()],
+        };
+        let elements = vec![RawMsgElement {
+            msg_idx: Some("REFIDX_element".to_owned()),
+            content: None,
+            attachments: Vec::new(),
+            msg_elements: Vec::new(),
+        }];
+
+        let indices = parse_ref_indices(Some(&scene), Some(MSG_TYPE_QUOTE), &elements);
+
         assert_eq!(indices.ref_msg_idx.as_deref(), Some("REFIDX_element"));
+        assert!(indices.ref_msg_idx_inferred);
     }
 }

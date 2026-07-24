@@ -177,7 +177,7 @@ pub(crate) fn openai_model_supports_reasoning(model: &str) -> bool {
 mod tests {
     use super::*;
     use crate::provider::types::ChatMessage;
-    use qq_maid_common::input_part::{MessageInputPart, MessageMedia};
+    use qq_maid_common::input_part::{MessageInputPart, MessageMedia, TextSource};
 
     fn common_prefix_len(left: &[u8], right: &[u8]) -> usize {
         left.iter()
@@ -574,6 +574,40 @@ mod tests {
             .join("\n");
 
         assert_eq!(payload_text.matches("测试").count(), 1);
+        assert_eq!(payload_text.matches("引用内容查看").count(), 1);
+        assert!(!payload_text.contains("测试引用内容查看"));
+    }
+
+    #[test]
+    fn openai_responses_payload_never_serializes_untrusted_mixed_quote() {
+        let payload = openai_responses_payload(
+            &[ChatMessage::user_with_parts(
+                "引用内容查看",
+                vec![
+                    MessageInputPart::text("引用元数据：reference=REFIDX_quoted"),
+                    MessageInputPart::Text {
+                        text: "测试引用内容查看".to_owned(),
+                        source: Some(TextSource::QuoteContaminated),
+                    },
+                    MessageInputPart::text("引用内容查看"),
+                ],
+            )],
+            "gpt-5.5",
+            10 * 1024 * 1024,
+            1200,
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        let payload_text = payload["input"][0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
         assert_eq!(payload_text.matches("引用内容查看").count(), 1);
         assert!(!payload_text.contains("测试引用内容查看"));
     }
