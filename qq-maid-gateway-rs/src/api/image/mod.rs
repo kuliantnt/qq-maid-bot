@@ -4,7 +4,7 @@
 //! `upload_prepare -> PUT presigned_url -> upload_part_finish -> /files merge`。
 //! 上传接口不会隐式发送消息，成功后仍由普通消息接口携带 `media.file_info` 投递。
 
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use md5::Md5;
@@ -25,6 +25,60 @@ impl MediaFileType {
     fn code(self) -> u8 {
         self as u8
     }
+}
+
+/// QQ 当前图片上传只接受 PNG 与 JPEG；格式同时决定传给上传接口的安全文件名。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageFormat {
+    Png,
+    Jpeg,
+}
+
+impl ImageFormat {
+    fn from_data_url_mime(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "image/png" => Some(Self::Png),
+            "image/jpeg" | "image/jpg" => Some(Self::Jpeg),
+            _ => None,
+        }
+    }
+
+    fn from_file_extension(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "png" => Some(Self::Png),
+            "jpg" | "jpeg" => Some(Self::Jpeg),
+            _ => None,
+        }
+    }
+
+    fn detect(bytes: &[u8]) -> Option<Self> {
+        if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            Some(Self::Png)
+        } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+            Some(Self::Jpeg)
+        } else {
+            None
+        }
+    }
+
+    fn safe_file_name(self) -> &'static str {
+        match self {
+            Self::Png => "image.png",
+            Self::Jpeg => "image.jpg",
+        }
+    }
+}
+
+struct ResolvedImageUpload {
+    bytes: Vec<u8>,
+    file_name: String,
+}
+
+struct UploadPartLayout {
+    index: u32,
+    presigned_url: String,
+    offset: usize,
+    end: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -202,40 +256,33 @@ impl QqApiClient {
             .await;
         }
 
-        let bytes = image_bytes(image)?;
-        if bytes.is_empty() {
+        let upload = resolve_image_upload(image)?;
+        if upload.bytes.is_empty() {
             return Err(ApiError::InvalidMedia(
                 "local image or base64 data is empty",
             ));
         }
-        let file_name = image_file_name(image);
         upload_bytes_media(
             &self.client,
             &self.api_base,
             scene,
             peer_id,
             &authorization,
-            &bytes,
-            &file_name,
+            &upload.bytes,
+            &upload.file_name,
         )
         .await
     }
 }
 
-fn image_bytes(image: &ImagePayload) -> Result<Vec<u8>, ApiError> {
+fn resolve_image_upload(image: &ImagePayload) -> Result<ResolvedImageUpload, ApiError> {
     if let Some(value) = image
         .data_base64
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let encoded = value
-            .rsplit_once(',')
-            .map(|(_, data)| data)
-            .unwrap_or(value);
-        return STANDARD
-            .decode(encoded)
-            .map_err(|_| ApiError::InvalidMedia("invalid image base64 data"));
+        return resolve_base64_image(value);
     }
     let Some(path) = image
         .local_path
@@ -247,18 +294,80 @@ fn image_bytes(image: &ImagePayload) -> Result<Vec<u8>, ApiError> {
             "missing file_info, URL, base64 data, or local image path",
         ));
     };
-    std::fs::read(path).map_err(|_| ApiError::InvalidMedia("failed to read local image file"))
+    let bytes = std::fs::read(path)
+        .map_err(|_| ApiError::InvalidMedia("failed to read local image file"))?;
+    let format = ImageFormat::detect(&bytes).ok_or(ApiError::InvalidMedia(
+        "local image file is not a supported PNG or JPEG",
+    ))?;
+    let file_name = safe_local_image_name(path, format)?;
+    Ok(ResolvedImageUpload { bytes, file_name })
 }
 
-fn image_file_name(image: &ImagePayload) -> String {
-    image
-        .local_path
-        .as_deref()
-        .and_then(|path| Path::new(path).file_name())
+fn resolve_base64_image(value: &str) -> Result<ResolvedImageUpload, ApiError> {
+    let (encoded, declared_format) = if value
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+    {
+        let (header, encoded) = value
+            .split_once(',')
+            .ok_or(ApiError::InvalidMedia("invalid image data URL"))?;
+        let metadata = &header[5..];
+        let mut sections = metadata.split(';');
+        let mime = sections
+            .next()
+            .ok_or(ApiError::InvalidMedia("invalid image data URL"))?;
+        let format = ImageFormat::from_data_url_mime(mime).ok_or(ApiError::InvalidMedia(
+            "unsupported image data URL MIME type",
+        ))?;
+        if !sections.any(|section| section.trim().eq_ignore_ascii_case("base64")) {
+            return Err(ApiError::InvalidMedia(
+                "image data URL is not base64 encoded",
+            ));
+        }
+        (encoded, Some(format))
+    } else {
+        (value, None)
+    };
+    let bytes = STANDARD
+        .decode(encoded)
+        .map_err(|_| ApiError::InvalidMedia("invalid image base64 data"))?;
+    let detected_format = ImageFormat::detect(&bytes).ok_or(ApiError::InvalidMedia(
+        "base64 data is not a supported PNG or JPEG",
+    ))?;
+    if declared_format.is_some_and(|format| format != detected_format) {
+        return Err(ApiError::InvalidMedia(
+            "image data URL MIME type does not match image data",
+        ));
+    }
+    Ok(ResolvedImageUpload {
+        bytes,
+        file_name: detected_format.safe_file_name().to_owned(),
+    })
+}
+
+fn safe_local_image_name(path: &str, format: ImageFormat) -> Result<String, ApiError> {
+    // Windows 路径可能通过跨平台调用传入；只传 basename，避免把本地目录暴露给 QQ 上传接口。
+    let file_name = Path::new(path)
+        .file_name()
         .and_then(|name| name.to_str())
+        .and_then(|name| name.rsplit(['/', '\\']).next())
         .filter(|name| !name.trim().is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| "image.bin".to_owned())
+        .ok_or(ApiError::InvalidMedia(
+            "local image file has no valid basename",
+        ))?;
+    let extension = Path::new(file_name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .and_then(ImageFormat::from_file_extension)
+        .ok_or(ApiError::InvalidMedia(
+            "local image file has unsupported extension",
+        ))?;
+    if extension != format {
+        return Err(ApiError::InvalidMedia(
+            "local image file extension does not match image data",
+        ));
+    }
+    Ok(file_name.to_owned())
 }
 
 async fn upload_url_media(
@@ -318,21 +427,9 @@ async fn upload_bytes_media(
         );
     }
 
-    let default_block_size = parse_block_size(&prepared.block_size)?;
-    let mut parts = prepared.parts;
-    parts.sort_by_key(|part| part.index);
-    let mut offset = 0usize;
+    let parts = resolve_upload_part_layout(prepared.parts, &prepared.block_size, bytes.len())?;
     for part in parts {
-        let part_size = if part.block_size.trim().is_empty() {
-            default_block_size
-        } else {
-            parse_block_size(&part.block_size)?
-        };
-        if offset >= bytes.len() || part_size == 0 {
-            return Err(ApiError::InvalidMedia("invalid upload part layout"));
-        }
-        let end = offset.saturating_add(part_size).min(bytes.len());
-        let block = &bytes[offset..end];
+        let block = &bytes[part.offset..part.end];
         put_upload_part(client, &part.presigned_url, block).await?;
         let finish_endpoint = upload_endpoint(api_base, scene, peer_id, "upload_part_finish");
         let finish = UploadPartFinishPayload {
@@ -343,12 +440,6 @@ async fn upload_bytes_media(
         };
         let _: serde_json::Value =
             post_upload_json(client, finish_endpoint, authorization, &finish, scene).await?;
-        offset = end;
-    }
-    if offset != bytes.len() {
-        return Err(ApiError::InvalidMedia(
-            "upload prepare parts do not cover the complete image",
-        ));
     }
 
     let merge_endpoint = upload_endpoint(api_base, scene, peer_id, "files");
@@ -454,6 +545,76 @@ fn parse_block_size(value: &str) -> Result<usize, ApiError> {
         .ok_or(ApiError::InvalidMedia("invalid upload block_size"))
 }
 
+fn resolve_upload_part_layout(
+    mut parts: Vec<UploadPart>,
+    default_block_size: &str,
+    file_size: usize,
+) -> Result<Vec<UploadPartLayout>, ApiError> {
+    if file_size == 0 {
+        return Err(ApiError::InvalidMedia("cannot upload an empty image"));
+    }
+
+    let mut indexes = HashSet::with_capacity(parts.len());
+    if parts.iter().any(|part| !indexes.insert(part.index)) {
+        return Err(ApiError::InvalidMedia(
+            "upload prepare response has duplicate part index",
+        ));
+    }
+    parts.sort_by_key(|part| part.index);
+    if parts
+        .iter()
+        .enumerate()
+        .any(|(expected, part)| part.index != expected as u32)
+    {
+        return Err(ApiError::InvalidMedia(
+            "upload prepare response has missing part index",
+        ));
+    }
+
+    // QQ 可为每个 part 单独给出大小。只有存在缺失值时才读取顶层默认值，
+    // 以兼容顶层 block_size 为空但各 part 完整的响应。
+    let fallback_block_size = if parts.iter().any(|part| part.block_size.trim().is_empty()) {
+        Some(parse_block_size(default_block_size)?)
+    } else {
+        None
+    };
+
+    let mut offset = 0usize;
+    let mut layout = Vec::with_capacity(parts.len());
+    for part in parts {
+        if part.presigned_url.trim().is_empty() {
+            return Err(ApiError::InvalidMedia(
+                "upload prepare response has empty part URL",
+            ));
+        }
+        let part_size = if part.block_size.trim().is_empty() {
+            fallback_block_size.ok_or(ApiError::InvalidMedia("invalid upload block_size"))?
+        } else {
+            parse_block_size(&part.block_size)?
+        };
+        if offset >= file_size {
+            return Err(ApiError::InvalidMedia("invalid upload part layout"));
+        }
+        let end = offset.saturating_add(part_size).min(file_size);
+        if end == offset {
+            return Err(ApiError::InvalidMedia("invalid upload part layout"));
+        }
+        layout.push(UploadPartLayout {
+            index: part.index,
+            presigned_url: part.presigned_url,
+            offset,
+            end,
+        });
+        offset = end;
+    }
+    if offset != file_size {
+        return Err(ApiError::InvalidMedia(
+            "upload prepare parts do not cover the complete image",
+        ));
+    }
+    Ok(layout)
+}
+
 fn hex_digest<D: Digest + Default>(bytes: &[u8]) -> String {
     let mut digest = D::default();
     digest.update(bytes);
@@ -465,263 +626,4 @@ fn hex_digest<D: Digest + Default>(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::{Arc, Mutex};
-
-    use axum::{
-        Json, Router,
-        body::Bytes,
-        extract::State,
-        http::StatusCode,
-        response::IntoResponse,
-        routing::{post, put},
-    };
-    use serde_json::{Value, json};
-    use tokio::net::TcpListener;
-
-    #[derive(Clone)]
-    struct UploadTestState {
-        base_url: String,
-        failure_phase: Arc<Mutex<Option<&'static str>>>,
-        file_payloads: Arc<Mutex<Vec<Value>>>,
-        put_bodies: Arc<Mutex<Vec<Vec<u8>>>>,
-    }
-
-    async fn files_handler(
-        State(state): State<UploadTestState>,
-        Json(payload): Json<Value>,
-    ) -> impl IntoResponse {
-        let is_merge = payload.get("upload_id").is_some();
-        state.file_payloads.lock().unwrap().push(payload);
-        if is_merge && *state.failure_phase.lock().unwrap() == Some("merge") {
-            return (
-                StatusCode::BAD_GATEWAY,
-                "merge failed https://temporary.test/?auth_token=secret",
-            )
-                .into_response();
-        }
-        Json(json!({
-            "file_info": "file-info",
-            "file_uuid": "file-uuid",
-            "ttl": 1,
-            "raw_url": format!("{}/temporary?auth_token=secret", state.base_url)
-        }))
-        .into_response()
-    }
-
-    async fn prepare_handler(State(state): State<UploadTestState>) -> impl IntoResponse {
-        if *state.failure_phase.lock().unwrap() == Some("prepare") {
-            return (
-                StatusCode::BAD_GATEWAY,
-                "prepare failed https://temporary.test/?auth_token=secret",
-            )
-                .into_response();
-        }
-        Json(json!({
-            "upload_id": "upload-1",
-            "block_size": "5",
-            "parts": [{"index": 0, "block_size": "5", "presigned_url": format!("{}/presigned/0?signature=secret", state.base_url)}],
-            "upload_config": {"concurrency": 1, "retry_timeout": 1, "retry_delay": 0}
-        }))
-        .into_response()
-    }
-
-    async fn part_handler(State(state): State<UploadTestState>) -> impl IntoResponse {
-        if *state.failure_phase.lock().unwrap() == Some("part_finish") {
-            return (
-                StatusCode::BAD_GATEWAY,
-                "part finish failed https://temporary.test/?auth_token=secret",
-            )
-                .into_response();
-        }
-        Json(json!({})).into_response()
-    }
-
-    async fn put_handler(State(state): State<UploadTestState>, body: Bytes) -> impl IntoResponse {
-        state.put_bodies.lock().unwrap().push(body.to_vec());
-        if *state.failure_phase.lock().unwrap() == Some("put") {
-            return (
-                StatusCode::BAD_GATEWAY,
-                "put failed https://temporary.test/?auth_token=secret",
-            )
-                .into_response();
-        }
-        StatusCode::OK.into_response()
-    }
-
-    async fn upload_test_server() -> (UploadTestState, tokio::task::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let state = UploadTestState {
-            base_url,
-            failure_phase: Arc::new(Mutex::new(None)),
-            file_payloads: Arc::new(Mutex::new(Vec::new())),
-            put_bodies: Arc::new(Mutex::new(Vec::new())),
-        };
-        let app = Router::new()
-            .route("/v2/users/user/files", post(files_handler))
-            .route("/v2/users/user/upload_prepare", post(prepare_handler))
-            .route("/v2/users/user/upload_part_finish", post(part_handler))
-            .route("/presigned/0", put(put_handler))
-            .with_state(state.clone());
-        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        (state, task)
-    }
-
-    #[test]
-    fn url_upload_payload_uses_only_documented_fields() {
-        let payload = serde_json::to_value(UploadMergePayload {
-            file_type: 1,
-            url: Some("https://example.test/image.png"),
-            srv_send_msg: false,
-            file_name: None,
-            upload_id: None,
-        })
-        .unwrap();
-
-        assert_eq!(payload["file_type"], 1);
-        assert_eq!(payload["url"], "https://example.test/image.png");
-        assert_eq!(payload["srv_send_msg"], false);
-        assert!(payload.get("file_data").is_none());
-    }
-
-    #[test]
-    fn local_path_and_base64_resolve_to_upload_bytes() {
-        let path = std::env::temp_dir().join(format!("qq-maid-upload-{}.bin", fastrand::u64(..)));
-        std::fs::write(&path, b"local-image").unwrap();
-        let local = ImagePayload::from_local_path(path.to_string_lossy());
-        assert_eq!(image_bytes(&local).unwrap(), b"local-image");
-        let _ = std::fs::remove_file(path);
-
-        let base64 = ImagePayload::from_base64("aGVsbG8=");
-        assert_eq!(image_bytes(&base64).unwrap(), b"hello");
-    }
-
-    #[test]
-    fn c2c_and_group_upload_endpoints_are_never_interchanged() {
-        assert_eq!(
-            upload_endpoint(
-                "https://api.example.test",
-                UploadScene::C2c,
-                "user",
-                "files"
-            ),
-            "https://api.example.test/v2/users/user/files"
-        );
-        assert_eq!(
-            upload_endpoint(
-                "https://api.example.test",
-                UploadScene::Group,
-                "group",
-                "files"
-            ),
-            "https://api.example.test/v2/groups/group/files"
-        );
-    }
-
-    #[tokio::test]
-    async fn url_upload_uses_files_endpoint_and_never_sends_file_data() {
-        let (state, task) = upload_test_server().await;
-        let image = upload_url_media(
-            &qq_maid_common::http_client::client(),
-            &state.base_url,
-            UploadScene::C2c,
-            "user",
-            "QQBot test",
-            "https://example.test/image.png",
-        )
-        .await
-        .unwrap();
-        task.abort();
-
-        assert_eq!(image.file_info.as_deref(), Some("file-info"));
-        let payloads = state.file_payloads.lock().unwrap();
-        assert_eq!(payloads.len(), 1);
-        assert_eq!(payloads[0]["url"], "https://example.test/image.png");
-        assert!(payloads[0].get("file_data").is_none());
-        assert!(payloads[0].get("upload_id").is_none());
-    }
-
-    #[tokio::test]
-    async fn base64_and_local_images_use_prepare_put_finish_and_merge_without_cache() {
-        let (state, task) = upload_test_server().await;
-        let client = qq_maid_common::http_client::client();
-        let base64 = ImagePayload::from_base64("aGVsbG8=");
-        let bytes = image_bytes(&base64).unwrap();
-        upload_bytes_media(
-            &client,
-            &state.base_url,
-            UploadScene::C2c,
-            "user",
-            "QQBot test",
-            &bytes,
-            "image.bin",
-        )
-        .await
-        .unwrap();
-
-        let path = std::env::temp_dir().join(format!("qq-maid-upload-{}.bin", fastrand::u64(..)));
-        std::fs::write(&path, b"local").unwrap();
-        let local = ImagePayload::from_local_path(path.to_string_lossy());
-        let local_bytes = image_bytes(&local).unwrap();
-        upload_bytes_media(
-            &client,
-            &state.base_url,
-            UploadScene::C2c,
-            "user",
-            "QQBot test",
-            &local_bytes,
-            "local.bin",
-        )
-        .await
-        .unwrap();
-        let _ = std::fs::remove_file(path);
-        task.abort();
-
-        assert_eq!(
-            state.put_bodies.lock().unwrap().as_slice(),
-            &[b"hello".to_vec(), b"local".to_vec()]
-        );
-        let payloads = state.file_payloads.lock().unwrap();
-        assert_eq!(
-            payloads.len(),
-            2,
-            "ttl=1 response must not create an unbounded file_info cache"
-        );
-        assert!(
-            payloads
-                .iter()
-                .all(|payload| payload.get("upload_id").is_some())
-        );
-        assert!(
-            payloads
-                .iter()
-                .all(|payload| payload.get("file_data").is_none())
-        );
-    }
-
-    #[tokio::test]
-    async fn prepare_put_part_finish_and_merge_failures_are_propagated() {
-        for phase in ["prepare", "put", "part_finish", "merge"] {
-            let (state, task) = upload_test_server().await;
-            *state.failure_phase.lock().unwrap() = Some(phase);
-            let error = upload_bytes_media(
-                &qq_maid_common::http_client::client(),
-                &state.base_url,
-                UploadScene::C2c,
-                "user",
-                "QQBot test",
-                b"hello",
-                "image.bin",
-            )
-            .await
-            .unwrap_err();
-            task.abort();
-            assert!(matches!(error, ApiError::Status { .. }), "phase={phase}");
-            let summary = error.log_summary();
-            assert!(!summary.contains("auth_token"), "phase={phase}");
-            assert!(!summary.contains("temporary.test"), "phase={phase}");
-        }
-    }
-}
+mod tests;
