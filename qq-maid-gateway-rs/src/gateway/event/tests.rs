@@ -1,6 +1,8 @@
 use super::*;
 use serde_json::json;
 
+mod quote_boundary;
+
 #[test]
 fn parses_c2c_message_create() {
     let envelope = GatewayEnvelope {

@@ -165,6 +165,7 @@ impl RefIndex {
             log_ref_index_hit("quoted_lookup", &key, entry);
         } else {
             log_ref_index_miss(&self.entries, &key);
+            discard_contaminated_payload_text(quoted);
             if quoted_has_payload_fallback(quoted) {
                 quoted.lookup_found = true;
                 quoted.from_bot = None;
@@ -269,6 +270,33 @@ impl RefIndex {
     fn remove_from_order(&mut self, key: &RefIndexKey) {
         self.order.retain(|existing| existing != key);
     }
+}
+
+fn discard_contaminated_payload_text(
+    quoted: &mut qq_maid_common::input_part::QuotedMessageContext,
+) {
+    let contaminated = quoted.input_parts.iter().any(|part| {
+        matches!(
+            part,
+            MessageInputPart::Text {
+                source: Some(qq_maid_common::input_part::TextSource::QuoteContaminated),
+                ..
+            }
+        )
+    });
+    if !contaminated {
+        return;
+    }
+    quoted.text_summary = None;
+    quoted.input_parts.retain(|part| {
+        !matches!(
+            part,
+            MessageInputPart::Text {
+                source: Some(qq_maid_common::input_part::TextSource::QuoteContaminated),
+                ..
+            }
+        )
+    });
 }
 
 impl Default for RefIndex {
@@ -591,6 +619,8 @@ mod tests {
     use qq_maid_common::identity_context::IdentitySource;
     use qq_maid_common::input_part::{MessageMedia, QuotedMessageContext};
     use qq_maid_core::service::{VisibleEntityItem, VisibleEntitySnapshot};
+
+    mod quote_payload;
 
     fn test_snapshot(entity_id: &str) -> VisibleEntitySnapshot {
         VisibleEntitySnapshot {

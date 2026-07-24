@@ -1057,6 +1057,17 @@ mod tests {
     }
 
     #[test]
+    fn group_content_normalization_reduces_42_char_qq_mention_body_to_six_chars() {
+        let raw = "<@!12345678901234567890123456789012>引用内容查看";
+        assert_eq!(raw.chars().count(), 42);
+
+        let normalized = build_group_respond_content(&group_message(raw, Some("member1")), &[]);
+
+        assert_eq!(normalized, "引用内容查看");
+        assert_eq!(normalized.chars().count(), 6);
+    }
+
+    #[test]
     fn group_address_prefixes_expose_pending_reply_body() {
         let keywords = vec!["召唤词".to_owned(), "脸脸家的小女仆".to_owned()];
 

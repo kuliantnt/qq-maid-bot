@@ -544,4 +544,37 @@ mod tests {
         assert_eq!(content[2]["type"], "input_image");
         assert_eq!(content[2]["image_url"], "https://example.test/a.jpg");
     }
+
+    #[test]
+    fn openai_responses_payload_keeps_quote_and_current_text_once() {
+        // Core 已将引用正文和当前正文分别组装为可信有序 parts；Provider 只能原样序列化。
+        let payload = openai_responses_payload(
+            &[ChatMessage::user_with_parts(
+                "引用内容查看",
+                vec![
+                    MessageInputPart::text("引用元数据：reference=REFIDX_quoted"),
+                    MessageInputPart::text("引用文本：测试"),
+                    MessageInputPart::text("引用内容查看"),
+                ],
+            )],
+            "gpt-5.5",
+            10 * 1024 * 1024,
+            1200,
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        let payload_text = payload["input"][0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(payload_text.matches("测试").count(), 1);
+        assert_eq!(payload_text.matches("引用内容查看").count(), 1);
+        assert!(!payload_text.contains("测试引用内容查看"));
+    }
 }

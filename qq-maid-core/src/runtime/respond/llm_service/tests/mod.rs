@@ -12,6 +12,7 @@ use qq_maid_common::{
 use qq_maid_llm::provider::types::TokenUsage;
 
 mod history;
+mod quote_boundary;
 
 fn message_contents_with_time_marker(messages: &[ChatMessage]) -> Vec<String> {
     messages

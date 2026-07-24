@@ -4,12 +4,15 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::gateway::logging::mask_openid;
-use crate::gateway::ref_index::qq::{
-    MSG_TYPE_QUOTE, RawMessageScene, RawMsgElement, parse_ref_indices,
-};
+use crate::gateway::ref_index::qq::{RawMessageScene, RawMsgElement, parse_ref_indices};
 use qq_maid_common::input_part::{
     MediaStatus, MessageInputPart, MessageMedia, QuotedMediaSummary, TextSource,
 };
+
+mod quote_evidence;
+mod quoted_payload;
+
+use quoted_payload::quoted_payload_fallback;
 
 pub const EVENT_C2C_MESSAGE_CREATE: &str = "C2C_MESSAGE_CREATE";
 pub const EVENT_GROUP_AT_MESSAGE_CREATE: &str = "GROUP_AT_MESSAGE_CREATE";
@@ -326,6 +329,7 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
             &raw.msg_elements,
             raw.parallel_message.as_ref(),
             ref_indices.msg_idx.as_deref(),
+            ref_indices.ref_msg_idx.as_deref(),
             &base_content,
         ),
     );
@@ -411,6 +415,7 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
             &raw.msg_elements,
             raw.parallel_message.as_ref(),
             ref_indices.msg_idx.as_deref(),
+            ref_indices.ref_msg_idx.as_deref(),
             &base_content,
         ),
     );
@@ -504,140 +509,6 @@ fn extract_message_reply(
         input_parts: fallback.input_parts,
         media_summaries: fallback.media_summaries,
     })
-}
-
-fn quoted_payload_fallback(
-    message_type: Option<u64>,
-    msg_elements: &[RawMsgElement],
-    parallel_message: Option<&RawParallelMessage>,
-    current_msg_idx: Option<&str>,
-    current_content: &str,
-) -> QuotedPayloadFallback {
-    if message_type != Some(MSG_TYPE_QUOTE) {
-        return QuotedPayloadFallback::default();
-    }
-
-    // QQ 引用事件的顶层 msg_elements[0] 才是被引用原消息；后续顶层元素可能是
-    // 等价表示或当前消息内容，不能继续并入 quote。引用根内部的嵌套元素仍按原始
-    // 顺序递归保留，媒体取回阶段再按稳定文件名收敛重复图片。
-    let mut content_fragments = Vec::new();
-    let mut input_parts = Vec::new();
-    if let Some(quoted_root) = msg_elements.first() {
-        append_quoted_element_parts(
-            quoted_root,
-            current_msg_idx,
-            current_content,
-            true,
-            &mut content_fragments,
-            &mut input_parts,
-        );
-    }
-
-    let mut content = content_fragments.join("\n");
-    if content.is_empty()
-        && let Some(fallback) = parallel_message_display_text(parallel_message)
-    {
-        content = fallback;
-        input_parts.insert(
-            0,
-            MessageInputPart::Text {
-                text: content.clone(),
-                source: Some(TextSource::Quote),
-            },
-        );
-    }
-    let media_summaries = input_parts
-        .iter()
-        .filter_map(QuotedMediaSummary::from_input_part)
-        .collect::<Vec<_>>();
-
-    QuotedPayloadFallback {
-        content: (!content.is_empty()).then_some(content),
-        input_parts,
-        media_summaries,
-    }
-}
-
-fn append_quoted_element_parts(
-    element: &RawMsgElement,
-    current_msg_idx: Option<&str>,
-    current_content: &str,
-    is_quoted_root: bool,
-    content_fragments: &mut Vec<String>,
-    input_parts: &mut Vec<MessageInputPart>,
-) {
-    let raw_content = element.content.as_deref().unwrap_or_default();
-    let cleaned_content = strip_qq_image_placeholders(raw_content);
-    let parsed = parse_safe_content_parts(&cleaned_content, "qq_official");
-    let element_content = parsed.text.trim().to_owned();
-    // QQ 某些引用事件会把当前用户输入作为引用根的子元素下发。
-    // 先按稳定 msg_idx 排除；平台未给 idx 时仅在非根节点按当前正文兜底，
-    // 防止“引用内容 + 当前提问”被拼成同一段引用上下文。
-    let matches_current_idx =
-        current_msg_idx.is_some_and(|idx| element.msg_idx.as_deref() == Some(idx));
-    let lacks_comparable_idx = current_msg_idx.is_none() || element.msg_idx.is_none();
-    let matches_current_content =
-        lacks_comparable_idx && !current_content.is_empty() && element_content == current_content;
-    let is_current_message = !is_quoted_root && (matches_current_idx || matches_current_content);
-    if is_current_message {
-        return;
-    }
-    if !element_content.is_empty() {
-        content_fragments.push(element_content.clone());
-    }
-    let mut element_parts = input_parts_from_content_and_attachments(
-        &element_content,
-        parsed.input_parts,
-        &element.attachments,
-        "qq_official",
-        TextSource::Quote,
-    );
-    for part in &mut element_parts {
-        if let MessageInputPart::Text { source, .. } = part {
-            *source = Some(TextSource::Quote);
-        }
-    }
-    input_parts.extend(element_parts);
-
-    for child in &element.msg_elements {
-        append_quoted_element_parts(
-            child,
-            current_msg_idx,
-            current_content,
-            false,
-            content_fragments,
-            input_parts,
-        );
-    }
-}
-
-fn parallel_message_display_text(parallel_message: Option<&RawParallelMessage>) -> Option<String> {
-    let parallel_message = parallel_message?;
-    let text = parallel_message
-        .msg_nodes
-        .iter()
-        .filter_map(parallel_message_node_text)
-        .map(strip_qq_image_placeholders)
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    (!text.is_empty()).then_some(text)
-}
-
-fn parallel_message_node_text(node: &Value) -> Option<&str> {
-    if let Some(text) = node.as_str() {
-        return Some(text);
-    }
-    let object = node.as_object()?;
-    // 只读取明确的展示文本键，避免把 message_scene.ext 中的 auth_token 等
-    // 临时凭证混入模型上下文或日志。
-    ["content", "text", "msg_content"]
-        .into_iter()
-        .find_map(|key| object.get(key).and_then(Value::as_str))
-}
-
-fn strip_qq_image_placeholders(value: &str) -> String {
-    value.replace("[图片]", "").trim().to_owned()
 }
 
 fn extract_cq_reply_message_id(content: &str) -> Option<&str> {
