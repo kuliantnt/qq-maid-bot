@@ -311,3 +311,58 @@ fn non_quote_message_ignores_msg_elements() {
     assert_eq!(message.content, "普通消息");
     assert!(message.reply.is_none());
 }
+
+/// msg_elements 引用文字与当前正文混合时，丢弃被污染的引用文字，保留引用媒体。
+///
+/// 用例：raw.content=引用内容查看，msg_elements[0].content=测试引用内容查看。
+/// "测试引用内容查看" 以当前正文 "引用内容查看" 结尾且不等同，判定为混合串。
+#[test]
+fn contaminated_element_content_removes_text_keeps_media() {
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_AT_MESSAGE_CREATE.to_owned()),
+        id: None,
+        d: json!({
+            "id": "msg-current",
+            "group_openid": "group-1",
+            "author": {"member_openid": "member-1"},
+            "content": "引用内容查看",
+            "message_type": 103,
+            "message_scene": {"ext": ["msg_idx=REFIDX_current"]},
+            "msg_elements": [
+                {
+                    "content": "测试引用内容查看",
+                    "attachments": [{
+                        "content_type": "image/png",
+                        "filename": "quoted.png",
+                        "url": "https://example.test/quoted.png"
+                    }]
+                }
+            ]
+        }),
+    };
+
+    let message = parse_group_message(&envelope).unwrap().unwrap();
+    let reply = message.reply.as_ref().unwrap();
+
+    // 当前正文只出现一次。
+    assert_eq!(message.content, "引用内容查看");
+
+    // 被污染的引用文字已丢弃。
+    assert_eq!(reply.content, None);
+    assert!(
+        reply
+            .input_parts
+            .iter()
+            .all(|part| !matches!(part, MessageInputPart::Text { .. }))
+    );
+
+    // 引用图片保留。
+    assert_eq!(reply.input_parts.len(), 1);
+    assert!(matches!(
+        reply.input_parts[0],
+        MessageInputPart::Image { .. }
+    ));
+    assert_eq!(reply.media_summaries.len(), 1);
+}

@@ -141,8 +141,15 @@ impl RefIndex {
             return;
         };
         let Some(ref_id) = ref_id else {
-            quoted.lookup_found = false;
-            quoted.fallback_reason = Some("missing_reference_id".to_owned());
+            // ref_msg_idx / reference_id 缺失但 msg_elements 携带有效 payload 时，
+            // 标记为 quoted_payload_without_reference_id，引用正文和媒体仍可进入模型。
+            if quoted_has_payload_fallback(quoted) {
+                quoted.lookup_found = true;
+                quoted.fallback_reason = Some("quoted_payload_without_reference_id".to_owned());
+            } else {
+                quoted.lookup_found = false;
+                quoted.fallback_reason = Some("missing_reference_id".to_owned());
+            }
             return;
         };
         let key = key_for(

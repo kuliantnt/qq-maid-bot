@@ -455,6 +455,10 @@ fn extract_message_reply(
     ref_msg_idx: Option<String>,
     fallback: QuotedPayloadFallback,
 ) -> Option<MessageReply> {
+    let mut fallback = fallback;
+    // 检测并移除被当前正文污染的引用文字（混合串）。
+    // RefIndex 命中时会用索引原文覆盖，因此本处只影响 RefIndex miss 的最终状态。
+    quoted_payload::strip_contaminated_quote_text(&mut fallback, content);
     let has_payload = fallback.content.is_some()
         || !fallback.input_parts.is_empty()
         || !fallback.media_summaries.is_empty();

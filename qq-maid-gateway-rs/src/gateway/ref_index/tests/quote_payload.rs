@@ -130,3 +130,36 @@ fn qq_current_message_is_not_saved_under_ref_msg_idx() {
     store.enrich_inbound(&mut quote_referenced);
     assert!(!quote_referenced.quoted.as_ref().unwrap().lookup_found);
 }
+
+/// ref_msg_idx 缺失但 msg_elements 携带有效 payload 时，
+/// 标记为 quoted_payload_without_reference_id，引用正文和媒体仍可进入模型。
+#[test]
+fn missing_ref_msg_idx_with_payload_marks_quoted_payload_without_reference_id() {
+    let mut store = RefIndex::default();
+    let mut current = group_inbound("gm-current", Some("REFIDX_current"), "引用内容查看");
+    // ref_msg_idx 缺失，但 payload 存在。
+    current.quoted = Some(QuotedMessageContext {
+        ref_msg_idx: None,
+        text_summary: Some("被引用原文".to_owned()),
+        input_parts: vec![MessageInputPart::text("被引用原文")],
+        lookup_found: true,
+        fallback_reason: Some("pending_ref_index_lookup".to_owned()),
+        ..Default::default()
+    });
+
+    store.enrich_inbound(&mut current);
+
+    let quoted = current.quoted.as_ref().unwrap();
+    // 有 payload 时仍标记为 lookup_found，不输出"引用内容不可用"。
+    assert!(quoted.lookup_found);
+    assert_eq!(
+        quoted.fallback_reason.as_deref(),
+        Some("quoted_payload_without_reference_id")
+    );
+    // 引用 payload 保留。
+    assert_eq!(quoted.text_summary.as_deref(), Some("被引用原文"));
+    assert_eq!(quoted.input_parts.len(), 1);
+    assert_eq!(quoted.input_parts[0].text_content(), Some("被引用原文"));
+    // reference_id 不产生 Some("")。
+    assert_eq!(quoted.reference_id, None);
+}
