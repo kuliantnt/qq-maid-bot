@@ -187,7 +187,7 @@ pub(crate) fn mentions_current_bot(message: &GroupMessage) -> bool {
 }
 
 /// `active` 模式只按显式提示词触发，避免普通群聊闲谈被机器人自动插话。
-fn contains_active_keyword(content: &str, keywords: &[String]) -> bool {
+pub(crate) fn contains_active_keyword(content: &str, keywords: &[String]) -> bool {
     let content = content.to_ascii_lowercase();
     keywords
         .iter()

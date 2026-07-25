@@ -42,6 +42,9 @@ pub struct CoreRequest {
     pub account_id: Option<String>,
     pub actor: CoreActor,
     pub mentions: Vec<MentionIdentity>,
+    /// Gateway 根据平台结构化 @ 或已支持的唤醒词判定本轮是否明确指向机器人。
+    /// 该字段只表达寻址语义，不参与平台协议解析或权限判断。
+    pub addressed_to_bot: bool,
     pub conversation: CoreConversation,
 }
 

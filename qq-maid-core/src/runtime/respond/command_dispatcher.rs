@@ -8,13 +8,13 @@ use crate::error::LlmError;
 use super::{
     PlannedRespond, RespondRequest, RespondResponse, RustRespondService,
     chat_flow::PreparedChat,
-    common::{session_error, suppressed_response},
+    common::{command_response, session_error, suppressed_response},
     interaction_state::{
         command_bypasses_pending, prepare_message_context_for_model, respond_interaction_meta,
         respond_meta, session_pending_visible_to_user, shared_session_turn_actor,
         should_try_todo_flow,
     },
-    memory_flow, radar_flow, search_flow, session_flow,
+    memory_flow, radar_flow, rss_flow, search_flow, session_flow,
     set_flow::{parse_set_command, parse_unset_command},
     train_flow, translation_flow, weather_flow,
 };
@@ -116,6 +116,27 @@ impl<'a> CommandDispatcher<'a> {
             return Ok(DispatchOutcome::Respond(Box::new(
                 self.service.handle_session_command(command, &meta).await?,
             )));
+        }
+
+        // 只有所有剩余注册 parser 都明确 NotMatched 时才进入未知命令兜底。
+        // 该判断必须早于 get_or_create_active，保证未知 slash 不创建 session；已知命令的
+        // 缺参、参数错误、权限拒绝和执行失败仍由原 handler 收口。
+        if command_text.is_some_and(|text| !matches_remaining_registered_command(text)) {
+            let response = if req
+                .group_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+                && !req.addressed_to_bot
+            {
+                suppressed_response("unknown_group_slash_command")
+            } else {
+                command_response(
+                    "未知命令，发送 `/help` 查看可用命令。",
+                    None,
+                    Some("unknown_command"),
+                )
+            };
+            return Ok(DispatchOutcome::Respond(Box::new(response)));
         }
 
         // 确保存在活跃会话（无则创建）
@@ -265,19 +286,6 @@ impl<'a> CommandDispatcher<'a> {
             }
         }
 
-        // 所有已注册命令解析器都已尝试；群聊中的剩余斜杠候选属于未知命令。
-        // Core 在这里明确静默收口，避免把命令文本当普通聊天交给模型。
-        if req
-            .group_id
-            .as_deref()
-            .is_some_and(|id| !id.trim().is_empty())
-            && command_text.is_some()
-        {
-            return Ok(DispatchOutcome::Respond(Box::new(suppressed_response(
-                "unknown_group_slash_command",
-            ))));
-        }
-
         // 兜底：进入普通 LLM 聊天流程。共享历史 actor 快照已在上方准备；这里把
         // 同一快照的 actor_ref 注入当前 MessageContext，供模型可靠映射当前发言人。
         prepare_message_context_for_model(
@@ -303,4 +311,17 @@ impl<'a> CommandDispatcher<'a> {
             status_hint,
         })))
     }
+}
+
+fn matches_remaining_registered_command(text: &str) -> bool {
+    translation_flow::parse_translation_command(text).is_some()
+        || parse_set_command(text).is_some()
+        || parse_unset_command(text).is_some()
+        || weather_flow::parse_weather_command(text).is_some()
+        || train_flow::parse_train_command(text).is_some()
+        || radar_flow::parse_radar_command(text).is_some()
+        || search_flow::parse_web_search_command(text).is_some()
+        || rss_flow::parse_rss_command(text).is_some()
+        || should_try_todo_flow(text)
+        || memory_flow::parse_memory_command(text).is_some()
 }

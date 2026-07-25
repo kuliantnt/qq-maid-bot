@@ -1196,6 +1196,7 @@ fn request_scope_key_matches_private_message() {
             is_bot: false,
             identity_source: IdentitySource::Event,
         },
+        addressed_to_bot: false,
         conversation: CoreConversation::Private {
             peer_id: "u1".to_owned(),
         },

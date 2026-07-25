@@ -161,7 +161,7 @@ impl<'a> RespondRouter<'a> {
             .map_err(session_error)?;
 
         // Gateway 只提交候选，Core 负责后续注册表与权限判断；所有斜杠候选都应绕过
-        // Gateway 普通聊天冷却，确保未知命令也能在 Core 静默收口。
+        // Gateway 普通聊天冷却，确保未知命令也能在 Core 确定性收口。
         if self.service.command_prefix().is_candidate(&user_text) {
             return Ok(CoreInboundClassification {
                 kind: CoreInboundKind::Immediate,

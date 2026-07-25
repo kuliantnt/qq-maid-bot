@@ -108,18 +108,83 @@ async fn core_unknown_group_slash_is_silent_without_model_call() {
 }
 
 #[tokio::test]
-async fn core_unknown_private_slash_keeps_existing_chat_behavior() {
-    let provider = TestProvider::replying("私聊仍按普通聊天处理");
+async fn core_unknown_private_slash_is_deterministic_without_session_or_model_call() {
+    let provider = TestProvider::replying("不应调用");
     let state = test_state(provider.clone(), 5);
+    let session_store = state.stores.session_store.clone();
     let service = CoreHandle::new(state);
-    let CoreRespondOutput::Complete(response) =
-        service.respond(private_request("/unknown")).await.unwrap()
+
+    for input in ["/unknown", "/记忆查看1"] {
+        let CoreRespondOutput::Complete(response) =
+            service.respond(private_request(input)).await.unwrap()
+        else {
+            panic!("unknown private slash should complete synchronously");
+        };
+
+        assert_eq!(
+            response.text_content(),
+            Some("未知命令，发送 `/help` 查看可用命令。")
+        );
+        assert_eq!(response.command.as_deref(), Some("unknown_command"));
+        assert!(!response.suppresses_reply());
+    }
+    let meta = SessionMeta::new(
+        private_scope(),
+        Some("u1".to_owned()),
+        None,
+        None,
+        None,
+        "qq_official",
+    );
+    assert!(session_store.get_active(&meta).unwrap().is_none());
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn core_addressed_group_unknown_slash_returns_hint_without_model_call() {
+    let provider =
+        TestProvider::replying("不应调用").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let service = CoreHandle::new(state);
+
+    for input in ["/unknown", "/记忆查看1"] {
+        let mut request = group_request(input);
+        request.addressed_to_bot = true;
+        let CoreRespondOutput::Complete(response) = service.respond(request).await.unwrap() else {
+            panic!("addressed unknown group slash should complete synchronously");
+        };
+
+        assert_eq!(
+            response.text_content(),
+            Some("未知命令，发送 `/help` 查看可用命令。")
+        );
+        assert_eq!(response.command.as_deref(), Some("unknown_command"));
+        assert!(!response.suppresses_reply());
+    }
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn core_valid_memory_show_still_uses_registered_handler() {
+    let provider =
+        TestProvider::replying("不应调用").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let service = CoreHandle::new(state);
+
+    let CoreRespondOutput::Complete(response) = service
+        .respond(private_request("/记忆 查看 1"))
+        .await
+        .unwrap()
     else {
-        panic!("immediate private fallback should complete synchronously");
+        panic!("memory show should complete synchronously");
     };
 
-    assert_eq!(response.text_content(), Some("私聊仍按普通聊天处理"));
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(response.command.as_deref(), Some("memory_show"));
+    assert_ne!(response.command.as_deref(), Some("unknown_command"));
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

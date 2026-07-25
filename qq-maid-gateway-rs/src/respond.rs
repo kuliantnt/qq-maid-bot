@@ -449,6 +449,10 @@ pub(crate) fn normalized_group_inbound_with_prefix(
     );
     let mut inbound = platform::qq_official::inbound_from_group(message);
     inbound.text = content.clone();
+    // Core 只消费平台无关的寻址事实。QQ 结构化 @ 已由 adapter 标记，Active 模式
+    // 的配置唤醒词在归一化边界补充，不能让 Core 理解 GROUP_ACTIVE_KEYWORDS。
+    inbound.mentioned_bot |=
+        crate::gateway::contains_active_keyword(&message.content, active_keywords);
 
     // 有序内容块存在时 Core 会优先使用 input_parts。寻址 mention 只改写正文文本块，
     // 因此仅同步首个正文文本块，媒体块及其相对顺序、状态和元数据保持原样。
@@ -926,6 +930,41 @@ mod tests {
             missing_member.scope_key(),
             "platform:qq_official:account:-:group:g1"
         );
+    }
+
+    #[test]
+    fn qq_group_mapping_marks_structured_at_and_active_keyword_as_addressed() {
+        let keywords = vec!["召唤词".to_owned()];
+
+        let structured = normalized_group_inbound_with_prefix(
+            &group_message("/unknown", Some("member1")),
+            &keywords,
+            CommandPrefix::default(),
+        );
+        let structured_request =
+            platform::to_core_request(&structured, structured.text.clone()).unwrap();
+        assert!(structured_request.addressed_to_bot);
+
+        let mut keyword_message = group_message("召唤词 /unknown", Some("member1"));
+        keyword_message.event_type = GroupEventType::GroupMessage;
+        let keyword = normalized_group_inbound_with_prefix(
+            &keyword_message,
+            &keywords,
+            CommandPrefix::default(),
+        );
+        let keyword_request = platform::to_core_request(&keyword, keyword.text.clone()).unwrap();
+        assert_eq!(keyword_request.text, "/unknown");
+        assert!(keyword_request.addressed_to_bot);
+
+        let mut direct_message = group_message("/unknown", Some("member1"));
+        direct_message.event_type = GroupEventType::GroupMessage;
+        let direct = normalized_group_inbound_with_prefix(
+            &direct_message,
+            &keywords,
+            CommandPrefix::default(),
+        );
+        let direct_request = platform::to_core_request(&direct, direct.text.clone()).unwrap();
+        assert!(!direct_request.addressed_to_bot);
     }
 
     #[test]

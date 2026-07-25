@@ -60,6 +60,7 @@ pub(crate) fn to_core_request(
             identity_source: inbound.actor.source,
         },
         mentions: inbound.mentions.clone(),
+        addressed_to_bot: inbound.mentioned_bot,
         conversation,
     })
 }
