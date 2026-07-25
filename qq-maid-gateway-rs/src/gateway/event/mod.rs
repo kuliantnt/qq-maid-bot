@@ -253,6 +253,9 @@ struct RawMention {
     /// 部分 QQ 全量群事件仍带有该兼容字段；稳定 target_id 存在时由 Gateway 优先校验 ID。
     #[serde(default)]
     is_you: Option<bool>,
+    /// `all` 表示 @全体成员。QQ 可能同时下发 `is_you=true`，但这不代表单独 @ 当前机器人。
+    #[serde(default)]
+    scope: Option<String>,
     /// QQ 全量群事件可能同时标记被提及者是否为机器人；仅用于约束兼容 is_you 证据。
     #[serde(default)]
     bot: Option<bool>,
@@ -431,22 +434,33 @@ fn resolve_group_member_role(
 }
 
 fn raw_group_mention(mention: &RawMention) -> GroupMention {
+    let is_everyone = mention
+        .scope
+        .as_deref()
+        .is_some_and(|scope| scope.trim().eq_ignore_ascii_case("all"));
     GroupMention {
         // 没有稳定 ID 时暂存协议兼容标记；明确标记为普通成员时不接受 is_you，避免
-        // 把普通成员误认为当前机器人。bot 缺失时保留旧 QQ 事件兼容行为。
-        is_current_bot: mention.is_you.unwrap_or(false) && mention.bot != Some(false),
+        // 把普通成员误认为当前机器人。@全体成员即使带 is_you=true 也不得触发机器人。
+        // bot 缺失时保留旧 QQ 事件兼容行为。
+        is_current_bot: !is_everyone
+            && mention.is_you.unwrap_or(false)
+            && mention.bot != Some(false),
         member_role: mention
             .member_role
             .as_deref()
             .map(GroupMemberRole::from_raw),
         // 群场景优先 member openid，其次 user openid / openid / id；
-        // 都缺失时返回 None，普通群消息无法确认该 mention 指向当前机器人。
-        target_id: first_non_empty([
-            mention.member_openid.as_deref(),
-            mention.user_openid.as_deref(),
-            mention.openid.as_deref(),
-            mention.mention_id.as_deref(),
-        ]),
+        // @全体成员不绑定单个身份，必须丢弃可能伴随下发的兼容 ID，避免后续误判。
+        target_id: if is_everyone {
+            None
+        } else {
+            first_non_empty([
+                mention.member_openid.as_deref(),
+                mention.user_openid.as_deref(),
+                mention.openid.as_deref(),
+                mention.mention_id.as_deref(),
+            ])
+        },
     }
 }
 
