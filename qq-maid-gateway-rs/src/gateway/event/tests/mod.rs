@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::json;
+use std::sync::Arc;
 
 mod media;
 mod quote_boundary;
@@ -285,9 +286,9 @@ fn parses_group_message_structured_mentions() {
             "author": {"member_openid": "member-2", "member_role": "owner"},
             "content": " /help ",
             "mentions": [
-                {"id": "owner-id", "is_you": false, "member_role": "owner"},
-                {"id": "appid", "is_you": true, "member_role": "admin"},
-                {"user_openid": "user-openid", "is_you": false, "member_role": "member"},
+                {"id": "owner-id", "member_role": "owner"},
+                {"id": "appid", "is_you": true, "bot": true, "member_role": "admin"},
+                {"user_openid": "user-openid", "member_role": "member"},
                 {"member_openid": "member-openid", "member_role": "future-role"}
             ]
         }),
@@ -301,27 +302,138 @@ fn parses_group_message_structured_mentions() {
         message.mentions,
         vec![
             GroupMention {
-                is_you: false,
+                is_current_bot: false,
                 member_role: Some(GroupMemberRole::Owner),
                 target_id: Some("owner-id".to_owned())
             },
             GroupMention {
-                is_you: true,
+                is_current_bot: true,
                 member_role: Some(GroupMemberRole::Admin),
                 target_id: Some("appid".to_owned())
             },
             GroupMention {
-                is_you: false,
+                is_current_bot: false,
                 member_role: Some(GroupMemberRole::Member),
                 target_id: Some("user-openid".to_owned())
             },
             GroupMention {
-                is_you: false,
+                is_current_bot: false,
                 member_role: Some(GroupMemberRole::Unknown),
                 target_id: Some("member-openid".to_owned())
             }
         ]
     );
+}
+
+#[test]
+fn normalizes_full_group_bot_mention_without_touching_plain_members() {
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+        id: None,
+        d: json!({
+            "id": "msg-full-group-mention",
+            "group_openid": "group-1",
+            "author": {"member_openid": "member-1"},
+            "content": "[@张三](mqqapi://markdown/mention?at_type=1&at_tinyid=member-1) 帮我问一下 [@汐雨](mqqapi://markdown/mention?at_type=1&at_tinyid=bot-openid) 原始数据",
+            "mentions": [
+                {"is_you": false, "member_openid": "member-1", "username": "张三"},
+                {"is_you": true, "bot": true, "member_openid": "bot-openid", "username": "汐雨"}
+            ]
+        }),
+    };
+
+    let mut message = parse_group_message(&envelope).unwrap().unwrap();
+    assert!(message.content.contains("mqqapi://markdown/mention"));
+    crate::gateway::group_filter::normalize_current_bot_mentions(
+        &mut message,
+        // 模拟 READY 未学习 member_openid：QQ 的结构化当前机器人标记仍是有效证据。
+        &Arc::new(crate::gateway::bot_identity::BotIdentity::new(
+            "app-id",
+            &[],
+        )),
+    );
+
+    assert_eq!(
+        message.content,
+        "[@张三](mqqapi://markdown/mention?at_type=1&at_tinyid=member-1) 帮我问一下 原始数据"
+    );
+    assert_eq!(
+        message.input_parts[0].text_content(),
+        Some("[@张三](mqqapi://markdown/mention?at_type=1&at_tinyid=member-1) 帮我问一下 原始数据")
+    );
+    assert!(
+        !message
+            .content
+            .contains("mqqapi://markdown/mention?at_type=1&at_tinyid=bot-openid")
+    );
+    assert!(!message.mentions[0].is_current_bot);
+    assert!(message.mentions[1].is_current_bot);
+
+    let inbound = crate::respond::normalized_group_inbound(&message, &[]);
+    assert_eq!(
+        inbound.text,
+        "[@张三](mqqapi://markdown/mention?at_type=1&at_tinyid=member-1) 帮我问一下 原始数据"
+    );
+    assert_eq!(
+        inbound.input_parts[0].text_content(),
+        Some(inbound.text.as_str())
+    );
+    assert_eq!(inbound.text.matches("原始数据").count(), 1);
+    assert!(!inbound.text.contains("at_tinyid=bot-openid"));
+}
+
+#[test]
+fn does_not_accept_is_you_for_a_mention_explicitly_marked_as_member() {
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+        id: None,
+        d: json!({
+            "id": "msg-member-mark",
+            "group_openid": "group-1",
+            "author": {"member_openid": "member-1"},
+            "content": "hello",
+            "mentions": [{
+                "is_you": true,
+                "bot": false,
+                "member_openid": "member-2"
+            }]
+        }),
+    };
+
+    let message = parse_group_message(&envelope).unwrap().unwrap();
+
+    assert!(!message.mentions[0].is_current_bot);
+}
+
+#[test]
+fn group_at_message_keeps_qq_cleaned_body() {
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_AT_MESSAGE_CREATE.to_owned()),
+        id: None,
+        d: json!({
+            "id": "msg-group-at-clean",
+            "group_openid": "group-1",
+            "content": "  原始数据",
+            "mentions": []
+        }),
+    };
+
+    let mut message = parse_group_message(&envelope).unwrap().unwrap();
+    crate::gateway::group_filter::normalize_current_bot_mentions(
+        &mut message,
+        &Arc::new(crate::gateway::bot_identity::BotIdentity::new(
+            "app-id",
+            &[],
+        )),
+    );
+    assert_eq!(message.content, "原始数据");
+    assert_eq!(message.input_parts[0].text_content(), Some("原始数据"));
 }
 
 #[test]

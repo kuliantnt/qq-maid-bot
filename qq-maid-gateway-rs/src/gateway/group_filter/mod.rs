@@ -17,6 +17,10 @@ use std::{
 use qq_maid_common::command_prefix::CommandPrefix;
 use tracing::debug;
 
+mod mention_normalizer;
+
+pub(crate) use mention_normalizer::normalize_current_bot_mentions;
+
 use super::{
     BotOutboundCache,
     bot_identity::SharedBotIdentity,
@@ -93,6 +97,7 @@ pub(crate) fn should_ignore_group_message(
     }
     if !mentions_current_bot(message)
         && respond_content.trim().is_empty()
+        && message.content.trim().is_empty()
         && !is_reply_to_bot(message, bot_outbound_cache)
     {
         debug!(
@@ -107,8 +112,8 @@ pub(crate) fn should_ignore_group_message(
 
 /// 按群消息模式策略判断是否应处理该消息。
 ///
-/// QQ 官方 at 事件直接视为提到当前机器人；普通群消息优先由 READY 阶段学习的稳定身份
-/// 字段匹配，`is_you` 仅用于没有稳定身份字段的旧事件兼容。
+/// QQ 官方 at 事件直接视为提到当前机器人；普通群消息保留 QQ 结构化的当前机器人标记，
+/// 并用 mention 的稳定 target_id 与 READY 阶段学习的机器人身份集合补充确认。
 /// 后续只按群消息模式决定是否进入 Core：
 /// - Off：不处理；
 /// - 其他模式：先放行斜杠命令候选，再应用各自的唤醒规则；
@@ -173,33 +178,12 @@ pub(crate) fn should_process_group_message_with_prefix(
     }
 }
 
-/// 在普通群消息进入过滤、命令和 Core adapter 前统一解析“是否 @ 当前机器人”。
-/// 稳定 ID 的判断优先级高于旧 `is_you`：即便旧字段为 true，只要事件同时给出
-/// 不匹配的稳定 ID，也不能把任意 mention 误判为当前机器人。
-pub(crate) fn normalize_current_bot_mentions(
-    message: &mut GroupMessage,
-    bot_identity: &SharedBotIdentity,
-) {
-    if message.event_type == GroupEventType::GroupAtMessage {
-        return;
-    }
-    for mention in &mut message.mentions {
-        if let Some(target_id) = mention.target_id.as_deref() {
-            mention.is_you = bot_identity.contains(target_id);
-        } else if mention.is_you {
-            // 旧事件没有稳定 mention ID 时才接受 is_you；不记录用户或群完整 ID。
-            debug!(
-                event_type = "group_message",
-                mention_identity_source = "legacy_is_you",
-                "QQ group mention used legacy is_you fallback"
-            );
-        }
-    }
-}
-
 pub(crate) fn mentions_current_bot(message: &GroupMessage) -> bool {
     message.event_type == GroupEventType::GroupAtMessage
-        || message.mentions.iter().any(|mention| mention.is_you)
+        || message
+            .mentions
+            .iter()
+            .any(|mention| mention.is_current_bot)
 }
 
 /// `active` 模式只按显式提示词触发，避免普通群聊闲谈被机器人自动插话。
@@ -281,7 +265,7 @@ mod tests {
 
     fn official_bot_mention() -> GroupMention {
         GroupMention {
-            is_you: true,
+            is_current_bot: true,
             member_role: None,
             target_id: None,
         }
@@ -464,7 +448,7 @@ mod tests {
         let active_keywords = vec!["小女仆".to_owned()];
         let mut message = group_message("@其他成员 /help", GroupEventType::GroupMessage);
         message.mentions = vec![GroupMention {
-            is_you: false,
+            is_current_bot: false,
             member_role: None,
             target_id: None,
         }];
@@ -518,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_bot_mention_id_no_longer_triggers_without_is_you() {
+    fn configured_bot_mention_id_no_longer_triggers_without_is_current_bot() {
         let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
         let active_keywords = vec!["小女仆".to_owned()];
         let message = group_message("@机器人 实在是睡不着", GroupEventType::GroupMessage);
@@ -533,13 +517,13 @@ mod tests {
                     &bot_identity(),
                     &cache
                 ),
-                "{mode:?} should ignore configured mention ids without official is_you"
+                "{mode:?} should ignore configured mention ids without official is_current_bot"
             );
         }
     }
 
     #[test]
-    fn content_mentions_do_not_trigger_without_official_is_you() {
+    fn content_mentions_do_not_trigger_without_official_is_current_bot() {
         let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
         let active_keywords = vec!["小女仆".to_owned()];
 
@@ -573,7 +557,7 @@ mod tests {
         let active_keywords = vec!["小女仆".to_owned()];
         let mut message = group_message("@其他成员 hello", GroupEventType::GroupAtMessage);
         message.mentions = vec![GroupMention {
-            is_you: false,
+            is_current_bot: false,
             member_role: None,
             target_id: None,
         }];
@@ -728,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn mention_mode_accepts_structured_bot_mention_only_for_official_is_you() {
+    fn mention_mode_accepts_structured_bot_mention_only_for_official_is_current_bot() {
         let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
         let mut message = group_message("hello", GroupEventType::GroupMessage);
         message.mentions = vec![official_bot_mention()];
@@ -743,7 +727,7 @@ mod tests {
         ));
 
         message.mentions = vec![GroupMention {
-            is_you: false,
+            is_current_bot: false,
             member_role: None,
             target_id: None,
         }];
@@ -758,11 +742,11 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_group_mentions_by_stable_bot_identity_before_legacy_is_you() {
+    fn normalizes_group_mentions_from_event_or_stable_bot_identity() {
         let identity = Arc::new(BotIdentity::new("appid", &["bot-openid".to_owned()]));
         let mut stable_match = group_message("hello", GroupEventType::GroupMessage);
         stable_match.mentions = vec![GroupMention {
-            is_you: false,
+            is_current_bot: false,
             member_role: None,
             target_id: Some("bot-openid".to_owned()),
         }];
@@ -771,30 +755,119 @@ mod tests {
 
         let mut stable_mismatch = group_message("hello", GroupEventType::GroupMessage);
         stable_mismatch.mentions = vec![GroupMention {
-            is_you: true,
+            is_current_bot: true,
             member_role: None,
             target_id: Some("another-member".to_owned()),
         }];
         normalize_current_bot_mentions(&mut stable_mismatch, &identity);
-        assert!(!mentions_current_bot(&stable_mismatch));
+        assert!(mentions_current_bot(&stable_mismatch));
 
         let mut legacy = group_message("hello", GroupEventType::GroupMessage);
         legacy.mentions = vec![GroupMention {
-            is_you: true,
+            is_current_bot: true,
             member_role: None,
             target_id: None,
         }];
         normalize_current_bot_mentions(&mut legacy, &identity);
         assert!(mentions_current_bot(&legacy));
 
+        let mut at_with_matching_target = group_message("hello", GroupEventType::GroupAtMessage);
+        at_with_matching_target.mentions = vec![GroupMention {
+            is_current_bot: false,
+            member_role: None,
+            target_id: Some("bot-openid".to_owned()),
+        }];
+        normalize_current_bot_mentions(&mut at_with_matching_target, &identity);
+        assert!(at_with_matching_target.mentions[0].is_current_bot);
+        assert!(mentions_current_bot(&at_with_matching_target));
+
         let mut at_event = group_message("hello", GroupEventType::GroupAtMessage);
         at_event.mentions = vec![GroupMention {
-            is_you: false,
+            is_current_bot: false,
             member_role: None,
             target_id: Some("another-member".to_owned()),
         }];
         normalize_current_bot_mentions(&mut at_event, &identity);
         assert!(mentions_current_bot(&at_event));
+    }
+
+    #[test]
+    fn active_keyword_survives_empty_normalized_body() {
+        let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+        let active_keywords = vec!["小女仆".to_owned()];
+        let message = group_message("小女仆", GroupEventType::GroupMessage);
+
+        // 唤醒词会被正文归一化剥掉，但 raw content 仍非空，不能在空内容过滤阶段丢弃。
+        assert!(!should_ignore_group_message(
+            &message,
+            "",
+            "masked-group",
+            &cache
+        ));
+        assert!(should_process_group_message(
+            GroupMessageMode::Active,
+            &active_keywords,
+            &message,
+            "",
+            &bot_identity(),
+            &cache
+        ));
+
+        let mut other_bot = group_message("你好", GroupEventType::GroupMessage);
+        other_bot.mentions = vec![GroupMention {
+            is_current_bot: false,
+            member_role: None,
+            target_id: Some("other-bot".to_owned()),
+        }];
+        normalize_current_bot_mentions(&mut other_bot, &bot_identity());
+        assert!(!should_process_group_message(
+            GroupMessageMode::Active,
+            &active_keywords,
+            &other_bot,
+            &other_bot.content,
+            &bot_identity(),
+            &cache
+        ));
+    }
+
+    #[test]
+    fn markdown_mention_cleanup_preserves_plain_and_other_member_content() {
+        let identity = Arc::new(BotIdentity::new("app", &[]));
+        let mut plain = group_message("原始数据", GroupEventType::GroupMessage);
+        normalize_current_bot_mentions(&mut plain, &identity);
+        assert_eq!(plain.content, "原始数据");
+        assert_eq!(plain.input_parts[0].text_content(), Some("原始数据"));
+
+        let mut repeated = group_message(
+            "[@张三](mqqapi://markdown/mention?at_type=1&at_tinyid=other) [@汐雨](mqqapi://markdown/mention?at_type=1&at_tinyid=app) [@汐雨](mqqapi://markdown/mention?at_type=1&at_tinyid=app) 原始数据",
+            GroupEventType::GroupMessage,
+        );
+        repeated.mentions = vec![
+            GroupMention {
+                is_current_bot: false,
+                member_role: None,
+                target_id: Some("other".to_owned()),
+            },
+            GroupMention {
+                is_current_bot: false,
+                member_role: None,
+                target_id: Some("app".to_owned()),
+            },
+            GroupMention {
+                is_current_bot: false,
+                member_role: None,
+                target_id: Some("app".to_owned()),
+            },
+        ];
+        normalize_current_bot_mentions(&mut repeated, &identity);
+        assert_eq!(
+            repeated.content,
+            "[@张三](mqqapi://markdown/mention?at_type=1&at_tinyid=other) 原始数据"
+        );
+        assert_eq!(
+            repeated.input_parts[0].text_content(),
+            Some(repeated.content.as_str())
+        );
     }
 
     #[test]

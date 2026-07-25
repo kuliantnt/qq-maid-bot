@@ -644,7 +644,7 @@ fn can_strip_encoded_mention(
     target_id: &str,
 ) -> bool {
     if let Some(mention) = message.mentions.get(mention_index) {
-        return mention.is_you
+        return mention.is_current_bot
             && mention
                 .target_id
                 .as_deref()
@@ -660,7 +660,7 @@ fn can_strip_display_mention(
     display_name: &str,
 ) -> bool {
     if let Some(mention) = message.mentions.get(mention_index) {
-        return mention.is_you;
+        return mention.is_current_bot;
     }
     // 缺少结构化身份时只兼容已配置的机器人展示名，不能把任意 @群成员当作寻址前缀。
     active_keywords.iter().any(|keyword| {
@@ -671,7 +671,7 @@ fn can_strip_display_mention(
 
 fn can_strip_encoded_mention_suffix(message: &GroupMessage, target_id: &str) -> bool {
     if let Some(mention) = message.mentions.last() {
-        return mention.is_you
+        return mention.is_current_bot
             && mention
                 .target_id
                 .as_deref()
@@ -686,7 +686,7 @@ fn can_strip_display_mention_suffix(
     display_name: &str,
 ) -> bool {
     if let Some(mention) = message.mentions.last() {
-        return mention.is_you;
+        return mention.is_current_bot;
     }
     active_keywords.iter().any(|keyword| {
         let keyword = keyword.trim();
@@ -1098,7 +1098,7 @@ mod tests {
                 let mut message = group_message(&input, Some("member1"));
                 message.event_type = GroupEventType::GroupMessage;
                 message.mentions = vec![GroupMention {
-                    is_you: true,
+                    is_current_bot: true,
                     member_role: None,
                     target_id: suffix.contains("bot-id").then(|| "bot-id".to_owned()),
                 }];
@@ -1188,7 +1188,7 @@ mod tests {
         let mut message = media_message(
             "@机器人 确认",
             GroupMention {
-                is_you: true,
+                is_current_bot: true,
                 member_role: None,
                 target_id: None,
             },
@@ -1232,7 +1232,7 @@ mod tests {
             let message = media_message(
                 input,
                 GroupMention {
-                    is_you: true,
+                    is_current_bot: true,
                     member_role: None,
                     target_id: Some("bot-id".to_owned()),
                 },
@@ -1275,7 +1275,7 @@ mod tests {
             let message = media_message(
                 input,
                 GroupMention {
-                    is_you: false,
+                    is_current_bot: false,
                     member_role: None,
                     target_id: Some("member-2".to_owned()),
                 },
@@ -1297,7 +1297,7 @@ mod tests {
         let mut message = media_message(
             "@其他成员 小女仆帮我看图",
             GroupMention {
-                is_you: false,
+                is_current_bot: false,
                 member_role: None,
                 target_id: None,
             },
@@ -1318,13 +1318,13 @@ mod tests {
         let mut message = media_message(
             "<@member-2> <@bot-id> 确认",
             GroupMention {
-                is_you: false,
+                is_current_bot: false,
                 member_role: None,
                 target_id: Some("member-2".to_owned()),
             },
         );
         message.mentions.push(GroupMention {
-            is_you: true,
+            is_current_bot: true,
             member_role: None,
             target_id: Some("bot-id".to_owned()),
         });
@@ -1343,7 +1343,7 @@ mod tests {
         let message = media_message(
             "<@bot-id>",
             GroupMention {
-                is_you: true,
+                is_current_bot: true,
                 member_role: None,
                 target_id: Some("bot-id".to_owned()),
             },

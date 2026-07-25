@@ -87,7 +87,8 @@ pub struct GroupMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupMention {
-    pub is_you: bool,
+    /// 是否已由 Gateway 判定为当前机器人；不是 QQ raw event 字段。
+    pub is_current_bot: bool,
     pub member_role: Option<GroupMemberRole>,
     /// 被提及者的平台结构化 ID（群场景优先 member openid，其次 user openid / id）。
     /// 仅当平台事件未提供任何稳定 ID 时为 None。
@@ -249,8 +250,12 @@ struct RawAuthor {
 
 #[derive(Debug, Deserialize)]
 struct RawMention {
+    /// 部分 QQ 全量群事件仍带有该兼容字段；稳定 target_id 存在时由 Gateway 优先校验 ID。
     #[serde(default)]
     is_you: Option<bool>,
+    /// QQ 全量群事件可能同时标记被提及者是否为机器人；仅用于约束兼容 is_you 证据。
+    #[serde(default)]
+    bot: Option<bool>,
     #[serde(default)]
     member_role: Option<String>,
     // QQ mention 对象可能以下任一字段携带被提及者稳定 ID。
@@ -365,8 +370,7 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
         raw.member_openid.as_deref(),
         raw.user_openid.as_deref(),
     );
-    let member_role =
-        resolve_group_member_role(raw.member_role.as_deref(), author.as_ref(), &raw.mentions);
+    let member_role = resolve_group_member_role(raw.member_role.as_deref(), author.as_ref());
     let author_is_bot = raw.bot.or(raw.is_bot).unwrap_or(false)
         || author
             .as_ref()
@@ -418,32 +422,25 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
 fn resolve_group_member_role(
     top_member_role: Option<&str>,
     author: Option<&RawAuthor>,
-    mentions: &[RawMention],
 ) -> Option<GroupMemberRole> {
     first_non_empty([
         top_member_role,
         author.and_then(|author| author.member_role.as_deref()),
-        mentions.iter().find_map(|mention| {
-            mention
-                .is_you
-                .unwrap_or(false)
-                .then_some(mention.member_role.as_deref())
-                .flatten()
-        }),
     ])
     .map(|value| GroupMemberRole::from_raw(&value))
 }
 
 fn raw_group_mention(mention: &RawMention) -> GroupMention {
     GroupMention {
-        // `is_you` 仅作为没有稳定 ID 的旧事件兼容；群处理入口会优先用 target_id 匹配 READY 身份。
-        is_you: mention.is_you.unwrap_or(false),
+        // 没有稳定 ID 时暂存协议兼容标记；明确标记为普通成员时不接受 is_you，避免
+        // 把普通成员误认为当前机器人。bot 缺失时保留旧 QQ 事件兼容行为。
+        is_current_bot: mention.is_you.unwrap_or(false) && mention.bot != Some(false),
         member_role: mention
             .member_role
             .as_deref()
             .map(GroupMemberRole::from_raw),
         // 群场景优先 member openid，其次 user openid / openid / id；
-        // 都缺失时返回 None，上游才可使用 is_you 兼容旧事件。
+        // 都缺失时返回 None，普通群消息无法确认该 mention 指向当前机器人。
         target_id: first_non_empty([
             mention.member_openid.as_deref(),
             mention.user_openid.as_deref(),

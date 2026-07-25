@@ -55,9 +55,9 @@ fn group_at_reply_markdown_outbound_mentions_sender() {
 fn structured_group_mention_markdown_reply_mentions_sender_like_at_event() {
     let mut message = group_message("hello", GroupEventType::GroupMessage);
     message.mentions = vec![crate::gateway::event::GroupMention {
-        is_you: true,
+        is_current_bot: true,
         member_role: None,
-        target_id: None,
+        target_id: Some("app".to_owned()),
     }];
     let capability = qq_group_capability();
     let outbound = OutboundMessage::Markdown {
@@ -170,6 +170,138 @@ async fn plain_group_message_ignored_by_mode_policy_is_not_ref_indexed() {
         quoted_context.fallback_reason.as_deref(),
         Some("ref_index_miss")
     );
+}
+
+struct GroupHandlerHarness {
+    config: AppConfig,
+    respond: RespondClient,
+    api: QqApiClient,
+    dedupe: crate::gateway::dedupe::MessageDedupe,
+    outbound_cache: Arc<Mutex<BotOutboundCache>>,
+    cooldowns: Arc<Mutex<GroupCooldowns>>,
+    identity: crate::gateway::bot_identity::SharedBotIdentity,
+    runtime: GatewayRuntimeStatus,
+    ref_index: crate::gateway::ref_index::SharedRefIndex,
+    respond_calls: Arc<AtomicUsize>,
+}
+
+impl GroupHandlerHarness {
+    fn new(mode: GroupMessageMode) -> Self {
+        let mut config = test_config();
+        config.group_message_mode = mode;
+        let respond_calls = Arc::new(AtomicUsize::new(0));
+        Self {
+            config,
+            respond: respond_client_with_counter(respond_calls.clone()),
+            api: api_client(),
+            dedupe: crate::gateway::dedupe::MessageDedupe::new(Duration::from_secs(60)),
+            outbound_cache: Arc::new(Mutex::new(BotOutboundCache::default())),
+            cooldowns: Arc::new(Mutex::new(GroupCooldowns::default())),
+            identity: bot_identity(),
+            runtime: GatewayRuntimeStatus::new(),
+            ref_index: crate::gateway::ref_index::ref_index(),
+            respond_calls,
+        }
+    }
+
+    async fn handle(&self, message: GroupMessage) -> anyhow::Result<()> {
+        handle_group_message_for_test(
+            message,
+            &self.config,
+            &self.respond,
+            &self.api,
+            &self.dedupe,
+            &self.outbound_cache,
+            &self.cooldowns,
+            &self.identity,
+            &self.runtime,
+            &self.ref_index,
+        )
+        .await
+    }
+}
+
+#[tokio::test]
+async fn raw_like_group_mention_uses_target_id_and_rejects_other_bot() {
+    let harness = GroupHandlerHarness::new(GroupMessageMode::Mention);
+
+    // 贴近 QQ raw event：解析层保留平台结构化身份，handler 根据 target_id 和官方标记归一化。
+    let mut current_bot = group_message("请帮我看看", GroupEventType::GroupMessage);
+    current_bot.message_id = "raw-like-current-bot".to_owned();
+    current_bot.mentions = vec![crate::gateway::event::GroupMention {
+        is_current_bot: false,
+        member_role: None,
+        target_id: Some("app".to_owned()),
+    }];
+    assert_group_send_error(harness.handle(current_bot).await.unwrap_err());
+    assert_eq!(harness.respond_calls.load(Ordering::SeqCst), 1);
+
+    let mut other_bot = group_message("请帮我看看", GroupEventType::GroupMessage);
+    other_bot.message_id = "raw-like-other-bot".to_owned();
+    other_bot.mentions = vec![crate::gateway::event::GroupMention {
+        is_current_bot: false,
+        member_role: None,
+        target_id: Some("other-bot".to_owned()),
+    }];
+    harness.handle(other_bot).await.unwrap();
+
+    let mut ordinary = group_message("请帮我看看", GroupEventType::GroupMessage);
+    ordinary.message_id = "raw-like-ordinary".to_owned();
+    harness.handle(ordinary).await.unwrap();
+
+    assert_eq!(harness.respond_calls.load(Ordering::SeqCst), 1);
+
+    let unresolved_harness = GroupHandlerHarness::new(GroupMessageMode::Mention);
+    let mut official_mark = group_message(
+        "[@汐雨](mqqapi://markdown/mention?at_type=1&at_tinyid=unresolved-target) 原始数据",
+        GroupEventType::GroupMessage,
+    );
+    official_mark.message_id = "raw-like-official-mark".to_owned();
+    official_mark.mentions = vec![crate::gateway::event::GroupMention {
+        is_current_bot: true,
+        member_role: None,
+        target_id: Some("unresolved-target".to_owned()),
+    }];
+    assert_group_send_error(unresolved_harness.handle(official_mark).await.unwrap_err());
+    assert_eq!(unresolved_harness.respond_calls.load(Ordering::SeqCst), 1);
+
+    // QQ 专门的 GROUP_AT_MESSAGE_CREATE 事件本身就是当前机器人被 @，不能因 mention
+    // 的 target_id 缺失或暂时无法匹配而丢弃整条事件。
+    let at_harness = GroupHandlerHarness::new(GroupMessageMode::Mention);
+    let mut at_event = group_message("请帮我看看", GroupEventType::GroupAtMessage);
+    at_event.message_id = "raw-like-at-event".to_owned();
+    at_event.mentions = vec![crate::gateway::event::GroupMention {
+        is_current_bot: false,
+        member_role: None,
+        target_id: Some("unresolved-target".to_owned()),
+    }];
+    assert_group_send_error(at_harness.handle(at_event).await.unwrap_err());
+    assert_eq!(at_harness.respond_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn active_wake_word_survives_normalization_and_dedupes_combined_trigger() {
+    let harness = GroupHandlerHarness::new(GroupMessageMode::Active);
+
+    // 唤醒词被剥离后正文仍可能为空，消息必须先通过空内容过滤，再由 active 策略命中。
+    let mut wake_only = group_message("小女仆", GroupEventType::GroupMessage);
+    wake_only.message_id = "wake-only".to_owned();
+    assert_group_send_error(harness.handle(wake_only).await.unwrap_err());
+    assert_eq!(harness.respond_calls.load(Ordering::SeqCst), 1);
+
+    // @ 与唤醒词同时存在时仍只走一次 handler；重复投递由复合去重键拦截。
+    let combined_harness = GroupHandlerHarness::new(GroupMessageMode::Active);
+    let mut combined = group_message("小女仆 请继续", GroupEventType::GroupMessage);
+    combined.message_id = "wake-and-mention".to_owned();
+    combined.mentions = vec![crate::gateway::event::GroupMention {
+        is_current_bot: false,
+        member_role: None,
+        target_id: Some("app".to_owned()),
+    }];
+    assert_group_send_error(combined_harness.handle(combined.clone()).await.unwrap_err());
+    combined_harness.handle(combined).await.unwrap();
+
+    assert_eq!(combined_harness.respond_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -304,12 +436,15 @@ async fn slash_candidates_reach_core_and_explicit_suppression_sends_nothing() {
     .await
     .unwrap();
 
-    let mut mentioned = group_message("@小女仆 /help", GroupEventType::GroupMessage);
+    let mut mentioned = group_message(
+        "[@汐雨](mqqapi://markdown/mention?at_type=1&at_tinyid=app) /help",
+        GroupEventType::GroupMessage,
+    );
     mentioned.message_id = "group-mentioned-command".to_owned();
     mentioned.mentions = vec![crate::gateway::event::GroupMention {
-        is_you: true,
+        is_current_bot: true,
         member_role: None,
-        target_id: None,
+        target_id: Some("app".to_owned()),
     }];
     handle_group_message_for_test(
         mentioned,
@@ -368,9 +503,9 @@ async fn normal_chat_mention_during_cooldown_skips_core_and_sends_hint() {
     let mut first = group_message("总结一下", GroupEventType::GroupMessage);
     first.message_id = "group-mention-1".to_owned();
     first.mentions = vec![crate::gateway::event::GroupMention {
-        is_you: true,
+        is_current_bot: true,
         member_role: None,
-        target_id: None,
+        target_id: Some("app".to_owned()),
     }];
 
     handle_group_message_for_test(
@@ -392,9 +527,9 @@ async fn normal_chat_mention_during_cooldown_skips_core_and_sends_hint() {
     let mut second = group_message("再总结一下", GroupEventType::GroupMessage);
     second.message_id = "group-mention-2".to_owned();
     second.mentions = vec![crate::gateway::event::GroupMention {
-        is_you: true,
+        is_current_bot: true,
         member_role: None,
-        target_id: None,
+        target_id: Some("app".to_owned()),
     }];
 
     handle_group_message_for_test(
@@ -438,9 +573,9 @@ async fn immediate_group_reply_bypasses_cooldown_without_sending_hint() {
     let mut first = group_message("@小女仆 先处理这一条", GroupEventType::GroupMessage);
     first.message_id = "group-immediate-1".to_owned();
     first.mentions = vec![crate::gateway::event::GroupMention {
-        is_you: true,
+        is_current_bot: true,
         member_role: None,
-        target_id: None,
+        target_id: Some("app".to_owned()),
     }];
     let first_err = handle_group_message_for_test(
         first,
@@ -461,9 +596,9 @@ async fn immediate_group_reply_bypasses_cooldown_without_sending_hint() {
     let mut second = group_message("@小女仆 确认", GroupEventType::GroupMessage);
     second.message_id = "group-immediate-2".to_owned();
     second.mentions = vec![crate::gateway::event::GroupMention {
-        is_you: true,
+        is_current_bot: true,
         member_role: None,
-        target_id: None,
+        target_id: Some("app".to_owned()),
     }];
     let second_err = handle_group_message_for_test(
         second,
@@ -513,9 +648,9 @@ async fn immediate_quoted_group_reply_bypasses_cooldown() {
     let mut first = group_message("@小女仆 先处理这一条", GroupEventType::GroupMessage);
     first.message_id = "group-quoted-immediate-1".to_owned();
     first.mentions = vec![crate::gateway::event::GroupMention {
-        is_you: true,
+        is_current_bot: true,
         member_role: None,
-        target_id: None,
+        target_id: Some("app".to_owned()),
     }];
     let first_err = handle_group_message_for_test(
         first,
