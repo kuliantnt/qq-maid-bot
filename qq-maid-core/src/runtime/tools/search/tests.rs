@@ -9,7 +9,7 @@ use std::{
 use async_trait::async_trait;
 
 use qq_maid_llm::{
-    tool::{DEFAULT_TOOL_OUTPUT_MAX_CHARS, ToolRegistry},
+    tool::{DEFAULT_TOOL_OUTPUT_MAX_CHARS, DEFAULT_TOOL_TIMEOUT, ToolRegistry},
     web_search::WebSearchExecutor,
 };
 
@@ -53,6 +53,65 @@ impl WebSearchExecutor for MockWebSearchExecutor {
     }
 }
 
+struct EmptyWebSearchExecutor;
+
+#[async_trait]
+impl WebSearchExecutor for EmptyWebSearchExecutor {
+    async fn query(&self, _req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
+        Ok(WebSearchOutcome {
+            answer: String::new(),
+            sources: Vec::new(),
+            provider: "tavily".to_owned(),
+            elapsed_ms: 12,
+        })
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "tavily"
+    }
+}
+
+struct FailingWebSearchExecutor;
+
+#[async_trait]
+impl WebSearchExecutor for FailingWebSearchExecutor {
+    async fn query(&self, _req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
+        Err(LlmError::new(
+            "tavily_auth_error",
+            "Tavily rejected the configured API key",
+            "tavily_http",
+        ))
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "tavily"
+    }
+}
+
+struct LargeWebSearchExecutor;
+
+#[async_trait]
+impl WebSearchExecutor for LargeWebSearchExecutor {
+    async fn query(&self, _req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
+        Ok(WebSearchOutcome {
+            answer: "昨日 AI 新闻重点。".repeat(220),
+            sources: (0..8)
+                .map(|index| WebSearchSource {
+                    title: format!("来源 {index} {}", "标题".repeat(80)),
+                    url: format!("https://example.com/news/{index}?query={}", "a".repeat(260)),
+                    snippet: "公开报道摘要。".repeat(180),
+                })
+                .collect(),
+            provider: "tavily".to_owned(),
+            elapsed_ms: 12,
+        })
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "tavily"
+    }
+}
+
 fn test_context() -> ToolContext {
     ToolContext {
         task_id: "task-1".to_owned(),
@@ -69,6 +128,8 @@ fn test_context() -> ToolContext {
             interaction_scope_id: "private:u1".to_owned(),
         },
         tool_call_id: None,
+        tool_round: None,
+        retry_of: None,
         execution_deadline: None,
     }
 }
@@ -106,8 +167,176 @@ async fn web_search_tool_reuses_query_executor() {
     assert_eq!(requests[0].time_range.as_deref(), Some("week"));
     assert_eq!(requests[0].model_override.as_deref(), Some("gpt-search"));
     assert_eq!(stream_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(output.value["ok"], true);
+    assert_eq!(output.value["result_count"], 1);
     assert_eq!(output.value["answer"], "answer: Rust 新闻");
     assert_eq!(output.value["sources"][0]["url"], "https://example.com");
+}
+
+#[tokio::test]
+async fn tavily_empty_outcome_is_completed_without_tool_execution_failure() {
+    let tool = WebSearchTool::new(Arc::new(EmptyWebSearchExecutor))
+        .with_backend_override(WebSearchBackend::Tavily);
+
+    let output = tool
+        .execute(
+            test_context(),
+            json!({
+                "query": "今日 AI 新闻",
+                "raw_question": "今日 AI 新闻",
+                "max_results": null,
+                "context_size": null,
+                "topic": null,
+                "time_range": null,
+                "research_targets": null,
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output.value["ok"], false);
+    assert_eq!(output.value["execution_succeeded"], true);
+    assert_eq!(output.value["backend"], "tavily");
+    assert_eq!(output.value["error"]["code"], "empty_result");
+    assert_eq!(
+        output.value["error"]["message"],
+        WEB_SEARCH_EMPTY_RESULT_MODEL_MESSAGE
+    );
+    assert_eq!(output.value["result_count"], 0);
+}
+
+#[tokio::test]
+async fn tavily_execution_failure_remains_retryable_tool_failure() {
+    let tool = WebSearchTool::new(Arc::new(FailingWebSearchExecutor))
+        .with_backend_override(WebSearchBackend::Tavily);
+    let mut context = test_context();
+    context.tool_call_id = Some("agent-call".to_owned());
+
+    let output = tool
+        .execute(
+            context,
+            json!({
+                "query": "今日 AI 新闻",
+                "raw_question": "今日 AI 新闻",
+                "max_results": null,
+                "context_size": null,
+                "topic": null,
+                "time_range": null,
+                "research_targets": null,
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output.value["ok"], false);
+    assert_eq!(output.value["execution_succeeded"], false);
+    assert_eq!(output.value["backend"], "tavily");
+    assert_eq!(output.value["error"]["code"], "tavily_auth_error");
+    assert_eq!(
+        output.value["error"]["message"],
+        "Tavily rejected the configured API key"
+    );
+    assert_eq!(output.value["error"]["stage"], "tavily_http");
+}
+
+#[tokio::test]
+async fn large_search_result_keeps_structured_evidence_through_tool_registry() {
+    const OUTPUT_MAX_CHARS: usize = 1_200;
+    let registry = ToolRegistry::new()
+        .with_limits(DEFAULT_TOOL_TIMEOUT, OUTPUT_MAX_CHARS)
+        .register(
+            WebSearchTool::new(Arc::new(LargeWebSearchExecutor))
+                .with_backend_override(WebSearchBackend::Tavily)
+                .with_output_max_chars(OUTPUT_MAX_CHARS),
+        )
+        .unwrap();
+    let mut context = test_context();
+    context.tool_call_id = Some("agent-call".to_owned());
+
+    let serialized = registry
+        .execute_json(
+            &context,
+            WEB_SEARCH_TOOL_NAME,
+            r#"{"query":"昨日 AI 新闻","raw_question":"昨日 AI 新闻"}"#,
+        )
+        .await
+        .unwrap();
+    let output: Value = serde_json::from_str(&serialized).unwrap();
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(output["execution_succeeded"], true);
+    assert_eq!(output["result_count"], 8);
+    assert_ne!(output["answer"], "");
+    assert!(!output["sources"].as_array().unwrap().is_empty());
+    assert_ne!(output["truncated"], true);
+    assert!(serialized.chars().count() <= OUTPUT_MAX_CHARS);
+
+    let rendered = crate::runtime::respond::search_flow::format_web_search_tool_reply(&output);
+    assert!(rendered.contains("昨日 AI 新闻重点"));
+    assert!(!rendered.contains("没查到明确结果"));
+}
+
+#[test]
+fn compact_search_result_drops_oversized_source_instead_of_truncating_url() {
+    const PREVIOUS_URL_MAX_CHARS: usize = 300;
+    const OUTPUT_MAX_CHARS: usize = 420;
+    let oversized_url = format!("https://example.com/{}", "a".repeat(PREVIOUS_URL_MAX_CHARS));
+    let output = web_search_tool_output(
+        &WebSearchOutcome {
+            answer: "搜索结果".repeat(100),
+            sources: vec![
+                WebSearchSource {
+                    title: "超长链接来源".to_owned(),
+                    url: oversized_url.clone(),
+                    snippet: "摘要".repeat(100),
+                },
+                WebSearchSource {
+                    title: "可保留来源".to_owned(),
+                    url: "https://example.com/valid".to_owned(),
+                    snippet: "有效摘要".to_owned(),
+                },
+            ],
+            provider: "mock-query".to_owned(),
+            elapsed_ms: 12,
+        },
+        "tavily",
+        OUTPUT_MAX_CHARS,
+    );
+
+    let urls = output["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|source| source["url"].as_str())
+        .collect::<Vec<_>>();
+    assert!(!urls.contains(&oversized_url.as_str()));
+    assert_eq!(urls, ["https://example.com/valid"]);
+    assert!(urls.iter().all(|url| !url.contains('…')));
+    assert!(serialized_value_chars(&output) <= OUTPUT_MAX_CHARS);
+}
+
+#[test]
+fn web_search_tool_empty_outcome_is_structured_failure_not_success_evidence() {
+    let output = web_search_tool_output(
+        &WebSearchOutcome {
+            answer: " \n ".to_owned(),
+            sources: Vec::new(),
+            provider: "mock-query".to_owned(),
+            elapsed_ms: 12,
+        },
+        "tavily",
+        DEFAULT_TOOL_OUTPUT_MAX_CHARS,
+    );
+
+    assert_eq!(output["ok"], false);
+    assert_eq!(output["execution_succeeded"], true);
+    assert_eq!(output["result_count"], 0);
+    assert_eq!(output["error"]["code"], "empty_result");
+    assert_eq!(output["error"]["stage"], "web_search");
+    assert_eq!(
+        output["error"]["message"],
+        WEB_SEARCH_EMPTY_RESULT_MODEL_MESSAGE
+    );
 }
 
 #[test]
@@ -147,6 +376,14 @@ fn web_search_tool_is_read_only_and_deduplicates_normalized_query() {
         default_key,
         tool.deduplication_key(&json!({"query": "rust news", "context_size": "high"}))
             .unwrap()
+    );
+    assert_ne!(
+        default_key,
+        tool.deduplication_key(&json!({
+            "query": "rust news",
+            "topic": "general"
+        }))
+        .unwrap()
     );
     assert_ne!(
         default_key,
@@ -526,6 +763,14 @@ impl WebSearchExecutor for ResearchExecutor {
         } else {
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
+        if req.query.contains("无结果") {
+            return Ok(WebSearchOutcome {
+                answer: String::new(),
+                sources: Vec::new(),
+                provider: "research-mock".to_owned(),
+                elapsed_ms: 15,
+            });
+        }
         let _ = delta_tx.send("事实".to_owned()).await;
         let long_result = req.query.contains("长结果");
         Ok(WebSearchOutcome {
@@ -675,6 +920,8 @@ async fn multi_entity_research_reports_all_failed_without_tool_error() {
     assert_eq!(output.value["ok"], false);
     assert_eq!(output.value["successful"], 0);
     assert_eq!(output.value["failed"], 2);
+    assert_eq!(output.value["error"]["code"], "provider_error");
+    assert_eq!(output.value["error"]["stage"], "provider");
     assert!(
         output.value["results"]
             .as_array()
@@ -682,6 +929,55 @@ async fn multi_entity_research_reports_all_failed_without_tool_error() {
             .iter()
             .all(|result| result["status"] == "failed")
     );
+}
+
+#[tokio::test]
+async fn multi_entity_research_all_empty_results_keep_execution_success() {
+    let tool = WebSearchTool::new(Arc::new(ResearchExecutor::default()));
+
+    let output = tool
+        .execute(
+            test_context(),
+            research_arguments(&[("空结果一", "无结果查询一"), ("空结果二", "无结果查询二")]),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output.value["ok"], false);
+    assert_eq!(output.value["execution_succeeded"], true);
+    assert_eq!(output.value["result_count"], 0);
+    assert_eq!(output.value["error"]["code"], "empty_result");
+    assert_eq!(output.value["error"]["stage"], "web_search");
+    assert_eq!(
+        output.value["error"]["message"],
+        WEB_SEARCH_EMPTY_RESULT_MODEL_MESSAGE
+    );
+    assert!(
+        output.value["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|result| result["error"]["code"] == "empty_result")
+    );
+}
+
+#[tokio::test]
+async fn multi_entity_research_real_failure_is_not_masked_by_empty_results() {
+    let tool = WebSearchTool::new(Arc::new(ResearchExecutor::default()));
+
+    let output = tool
+        .execute(
+            test_context(),
+            research_arguments(&[("空结果", "无结果查询"), ("失败项", "失败查询")]),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output.value["ok"], false);
+    assert_ne!(output.value["execution_succeeded"], true);
+    assert_eq!(output.value["result_count"], 0);
+    assert_eq!(output.value["error"]["code"], "provider_error");
+    assert_eq!(output.value["error"]["stage"], "provider");
 }
 
 #[tokio::test]

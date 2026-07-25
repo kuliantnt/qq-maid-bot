@@ -39,6 +39,8 @@ fn test_context() -> ToolContext {
             interaction_scope_id: "private:u1".to_owned(),
         },
         tool_call_id: None,
+        tool_round: None,
+        retry_of: None,
         execution_deadline: None,
     }
 }
@@ -306,11 +308,19 @@ struct NamedSlowReadOnlyTool {
     delay: std::time::Duration,
 }
 
+type ToolAttemptContext = (Option<usize>, Option<usize>);
+
 struct FailOnceReadOnlyTool {
     calls: Arc<StdMutex<usize>>,
+    contexts: Arc<StdMutex<Vec<ToolAttemptContext>>>,
 }
 
 struct LimitedReadOnlyTool {
+    calls: Arc<StdMutex<usize>>,
+}
+
+/// 模拟网络请求已完成但没有返回可用证据的只读搜索结果。
+struct EmptyResultReadOnlyTool {
     calls: Arc<StdMutex<usize>>,
 }
 
@@ -341,6 +351,50 @@ impl crate::tool::Tool for LimitedReadOnlyTool {
 }
 
 #[async_trait]
+impl crate::tool::Tool for EmptyResultReadOnlyTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "web_search".to_owned(),
+            description: "empty result search".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    fn max_calls_per_request(&self) -> Option<usize> {
+        Some(1)
+    }
+
+    async fn execute(&self, _ctx: ToolContext, _arguments: Value) -> Result<ToolOutput, LlmError> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolOutput::json(json!({
+            "ok": false,
+            "execution_succeeded": true,
+            "mode": "multi_entity_research",
+            "result_count": 0,
+            "error": {"code": "empty_result", "stage": "web_search"},
+            "results": [{
+                "entity": "项目甲",
+                "status": "failed",
+                "error": {"code": "empty_result", "stage": "web_search"}
+            }, {
+                "entity": "项目乙",
+                "status": "failed",
+                "error": {"code": "empty_result", "stage": "web_search"}
+            }],
+        })))
+    }
+}
+
+#[async_trait]
 impl crate::tool::Tool for FailOnceReadOnlyTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
@@ -359,7 +413,11 @@ impl crate::tool::Tool for FailOnceReadOnlyTool {
         ToolEffect::ReadOnly
     }
 
-    async fn execute(&self, _ctx: ToolContext, arguments: Value) -> Result<ToolOutput, LlmError> {
+    async fn execute(&self, ctx: ToolContext, arguments: Value) -> Result<ToolOutput, LlmError> {
+        self.contexts
+            .lock()
+            .unwrap()
+            .push((ctx.tool_round, ctx.retry_of));
         let mut calls = self.calls.lock().unwrap();
         *calls += 1;
         if *calls == 1 {
@@ -394,6 +452,14 @@ impl crate::tool::Tool for NamedSlowReadOnlyTool {
     async fn execute(&self, _ctx: ToolContext, arguments: Value) -> Result<ToolOutput, LlmError> {
         *self.calls.lock().unwrap() += 1;
         tokio::time::sleep(self.delay).await;
+        if self.name == "web_search" {
+            let value = arguments["value"].as_str().unwrap_or_default();
+            return Ok(ToolOutput::json(json!({
+                "ok": true,
+                "answer": format!("{value} 的完整搜索答案"),
+                "sources": [{"title": "搜索来源", "url": "https://example.test/source"}],
+            })));
+        }
         Ok(ToolOutput::json(json!({
             "ok": true,
             "value": arguments["value"],

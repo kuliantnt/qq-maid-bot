@@ -22,7 +22,7 @@ use super::agent_presenters::{
     tool_outcome_from_knowledge_result, tool_outcome_from_rss_result,
     tool_outcome_from_train_result, tool_outcome_from_weather_result,
 };
-use super::search::agent_turn::{SearchResultProjection, project_result as project_search_result};
+use super::search::agent_turn::project_results as project_search_results;
 
 pub(crate) type IndexedToolOutcomes = Vec<(usize, ToolExecutionOutcome)>;
 
@@ -207,28 +207,30 @@ fn project_tool_turn(
         &output.agent.tool_attempts,
     )?;
     let visible_entity_snapshot = todo_projection.visible_entity_snapshot;
+    let search_projection =
+        project_search_results(&output.agent.tool_results, &output.agent.tool_attempts);
     let mut outcomes = Vec::new();
     let mut todo_outcomes = todo_projection.outcomes.into_iter().peekable();
+    let mut search_outcomes = search_projection.outcomes.into_iter().peekable();
 
     for (index, result) in output.agent.tool_results.iter().enumerate() {
         if is_retry_superseded_result(index, &output.agent.tool_attempts) {
             // 旧尝试仍保留在 Agent diagnostics；这里只丢弃它对应的用户展示块。
             let mut discarded = Vec::new();
             drain_domain_outcomes_for_result(index, &mut todo_outcomes, &mut discarded);
+            drain_domain_outcomes_for_result(index, &mut search_outcomes, &mut discarded);
             continue;
         }
         if todo_projection.consumed_result_indexes.contains(&index) {
             drain_domain_outcomes_for_result(index, &mut todo_outcomes, &mut outcomes);
+        } else if search_projection.consumed_result_indexes.contains(&index) {
+            drain_domain_outcomes_for_result(index, &mut search_outcomes, &mut outcomes);
         } else if let Some(outcome) = tool_outcome_from_weather_result(result) {
             outcomes.push(outcome);
         } else if let Some(outcome) = tool_outcome_from_train_result(result) {
             outcomes.push(outcome);
         } else if let Some(outcome) = tool_outcome_from_rss_result(result) {
             outcomes.push(outcome);
-        } else if let Some(projection) = project_search_result(result) {
-            if let SearchResultProjection::Visible(outcome) = projection {
-                outcomes.push(outcome);
-            }
         } else if let Some(outcome) = tool_outcome_from_knowledge_result(result) {
             outcomes.push(outcome);
         } else if let Some(outcome) = memory::agent_turn::tool_outcome_from_result(result) {
@@ -238,6 +240,7 @@ fn project_tool_turn(
         }
     }
     outcomes.extend(todo_outcomes.map(|(_, outcome)| outcome));
+    outcomes.extend(search_outcomes.map(|(_, outcome)| outcome));
 
     Ok(AgentTurnOutcome::from_outcomes_with_visible_snapshot(
         outcomes,

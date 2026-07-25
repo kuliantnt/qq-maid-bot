@@ -301,6 +301,8 @@ mod tests {
                 interaction_scope_id: "private:u1".to_owned(),
             },
             tool_call_id: Some("call-1".to_owned()),
+            tool_round: None,
+            retry_of: None,
             execution_deadline: None,
         }
     }

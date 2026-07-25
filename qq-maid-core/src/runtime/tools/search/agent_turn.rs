@@ -3,8 +3,9 @@
 //! 搜索领域在这里决定单次工具轨迹应展示、隐藏还是交给其他领域处理；通用
 //! `tools/agent_turn.rs` 只负责调度，不理解 `deduplicated` 等搜索结果字段。
 
-use qq_maid_llm::provider::ToolExecutionResult;
+use qq_maid_llm::provider::{ToolExecutionAttempt, ToolExecutionResult};
 use serde_json::Value;
+use std::collections::HashSet;
 
 use crate::{
     error::LlmError,
@@ -27,6 +28,61 @@ pub(crate) enum SearchResultProjection {
     Visible(ToolExecutionOutcome),
 }
 
+pub(crate) struct SearchTurnProjection {
+    pub(crate) consumed_result_indexes: HashSet<usize>,
+    pub(crate) outcomes: Vec<(usize, ToolExecutionOutcome)>,
+}
+
+/// 搜索结果必须按整轮投影，才能区分“全部失败”和“部分成功”。
+/// 原始工具轨迹仍完整留在 diagnostics；这里只控制可信用户正文及模型 final_text
+/// 是否允许保留，避免空结果提示重复或被模型补成无证据的时效信息。
+pub(crate) fn project_results(
+    results: &[ToolExecutionResult],
+    attempts: &[ToolExecutionAttempt],
+) -> SearchTurnProjection {
+    let mut consumed_result_indexes = HashSet::new();
+    let mut projected = Vec::new();
+    for (index, result) in results.iter().enumerate() {
+        let Some(projection) = project_result(result) else {
+            continue;
+        };
+        consumed_result_indexes.insert(index);
+        if attempts
+            .iter()
+            .any(|attempt| attempt.retry_of == Some(index))
+        {
+            continue;
+        }
+        if let SearchResultProjection::Visible(outcome) = projection {
+            projected.push((index, outcome));
+        }
+    }
+
+    let has_success = projected
+        .iter()
+        .any(|(_, outcome)| outcome.status == ToolOutcomeStatus::Succeeded);
+    let mut visible_failure_keys = HashSet::new();
+    for (_, outcome) in &mut projected {
+        if outcome.status != ToolOutcomeStatus::Failed {
+            continue;
+        }
+        let failure_key = outcome
+            .error_code
+            .clone()
+            .unwrap_or_else(|| "provider_error".to_owned());
+        let hide_empty_beside_success = has_success && failure_key == "empty_result";
+        let duplicate_failure = !visible_failure_keys.insert(failure_key);
+        if hide_empty_beside_success || duplicate_failure {
+            outcome.blocks.clear();
+        }
+    }
+
+    SearchTurnProjection {
+        consumed_result_indexes,
+        outcomes: projected,
+    }
+}
+
 pub(crate) fn project_result(result: &ToolExecutionResult) -> Option<SearchResultProjection> {
     if result.name != WEB_SEARCH_TOOL_NAME {
         return None;
@@ -41,8 +97,14 @@ pub(crate) fn project_result(result: &ToolExecutionResult) -> Option<SearchResul
 }
 
 fn visible_outcome(result: &ToolExecutionResult) -> ToolExecutionOutcome {
-    let status = ToolOutcomeStatus::from_tool_result(result);
-    let error_code = structured_error_code(&result.output);
+    let mut status = ToolOutcomeStatus::from_tool_result(result);
+    let mut error_code = structured_error_code(&result.output);
+    // 兼容旧工具输出和跨版本累计轨迹：即使上游误标 succeeded，只要没有 answer
+    // 或可用 source，就不能作为搜索成功证据，也不能保留模型最终补全文。
+    if status == ToolOutcomeStatus::Succeeded && !output_has_evidence(&result.output) {
+        status = ToolOutcomeStatus::Failed;
+        error_code = Some("empty_result".to_owned());
+    }
     let block = match status {
         ToolOutcomeStatus::Succeeded => ResponseBlock::FactCard(structured_command_body(
             format_web_search_tool_reply(&result.output),
@@ -52,7 +114,7 @@ fn visible_outcome(result: &ToolExecutionResult) -> ToolExecutionOutcome {
             ResponseBlock::Clarification(CommandBody::plain("请说明要联网查询什么内容。"))
         }
         ToolOutcomeStatus::PendingConfirmation | ToolOutcomeStatus::Failed => {
-            ResponseBlock::Error(error_body(&result.output))
+            ResponseBlock::Error(error_body(&result.output, error_code.as_deref()))
         }
     };
 
@@ -68,8 +130,11 @@ fn visible_outcome(result: &ToolExecutionResult) -> ToolExecutionOutcome {
     }
 }
 
-fn error_body(output: &Value) -> CommandBody {
-    let code = structured_error_code(output).unwrap_or_else(|| "provider_error".to_owned());
+fn error_body(output: &Value, projected_error_code: Option<&str>) -> CommandBody {
+    let code = projected_error_code
+        .map(str::to_owned)
+        .or_else(|| structured_error_code(output))
+        .unwrap_or_else(|| "provider_error".to_owned());
     let stage = output
         .get("error")
         .and_then(|error| error.get("stage"))
@@ -81,6 +146,37 @@ fn error_body(output: &Value) -> CommandBody {
         return structured_command_body(format_web_search_research_error_reply(output, &reply));
     }
     structured_command_body(reply)
+}
+
+fn output_has_evidence(output: &Value) -> bool {
+    if string_field(output, "mode").as_deref() == Some("multi_entity_research") {
+        return output
+            .get("results")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|item| {
+                string_field(item, "status").as_deref() == Some("success")
+                    && (string_field(item, "facts").is_some()
+                        || string_field(item, "summary").is_some()
+                        || string_field(item, "answer").is_some()
+                        || sources_have_evidence(item.get("sources")))
+            });
+    }
+    string_field(output, "answer").is_some() || sources_have_evidence(output.get("sources"))
+}
+
+fn sources_have_evidence(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|source| {
+            source.as_str().is_some_and(|text| !text.trim().is_empty())
+                || string_field(source, "title").is_some()
+                || string_field(source, "url").is_some()
+                || string_field(source, "snippet").is_some()
+        })
 }
 
 fn skip_body(output: &Value) -> CommandBody {

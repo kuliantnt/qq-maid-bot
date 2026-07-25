@@ -5,6 +5,7 @@ use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
 
 use crate::{error::LlmError, metrics::duration_ms};
+use qq_maid_common::time_context::{RequestTimeContext, request_time_context};
 
 use super::{
     MAX_RESULTS_LIMIT, WebSearchConfig, WebSearchExecutor, WebSearchOutcome, WebSearchRequest,
@@ -94,17 +95,13 @@ impl WebSearchExecutor for TavilyWebSearchExecutor {
         }
 
         let started = Instant::now();
-        let topic = request_topic(req.topic.as_deref(), self.config.topic)?;
-        let time_range = request_time_range(req.time_range.as_deref(), self.config.time_range)?;
+        let options = tavily_request_options(&req, &self.config, &request_time_context())?;
         let payload = TavilySearchRequest {
-            query,
+            query: &options.query,
             search_depth: self.config.search_depth.as_str(),
-            max_results: req
-                .max_results
-                .unwrap_or(self.config.max_results)
-                .clamp(1, MAX_RESULTS_LIMIT),
-            topic: topic.as_str(),
-            time_range: time_range.map(WebSearchTimeRange::as_str),
+            max_results: options.max_results,
+            topic: options.topic.as_str(),
+            time_range: options.time_range.map(WebSearchTimeRange::as_str),
             include_answer: "basic",
             include_raw_content: false,
             include_images: false,
@@ -128,11 +125,14 @@ impl WebSearchExecutor for TavilyWebSearchExecutor {
         })?;
         let sources = tavily_sources(body.results, usize::from(payload.max_results));
         if sources.is_empty() {
-            return Err(LlmError::new(
-                "empty_result",
-                "Tavily search returned no usable results",
-                "tavily_search",
-            ));
+            // HTTP 与协议都已成功；没有可引用网页是业务空结果，必须让 Core 统一投影为
+            // `ok:false + execution_succeeded:true`，不能伪装成可重试的执行故障。
+            return Ok(WebSearchOutcome {
+                answer: String::new(),
+                sources,
+                provider: "tavily".to_owned(),
+                elapsed_ms: duration_ms(started.elapsed()),
+            });
         }
 
         Ok(WebSearchOutcome {
@@ -146,6 +146,91 @@ impl WebSearchExecutor for TavilyWebSearchExecutor {
     fn provider_name(&self) -> &'static str {
         "tavily"
     }
+}
+
+struct TavilyRequestOptions {
+    query: String,
+    max_results: u8,
+    topic: WebSearchTopic,
+    time_range: Option<WebSearchTimeRange>,
+}
+
+fn tavily_request_options(
+    req: &WebSearchRequest,
+    config: &WebSearchConfig,
+    time_context: &RequestTimeContext,
+) -> Result<TavilyRequestOptions, LlmError> {
+    let query = req.query.trim();
+    let semantic_text = req
+        .raw_question
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(query);
+    let current_news = is_current_news_request(query, semantic_text);
+    let topic = match req.topic.as_deref() {
+        Some(value) => request_topic(Some(value), config.topic)?,
+        None if current_news => WebSearchTopic::News,
+        None => config.topic,
+    };
+    let time_range = match req.time_range.as_deref() {
+        Some(value) => request_time_range(Some(value), config.time_range)?,
+        None if current_news => Some(WebSearchTimeRange::Day),
+        None => config.time_range,
+    };
+
+    Ok(TavilyRequestOptions {
+        // Provider 原生后端需要长提示词来约束模型；Tavily 只接收检索词，
+        // 因此仅补入服务端已解析的日期，避免把聊天上下文误传给第三方搜索。
+        query: tavily_query_with_resolved_date(query, semantic_text, time_context),
+        max_results: req
+            .max_results
+            .unwrap_or(config.max_results)
+            .clamp(1, MAX_RESULTS_LIMIT),
+        topic,
+        time_range,
+    })
+}
+
+fn tavily_query_with_resolved_date(
+    query: &str,
+    semantic_text: &str,
+    time_context: &RequestTimeContext,
+) -> String {
+    let resolved = time_context.resolve_relative_time_text(semantic_text);
+    let resolved = if resolved.is_empty() {
+        time_context.resolve_relative_time_text(query)
+    } else {
+        resolved
+    };
+    let date_hint = resolved
+        .first()
+        .map(|item| item.value.as_str())
+        .or_else(|| {
+            (is_current_time_request(query) || is_current_time_request(semantic_text))
+                .then_some(time_context.current_date())
+        });
+    date_hint
+        .map(|date| format!("{query} {date}"))
+        .unwrap_or_else(|| query.to_owned())
+}
+
+fn is_current_news_request(query: &str, semantic_text: &str) -> bool {
+    (has_news_intent(query) || has_news_intent(semantic_text))
+        && (is_current_time_request(query) || is_current_time_request(semantic_text))
+}
+
+fn has_news_intent(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    ["新闻", "资讯", "报道", "news"]
+        .iter()
+        .any(|term| value.contains(term))
+}
+
+fn is_current_time_request(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    ["今天", "今日", "最新", "today", "latest"]
+        .iter()
+        .any(|term| value.contains(term))
 }
 
 #[derive(Serialize)]
@@ -343,6 +428,7 @@ mod tests {
         response::IntoResponse,
         routing::post,
     };
+    use chrono::{FixedOffset, TimeZone};
     use serde_json::{Value, json};
     use std::sync::Arc;
     use tokio::{net::TcpListener, sync::Mutex};
@@ -445,7 +531,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_classifies_auth_quota_and_empty_results() {
+    async fn query_classifies_auth_quota_and_keeps_empty_results_completed() {
         let (executor, _) = test_executor(401, json!({"detail": "invalid key"})).await;
         assert_eq!(
             executor.query(request()).await.unwrap_err().code,
@@ -465,10 +551,63 @@ mod tests {
         );
 
         let (executor, _) = test_executor(200, json!({"results": []})).await;
-        assert_eq!(
-            executor.query(request()).await.unwrap_err().code,
-            "empty_result"
+        let outcome = executor.query(request()).await.unwrap();
+        assert!(outcome.answer.is_empty());
+        assert!(outcome.sources.is_empty());
+    }
+
+    #[test]
+    fn current_news_query_is_date_resolved_with_news_defaults() {
+        let offset = FixedOffset::east_opt(8 * 60 * 60).unwrap();
+        let context = RequestTimeContext::from_datetime(
+            offset.with_ymd_and_hms(2026, 7, 25, 9, 30, 0).unwrap(),
         );
+        let request = WebSearchRequest {
+            query: "今日 AI 新闻".to_owned(),
+            raw_question: Some("请查今日 AI 新闻".to_owned()),
+            max_results: None,
+            context_size: None,
+            topic: None,
+            time_range: None,
+            backend_override: None,
+            model_override: None,
+        };
+
+        let options =
+            tavily_request_options(&request, &WebSearchConfig::default(), &context).unwrap();
+
+        assert!(options.query.contains("2026-07-25"));
+        assert_eq!(options.topic, WebSearchTopic::News);
+        assert_eq!(options.time_range, Some(WebSearchTimeRange::Day));
+    }
+
+    #[test]
+    fn recent_news_query_does_not_force_day_defaults() {
+        let context = RequestTimeContext::from_datetime(
+            FixedOffset::east_opt(8 * 60 * 60)
+                .unwrap()
+                .with_ymd_and_hms(2026, 7, 25, 9, 30, 0)
+                .unwrap(),
+        );
+
+        for query in ["最近 AI 新闻", "近日 AI 新闻", "recent AI news"] {
+            let request = WebSearchRequest {
+                query: query.to_owned(),
+                raw_question: None,
+                max_results: None,
+                context_size: None,
+                topic: None,
+                time_range: None,
+                backend_override: None,
+                model_override: None,
+            };
+
+            let options =
+                tavily_request_options(&request, &WebSearchConfig::default(), &context).unwrap();
+
+            assert_eq!(options.topic, WebSearchTopic::General, "{query}");
+            assert_eq!(options.time_range, None, "{query}");
+        }
     }
 
     #[tokio::test]

@@ -274,8 +274,22 @@ async fn duplicate_web_search_executes_once_and_returns_cache_marker_to_model() 
     assert_eq!(outcome.agent.executed_tools, ["web_search"]);
     assert_eq!(outcome.agent.tool_results.len(), 2);
     assert_eq!(outcome.agent.tool_attempts.len(), 2);
-    assert_eq!(outcome.agent.tool_results[0].output["value"], "rust");
+    assert_eq!(
+        outcome.agent.tool_results[0].output["answer"],
+        "rust 的完整搜索答案"
+    );
+    assert_eq!(
+        outcome.agent.tool_results[0].output["sources"][0]["title"],
+        "搜索来源"
+    );
     assert_eq!(outcome.agent.tool_results[1].output["deduplicated"], true);
+    assert!(outcome.agent.tool_results[1].output.get("answer").is_none());
+    assert!(
+        outcome.agent.tool_results[1]
+            .output
+            .get("sources")
+            .is_none()
+    );
     assert_eq!(
         *events.lock().unwrap(),
         vec![
@@ -293,10 +307,131 @@ async fn duplicate_web_search_executes_once_and_returns_cache_marker_to_model() 
 }
 
 #[tokio::test]
+async fn empty_result_is_completed_once_without_retry_or_execution_failure() {
+    let calls = Arc::new(StdMutex::new(0));
+    let events = Arc::new(StdMutex::new(Vec::new()));
+    let progress_sink = {
+        let events = events.clone();
+        Arc::new(move |event: ToolLoopProgressEvent| {
+            let events = events.clone();
+            Box::pin(async move {
+                events.lock().unwrap().push(event);
+                Ok(())
+            }) as ToolLoopProgressFuture
+        })
+    };
+    let registry = registry_with(vec![Arc::new(EmptyResultReadOnlyTool {
+        calls: calls.clone(),
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call(
+                "web_search",
+                "w1",
+                r#"{"query":"today ai news"}"#,
+            )]),
+            tool_calls(vec![tool_call(
+                "web_search",
+                "w2",
+                r#"{"query":"today ai news"}"#,
+            )]),
+            final_reply("没有新增证据。"),
+        ],
+    ));
+
+    let outcome = run_agent_loop(
+        session,
+        registry,
+        test_context(),
+        3,
+        Some(progress_sink),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert_eq!(outcome.agent.executed_tools, ["web_search"]);
+    assert_eq!(outcome.agent.tool_results.len(), 2);
+    assert!(
+        outcome
+            .agent
+            .tool_results
+            .iter()
+            .all(|result| !result.succeeded)
+    );
+    assert_eq!(outcome.agent.tool_results[0].output["ok"], false);
+    assert_eq!(
+        outcome.agent.tool_results[0].output["execution_succeeded"],
+        true
+    );
+    assert_eq!(outcome.agent.tool_results[1].output["deduplicated"], true);
+    assert_eq!(outcome.agent.tool_attempts[1].retry_of, None);
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![
+            ToolLoopProgressEvent::ToolCallStarted {
+                tool_name: "web_search".to_owned()
+            },
+            ToolLoopProgressEvent::ToolCallFinished {
+                tool_name: "web_search".to_owned()
+            }
+        ]
+    );
+}
+
+#[tokio::test]
+async fn execution_success_without_domain_success_skips_dependent_tool() {
+    let empty_calls = Arc::new(StdMutex::new(0));
+    let dependent_calls = Arc::new(StdMutex::new(0));
+    let registry = registry_with(vec![
+        Arc::new(EmptyResultReadOnlyTool {
+            calls: empty_calls.clone(),
+        }) as _,
+        Arc::new(CountingTool {
+            name: "dependent",
+            calls: dependent_calls.clone(),
+            fail: false,
+            soft_fail: false,
+            dependency: ToolCallDependency::PreviousCallSuccess,
+        }) as _,
+    ]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![
+                tool_call("web_search", "w1", r#"{"query":"no evidence"}"#),
+                tool_call("dependent", "d1", r#"{"value":"continue"}"#),
+            ]),
+            final_reply("done"),
+        ],
+    ));
+
+    let outcome = run_agent_loop(session, registry, test_context(), 3, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(*empty_calls.lock().unwrap(), 1);
+    assert_eq!(*dependent_calls.lock().unwrap(), 0);
+    assert!(!outcome.agent.tool_results[0].succeeded);
+    assert_eq!(outcome.agent.tool_attempts[0].retry_of, None);
+    assert_eq!(outcome.agent.tool_results[1].output["skipped"], true);
+    assert_eq!(
+        outcome.agent.tool_results[1].output["reason"],
+        "dependency_previous_call_failed"
+    );
+}
+
+#[tokio::test]
 async fn failed_tool_followed_by_same_singleton_call_is_recorded_as_retry() {
     let calls = Arc::new(StdMutex::new(0));
+    let contexts = Arc::new(StdMutex::new(Vec::new()));
     let registry = registry_with(vec![Arc::new(FailOnceReadOnlyTool {
         calls: calls.clone(),
+        contexts: contexts.clone(),
     }) as _]);
     let session = Box::new(ScriptedSession::new(
         "mock",
@@ -319,6 +454,10 @@ async fn failed_tool_followed_by_same_singleton_call_is_recorded_as_retry() {
     assert_eq!(outcome.agent.tool_attempts.len(), 2);
     assert_eq!(outcome.agent.tool_attempts[0].retry_of, None);
     assert_eq!(outcome.agent.tool_attempts[1].retry_of, Some(0));
+    assert_eq!(
+        *contexts.lock().unwrap(),
+        [(Some(0), None), (Some(1), Some(0))]
+    );
 }
 
 #[tokio::test]
@@ -364,6 +503,7 @@ async fn cross_candidate_retry_indexes_are_offset_to_global() {
     let calls_b = Arc::new(StdMutex::new(0));
     let registry_b = registry_with(vec![Arc::new(FailOnceReadOnlyTool {
         calls: calls_b.clone(),
+        contexts: Arc::new(StdMutex::new(Vec::new())),
     }) as _]);
     let outcome = run_agent_loop_with_handle(
         Box::new(ScriptedSession::new(
@@ -409,6 +549,7 @@ async fn independent_same_round_calls_are_not_recorded_as_retry() {
     let calls = Arc::new(StdMutex::new(0));
     let registry = registry_with(vec![Arc::new(FailOnceReadOnlyTool {
         calls: calls.clone(),
+        contexts: Arc::new(StdMutex::new(Vec::new())),
     }) as _]);
     let session = Box::new(ScriptedSession::new(
         "mock",

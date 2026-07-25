@@ -49,6 +49,52 @@ async fn multi_entity_web_search_fact_card_preserves_model_summary_without_empty
 }
 
 #[tokio::test]
+async fn nested_research_evidence_keeps_news_summary_when_top_level_fields_are_empty() {
+    // 多实体调研的可信来源位于 results 内；顶层 answer/sources 为空不能覆盖子项证据。
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results(
+            vec![raw_tool_result(
+                "web_search",
+                serde_json::json!({
+                    "ok": true,
+                    "mode": "multi_entity_research",
+                    "answer": "",
+                    "sources": [],
+                    "results": [{
+                        "entity": "今日 AI 新闻",
+                        "status": "success",
+                        "facts": "Reuters 报道了可核实的 AI 新闻。",
+                        "sources": [{
+                            "title": "Reuters AI News",
+                            "url": "https://example.test/reuters-ai",
+                            "snippet": "嵌套搜索来源"
+                        }]
+                    }]
+                }),
+                true,
+            )],
+            "基于 Reuters 的结果，今日 AI 新闻已有明确来源。",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("今日 AI 新闻"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("Reuters 报道了可核实的 AI 新闻。"));
+    assert!(text.contains("Reuters AI News"));
+    assert!(text.contains("基于 Reuters 的结果"));
+    assert!(!text.contains("没查到明确结果"));
+    assert_eq!(
+        response.diagnostics.unwrap()["agent_turn_status"],
+        "succeeded"
+    );
+}
+
+#[tokio::test]
 async fn duplicate_web_search_keeps_first_card_and_model_reply_without_counting_cache_hit() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
@@ -112,16 +158,22 @@ async fn duplicate_web_search_keeps_first_card_and_model_reply_without_counting_
 }
 
 #[tokio::test]
-async fn first_empty_web_search_still_renders_empty_result_hint() {
+async fn empty_web_search_with_empty_final_text_only_renders_empty_result_hint() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_raw_tool_results(
             vec![raw_tool_result(
                 "web_search",
-                serde_json::json!({"ok": true, "answer": "", "sources": []}),
+                serde_json::json!({
+                    "ok": false,
+                    "execution_succeeded": true,
+                    "answer": "",
+                    "sources": [],
+                    "error": {"code": "empty_result", "stage": "web_search"}
+                }),
                 true,
             )],
-            "模型确认当前没有更明确的公开结果。",
+            "  ",
         );
     let service = test_service_with_provider_and_tool_calling(inspector, true);
 
@@ -133,14 +185,67 @@ async fn first_empty_web_search_still_renders_empty_result_hint() {
     let text = response.text.unwrap();
     assert_eq!(text.matches("【联网查询】").count(), 1);
     assert_eq!(text.matches("没查到明确结果").count(), 1);
-    assert!(text.contains("模型确认当前没有更明确的公开结果"));
+    assert!(!text.contains("联网查询服务暂时不可用"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 1);
-    assert_eq!(diagnostics["tool_outcomes"][0]["status"], "succeeded");
+    assert_eq!(diagnostics["tool_outcomes"][0]["status"], "failed");
+    assert_eq!(
+        diagnostics["tool_outcomes"][0]["error_code"],
+        "empty_result"
+    );
+    assert_eq!(diagnostics["tool_retry_count"], 0);
 }
 
 #[tokio::test]
-async fn web_search_retry_renders_only_final_empty_result_and_keeps_attempt_trace() {
+async fn multi_entity_all_empty_search_renders_one_empty_hint_without_retry() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results(
+            vec![raw_tool_result(
+                "web_search",
+                serde_json::json!({
+                    "ok": false,
+                    "execution_succeeded": true,
+                    "mode": "multi_entity_research",
+                    "successful": 0,
+                    "failed": 2,
+                    "result_count": 0,
+                    "error": {"code": "empty_result", "stage": "web_search"},
+                    "results": [{
+                        "entity": "项目甲",
+                        "status": "failed",
+                        "error": {"code": "empty_result", "stage": "web_search"}
+                    }, {
+                        "entity": "项目乙",
+                        "status": "failed",
+                        "error": {"code": "empty_result", "stage": "web_search"}
+                    }]
+                }),
+                false,
+            )],
+            "  ",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("联网对比两个没有公开资料的项目"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert_eq!(text.matches("【联网查询").count(), 1);
+    assert_eq!(text.matches("没查到明确结果").count(), 1);
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["tool_retry_count"], 0);
+    assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        diagnostics["tool_outcomes"][0]["error_code"],
+        "empty_result"
+    );
+}
+
+#[tokio::test]
+async fn web_search_execution_failure_retry_renders_only_final_error_and_keeps_attempt_trace() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_raw_tool_results_and_attempts(
@@ -149,14 +254,17 @@ async fn web_search_retry_renders_only_final_empty_result_and_keeps_attempt_trac
                     "web_search",
                     serde_json::json!({
                         "ok": false,
-                        "error": {"code": "empty_result", "stage": "web_search"}
+                        "error": {"code": "network_error", "stage": "web_search"}
                     }),
                     false,
                 ),
                 raw_tool_result(
                     "web_search",
-                    serde_json::json!({"ok": true, "answer": ""}),
-                    true,
+                    serde_json::json!({
+                        "ok": false,
+                        "error": {"code": "network_error", "stage": "web_search"}
+                    }),
+                    false,
                 ),
             ],
             vec![
@@ -184,17 +292,145 @@ async fn web_search_retry_renders_only_final_empty_result_and_keeps_attempt_trac
 
     let text = response.text.unwrap();
     assert_eq!(text.matches("【联网查询】").count(), 1);
-    assert_eq!(text.matches("没查到明确结果").count(), 1);
-    assert!(!text.contains("联网查询服务暂时不可用"));
+    assert_eq!(text.matches("联网查询服务暂时不可用").count(), 1);
+    assert!(!text.contains("没查到明确结果"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
         diagnostics["agent_tool_results"].as_array().unwrap().len(),
         2
     );
     assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 1);
-    assert_eq!(diagnostics["tool_outcomes"][0]["status"], "succeeded");
+    assert_eq!(diagnostics["tool_outcomes"][0]["status"], "failed");
     assert_eq!(diagnostics["tool_retry_count"], 1);
     assert!(diagnostics.get("tool_attempts").is_none());
+}
+
+#[tokio::test]
+async fn group_two_empty_searches_keep_one_hint_and_one_final_text() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results(
+            vec![
+                raw_tool_result(
+                    "web_search",
+                    serde_json::json!({"ok": true, "answer": "", "sources": []}),
+                    true,
+                ),
+                raw_tool_result(
+                    "web_search",
+                    serde_json::json!({"ok": true, "answer": "", "sources": []}),
+                    true,
+                ),
+            ],
+            "模型确认本轮没有更明确的公开结果。",
+        );
+    let service = test_service_with_provider_and_group_tool_calling_tools(
+        inspector,
+        true,
+        true,
+        Some(vec!["web_search".to_owned()]),
+    );
+
+    let response = service.respond(message("今日 ai 新闻")).await.unwrap();
+    let text = response.text.unwrap();
+
+    assert_eq!(text.matches("【联网查询】").count(), 1);
+    assert_eq!(text.matches("没查到明确结果").count(), 1);
+    assert_eq!(
+        text.matches("模型确认本轮没有更明确的公开结果。").count(),
+        1
+    );
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["agent_turn_status"], "failed");
+    assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 2);
+    assert!(
+        diagnostics["tool_outcomes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|outcome| outcome["error_code"] == "empty_result")
+    );
+}
+
+#[tokio::test]
+async fn group_partial_search_keeps_success_evidence_and_model_final_text() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results(
+            vec![
+                raw_tool_result(
+                    "web_search",
+                    serde_json::json!({
+                        "ok": true,
+                        "answer": "有效搜索事实",
+                        "sources": [{"title": "有效来源", "url": "https://example.test/valid", "snippet": "有效摘要"}]
+                    }),
+                    true,
+                ),
+                raw_tool_result(
+                    "web_search",
+                    serde_json::json!({"ok": true, "answer": "", "sources": []}),
+                    true,
+                ),
+            ],
+            "Reuters 说这是额外新闻，不能补入结果。",
+        );
+    let service = test_service_with_provider_and_group_tool_calling_tools(
+        inspector,
+        true,
+        true,
+        Some(vec!["web_search".to_owned()]),
+    );
+
+    let response = service.respond(message("今日 ai 新闻")).await.unwrap();
+    let text = response.text.unwrap();
+
+    assert!(text.contains("有效搜索事实"));
+    assert!(!text.contains("没查到明确结果"));
+    assert_eq!(
+        text.matches("Reuters 说这是额外新闻，不能补入结果。")
+            .count(),
+        1
+    );
+    assert_eq!(
+        response.diagnostics.unwrap()["agent_turn_status"],
+        "partial_success"
+    );
+}
+
+#[tokio::test]
+async fn group_two_successful_searches_keep_both_evidence_and_supported_summary() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results(
+            vec![
+                raw_tool_result(
+                    "web_search",
+                    serde_json::json!({"ok": true, "answer": "新闻一"}),
+                    true,
+                ),
+                raw_tool_result(
+                    "web_search",
+                    serde_json::json!({"ok": true, "answer": "新闻二"}),
+                    true,
+                ),
+            ],
+            "以上两条搜索结果的汇总。",
+        );
+    let service = test_service_with_provider_and_group_tool_calling_tools(
+        inspector,
+        true,
+        true,
+        Some(vec!["web_search".to_owned()]),
+    );
+
+    let response = service.respond(message("今日 ai 新闻")).await.unwrap();
+    let text = response.text.unwrap();
+
+    assert!(text.contains("新闻一"));
+    assert!(text.contains("新闻二"));
+    assert!(text.contains("以上两条搜索结果的汇总"));
+    assert!(!text.contains("没查到明确结果"));
 }
 
 #[tokio::test]

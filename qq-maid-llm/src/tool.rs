@@ -66,6 +66,10 @@ pub struct ToolContext {
     pub conversation: ExecutionConversationContext,
     /// 当前工具调用的稳定标识；由上游 Tool Loop 生成，用于幂等去重与审计关联。
     pub tool_call_id: Option<String>,
+    /// 当前 Tool Loop 轮次；非 Agent 兼容入口为 None，仅用于低敏诊断关联。
+    pub tool_round: Option<usize>,
+    /// 当前调用重试所替代的结果下标；非重试或非 Agent 兼容入口为 None。
+    pub retry_of: Option<usize>,
     /// 只读工具本次允许执行到的最晚时刻；由 Agent Runtime 从请求 deadline
     /// 扣除最终回答预留后注入，模型参数不能覆盖。非 Agent 兼容入口为 None。
     pub execution_deadline: Option<Instant>,
@@ -519,6 +523,8 @@ mod tests {
                 interaction_scope_id: "private:u1".to_owned(),
             },
             tool_call_id: None,
+            tool_round: None,
+            retry_of: None,
             execution_deadline: None,
         }
     }

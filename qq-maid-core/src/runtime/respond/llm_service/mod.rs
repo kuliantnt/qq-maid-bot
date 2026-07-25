@@ -287,6 +287,8 @@ fn tool_context_from_request(req: &RespondRequest) -> ToolContext {
             interaction_scope_id,
         },
         tool_call_id: None,
+        tool_round: None,
+        retry_of: None,
         execution_deadline: None,
     }
 }

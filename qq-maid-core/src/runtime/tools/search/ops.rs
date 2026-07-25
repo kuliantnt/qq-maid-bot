@@ -16,8 +16,9 @@ use tokio::time::Instant;
 use crate::error::LlmError;
 
 use super::{
-    WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME, WebSearchTool, WebSearchToolRequest,
-    optional_string_field, parse_context_size, parse_max_results, parse_time_range, parse_topic,
+    WEB_SEARCH_EMPTY_RESULT_MODEL_MESSAGE, WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME,
+    WebSearchTool, WebSearchToolRequest, optional_string_field, parse_context_size,
+    parse_max_results, parse_time_range, parse_topic, web_search_outcome_has_evidence,
 };
 
 pub(super) const WEB_SEARCH_RESEARCH_MAX_TARGETS: usize = 5;
@@ -99,14 +100,48 @@ pub(super) async fn execute_research(
         .iter()
         .filter(|result| result["status"] == "success")
         .count();
-    Ok(ToolOutput::json(json!({
+    let result_count = results
+        .iter()
+        .filter_map(|result| result.get("sources").and_then(Value::as_array))
+        .map(Vec::len)
+        .sum::<usize>();
+    let all_empty = succeeded == 0
+        && results
+            .iter()
+            .all(|result| research_error_code(result).as_deref() == Some("empty_result"));
+    let mut output = json!({
         "ok": succeeded > 0,
+        "backend": tool.backend_label(),
         "mode": "multi_entity_research",
         "comparison_dimensions": dimensions,
         "successful": succeeded,
         "failed": total - succeeded,
+        "result_count": result_count,
         "results": results,
-    })))
+    });
+
+    if all_empty {
+        // 每个子查询都正常完成但没有证据时，向 Tool Loop 明确传递“执行完成、领域
+        // 无结果”。这不是网络失败，不能触发整批重试或失败进度事件。
+        output["execution_succeeded"] = Value::Bool(true);
+        output["result_count"] = Value::from(0);
+        output["error"] = json!({
+            "code": "empty_result",
+            "stage": "web_search",
+            "message": WEB_SEARCH_EMPTY_RESULT_MODEL_MESSAGE,
+        });
+    } else if succeeded == 0
+        && let Some(error) = output["results"]
+            .as_array()
+            .and_then(|results| results.iter().find_map(real_research_error))
+    {
+        // 不能用同批中的空结果掩盖真实故障；按原始目标顺序选择第一个真实错误，
+        // 让上层按 timeout / provider / parse 等明确语义处理。
+        output["error"] = error;
+        output["result_count"] = Value::from(0);
+    }
+
+    Ok(ToolOutput::json(output))
 }
 
 pub(super) fn parse_research_targets(
@@ -266,7 +301,7 @@ fn research_result_json(
     outcome: Result<WebSearchOutcome, LlmError>,
 ) -> Value {
     match outcome {
-        Ok(outcome) => json!({
+        Ok(outcome) if web_search_outcome_has_evidence(&outcome) => json!({
             "entity": target.entity,
             "assumption": target.assumption,
             "status": "success",
@@ -276,6 +311,19 @@ fn research_result_json(
             "facts": truncate_chars(&outcome.answer, WEB_SEARCH_RESEARCH_FACT_MAX_CHARS),
             "sources": outcome.sources.iter().take(WEB_SEARCH_RESEARCH_SOURCE_LIMIT)
                 .filter_map(compact_research_source_json).collect::<Vec<_>>(),
+        }),
+        Ok(outcome) => json!({
+            "entity": target.entity,
+            "assumption": target.assumption,
+            "status": "failed",
+            "model": truncate_chars(model, 100),
+            "provider": outcome.provider,
+            "elapsed_ms": outcome.elapsed_ms.max(elapsed_ms),
+            "error": {
+                "code": "empty_result",
+                "stage": "web_search",
+                "message": "web search returned no usable evidence",
+            }
         }),
         Err(err) => json!({
             "entity": target.entity,
@@ -290,6 +338,19 @@ fn research_result_json(
             }
         }),
     }
+}
+
+fn research_error_code(result: &Value) -> Option<String> {
+    result
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn real_research_error(result: &Value) -> Option<Value> {
+    let error = result.get("error")?;
+    (research_error_code(result).as_deref() != Some("empty_result")).then(|| error.clone())
 }
 
 fn compact_research_source_json(source: &WebSearchSource) -> Option<Value> {

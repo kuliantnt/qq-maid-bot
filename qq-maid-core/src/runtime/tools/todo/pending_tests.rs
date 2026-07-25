@@ -732,6 +732,8 @@ async fn stable_group_visible_todo_snapshots_are_isolated_by_actor() {
                     interaction_scope_id: format!("{}:actor:u2", stable_group_scope()),
                 },
                 tool_call_id: Some("call-u2-complete".to_owned()),
+                tool_round: None,
+                retry_of: None,
                 execution_deadline: None,
             },
             json!({"numbers": [1], "reference": null}),
