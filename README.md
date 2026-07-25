@@ -331,6 +331,11 @@ flowchart LR
 
 本项目基于 [MIT License](./LICENSE) 开源。
 
+## 社区
+
+有问题、建议，或想一起折腾？欢迎来 **[雪主任的工坊](https://qm.qq.com/q/sXg1SaKJXi)** 社区交流反馈。
+
+
 <!--
 你居然看到了这里。
 
