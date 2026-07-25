@@ -168,6 +168,7 @@ async fn help_all_lists_public_commands_by_module() {
     }
     for command in [
         "/todo undo",
+        "/todo daily status",
         "/rss recent",
         "/rss add",
         "/rss delete",
@@ -282,10 +283,12 @@ async fn help_todo_returns_module_details() {
 
     assert!(text.starts_with("✅ 待办帮助"));
     assert!(text.contains("/todo done"));
+    assert!(text.contains("/todo daily status"));
     assert!(text.contains("Tool 调用"));
     assert!(text.contains("自然语言"));
     assert!(markdown.starts_with("# ✅ 待办帮助"));
     assert!(markdown.contains("`/todo done`"));
+    assert!(markdown.contains("`/todo daily status`"));
     assert!(markdown.contains("Tool 调用"));
 }
 
