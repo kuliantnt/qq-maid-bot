@@ -44,6 +44,7 @@ use tracing::{info, warn};
 pub(crate) use cache::BotOutboundCache;
 use dedupe::MessageDedupe;
 use group_filter::GroupCooldowns;
+pub(crate) use group_filter::contains_active_keyword;
 use ping::GatewayRuntimeStatus;
 use protocol::ResumeState;
 use push::GatewayPushSink;

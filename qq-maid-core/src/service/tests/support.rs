@@ -522,6 +522,7 @@ pub(super) fn private_request(text: &str) -> CoreRequest {
             is_bot: false,
             identity_source: IdentitySource::Event,
         },
+        addressed_to_bot: false,
         conversation: CoreConversation::Private {
             peer_id: "u1".to_owned(),
         },
@@ -550,6 +551,7 @@ pub(super) fn group_request(text: &str) -> CoreRequest {
             is_bot: false,
             identity_source: IdentitySource::Event,
         },
+        addressed_to_bot: false,
         conversation: CoreConversation::Group {
             group_id: "g1".to_owned(),
         },
@@ -574,6 +576,7 @@ pub(super) fn wechat_service_request(text: &str) -> CoreRequest {
             is_bot: false,
             identity_source: IdentitySource::Event,
         },
+        addressed_to_bot: false,
         conversation: CoreConversation::ServiceAccount {
             account_id: Some("gh_test".to_owned()),
             peer_id: "openid-u1".to_owned(),

@@ -46,6 +46,7 @@ pub(crate) struct InboundMessage {
     pub(crate) visible_entity_snapshot: Option<VisibleEntitySnapshot>,
     /// 平台事件提供的结构化 mention 目标。文本 @昵称 不应伪造成稳定身份。
     pub(crate) mentions: Vec<MentionIdentity>,
+    /// 平台已确认的机器人寻址信号。QQ 归一化阶段还会合并配置唤醒词命中结果。
     pub(crate) mentioned_bot: bool,
 }
 

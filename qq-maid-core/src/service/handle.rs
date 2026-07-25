@@ -298,6 +298,7 @@ impl From<CoreRequest> for RespondRequest {
             channel_id,
             platform: value.platform.as_str().to_owned(),
             account_id: value.account_id,
+            addressed_to_bot: value.addressed_to_bot,
             event_type: event_type.to_owned(),
             message_id: value.message_id,
             ..Default::default()

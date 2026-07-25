@@ -917,7 +917,7 @@ async fn slash_command_does_not_enter_tool_loop() {
 }
 
 #[tokio::test]
-async fn unknown_slash_command_falls_back_to_standard_chat_with_router_decision() {
+async fn unknown_slash_command_returns_deterministic_hint_without_model_request() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
 
@@ -931,16 +931,12 @@ async fn unknown_slash_command_falls_back_to_standard_chat_with_router_decision(
     let response = service.respond_with_plan(req, planned).await.unwrap();
 
     assert_eq!(inspector.tool_call_count(), 0);
-    assert_eq!(inspector.requests().len(), 1);
-    assert!(
-        response
-            .text
-            .as_deref()
-            .is_some_and(|text| text.contains("回复：/unknown-route-command"))
+    assert!(inspector.requests().is_empty());
+    assert_eq!(
+        response.text.as_deref(),
+        Some("未知命令，发送 `/help` 查看可用命令。")
     );
-    let diagnostics = response.diagnostics.unwrap();
-    assert_eq!(diagnostics["respond_route"], "standard_chat");
-    assert_eq!(diagnostics["route_reason"], "deterministic_slash_fallback");
+    assert_eq!(response.command.as_deref(), Some("unknown_command"));
 }
 
 #[tokio::test]

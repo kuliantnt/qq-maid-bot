@@ -116,6 +116,9 @@ pub struct RespondRequest {
     /// 平台账号/机器人账号标识；只参与业务隔离键，不作为发送目标。
     #[serde(default)]
     pub account_id: Option<String>,
+    /// 当前群消息是否由 Gateway 判定为明确指向机器人；私聊不依赖此字段。
+    #[serde(default)]
+    pub addressed_to_bot: bool,
     /// 事件类型（如 "message"）
     #[serde(default)]
     pub event_type: String,
@@ -233,6 +236,7 @@ impl Default for RespondRequest {
             timestamp: None,
             platform: String::new(),
             account_id: None,
+            addressed_to_bot: false,
             event_type: String::new(),
             system_prompts: Vec::new(),
             memory_context: String::new(),

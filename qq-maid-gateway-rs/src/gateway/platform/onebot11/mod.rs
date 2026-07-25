@@ -426,7 +426,7 @@ mod tests {
     use super::*;
     use crate::gateway::{
         dedupe::MessageDedupe,
-        platform::{core_scope_key, render_text_for_core},
+        platform::{core_scope_key, render_text_for_core, to_core_request},
     };
 
     fn event(value: Value) -> OneBotEvent {
@@ -601,6 +601,19 @@ mod tests {
                 target_id: "30003".to_owned()
             }
         );
+        let request = to_core_request(&inbound, inbound.text.clone()).unwrap();
+        assert!(!request.addressed_to_bot);
+    }
+
+    #[test]
+    fn structured_bot_at_maps_to_addressed_core_request() {
+        let inbound = message(inbound_from_event(&group_event(json!([
+            {"type": "at", "data": {"qq": "10001"}},
+            {"type": "text", "data": {"text": " /unknown"}}
+        ]))));
+
+        let request = to_core_request(&inbound, inbound.text.clone()).unwrap();
+        assert!(request.addressed_to_bot);
     }
 
     #[test]
