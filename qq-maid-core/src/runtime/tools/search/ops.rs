@@ -100,14 +100,40 @@ pub(super) async fn execute_research(
         .iter()
         .filter(|result| result["status"] == "success")
         .count();
-    Ok(ToolOutput::json(json!({
+    let all_empty = succeeded == 0
+        && results
+            .iter()
+            .all(|result| research_error_code(result).as_deref() == Some("empty_result"));
+    let mut output = json!({
         "ok": succeeded > 0,
         "mode": "multi_entity_research",
         "comparison_dimensions": dimensions,
         "successful": succeeded,
         "failed": total - succeeded,
         "results": results,
-    })))
+    });
+
+    if all_empty {
+        // 每个子查询都正常完成但没有证据时，向 Tool Loop 明确传递“执行完成、领域
+        // 无结果”。这不是网络失败，不能触发整批重试或失败进度事件。
+        output["execution_succeeded"] = Value::Bool(true);
+        output["result_count"] = Value::from(0);
+        output["error"] = json!({
+            "code": "empty_result",
+            "stage": "web_search",
+        });
+    } else if succeeded == 0
+        && let Some(error) = output["results"]
+            .as_array()
+            .and_then(|results| results.iter().find_map(real_research_error))
+    {
+        // 不能用同批中的空结果掩盖真实故障；按原始目标顺序选择第一个真实错误，
+        // 让上层按 timeout / provider / parse 等明确语义处理。
+        output["error"] = error;
+        output["result_count"] = Value::from(0);
+    }
+
+    Ok(ToolOutput::json(output))
 }
 
 pub(super) fn parse_research_targets(
@@ -304,6 +330,19 @@ fn research_result_json(
             }
         }),
     }
+}
+
+fn research_error_code(result: &Value) -> Option<String> {
+    result
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn real_research_error(result: &Value) -> Option<Value> {
+    let error = result.get("error")?;
+    (research_error_code(result).as_deref() != Some("empty_result")).then(|| error.clone())
 }
 
 fn compact_research_source_json(source: &WebSearchSource) -> Option<Value> {

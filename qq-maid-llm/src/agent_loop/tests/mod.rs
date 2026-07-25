@@ -373,7 +373,18 @@ impl crate::tool::Tool for EmptyResultReadOnlyTool {
         Ok(ToolOutput::json(json!({
             "ok": false,
             "execution_succeeded": true,
+            "mode": "multi_entity_research",
+            "result_count": 0,
             "error": {"code": "empty_result", "stage": "web_search"},
+            "results": [{
+                "entity": "项目甲",
+                "status": "failed",
+                "error": {"code": "empty_result", "stage": "web_search"}
+            }, {
+                "entity": "项目乙",
+                "status": "failed",
+                "error": {"code": "empty_result", "stage": "web_search"}
+            }],
         })))
     }
 }
@@ -432,6 +443,14 @@ impl crate::tool::Tool for NamedSlowReadOnlyTool {
     async fn execute(&self, _ctx: ToolContext, arguments: Value) -> Result<ToolOutput, LlmError> {
         *self.calls.lock().unwrap() += 1;
         tokio::time::sleep(self.delay).await;
+        if self.name == "web_search" {
+            let value = arguments["value"].as_str().unwrap_or_default();
+            return Ok(ToolOutput::json(json!({
+                "ok": true,
+                "answer": format!("{value} 的完整搜索答案"),
+                "sources": [{"title": "搜索来源", "url": "https://example.test/source"}],
+            })));
+        }
         Ok(ToolOutput::json(json!({
             "ok": true,
             "value": arguments["value"],

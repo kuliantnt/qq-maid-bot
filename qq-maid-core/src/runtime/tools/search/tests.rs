@@ -544,6 +544,14 @@ impl WebSearchExecutor for ResearchExecutor {
         } else {
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
+        if req.query.contains("无结果") {
+            return Ok(WebSearchOutcome {
+                answer: String::new(),
+                sources: Vec::new(),
+                provider: "research-mock".to_owned(),
+                elapsed_ms: 15,
+            });
+        }
         let _ = delta_tx.send("事实".to_owned()).await;
         let long_result = req.query.contains("长结果");
         Ok(WebSearchOutcome {
@@ -693,6 +701,8 @@ async fn multi_entity_research_reports_all_failed_without_tool_error() {
     assert_eq!(output.value["ok"], false);
     assert_eq!(output.value["successful"], 0);
     assert_eq!(output.value["failed"], 2);
+    assert_eq!(output.value["error"]["code"], "provider_error");
+    assert_eq!(output.value["error"]["stage"], "provider");
     assert!(
         output.value["results"]
             .as_array()
@@ -700,6 +710,51 @@ async fn multi_entity_research_reports_all_failed_without_tool_error() {
             .iter()
             .all(|result| result["status"] == "failed")
     );
+}
+
+#[tokio::test]
+async fn multi_entity_research_all_empty_results_keep_execution_success() {
+    let tool = WebSearchTool::new(Arc::new(ResearchExecutor::default()));
+
+    let output = tool
+        .execute(
+            test_context(),
+            research_arguments(&[("空结果一", "无结果查询一"), ("空结果二", "无结果查询二")]),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output.value["ok"], false);
+    assert_eq!(output.value["execution_succeeded"], true);
+    assert_eq!(output.value["result_count"], 0);
+    assert_eq!(output.value["error"]["code"], "empty_result");
+    assert_eq!(output.value["error"]["stage"], "web_search");
+    assert!(
+        output.value["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|result| result["error"]["code"] == "empty_result")
+    );
+}
+
+#[tokio::test]
+async fn multi_entity_research_real_failure_is_not_masked_by_empty_results() {
+    let tool = WebSearchTool::new(Arc::new(ResearchExecutor::default()));
+
+    let output = tool
+        .execute(
+            test_context(),
+            research_arguments(&[("空结果", "无结果查询"), ("失败项", "失败查询")]),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output.value["ok"], false);
+    assert_ne!(output.value["execution_succeeded"], true);
+    assert_eq!(output.value["result_count"], 0);
+    assert_eq!(output.value["error"]["code"], "provider_error");
+    assert_eq!(output.value["error"]["stage"], "provider");
 }
 
 #[tokio::test]

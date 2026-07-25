@@ -152,6 +152,55 @@ async fn first_empty_web_search_still_renders_empty_result_hint() {
 }
 
 #[tokio::test]
+async fn multi_entity_all_empty_search_renders_one_empty_hint_without_retry() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results(
+            vec![raw_tool_result(
+                "web_search",
+                serde_json::json!({
+                    "ok": false,
+                    "execution_succeeded": true,
+                    "mode": "multi_entity_research",
+                    "successful": 0,
+                    "failed": 2,
+                    "result_count": 0,
+                    "error": {"code": "empty_result", "stage": "web_search"},
+                    "results": [{
+                        "entity": "项目甲",
+                        "status": "failed",
+                        "error": {"code": "empty_result", "stage": "web_search"}
+                    }, {
+                        "entity": "项目乙",
+                        "status": "failed",
+                        "error": {"code": "empty_result", "stage": "web_search"}
+                    }]
+                }),
+                false,
+            )],
+            "模型不应补充无证据的比较结论。",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("联网对比两个没有公开资料的项目"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert_eq!(text.matches("【联网查询").count(), 1);
+    assert_eq!(text.matches("没查到明确结果").count(), 1);
+    assert!(!text.contains("模型不应补充"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["tool_retry_count"], 0);
+    assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        diagnostics["tool_outcomes"][0]["error_code"],
+        "empty_result"
+    );
+}
+
+#[tokio::test]
 async fn web_search_execution_failure_retry_renders_only_final_error_and_keeps_attempt_trace() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
