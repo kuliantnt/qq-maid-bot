@@ -49,6 +49,52 @@ async fn multi_entity_web_search_fact_card_preserves_model_summary_without_empty
 }
 
 #[tokio::test]
+async fn nested_research_evidence_keeps_news_summary_when_top_level_fields_are_empty() {
+    // 多实体调研的可信来源位于 results 内；顶层 answer/sources 为空不能覆盖子项证据。
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results(
+            vec![raw_tool_result(
+                "web_search",
+                serde_json::json!({
+                    "ok": true,
+                    "mode": "multi_entity_research",
+                    "answer": "",
+                    "sources": [],
+                    "results": [{
+                        "entity": "今日 AI 新闻",
+                        "status": "success",
+                        "facts": "Reuters 报道了可核实的 AI 新闻。",
+                        "sources": [{
+                            "title": "Reuters AI News",
+                            "url": "https://example.test/reuters-ai",
+                            "snippet": "嵌套搜索来源"
+                        }]
+                    }]
+                }),
+                true,
+            )],
+            "基于 Reuters 的结果，今日 AI 新闻已有明确来源。",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("今日 AI 新闻"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("Reuters 报道了可核实的 AI 新闻。"));
+    assert!(text.contains("Reuters AI News"));
+    assert!(text.contains("基于 Reuters 的结果"));
+    assert!(!text.contains("没查到明确结果"));
+    assert_eq!(
+        response.diagnostics.unwrap()["agent_turn_status"],
+        "succeeded"
+    );
+}
+
+#[tokio::test]
 async fn duplicate_web_search_keeps_first_card_and_model_reply_without_counting_cache_hit() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
