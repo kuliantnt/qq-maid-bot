@@ -386,7 +386,9 @@ impl Tool for WebSearchTool {
                 ),
                 "max_results": max_results.unwrap_or(DEFAULT_MAX_RESULTS),
                 "context_size": context_size.as_deref().unwrap_or("low"),
-                "topic": topic.as_deref().unwrap_or("general"),
+                // Tavily 会根据未传 topic/time_range 的时效新闻请求改用 news/day。
+                // 因此不能将缺省值与模型显式指定的 general 视为同一搜索。
+                "topic": topic,
                 "time_range": time_range,
             }))
             .expect("web search deduplication key must serialize")
@@ -758,21 +760,21 @@ fn web_search_failure_output(backend: &str, error: &LlmError) -> Value {
     })
 }
 
-/// 搜索诊断只保留可定位重试的结构化字段；不记录 raw_question、聊天历史或上游正文。
+/// 搜索诊断只保留可定位重试的结构化字段；不记录 query、raw_question、聊天历史或上游正文。
 fn log_web_search_execution(
     context: &ToolContext,
     arguments: &Value,
     output: &Value,
     multi_entity_research: bool,
 ) {
-    let query = if multi_entity_research {
-        "multi_entity_research".to_owned()
+    let query_chars = if multi_entity_research {
+        0
     } else {
         arguments
             .get("query")
             .and_then(Value::as_str)
-            .map(normalize_dedup_text)
-            .unwrap_or_default()
+            .map(|query| query.chars().count())
+            .unwrap_or(0)
     };
     let source_count = output
         .get("sources")
@@ -795,7 +797,7 @@ fn log_web_search_execution(
         .get("execution_succeeded")
         .and_then(Value::as_bool)
         .unwrap_or_else(|| output.get("ok").and_then(Value::as_bool).unwrap_or(false));
-    tracing::info!(
+    tracing::debug!(
         tool = WEB_SEARCH_TOOL_NAME,
         tool_call_id = context.tool_call_id.as_deref().unwrap_or("direct"),
         round = ?context.tool_round,
@@ -803,7 +805,7 @@ fn log_web_search_execution(
             .get("backend")
             .and_then(|value| value.as_str())
             .unwrap_or("unknown"),
-        query = %query,
+        query_chars,
         topic = ?arguments.get("topic"),
         time_range = ?arguments.get("time_range"),
         max_results = ?arguments.get("max_results"),

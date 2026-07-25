@@ -342,6 +342,14 @@ fn web_search_tool_is_read_only_and_deduplicates_normalized_query() {
         default_key,
         tool.deduplication_key(&json!({
             "query": "rust news",
+            "topic": "general"
+        }))
+        .unwrap()
+    );
+    assert_ne!(
+        default_key,
+        tool.deduplication_key(&json!({
+            "query": "rust news",
             "raw_question": "different context"
         }))
         .unwrap()

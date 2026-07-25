@@ -228,11 +228,9 @@ fn has_news_intent(value: &str) -> bool {
 
 fn is_current_time_request(value: &str) -> bool {
     let value = value.to_ascii_lowercase();
-    [
-        "今天", "今日", "最新", "最近", "近日", "today", "latest", "recent",
-    ]
-    .iter()
-    .any(|term| value.contains(term))
+    ["今天", "今日", "最新", "today", "latest"]
+        .iter()
+        .any(|term| value.contains(term))
 }
 
 #[derive(Serialize)]
@@ -581,6 +579,35 @@ mod tests {
         assert!(options.query.contains("2026-07-25"));
         assert_eq!(options.topic, WebSearchTopic::News);
         assert_eq!(options.time_range, Some(WebSearchTimeRange::Day));
+    }
+
+    #[test]
+    fn recent_news_query_does_not_force_day_defaults() {
+        let context = RequestTimeContext::from_datetime(
+            FixedOffset::east_opt(8 * 60 * 60)
+                .unwrap()
+                .with_ymd_and_hms(2026, 7, 25, 9, 30, 0)
+                .unwrap(),
+        );
+
+        for query in ["最近 AI 新闻", "近日 AI 新闻", "recent AI news"] {
+            let request = WebSearchRequest {
+                query: query.to_owned(),
+                raw_question: None,
+                max_results: None,
+                context_size: None,
+                topic: None,
+                time_range: None,
+                backend_override: None,
+                model_override: None,
+            };
+
+            let options =
+                tavily_request_options(&request, &WebSearchConfig::default(), &context).unwrap();
+
+            assert_eq!(options.topic, WebSearchTopic::General, "{query}");
+            assert_eq!(options.time_range, None, "{query}");
+        }
     }
 
     #[tokio::test]
