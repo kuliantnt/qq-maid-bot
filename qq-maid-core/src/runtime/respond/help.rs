@@ -48,6 +48,7 @@ const HELP_MODULES: &[HelpModule] = &[
             "- `/todo all`：查看全部待办",
             "- `/todo search 关键词`：搜索未完成待办",
             "- `/todo done`、`/todo undo`：查看已完成待办",
+            "- `/todo daily status`",
             "- 写操作请直接用自然语言，例如：`帮我新增待办：明天检查日志`、`完成第一条待办`、`删除已完成待办`。",
         ],
         notes: &[
