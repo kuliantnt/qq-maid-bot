@@ -17,11 +17,12 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.21.5`，项目处于 `21.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.21.6`，项目处于 `21.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
 ## 21.x 版本线更新
+- **联网搜索与群聊触发修复**（v0.21.6）：收紧长结果、嵌套调研和空结果的搜索证据语义，补充 `/todo daily status` 帮助，并避免 @全体成员误触发机器人。
 - **QQ 群消息触发修复**（v0.21.5）：修复群聊 @ 机器人识别和 mention 文本污染，兼容 `GROUP_AT_MESSAGE_CREATE`、稳定机器人身份匹配及旧事件字段，同时避免误触发其它机器人。
 - **QQ API v2 消息协议与富媒体上传**（v0.21.4）：对齐图片分片上传、入站消息归一化、稳定群聊 @ 判断和复合消息去重；收紧 ARK、临时上传 URL 与被动回复分段的安全边界。
 - **引用图文与工具领域边界**（v0.21.3）：修复 QQ 引用图文消息超时与 `/ping` 应用版本注入；收敛 Todo / Memory / RSS 等工具领域边界，降低跨领域耦合。
