@@ -314,6 +314,11 @@ struct LimitedReadOnlyTool {
     calls: Arc<StdMutex<usize>>,
 }
 
+/// 模拟网络请求已完成但没有返回可用证据的只读搜索结果。
+struct EmptyResultReadOnlyTool {
+    calls: Arc<StdMutex<usize>>,
+}
+
 #[async_trait]
 impl crate::tool::Tool for LimitedReadOnlyTool {
     fn metadata(&self) -> ToolMetadata {
@@ -337,6 +342,39 @@ impl crate::tool::Tool for LimitedReadOnlyTool {
         Ok(ToolOutput::json(
             json!({"ok": true, "evidence": arguments["query"]}),
         ))
+    }
+}
+
+#[async_trait]
+impl crate::tool::Tool for EmptyResultReadOnlyTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "web_search".to_owned(),
+            description: "empty result search".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    fn max_calls_per_request(&self) -> Option<usize> {
+        Some(1)
+    }
+
+    async fn execute(&self, _ctx: ToolContext, _arguments: Value) -> Result<ToolOutput, LlmError> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolOutput::json(json!({
+            "ok": false,
+            "execution_succeeded": true,
+            "error": {"code": "empty_result", "stage": "web_search"},
+        })))
     }
 }
 

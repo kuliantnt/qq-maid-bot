@@ -423,12 +423,14 @@ fn tool_skip_output(reason: &str) -> String {
 }
 
 fn tool_output_indicates_success(output: &str) -> bool {
-    // 业务工具失败统一约定为 {"ok":false,...}；这里不理解具体业务字段，
-    // 只把明确失败用于依赖跳过和通用执行轨迹。
-    serde_json::from_str::<Value>(output)
-        .ok()
-        .and_then(|value| value.get("ok").and_then(Value::as_bool))
-        .unwrap_or(true)
+    // `ok` 表示领域目标是否达成；少数只读查询可正常完成却没有可用证据。
+    // 此时以 `execution_succeeded` 保留执行成功语义，避免进入通用失败重试、
+    // 依赖跳过和错误进度分支；领域层仍须按 `ok:false` 处理无结果。
+    let Ok(value) = serde_json::from_str::<Value>(output) else {
+        return true;
+    };
+    value.get("ok").and_then(Value::as_bool) != Some(false)
+        || value.get("execution_succeeded").and_then(Value::as_bool) == Some(true)
 }
 
 fn tool_execution_result(name: &str, output: &str, succeeded: bool) -> ToolExecutionResult {
@@ -441,13 +443,16 @@ fn tool_execution_result(name: &str, output: &str, succeeded: bool) -> ToolExecu
 }
 
 fn compact_cached_output(output: &str) -> String {
-    // 保留成功语义和去重标记，不重复注入首次检索的完整证据。
-    serde_json::to_string(&json!({
-        "ok": true,
-        "deduplicated": true,
-        "message": "已使用本次请求中相同检索的已有证据。",
-    }))
-    .unwrap_or_else(|_| output.to_owned())
+    // 缓存命中必须保留原始领域状态；例如 empty_result 的 ok:false 不能在这里被
+    // 改写成成功证据。只增加通用去重标记，避免再次真实执行相同的只读调用。
+    let Ok(mut value) = serde_json::from_str::<Value>(output) else {
+        return output.to_owned();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return output.to_owned();
+    };
+    object.insert("deduplicated".to_owned(), Value::Bool(true));
+    serde_json::to_string(&value).unwrap_or_else(|_| output.to_owned())
 }
 
 fn tool_limit_output(limit: usize) -> String {

@@ -18,6 +18,7 @@ use crate::error::LlmError;
 use super::{
     WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME, WebSearchTool, WebSearchToolRequest,
     optional_string_field, parse_context_size, parse_max_results, parse_time_range, parse_topic,
+    web_search_outcome_has_evidence,
 };
 
 pub(super) const WEB_SEARCH_RESEARCH_MAX_TARGETS: usize = 5;
@@ -266,7 +267,7 @@ fn research_result_json(
     outcome: Result<WebSearchOutcome, LlmError>,
 ) -> Value {
     match outcome {
-        Ok(outcome) => json!({
+        Ok(outcome) if web_search_outcome_has_evidence(&outcome) => json!({
             "entity": target.entity,
             "assumption": target.assumption,
             "status": "success",
@@ -276,6 +277,19 @@ fn research_result_json(
             "facts": truncate_chars(&outcome.answer, WEB_SEARCH_RESEARCH_FACT_MAX_CHARS),
             "sources": outcome.sources.iter().take(WEB_SEARCH_RESEARCH_SOURCE_LIMIT)
                 .filter_map(compact_research_source_json).collect::<Vec<_>>(),
+        }),
+        Ok(outcome) => json!({
+            "entity": target.entity,
+            "assumption": target.assumption,
+            "status": "failed",
+            "model": truncate_chars(model, 100),
+            "provider": outcome.provider,
+            "elapsed_ms": outcome.elapsed_ms.max(elapsed_ms),
+            "error": {
+                "code": "empty_result",
+                "stage": "web_search",
+                "message": "web search returned no usable evidence",
+            }
         }),
         Err(err) => json!({
             "entity": target.entity,

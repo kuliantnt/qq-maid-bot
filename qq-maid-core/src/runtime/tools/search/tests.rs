@@ -106,8 +106,26 @@ async fn web_search_tool_reuses_query_executor() {
     assert_eq!(requests[0].time_range.as_deref(), Some("week"));
     assert_eq!(requests[0].model_override.as_deref(), Some("gpt-search"));
     assert_eq!(stream_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(output.value["ok"], true);
+    assert_eq!(output.value["result_count"], 1);
     assert_eq!(output.value["answer"], "answer: Rust 新闻");
     assert_eq!(output.value["sources"][0]["url"], "https://example.com");
+}
+
+#[test]
+fn web_search_tool_empty_outcome_is_structured_failure_not_success_evidence() {
+    let output = web_search_tool_output(&WebSearchOutcome {
+        answer: " \n ".to_owned(),
+        sources: Vec::new(),
+        provider: "mock-query".to_owned(),
+        elapsed_ms: 12,
+    });
+
+    assert_eq!(output["ok"], false);
+    assert_eq!(output["execution_succeeded"], true);
+    assert_eq!(output["result_count"], 0);
+    assert_eq!(output["error"]["code"], "empty_result");
+    assert_eq!(output["error"]["stage"], "web_search");
 }
 
 #[test]

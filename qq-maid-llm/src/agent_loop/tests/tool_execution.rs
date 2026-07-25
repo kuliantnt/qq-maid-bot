@@ -293,6 +293,82 @@ async fn duplicate_web_search_executes_once_and_returns_cache_marker_to_model() 
 }
 
 #[tokio::test]
+async fn empty_result_is_completed_once_without_retry_or_execution_failure() {
+    let calls = Arc::new(StdMutex::new(0));
+    let events = Arc::new(StdMutex::new(Vec::new()));
+    let progress_sink = {
+        let events = events.clone();
+        Arc::new(move |event: ToolLoopProgressEvent| {
+            let events = events.clone();
+            Box::pin(async move {
+                events.lock().unwrap().push(event);
+                Ok(())
+            }) as ToolLoopProgressFuture
+        })
+    };
+    let registry = registry_with(vec![Arc::new(EmptyResultReadOnlyTool {
+        calls: calls.clone(),
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call(
+                "web_search",
+                "w1",
+                r#"{"query":"today ai news"}"#,
+            )]),
+            tool_calls(vec![tool_call(
+                "web_search",
+                "w2",
+                r#"{"query":"today ai news"}"#,
+            )]),
+            final_reply("没有新增证据。"),
+        ],
+    ));
+
+    let outcome = run_agent_loop(
+        session,
+        registry,
+        test_context(),
+        3,
+        Some(progress_sink),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert_eq!(outcome.agent.executed_tools, ["web_search"]);
+    assert_eq!(outcome.agent.tool_results.len(), 2);
+    assert!(
+        outcome
+            .agent
+            .tool_results
+            .iter()
+            .all(|result| result.succeeded)
+    );
+    assert_eq!(outcome.agent.tool_results[0].output["ok"], false);
+    assert_eq!(
+        outcome.agent.tool_results[0].output["execution_succeeded"],
+        true
+    );
+    assert_eq!(outcome.agent.tool_results[1].output["deduplicated"], true);
+    assert_eq!(outcome.agent.tool_attempts[1].retry_of, None);
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![
+            ToolLoopProgressEvent::ToolCallStarted {
+                tool_name: "web_search".to_owned()
+            },
+            ToolLoopProgressEvent::ToolCallFinished {
+                tool_name: "web_search".to_owned()
+            }
+        ]
+    );
+}
+
+#[tokio::test]
 async fn failed_tool_followed_by_same_singleton_call_is_recorded_as_retry() {
     let calls = Arc::new(StdMutex::new(0));
     let registry = registry_with(vec![Arc::new(FailOnceReadOnlyTool {

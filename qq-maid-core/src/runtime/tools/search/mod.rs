@@ -571,12 +571,45 @@ fn optional_string_field(arguments: &Value, key: &str) -> Option<String> {
 }
 
 fn web_search_tool_output(outcome: &WebSearchOutcome) -> Value {
+    let result_count = outcome
+        .sources
+        .iter()
+        .filter(|source| web_search_source_has_evidence(source))
+        .count();
+    if !web_search_outcome_has_evidence(outcome) {
+        return json!({
+            "ok": false,
+            "execution_succeeded": true,
+            "provider": outcome.provider,
+            "answer": "",
+            "sources": [],
+            "result_count": 0,
+            "elapsed_ms": outcome.elapsed_ms,
+            "error": {
+                "code": "empty_result",
+                "stage": "web_search",
+            },
+        });
+    }
+
     json!({
+        "ok": true,
         "provider": outcome.provider,
         "answer": outcome.answer,
         "sources": outcome.sources.iter().map(web_search_source_json).collect::<Vec<_>>(),
+        "result_count": result_count,
         "elapsed_ms": outcome.elapsed_ms,
     })
+}
+
+pub(super) fn web_search_outcome_has_evidence(outcome: &WebSearchOutcome) -> bool {
+    !outcome.answer.trim().is_empty() || outcome.sources.iter().any(web_search_source_has_evidence)
+}
+
+fn web_search_source_has_evidence(source: &WebSearchSource) -> bool {
+    !source.title.trim().is_empty()
+        || !source.url.trim().is_empty()
+        || !source.snippet.trim().is_empty()
 }
 
 fn web_search_source_json(source: &WebSearchSource) -> Value {

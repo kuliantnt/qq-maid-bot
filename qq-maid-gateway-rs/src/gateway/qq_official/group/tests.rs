@@ -50,6 +50,28 @@ async fn group_stream_timeout_sends_core_safe_failure_text() {
             .contains_ref_index_id("REFIDX_failure")
     );
 }
+
+#[tokio::test]
+async fn group_stream_collapse_uses_completed_body_without_delta_concat() {
+    let completed = crate::gateway::test_support::respond_response_fixture(
+        "【联网查询】\n\n没查到明确结果。可以换一个关键词再试。",
+    );
+    let stream = FakeGroupEventStream::new([
+        CoreResponseEvent::TextDelta("Reuters、CNBC、TechCrunch 的未经验证新闻正文".to_owned()),
+        CoreResponseEvent::Completed(Box::new(completed)),
+    ]);
+
+    let response = match consume_respond_stream(stream).await {
+        GroupStreamOutcome::Completed(response) => response,
+        other => panic!("expected completed group stream, got {other:?}"),
+    };
+
+    let text = response.text_content().unwrap();
+    assert_eq!(text.matches("没查到明确结果").count(), 1);
+    assert!(!text.contains("Reuters"));
+    assert!(!text.contains("CNBC"));
+    assert!(!text.contains("TechCrunch"));
+}
 use crate::{
     api::{ApiError, GroupReplyTarget, QqApiClient, SendFuture},
     auth::AccessTokenManager,
