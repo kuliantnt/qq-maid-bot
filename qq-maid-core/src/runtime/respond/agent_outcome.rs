@@ -240,12 +240,26 @@ impl AgentTurnOutcome {
     }
 
     pub(crate) fn should_preserve_model_reply(&self) -> bool {
-        !self.blocks.is_empty()
+        let readonly_trusted = !self.blocks.is_empty()
             && self.outcomes.iter().all(|outcome| {
                 outcome.effect == ToolEffect::ReadOnly
-                    && outcome.status == ToolOutcomeStatus::Succeeded
                     && outcome.presentation != OutcomePresentation::Unhandled
-            })
+            });
+        if !readonly_trusted {
+            return false;
+        }
+
+        // `empty_result` 表示查询已完成但没有可用证据。此时仍沿用已有的模型回复拼接
+        // 路径；其他失败继续由确定性工具回执覆盖，避免把执行失败误当成可用结果。
+        let all_succeeded = self
+            .outcomes
+            .iter()
+            .all(|outcome| outcome.status == ToolOutcomeStatus::Succeeded);
+        let all_empty_results = self.outcomes.iter().all(|outcome| {
+            outcome.status == ToolOutcomeStatus::Failed
+                && outcome.error_code.as_deref() == Some("empty_result")
+        });
+        all_succeeded || all_empty_results
     }
 
     pub(crate) fn has_unhandled_outcome(&self) -> bool {
@@ -598,6 +612,21 @@ mod tests {
         )]);
 
         assert!(turn.can_replace_model_reply());
+        assert!(turn.should_preserve_model_reply());
+    }
+
+    #[test]
+    fn readonly_empty_results_preserve_model_reply() {
+        let mut empty = outcome(
+            "web_search",
+            "search",
+            ToolOutcomeStatus::Failed,
+            ToolEffect::ReadOnly,
+            vec![ResponseBlock::Warning(CommandBody::plain("没查到明确结果"))],
+        );
+        empty.error_code = Some("empty_result".to_owned());
+        let turn = AgentTurnOutcome::from_outcomes(vec![empty]);
+
         assert!(turn.should_preserve_model_reply());
     }
 

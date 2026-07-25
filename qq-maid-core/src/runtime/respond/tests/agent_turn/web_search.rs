@@ -158,7 +158,7 @@ async fn duplicate_web_search_keeps_first_card_and_model_reply_without_counting_
 }
 
 #[tokio::test]
-async fn first_empty_web_search_still_renders_empty_result_hint() {
+async fn empty_web_search_with_empty_final_text_only_renders_empty_result_hint() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_raw_tool_results(
@@ -173,7 +173,7 @@ async fn first_empty_web_search_still_renders_empty_result_hint() {
                 }),
                 true,
             )],
-            "模型确认当前没有更明确的公开结果。",
+            "  ",
         );
     let service = test_service_with_provider_and_tool_calling(inspector, true);
 
@@ -186,7 +186,6 @@ async fn first_empty_web_search_still_renders_empty_result_hint() {
     assert_eq!(text.matches("【联网查询】").count(), 1);
     assert_eq!(text.matches("没查到明确结果").count(), 1);
     assert!(!text.contains("联网查询服务暂时不可用"));
-    assert!(!text.contains("模型确认当前没有更明确的公开结果"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 1);
     assert_eq!(diagnostics["tool_outcomes"][0]["status"], "failed");
@@ -224,7 +223,7 @@ async fn multi_entity_all_empty_search_renders_one_empty_hint_without_retry() {
                 }),
                 false,
             )],
-            "模型不应补充无证据的比较结论。",
+            "  ",
         );
     let service = test_service_with_provider_and_tool_calling(inspector, true);
 
@@ -236,7 +235,6 @@ async fn multi_entity_all_empty_search_renders_one_empty_hint_without_retry() {
     let text = response.text.unwrap();
     assert_eq!(text.matches("【联网查询").count(), 1);
     assert_eq!(text.matches("没查到明确结果").count(), 1);
-    assert!(!text.contains("模型不应补充"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["tool_retry_count"], 0);
     assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 1);
@@ -308,7 +306,7 @@ async fn web_search_execution_failure_retry_renders_only_final_error_and_keeps_a
 }
 
 #[tokio::test]
-async fn group_two_empty_searches_emit_one_failure_without_model_news() {
+async fn group_two_empty_searches_keep_one_hint_and_one_final_text() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_raw_tool_results(
@@ -324,7 +322,7 @@ async fn group_two_empty_searches_emit_one_failure_without_model_news() {
                     true,
                 ),
             ],
-            "截至今天，Reuters、CNBC、TechCrunch 都报道了未经搜索结果支持的新闻。",
+            "模型确认本轮没有更明确的公开结果。",
         );
     let service = test_service_with_provider_and_group_tool_calling_tools(
         inspector,
@@ -338,12 +336,10 @@ async fn group_two_empty_searches_emit_one_failure_without_model_news() {
 
     assert_eq!(text.matches("【联网查询】").count(), 1);
     assert_eq!(text.matches("没查到明确结果").count(), 1);
-    for unsupported in ["Reuters", "CNBC", "TechCrunch", "截至今天"] {
-        assert!(
-            !text.contains(unsupported),
-            "unexpected model text: {unsupported}"
-        );
-    }
+    assert_eq!(
+        text.matches("模型确认本轮没有更明确的公开结果。").count(),
+        1
+    );
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], "failed");
     assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 2);

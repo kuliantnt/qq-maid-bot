@@ -16,9 +16,9 @@ use tokio::time::Instant;
 use crate::error::LlmError;
 
 use super::{
-    WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME, WebSearchTool, WebSearchToolRequest,
-    optional_string_field, parse_context_size, parse_max_results, parse_time_range, parse_topic,
-    web_search_outcome_has_evidence,
+    WEB_SEARCH_EMPTY_RESULT_MODEL_MESSAGE, WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME,
+    WebSearchTool, WebSearchToolRequest, optional_string_field, parse_context_size,
+    parse_max_results, parse_time_range, parse_topic, web_search_outcome_has_evidence,
 };
 
 pub(super) const WEB_SEARCH_RESEARCH_MAX_TARGETS: usize = 5;
@@ -100,16 +100,23 @@ pub(super) async fn execute_research(
         .iter()
         .filter(|result| result["status"] == "success")
         .count();
+    let result_count = results
+        .iter()
+        .filter_map(|result| result.get("sources").and_then(Value::as_array))
+        .map(Vec::len)
+        .sum::<usize>();
     let all_empty = succeeded == 0
         && results
             .iter()
             .all(|result| research_error_code(result).as_deref() == Some("empty_result"));
     let mut output = json!({
         "ok": succeeded > 0,
+        "backend": tool.backend_label(),
         "mode": "multi_entity_research",
         "comparison_dimensions": dimensions,
         "successful": succeeded,
         "failed": total - succeeded,
+        "result_count": result_count,
         "results": results,
     });
 
@@ -121,6 +128,7 @@ pub(super) async fn execute_research(
         output["error"] = json!({
             "code": "empty_result",
             "stage": "web_search",
+            "message": WEB_SEARCH_EMPTY_RESULT_MODEL_MESSAGE,
         });
     } else if succeeded == 0
         && let Some(error) = output["results"]

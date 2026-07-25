@@ -54,8 +54,9 @@ impl ToolRuntime {
             ToolRegistry::new().with_limits(DEFAULT_TOOL_TIMEOUT, tool_result_max_chars);
         let save_memory_tool =
             SaveMemoryTool::new(stores.memory_store.clone(), stores.session_store.clone());
-        let web_search_tool =
-            WebSearchTool::new(executors.query_executor.clone()).with_timeouts(web_search_timeouts);
+        let web_search_tool = WebSearchTool::new(executors.query_executor.clone())
+            .with_timeouts(web_search_timeouts)
+            .with_output_max_chars(tool_result_max_chars);
         let weather_available = executors.weather_executor.is_available();
         // Tool 只通过服务端白名单注册；Todo Tool 复用现有 store、session 快照和 pending。
         let mut tools: Vec<qq_maid_llm::tool::DynTool> = vec![

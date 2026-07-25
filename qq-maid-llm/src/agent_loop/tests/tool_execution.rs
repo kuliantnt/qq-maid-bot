@@ -428,8 +428,10 @@ async fn execution_success_without_domain_success_skips_dependent_tool() {
 #[tokio::test]
 async fn failed_tool_followed_by_same_singleton_call_is_recorded_as_retry() {
     let calls = Arc::new(StdMutex::new(0));
+    let contexts = Arc::new(StdMutex::new(Vec::new()));
     let registry = registry_with(vec![Arc::new(FailOnceReadOnlyTool {
         calls: calls.clone(),
+        contexts: contexts.clone(),
     }) as _]);
     let session = Box::new(ScriptedSession::new(
         "mock",
@@ -452,6 +454,10 @@ async fn failed_tool_followed_by_same_singleton_call_is_recorded_as_retry() {
     assert_eq!(outcome.agent.tool_attempts.len(), 2);
     assert_eq!(outcome.agent.tool_attempts[0].retry_of, None);
     assert_eq!(outcome.agent.tool_attempts[1].retry_of, Some(0));
+    assert_eq!(
+        *contexts.lock().unwrap(),
+        [(Some(0), None), (Some(1), Some(0))]
+    );
 }
 
 #[tokio::test]
@@ -497,6 +503,7 @@ async fn cross_candidate_retry_indexes_are_offset_to_global() {
     let calls_b = Arc::new(StdMutex::new(0));
     let registry_b = registry_with(vec![Arc::new(FailOnceReadOnlyTool {
         calls: calls_b.clone(),
+        contexts: Arc::new(StdMutex::new(Vec::new())),
     }) as _]);
     let outcome = run_agent_loop_with_handle(
         Box::new(ScriptedSession::new(
@@ -542,6 +549,7 @@ async fn independent_same_round_calls_are_not_recorded_as_retry() {
     let calls = Arc::new(StdMutex::new(0));
     let registry = registry_with(vec![Arc::new(FailOnceReadOnlyTool {
         calls: calls.clone(),
+        contexts: Arc::new(StdMutex::new(Vec::new())),
     }) as _]);
     let session = Box::new(ScriptedSession::new(
         "mock",

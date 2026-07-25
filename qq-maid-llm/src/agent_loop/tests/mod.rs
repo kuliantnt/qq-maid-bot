@@ -39,6 +39,8 @@ fn test_context() -> ToolContext {
             interaction_scope_id: "private:u1".to_owned(),
         },
         tool_call_id: None,
+        tool_round: None,
+        retry_of: None,
         execution_deadline: None,
     }
 }
@@ -306,8 +308,11 @@ struct NamedSlowReadOnlyTool {
     delay: std::time::Duration,
 }
 
+type ToolAttemptContext = (Option<usize>, Option<usize>);
+
 struct FailOnceReadOnlyTool {
     calls: Arc<StdMutex<usize>>,
+    contexts: Arc<StdMutex<Vec<ToolAttemptContext>>>,
 }
 
 struct LimitedReadOnlyTool {
@@ -408,7 +413,11 @@ impl crate::tool::Tool for FailOnceReadOnlyTool {
         ToolEffect::ReadOnly
     }
 
-    async fn execute(&self, _ctx: ToolContext, arguments: Value) -> Result<ToolOutput, LlmError> {
+    async fn execute(&self, ctx: ToolContext, arguments: Value) -> Result<ToolOutput, LlmError> {
+        self.contexts
+            .lock()
+            .unwrap()
+            .push((ctx.tool_round, ctx.retry_of));
         let mut calls = self.calls.lock().unwrap();
         *calls += 1;
         if *calls == 1 {

@@ -17,8 +17,12 @@ use tokio::{
 use qq_maid_common::identity_context::{
     ConversationKind, ExecutionActorContext, ExecutionConversationContext,
 };
+use qq_maid_common::text::truncate_chars_with_ellipsis_trimmed;
 use qq_maid_llm::{
-    tool::{Tool, ToolContext, ToolEffect, ToolMetadata, ToolOutput, ToolTimeoutPolicy},
+    tool::{
+        DEFAULT_TOOL_OUTPUT_MAX_CHARS, Tool, ToolContext, ToolEffect, ToolMetadata, ToolOutput,
+        ToolTimeoutPolicy,
+    },
     web_search::{
         DEFAULT_MAX_RESULTS, DynWebSearchExecutor, WebSearchBackend, WebSearchOutcome,
         WebSearchRequest, WebSearchSource,
@@ -34,8 +38,14 @@ use crate::{
 };
 
 pub(crate) const WEB_SEARCH_TOOL_NAME: &str = "web_search";
+pub(super) const WEB_SEARCH_EMPTY_RESULT_MODEL_MESSAGE: &str =
+    "本次搜索没有找到可用结果；请说明没有联网证据，不要把未经搜索验证的信息描述成实时搜索结果。";
 pub(crate) const WEB_SEARCH_QUERY_MAX_LENGTH: usize = 200;
 const WEB_SEARCH_MAX_RESULTS_LIMIT: u8 = 10;
+const WEB_SEARCH_TOOL_SOURCE_LIMIT: usize = 4;
+const WEB_SEARCH_TOOL_SOURCE_TITLE_MAX_CHARS: usize = 100;
+const WEB_SEARCH_TOOL_SOURCE_URL_MAX_CHARS: usize = 300;
+const WEB_SEARCH_TOOL_SOURCE_SNIPPET_MAX_CHARS: usize = 160;
 /// 搜索流三段超时的默认值；绝对上限独立于 90 秒整体请求预算。
 pub const DEFAULT_WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT: Duration =
     Duration::from_secs(DEFAULT_WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT_SECONDS);
@@ -90,6 +100,7 @@ pub struct WebSearchTool {
     first_activity_timeout: Duration,
     idle_timeout: Duration,
     absolute_timeout: Duration,
+    output_max_chars: usize,
     backend_override: Option<WebSearchBackend>,
     model_override: Option<String>,
 }
@@ -102,6 +113,7 @@ impl WebSearchTool {
             first_activity_timeout: timeouts.first_activity,
             idle_timeout: timeouts.idle,
             absolute_timeout: timeouts.absolute,
+            output_max_chars: DEFAULT_TOOL_OUTPUT_MAX_CHARS,
             backend_override: None,
             model_override: None,
         }
@@ -115,6 +127,12 @@ impl WebSearchTool {
         self
     }
 
+    /// 与 Tool Registry 使用相同结果预算，避免搜索先生成超限 JSON 后丢失结构化证据。
+    pub(crate) fn with_output_max_chars(mut self, output_max_chars: usize) -> Self {
+        self.output_max_chars = output_max_chars;
+        self
+    }
+
     /// 自然语言 Tool Loop 必须使用服务端解析后的场景搜索路线，模型参数不能覆盖。
     pub fn with_model_override(mut self, model: String) -> Self {
         self.model_override = Some(model);
@@ -125,6 +143,12 @@ impl WebSearchTool {
     pub fn with_backend_override(mut self, backend: WebSearchBackend) -> Self {
         self.backend_override = Some(backend);
         self
+    }
+
+    pub(super) fn backend_label(&self) -> &'static str {
+        self.backend_override
+            .map(WebSearchBackend::as_str)
+            .unwrap_or("configured_default")
     }
 
     pub async fn query(&self, req: WebSearchToolRequest) -> Result<WebSearchOutcome, LlmError> {
@@ -375,22 +399,38 @@ impl Tool for WebSearchTool {
         arguments: Value,
     ) -> Result<ToolOutput, LlmError> {
         if let Some(targets) = ops::parse_research_targets(arguments.get("research_targets"))? {
-            return ops::execute_research(self, &context, &arguments, targets).await;
+            let output = ops::execute_research(self, &context, &arguments, targets).await?;
+            log_web_search_execution(&context, &arguments, &output.value, true);
+            return Ok(output);
         }
+        let request = request_from_arguments(
+            &context,
+            &arguments,
+            self.backend_override,
+            self.model_override.clone(),
+        )?;
         let outcome = self
             // Agent 最终回复仍由模型统一生成，但搜索上游必须复用 `/查` 的 SSE 路径，
             // 不能因进入 Tool Loop 退化成完整非流请求。
-            .query_stream_for_agent(
-                request_from_arguments(
-                    &context,
-                    &arguments,
-                    self.backend_override,
-                    self.model_override.clone(),
-                )?,
-                context.execution_deadline,
-            )
-            .await?;
-        Ok(ToolOutput::json(web_search_tool_output(&outcome)))
+            .query_stream_for_agent(request, context.execution_deadline)
+            .await;
+        let value = match outcome {
+            Ok(outcome) => {
+                web_search_tool_output(&outcome, self.backend_label(), self.output_max_chars)
+            }
+            Err(err) => {
+                let value = web_search_failure_output(self.backend_label(), &err);
+                log_web_search_execution(&context, &arguments, &value, false);
+                // 只有 Agent Tool Loop 需要把执行失败回填给模型，以便统一记录失败进度和
+                // 保守重试；显式查询等非 Agent 兼容入口仍保留原始 Err 语义。
+                if context.tool_call_id.is_some() {
+                    return Ok(ToolOutput::json(value));
+                }
+                return Err(err);
+            }
+        };
+        log_web_search_execution(&context, &arguments, &value, false);
+        Ok(ToolOutput::json(value))
     }
 }
 
@@ -570,7 +610,11 @@ fn optional_string_field(arguments: &Value, key: &str) -> Option<String> {
     }
 }
 
-fn web_search_tool_output(outcome: &WebSearchOutcome) -> Value {
+fn web_search_tool_output(
+    outcome: &WebSearchOutcome,
+    backend: &str,
+    output_max_chars: usize,
+) -> Value {
     let result_count = outcome
         .sources
         .iter()
@@ -580,6 +624,7 @@ fn web_search_tool_output(outcome: &WebSearchOutcome) -> Value {
         return json!({
             "ok": false,
             "execution_succeeded": true,
+            "backend": backend,
             "provider": outcome.provider,
             "answer": "",
             "sources": [],
@@ -588,18 +633,204 @@ fn web_search_tool_output(outcome: &WebSearchOutcome) -> Value {
             "error": {
                 "code": "empty_result",
                 "stage": "web_search",
+                "message": WEB_SEARCH_EMPTY_RESULT_MODEL_MESSAGE,
             },
         });
     }
 
-    json!({
+    let output = json!({
         "ok": true,
+        "execution_succeeded": true,
+        "backend": backend,
         "provider": outcome.provider,
         "answer": outcome.answer,
         "sources": outcome.sources.iter().map(web_search_source_json).collect::<Vec<_>>(),
         "result_count": result_count,
         "elapsed_ms": outcome.elapsed_ms,
+    });
+    if serialized_value_chars(&output) <= output_max_chars {
+        return output;
+    }
+
+    compact_web_search_tool_output(outcome, backend, result_count, output_max_chars)
+}
+
+/// Tool Registry 对超限输出只能保留通用 preview，搜索投影将因此失去结构化证据。
+/// 搜索领域先压缩重复的来源摘要，并在剩余预算内尽量保留 answer，确保事实卡仍可验真。
+fn compact_web_search_tool_output(
+    outcome: &WebSearchOutcome,
+    backend: &str,
+    result_count: usize,
+    output_max_chars: usize,
+) -> Value {
+    let mut sources = outcome
+        .sources
+        .iter()
+        .filter(|source| web_search_source_has_evidence(source))
+        .take(WEB_SEARCH_TOOL_SOURCE_LIMIT)
+        .map(compact_web_search_source_json)
+        .collect::<Vec<_>>();
+    while !sources.is_empty()
+        && serialized_value_chars(&successful_web_search_output(
+            outcome,
+            backend,
+            result_count,
+            "",
+            &sources,
+        )) > output_max_chars
+    {
+        sources.pop();
+    }
+
+    let answer_chars = outcome.answer.trim().chars().collect::<Vec<_>>();
+    let mut low = 0usize;
+    let mut high = answer_chars.len();
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        let answer = answer_chars[..mid].iter().collect::<String>();
+        let candidate =
+            successful_web_search_output(outcome, backend, result_count, &answer, &sources);
+        if serialized_value_chars(&candidate) <= output_max_chars {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    let answer = answer_chars[..low].iter().collect::<String>();
+    successful_web_search_output(outcome, backend, result_count, &answer, &sources)
+}
+
+fn successful_web_search_output(
+    outcome: &WebSearchOutcome,
+    backend: &str,
+    result_count: usize,
+    answer: &str,
+    sources: &[Value],
+) -> Value {
+    json!({
+        "ok": true,
+        "execution_succeeded": true,
+        "backend": backend,
+        "provider": outcome.provider,
+        "answer": answer,
+        "sources": sources,
+        "result_count": result_count,
+        "elapsed_ms": outcome.elapsed_ms,
     })
+}
+
+fn compact_web_search_source_json(source: &WebSearchSource) -> Value {
+    json!({
+        "title": truncate_chars_with_ellipsis_trimmed(
+            &source.title,
+            WEB_SEARCH_TOOL_SOURCE_TITLE_MAX_CHARS,
+        ),
+        "url": truncate_chars_with_ellipsis_trimmed(
+            &source.url,
+            WEB_SEARCH_TOOL_SOURCE_URL_MAX_CHARS,
+        ),
+        "snippet": truncate_chars_with_ellipsis_trimmed(
+            &source.snippet,
+            WEB_SEARCH_TOOL_SOURCE_SNIPPET_MAX_CHARS,
+        ),
+    })
+}
+
+fn serialized_value_chars(value: &Value) -> usize {
+    serde_json::to_string(value)
+        .map(|serialized| serialized.chars().count())
+        .unwrap_or(usize::MAX)
+}
+
+fn web_search_failure_output(backend: &str, error: &LlmError) -> Value {
+    json!({
+        "ok": false,
+        "execution_succeeded": false,
+        "backend": backend,
+        "answer": "",
+        "sources": [],
+        "result_count": 0,
+        "error": {
+            "code": error.code,
+            "message": error.message,
+            "stage": error.stage,
+        },
+    })
+}
+
+/// 搜索诊断只保留可定位重试的结构化字段；不记录 raw_question、聊天历史或上游正文。
+fn log_web_search_execution(
+    context: &ToolContext,
+    arguments: &Value,
+    output: &Value,
+    multi_entity_research: bool,
+) {
+    let query = if multi_entity_research {
+        "multi_entity_research".to_owned()
+    } else {
+        arguments
+            .get("query")
+            .and_then(Value::as_str)
+            .map(normalize_dedup_text)
+            .unwrap_or_default()
+    };
+    let source_count = output
+        .get("sources")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or_else(|| {
+            output
+                .get("results")
+                .and_then(Value::as_array)
+                .map(|results| {
+                    results
+                        .iter()
+                        .filter_map(|result| result.get("sources").and_then(Value::as_array))
+                        .map(Vec::len)
+                        .sum()
+                })
+                .unwrap_or(0)
+        });
+    let execution_succeeded = output
+        .get("execution_succeeded")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| output.get("ok").and_then(Value::as_bool).unwrap_or(false));
+    tracing::info!(
+        tool = WEB_SEARCH_TOOL_NAME,
+        tool_call_id = context.tool_call_id.as_deref().unwrap_or("direct"),
+        round = ?context.tool_round,
+        backend = output
+            .get("backend")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown"),
+        query = %query,
+        topic = ?arguments.get("topic"),
+        time_range = ?arguments.get("time_range"),
+        max_results = ?arguments.get("max_results"),
+        multi_entity_research,
+        answer_chars = output
+            .get("answer")
+            .and_then(|value| value.as_str())
+            .map(|answer| answer.chars().count())
+            .unwrap_or(0),
+        source_count,
+        result_count = output
+            .get("result_count")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0),
+        ok = output
+            .get("ok")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        execution_succeeded,
+        error_code = output
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(|value| value.as_str())
+            .unwrap_or(""),
+        retry_of = ?context.retry_of,
+        "web search tool execution completed"
+    );
 }
 
 pub(super) fn web_search_outcome_has_evidence(outcome: &WebSearchOutcome) -> bool {

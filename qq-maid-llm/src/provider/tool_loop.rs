@@ -150,7 +150,7 @@ impl<'a> ToolLoopExecutor<'a> {
     ) -> Result<ToolLoopCallOutput, LlmError> {
         let PreparedToolLoopCall {
             tool_name: requested_tool_name,
-            prepared,
+            mut prepared,
             call_id,
             round,
             batch_len,
@@ -170,6 +170,12 @@ impl<'a> ToolLoopExecutor<'a> {
                 .as_ref()
                 .map(|(name, arguments)| (name.as_str(), arguments)),
         );
+        if let Ok(prepared) = prepared.as_mut() {
+            // 轮次与重试关系属于执行器协议元数据；业务 Tool 只读取它们做低敏诊断，
+            // 不得据此改变领域执行语义。
+            prepared.context.tool_round = Some(round);
+            prepared.context.retry_of = retry_of;
+        }
         let (tool_name, output, domain_succeeded, execution_succeeded, progress_disposition) =
             match prepared {
                 Ok(prepared) => {

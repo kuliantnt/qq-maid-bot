@@ -514,6 +514,9 @@ impl RequestTimeContext {
         if text.contains("今天") {
             resolved.push(ResolvedTimeExpression::date("今天", date));
         }
+        if text.contains("今日") {
+            resolved.push(ResolvedTimeExpression::date("今日", date));
+        }
         if text.contains("明天") {
             resolved.push(ResolvedTimeExpression::date(
                 "明天",
