@@ -410,6 +410,42 @@ fn does_not_accept_is_you_for_a_mention_explicitly_marked_as_member() {
 }
 
 #[test]
+fn does_not_treat_everyone_mention_as_current_bot() {
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+        id: None,
+        d: json!({
+            "id": "msg-everyone-mention",
+            "group_openid": "group-1",
+            "author": {"member_openid": "member-1"},
+            "content": "通知大家",
+            "mentions": [{
+                "username": "全体成员",
+                "scope": "all",
+                "is_you": true,
+                "member_openid": "bot-openid"
+            }]
+        }),
+    };
+
+    let mut message = parse_group_message(&envelope).unwrap().unwrap();
+    let identity = Arc::new(crate::gateway::bot_identity::BotIdentity::new(
+        "app-id",
+        &["bot-openid".to_owned()],
+    ));
+    crate::gateway::group_filter::normalize_current_bot_mentions(&mut message, &identity);
+
+    assert_eq!(message.mentions.len(), 1);
+    assert!(!message.mentions[0].is_current_bot);
+    assert_eq!(message.mentions[0].target_id, None);
+    assert!(!crate::gateway::group_filter::mentions_current_bot(
+        &message
+    ));
+}
+
+#[test]
 fn group_at_message_keeps_qq_cleaned_body() {
     let envelope = GatewayEnvelope {
         op: 0,
