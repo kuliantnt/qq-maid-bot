@@ -153,7 +153,7 @@ QQ_SECRET=你的QQ机器人AppSecret
 
 普通群消息由 `QQ_MAID_GROUP_MESSAGE_MODE` 控制，默认 `mention` 保持有限触发；`off` 完全关闭普通群消息，其余模式都会先把 `/` 或全角 `／` 开头的候选原样交给 Core 判定，Gateway 不维护业务命令白名单。`command` 除斜杠候选外不处理普通文本，`mention` 额外处理平台 @ 标记和回复机器人消息，`active` 额外处理包含 `QQ_MAID_GROUP_ACTIVE_KEYWORDS` 指定提示词的普通群消息。提示词默认 `小女仆`，多个用英文逗号分隔。第一个有效关键词同时作为程序生成状态提示和兜底文案中的机器人主称呼，其余关键词仍作为 active 模式别名；仅当新变量完全未设置时，旧变量 `QQ_MAID_STATUS_DISPLAY_NAME` 才作为主称呼回退，且不会加入 active 关键词。旧变量 `QQ_MAID_ENABLE_GROUP_MESSAGES` 仅在未设置新变量时兼容，`false` 映射为 `off`，`true` 映射为 `active`，未设置时默认 `mention`。这些策略只对 QQ 官方已经推送到 Gateway 的群事件生效；如果平台没有推送普通非 @ 群消息，Gateway 无法通过关键词提前收到或登记该消息。群聊不会开放通用 Harness、文件处理或代码执行；Tool Calling 只由 Core 加载的 `agent.toml` 群聊 Scene 和工具白名单控制。Gateway 只负责把群聊目标传给 Core，由 Core 按既有命令和普通聊天边界处理；未知群聊斜杠候选由 Core 静默拦截。
 
-普通群事件是否 @ 当前机器人只信任官方结构化 `mentions[].is_you == true`；旧的 AppID、openid、member_openid、CQ 文本和 `<@...>` 文本不再作为触发依据。`QQ_MAID_BOT_MENTION_IDS` 仅保留为旧配置兼容，不应再用于修正普通群 @ 判定。不要把真实 ID 写入公开文档或提交到仓库。
+`GROUP_AT_MESSAGE_CREATE` 事件本身表示 @ 当前机器人；普通 `GROUP_MESSAGE_CREATE` 事件优先保留 QQ 结构化的当前机器人标记，并用 mention 的 `target_id` 与 READY 学到的机器人身份及 `QQ_MAID_BOT_MENTION_IDS` 补充匹配。没有当前机器人结构化证据的 mention（包括其它机器人）不触发；CQ 文本和 `<@...>` 文本本身不作为身份依据。不要把真实 ID 写入公开文档或提交到仓库。
 
 普通群消息会过滤自己发送的消息、可识别的其它机器人消息、空内容/无附件消息和重复 `message_id`，并使用群级与群成员级内存冷却避免刷屏；但发送给 Core 的 `scope_key` 仍保持群会话维度，actor 仅表示群内发言人，避免同一个用户的私聊与群聊 session / pending / visible snapshot / ref_index 串用。只有 QQ 官方实际推送且 payload 带 `current_msg_idx / msg_idx` 的群消息，才能提前登记到运行期 ref_index；平台未推送或缺字段时，后续引用只能依赖当前引用事件 payload 兜底或已有索引。
 

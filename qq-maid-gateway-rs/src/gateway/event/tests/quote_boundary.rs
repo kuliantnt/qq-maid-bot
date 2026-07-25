@@ -1,4 +1,6 @@
 use super::*;
+use qq_maid_common::input_part::MessageInputPart;
+use std::sync::Arc;
 
 /// 官方单聊引用结构：顶层 content 为当前正文，msg_elements 为引用正文。
 /// 两者各出现一次，不会混合。
@@ -89,6 +91,56 @@ fn group_quote_without_element_msg_idx_parses_content() {
     assert_eq!(
         reply.input_parts[0].text_content(),
         Some("被引用的群聊消息")
+    );
+}
+
+#[test]
+fn full_group_mention_quote_keeps_current_and_quoted_body_separate() {
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+        id: None,
+        d: json!({
+            "id": "msg-full-group-quote",
+            "group_openid": "group-1",
+            "author": {"member_openid": "member-1"},
+            "content": "[@汐雨](mqqapi://markdown/mention?at_type=1&at_tinyid=bot-openid) 原始数据",
+            "mentions": [
+                {"is_you": true, "member_openid": "bot-openid", "username": "汐雨"}
+            ],
+            "message_type": 103,
+            "msg_elements": [{"content": " 测试"}]
+        }),
+    };
+
+    let mut message = parse_group_message(&envelope).unwrap().unwrap();
+    crate::gateway::group_filter::normalize_current_bot_mentions(
+        &mut message,
+        &Arc::new(crate::gateway::bot_identity::BotIdentity::new(
+            "app-id",
+            &[],
+        )),
+    );
+
+    assert_eq!(message.content, "原始数据");
+    assert_eq!(message.input_parts[0].text_content(), Some("原始数据"));
+    let reply = message.reply.as_ref().unwrap();
+    assert_eq!(reply.content.as_deref(), Some("测试"));
+    assert_eq!(reply.input_parts[0].text_content(), Some("测试"));
+
+    let inbound = crate::respond::normalized_group_inbound(&message, &[]);
+    assert_eq!(inbound.text, "原始数据");
+    assert_eq!(inbound.input_parts[0].text_content(), Some("原始数据"));
+    let quoted = inbound.quoted.as_ref().unwrap();
+    assert_eq!(quoted.text_summary.as_deref(), Some("测试"));
+    assert!(!inbound.text.contains("mqqapi://markdown/mention"));
+    assert!(
+        !quoted
+            .input_parts
+            .iter()
+            .filter_map(MessageInputPart::text_content)
+            .any(|text| text.contains("mqqapi://markdown/mention"))
     );
 }
 

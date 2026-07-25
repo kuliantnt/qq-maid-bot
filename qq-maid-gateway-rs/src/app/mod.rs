@@ -110,6 +110,8 @@ fn log_startup(config: &AppConfig) {
         sandbox = config.sandbox,
         enable_markdown = config.enable_markdown,
         enable_group_messages = config.enable_group_messages,
+        group_message_mode = ?config.group_message_mode,
+        group_active_keyword_count = config.group_active_keywords.len(),
         verbose_log = config.verbose_log,
         conversation_queue_capacity = config.conversation_queue_capacity,
         max_active_conversation_workers = config.max_active_conversation_workers,

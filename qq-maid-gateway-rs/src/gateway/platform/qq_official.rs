@@ -80,35 +80,37 @@ pub(crate) fn inbound_from_group(message: &GroupMessage) -> InboundMessage {
         visible_entity_snapshot: None,
         mentions: mentions_from_group_event(message),
         mentioned_bot: message.event_type == GroupEventType::GroupAtMessage
-            || message.mentions.iter().any(|mention| mention.is_you),
+            || message
+                .mentions
+                .iter()
+                .any(|mention| mention.is_current_bot),
     }
 }
 
 /// 把群事件的结构化 mentions 映射为平台无关 `MentionIdentity`。
 ///
-/// - `mentions[]` 中每个条目按事件顺序映射：`is_you` -> `is_self`，`target_id` -> 稳定 ID，
-///   `member_role` -> 角色字符串，`confidence = Event`。
-/// - `is_self` 只来自平台结构化 `is_you` 字段，不因 `GROUP_AT_MESSAGE_CREATE` 事件类型
-///   把普通 mention 误标为机器人。
+/// - `mentions[]` 中每个条目按事件顺序映射：Gateway 推导的 `is_current_bot` -> `is_self`，
+///   `target_id` -> 稳定 ID，`member_role` -> 角色字符串，`confidence = Event`。
 /// - `GROUP_AT_MESSAGE_CREATE` 事件整体即代表 @ 当前机器人；若遍历完 mentions 仍未看到
-///   任何 `is_you=true` 条目，才追加一条 synthetic self mention，避免与结构化普通 mention 混淆。
-/// - 非 `is_you` 的 mention `is_bot` 保持 None（事件不提供），不伪造。
+///   Gateway 已标记的当前机器人条目，才追加一条 synthetic self mention，避免把普通 mention
+///   误标为机器人。
+/// - 未标记为当前机器人的 mention `is_bot` 保持 None（事件不提供），不伪造。
 /// - 文本 `@昵称` 弱候选由 `text_weak_mentions_from_content` 补充，采用保守去重策略。
 fn mentions_from_group_event(message: &GroupMessage) -> Vec<MentionIdentity> {
     let mut result = Vec::new();
     let has_self_event = message.event_type == GroupEventType::GroupAtMessage;
-    let mut saw_self = false;
     for mention in &message.mentions {
-        // is_self 只来自平台结构化 is_you；不因事件类型把普通 mention 强制标为 self。
-        let is_self = mention.is_you;
-        if is_self {
-            saw_self = true;
-        }
+        let is_self = mention.is_current_bot;
         result.push(mention_identity_from_group_mention(mention, is_self));
     }
-    // GROUP_AT_MESSAGE_CREATE 整体即 @ 当前机器人；仅当结构化 mentions 中无任何 is_you=true 时
-    // 才追加 synthetic self mention，不与普通 mention 混淆。
-    if has_self_event && !saw_self {
+    // GROUP_AT_MESSAGE_CREATE 整体即 @ 当前机器人；仅当结构化 mentions 中没有 Gateway
+    // 标记的当前机器人条目时才追加 synthetic self mention，不与普通 mention 混淆。
+    if has_self_event
+        && !message
+            .mentions
+            .iter()
+            .any(|mention| mention.is_current_bot)
+    {
         result.push(self_mention());
     }
     // 文本 @ 昵称弱候选：保守去重，避免与结构化 mention 拆成两个独立对象。
@@ -337,7 +339,7 @@ mod tests {
             member_role: Some(GroupMemberRole::Admin),
             content: "/rss".to_owned(),
             mentions: vec![GroupMention {
-                is_you: true,
+                is_current_bot: true,
                 member_role: Some(GroupMemberRole::Admin),
                 target_id: None,
             }],
@@ -460,18 +462,18 @@ mod tests {
 
     #[test]
     fn qq_group_multi_mention_maps_to_structured_identity_in_order() {
-        // 一条消息同时 @ 当前机器人（is_you）和 @ 普通成员（结构化），顺序与事件一致。
+        // 一条消息同时 @ 当前机器人（is_current_bot）和 @ 普通成员（结构化），顺序与事件一致。
         let mut message = group_message();
         message.event_type = GroupEventType::GroupMessage;
         message.content = "@当前机器人 帮我问一下".to_owned();
         message.mentions = vec![
             GroupMention {
-                is_you: true,
+                is_current_bot: true,
                 member_role: Some(GroupMemberRole::Admin),
                 target_id: Some("bot-appid".to_owned()),
             },
             GroupMention {
-                is_you: false,
+                is_current_bot: false,
                 member_role: Some(GroupMemberRole::Member),
                 target_id: Some("member-2".to_owned()),
             },
@@ -539,18 +541,18 @@ mod tests {
 
     #[test]
     fn qq_group_at_message_keeps_plain_mention_order_and_appends_synthetic_self() {
-        // GROUP_AT_MESSAGE_CREATE + mentions 全部 is_you=false：保留普通 mentions，
+        // GROUP_AT_MESSAGE_CREATE + mentions 全部 is_current_bot=false：保留普通 mentions，
         // 并额外追加一条 synthetic self mention，不把首条普通 mention 误标为 self。
         let mut message = group_message();
         message.event_type = GroupEventType::GroupAtMessage;
         message.mentions = vec![
             GroupMention {
-                is_you: false,
+                is_current_bot: false,
                 member_role: Some(GroupMemberRole::Member),
                 target_id: Some("member-plain".to_owned()),
             },
             GroupMention {
-                is_you: false,
+                is_current_bot: false,
                 member_role: Some(GroupMemberRole::Admin),
                 target_id: Some("member-admin".to_owned()),
             },
@@ -578,18 +580,18 @@ mod tests {
 
     #[test]
     fn qq_group_at_message_with_plain_then_self_keeps_order() {
-        // GROUP_AT_MESSAGE_CREATE + 首条普通 mention、其后 is_you=true 的 self：
+        // GROUP_AT_MESSAGE_CREATE + 首条普通 mention、其后 is_current_bot=true 的 self：
         // 首条保持 is_self=false，第二条 is_self=true，不再追加 synthetic self。
         let mut message = group_message();
         message.event_type = GroupEventType::GroupAtMessage;
         message.mentions = vec![
             GroupMention {
-                is_you: false,
+                is_current_bot: false,
                 member_role: Some(GroupMemberRole::Member),
                 target_id: Some("member-plain".to_owned()),
             },
             GroupMention {
-                is_you: true,
+                is_current_bot: true,
                 member_role: Some(GroupMemberRole::Admin),
                 target_id: Some("bot-appid".to_owned()),
             },
@@ -615,7 +617,7 @@ mod tests {
         let mut message = group_message();
         message.event_type = GroupEventType::GroupMessage;
         message.mentions = vec![GroupMention {
-            is_you: false,
+            is_current_bot: false,
             member_role: Some(GroupMemberRole::Member),
             target_id: Some("member-2".to_owned()),
         }];
@@ -638,7 +640,7 @@ mod tests {
         let mut message = group_message();
         message.event_type = GroupEventType::GroupMessage;
         message.mentions = vec![GroupMention {
-            is_you: true,
+            is_current_bot: true,
             member_role: Some(GroupMemberRole::Admin),
             target_id: None,
         }];

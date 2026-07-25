@@ -1,7 +1,8 @@
 //! Gateway 侧机器人身份观测。
 //!
-//! 普通群消息优先以 mention 的稳定 ID 与 READY 学到的机器人身份集合比对；
-//! `is_you` 仅供没有稳定 ID 的旧事件兜底，READY 学习和旧配置仍用于兼容运行配置。
+//! `GROUP_AT_MESSAGE_CREATE` 事件本身表示当前机器人被 @；普通群消息优先保留 QQ 提供的
+//! 当前机器人标记，再用 mention 稳定 ID 与 READY 学到的机器人身份集合补充确认。
+//! `is_current_bot` 是 Gateway 内部语义，READY 学习和旧配置仍用于兼容不同 QQ 事件。
 
 use std::{
     collections::HashSet,
