@@ -277,6 +277,45 @@ async fn large_search_result_keeps_structured_evidence_through_tool_registry() {
 }
 
 #[test]
+fn compact_search_result_drops_oversized_source_instead_of_truncating_url() {
+    const PREVIOUS_URL_MAX_CHARS: usize = 300;
+    const OUTPUT_MAX_CHARS: usize = 420;
+    let oversized_url = format!("https://example.com/{}", "a".repeat(PREVIOUS_URL_MAX_CHARS));
+    let output = web_search_tool_output(
+        &WebSearchOutcome {
+            answer: "搜索结果".repeat(100),
+            sources: vec![
+                WebSearchSource {
+                    title: "超长链接来源".to_owned(),
+                    url: oversized_url.clone(),
+                    snippet: "摘要".repeat(100),
+                },
+                WebSearchSource {
+                    title: "可保留来源".to_owned(),
+                    url: "https://example.com/valid".to_owned(),
+                    snippet: "有效摘要".to_owned(),
+                },
+            ],
+            provider: "mock-query".to_owned(),
+            elapsed_ms: 12,
+        },
+        "tavily",
+        OUTPUT_MAX_CHARS,
+    );
+
+    let urls = output["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|source| source["url"].as_str())
+        .collect::<Vec<_>>();
+    assert!(!urls.contains(&oversized_url.as_str()));
+    assert_eq!(urls, ["https://example.com/valid"]);
+    assert!(urls.iter().all(|url| !url.contains('…')));
+    assert!(serialized_value_chars(&output) <= OUTPUT_MAX_CHARS);
+}
+
+#[test]
 fn web_search_tool_empty_outcome_is_structured_failure_not_success_evidence() {
     let output = web_search_tool_output(
         &WebSearchOutcome {

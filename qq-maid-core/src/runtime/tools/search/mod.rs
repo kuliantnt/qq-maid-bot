@@ -44,7 +44,6 @@ pub(crate) const WEB_SEARCH_QUERY_MAX_LENGTH: usize = 200;
 const WEB_SEARCH_MAX_RESULTS_LIMIT: u8 = 10;
 const WEB_SEARCH_TOOL_SOURCE_LIMIT: usize = 4;
 const WEB_SEARCH_TOOL_SOURCE_TITLE_MAX_CHARS: usize = 100;
-const WEB_SEARCH_TOOL_SOURCE_URL_MAX_CHARS: usize = 300;
 const WEB_SEARCH_TOOL_SOURCE_SNIPPET_MAX_CHARS: usize = 160;
 /// 搜索流三段超时的默认值；绝对上限独立于 90 秒整体请求预算。
 pub const DEFAULT_WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT: Duration =
@@ -665,24 +664,19 @@ fn compact_web_search_tool_output(
     result_count: usize,
     output_max_chars: usize,
 ) -> Value {
-    let mut sources = outcome
+    let source_candidates = outcome
         .sources
         .iter()
         .filter(|source| web_search_source_has_evidence(source))
         .take(WEB_SEARCH_TOOL_SOURCE_LIMIT)
-        .map(compact_web_search_source_json)
         .collect::<Vec<_>>();
-    while !sources.is_empty()
-        && serialized_value_chars(&successful_web_search_output(
-            outcome,
-            backend,
-            result_count,
-            "",
-            &sources,
-        )) > output_max_chars
-    {
-        sources.pop();
-    }
+    let sources = compact_web_search_sources(
+        outcome,
+        backend,
+        result_count,
+        output_max_chars,
+        &source_candidates,
+    );
 
     let answer_chars = outcome.answer.trim().chars().collect::<Vec<_>>();
     let mut low = 0usize;
@@ -721,20 +715,68 @@ fn successful_web_search_output(
     })
 }
 
-fn compact_web_search_source_json(source: &WebSearchSource) -> Value {
+fn compact_web_search_sources(
+    outcome: &WebSearchOutcome,
+    backend: &str,
+    result_count: usize,
+    output_max_chars: usize,
+    candidates: &[&WebSearchSource],
+) -> Vec<Value> {
+    let fits = |sources: &[Value]| {
+        serialized_value_chars(&successful_web_search_output(
+            outcome,
+            backend,
+            result_count,
+            "",
+            sources,
+        )) <= output_max_chars
+    };
+    let with_snippets =
+        compact_web_search_source_jsons(candidates, WEB_SEARCH_TOOL_SOURCE_SNIPPET_MAX_CHARS);
+    if fits(&with_snippets) {
+        return with_snippets;
+    }
+
+    // URL 必须保持完整；预算不足时先压缩摘要，仍放不下才减少来源。
+    let without_snippets = compact_web_search_source_jsons(candidates, 0);
+    if fits(&without_snippets) {
+        return without_snippets;
+    }
+
+    let mut retained = Vec::new();
+    for source in candidates {
+        let mut candidate = retained.clone();
+        candidate.push(*source);
+        if fits(&compact_web_search_source_jsons(&candidate, 0)) {
+            retained = candidate;
+        }
+    }
+    compact_web_search_source_jsons(&retained, 0)
+}
+
+fn compact_web_search_source_jsons(
+    sources: &[&WebSearchSource],
+    snippet_max_chars: usize,
+) -> Vec<Value> {
+    sources
+        .iter()
+        .map(|source| compact_web_search_source_json(source, snippet_max_chars))
+        .collect()
+}
+
+fn compact_web_search_source_json(source: &WebSearchSource, snippet_max_chars: usize) -> Value {
+    let snippet = if snippet_max_chars == 0 {
+        String::new()
+    } else {
+        truncate_chars_with_ellipsis_trimmed(&source.snippet, snippet_max_chars)
+    };
     json!({
         "title": truncate_chars_with_ellipsis_trimmed(
             &source.title,
             WEB_SEARCH_TOOL_SOURCE_TITLE_MAX_CHARS,
         ),
-        "url": truncate_chars_with_ellipsis_trimmed(
-            &source.url,
-            WEB_SEARCH_TOOL_SOURCE_URL_MAX_CHARS,
-        ),
-        "snippet": truncate_chars_with_ellipsis_trimmed(
-            &source.snippet,
-            WEB_SEARCH_TOOL_SOURCE_SNIPPET_MAX_CHARS,
-        ),
+        "url": source.url,
+        "snippet": snippet,
     })
 }
 

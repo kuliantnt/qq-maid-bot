@@ -353,7 +353,7 @@ async fn group_two_empty_searches_keep_one_hint_and_one_final_text() {
 }
 
 #[tokio::test]
-async fn group_partial_search_keeps_only_success_evidence_without_model_fill() {
+async fn group_partial_search_keeps_success_evidence_and_model_final_text() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_raw_tool_results(
@@ -387,7 +387,11 @@ async fn group_partial_search_keeps_only_success_evidence_without_model_fill() {
 
     assert!(text.contains("有效搜索事实"));
     assert!(!text.contains("没查到明确结果"));
-    assert!(!text.contains("Reuters"));
+    assert_eq!(
+        text.matches("Reuters 说这是额外新闻，不能补入结果。")
+            .count(),
+        1
+    );
     assert_eq!(
         response.diagnostics.unwrap()["agent_turn_status"],
         "partial_success"
