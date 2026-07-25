@@ -2,6 +2,19 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.21.5] - 2026-07-25
+
+### Fixed
+
+* **QQ 群消息触发与 mention 归一化**（PR #587）：将 `GROUP_AT_MESSAGE_CREATE` 直接视为当前机器人被 @，并结合 READY 阶段学习的稳定机器人身份与兼容 ID 判定普通群消息中的目标，避免其它机器人或普通成员 mention 误触发。
+* **群聊 mention 文本污染**（PR #587）：归一化 QQ Markdown mention 时只移除当前机器人的寻址前缀，保留其它成员 mention 和正文，避免模型上下文丢失原始消息或重复出现机器人称呼。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 版本号提升到 `0.21.5`，其他内部 crate 版本不统一提升。
+* 本版本无数据库 migration、无必需配置迁移。群聊 `off`、`command`、`mention`、`active` 模式仍由现有配置控制，OneBot / 微信入口行为不变。
+* 群聊触发修复通过本地 Gateway 事件、mention 归一化、回复引用和冷却行为测试覆盖；未进行真实 QQ 环境联调。
+
 ## [v0.21.4] - 2026-07-25
 
 ### Changed
