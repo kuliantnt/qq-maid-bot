@@ -11,6 +11,7 @@ mod radar;
 mod rss;
 mod search;
 mod session;
+mod slash_pending;
 pub(crate) mod support;
 mod todo;
 mod todo_agent;

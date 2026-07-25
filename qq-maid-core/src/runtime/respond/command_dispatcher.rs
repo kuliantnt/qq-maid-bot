@@ -3,7 +3,7 @@
 //! 本模块只处理 pending、session command、slash/确定性命令和进入聊天前的状态准备。
 //! 若没有命中确定性路径，则返回 `PreparedChat` 交给 Chat flow 继续处理。
 
-use crate::error::LlmError;
+use crate::{error::LlmError, runtime::command::ParsedCommand};
 
 use super::{
     PlannedRespond, RespondRequest, RespondResponse, RustRespondService,
@@ -22,6 +22,60 @@ use super::{
 pub(super) enum DispatchOutcome {
     Respond(Box<RespondResponse>),
     Chat(Box<PreparedChat>),
+}
+
+/// 已注册 Slash 的一次性解析结果。
+///
+/// 识别结果既用于 pending 前的未知命令收口，也供后续原 handler 分派，避免两处各自
+/// 维护 parser 清单。Todo、Memory 与 RSS 的 handler 仍保留领域内参数解析和校验。
+enum RegisteredSlashCommand {
+    Session(ParsedCommand),
+    Translation(translation_flow::ParsedTranslationCommand),
+    Set(ParsedCommand),
+    Unset(ParsedCommand),
+    Weather(ParsedCommand),
+    Train(train_flow::ParsedTrainCommand),
+    Radar(ParsedCommand),
+    WebSearch(ParsedCommand),
+    Rss,
+    Todo,
+    Memory,
+}
+
+impl RegisteredSlashCommand {
+    fn parse(text: &str) -> Option<Self> {
+        if let Some(command) = session_flow::parse_session_command(text) {
+            return Some(Self::Session(command));
+        }
+        if let Some(command) = translation_flow::parse_translation_command(text) {
+            return Some(Self::Translation(command));
+        }
+        if let Some(command) = parse_set_command(text) {
+            return Some(Self::Set(command));
+        }
+        if let Some(command) = parse_unset_command(text) {
+            return Some(Self::Unset(command));
+        }
+        if let Some(command) = weather_flow::parse_weather_command(text) {
+            return Some(Self::Weather(command));
+        }
+        if let Some(command) = train_flow::parse_train_command(text) {
+            return Some(Self::Train(command));
+        }
+        if let Some(command) = radar_flow::parse_radar_command(text) {
+            return Some(Self::Radar(command));
+        }
+        if let Some(command) = search_flow::parse_web_search_command(text) {
+            return Some(Self::WebSearch(command));
+        }
+        if rss_flow::parse_rss_command(text).is_some() {
+            return Some(Self::Rss);
+        }
+        if should_try_todo_flow(text) {
+            return Some(Self::Todo);
+        }
+        memory_flow::parse_memory_command(text).map(|_| Self::Memory)
+    }
 }
 
 pub(super) struct CommandDispatcher<'a> {
@@ -64,6 +118,27 @@ impl<'a> CommandDispatcher<'a> {
             return Ok(DispatchOutcome::Respond(Box::new(
                 self.service.handle_ops_command(command, &req),
             )));
+        }
+
+        // 未知 Slash 必须在读取 session 和进入 pending 前收口。只有一次性分类确认属于
+        // 已注册命令的输入，才允许继续沿用既有 pending 优先级和命令 handler。
+        let registered_slash_command = command_text.and_then(RegisteredSlashCommand::parse);
+        if command_text.is_some() && registered_slash_command.is_none() {
+            let response = if req
+                .group_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+                && !req.addressed_to_bot
+            {
+                suppressed_response("unknown_group_slash_command")
+            } else {
+                command_response(
+                    "未知命令，发送 `/help` 查看可用命令。",
+                    None,
+                    Some("unknown_command"),
+                )
+            };
+            return Ok(DispatchOutcome::Respond(Box::new(response)));
         }
 
         // pending、Todo 可见编号和 Memory 列表序号属于群内个人交互状态；
@@ -112,31 +187,12 @@ impl<'a> CommandDispatcher<'a> {
         }
 
         // 检查是否为会话管理指令（/new, /clear, /state 等）
-        if let Some(command) = command_text.and_then(session_flow::parse_session_command) {
+        if let Some(RegisteredSlashCommand::Session(command)) = registered_slash_command.as_ref() {
             return Ok(DispatchOutcome::Respond(Box::new(
-                self.service.handle_session_command(command, &meta).await?,
+                self.service
+                    .handle_session_command(command.clone(), &meta)
+                    .await?,
             )));
-        }
-
-        // 只有所有剩余注册 parser 都明确 NotMatched 时才进入未知命令兜底。
-        // 该判断必须早于 get_or_create_active，保证未知 slash 不创建 session；已知命令的
-        // 缺参、参数错误、权限拒绝和执行失败仍由原 handler 收口。
-        if command_text.is_some_and(|text| !matches_remaining_registered_command(text)) {
-            let response = if req
-                .group_id
-                .as_deref()
-                .is_some_and(|id| !id.trim().is_empty())
-                && !req.addressed_to_bot
-            {
-                suppressed_response("unknown_group_slash_command")
-            } else {
-                command_response(
-                    "未知命令，发送 `/help` 查看可用命令。",
-                    None,
-                    Some("unknown_command"),
-                )
-            };
-            return Ok(DispatchOutcome::Respond(Box::new(response)));
         }
 
         // 确保存在活跃会话（无则创建）
@@ -154,20 +210,22 @@ impl<'a> CommandDispatcher<'a> {
             .is_some_and(|decision| decision.uses_agent_runtime());
 
         // 检查是否为翻译指令（如 "/翻译 文本"、"/翻译日语 文本"）
-        if let Some(command) = command_text.and_then(translation_flow::parse_translation_command) {
+        if let Some(RegisteredSlashCommand::Translation(command)) =
+            registered_slash_command.as_ref()
+        {
             return Ok(DispatchOutcome::Respond(Box::new(
                 self.service
-                    .handle_translation_command(command, &meta, &user_text, &mut session)
+                    .handle_translation_command(command.clone(), &meta, &user_text, &mut session)
                     .await?,
             )));
         }
 
         // 检查是否为用户偏好设置指令（如 "/set 昵称 脸脸"、"/unset 昵称"）
-        if let Some(command) = command_text.and_then(parse_set_command) {
+        if let Some(RegisteredSlashCommand::Set(command)) = registered_slash_command.as_ref() {
             return Ok(DispatchOutcome::Respond(Box::new(
                 self.service
                     .handle_set_command(
-                        command,
+                        command.clone(),
                         &req,
                         &user_text,
                         meta.user_id.as_deref(),
@@ -176,11 +234,11 @@ impl<'a> CommandDispatcher<'a> {
                     .await?,
             )));
         }
-        if let Some(command) = command_text.and_then(parse_unset_command) {
+        if let Some(RegisteredSlashCommand::Unset(command)) = registered_slash_command.as_ref() {
             return Ok(DispatchOutcome::Respond(Box::new(
                 self.service
                     .handle_unset_command(
-                        command,
+                        command.clone(),
                         &req,
                         &user_text,
                         meta.user_id.as_deref(),
@@ -191,43 +249,47 @@ impl<'a> CommandDispatcher<'a> {
         }
 
         // 检查是否为天气查询指令（如 "/北京天气" 或 "/天气北京"）
-        if let Some(command) = command_text.and_then(weather_flow::parse_weather_command) {
+        if let Some(RegisteredSlashCommand::Weather(command)) = registered_slash_command.as_ref() {
             return Ok(DispatchOutcome::Respond(Box::new(
                 self.service
-                    .handle_weather_command(command, &user_text, &mut session)
+                    .handle_weather_command(command.clone(), &user_text, &mut session)
                     .await?,
             )));
         }
 
         // 检查是否为列车时刻查询指令（如 "/火车 G1 明天"）
-        if let Some(command) = command_text.and_then(train_flow::parse_train_command) {
+        if let Some(RegisteredSlashCommand::Train(command)) = registered_slash_command.as_ref() {
             return Ok(DispatchOutcome::Respond(Box::new(
                 self.service
-                    .handle_train_command(command, &user_text, &mut session)
+                    .handle_train_command(command.clone(), &user_text, &mut session)
                     .await?,
             )));
         }
 
         // 检查是否为雷达看板指令（如 "/rader codex" 或 "/雷达"）
-        if let Some(command) = command_text.and_then(radar_flow::parse_radar_command) {
+        if let Some(RegisteredSlashCommand::Radar(command)) = registered_slash_command.as_ref() {
             return Ok(DispatchOutcome::Respond(Box::new(
                 self.service
-                    .handle_radar_command(command, &user_text, &mut session)
+                    .handle_radar_command(command.clone(), &user_text, &mut session)
                     .await?,
             )));
         }
 
         // 检查是否为联网搜索指令（如 "/查 关键词"）。
-        if let Some(command) = command_text.and_then(search_flow::parse_web_search_command) {
+        if let Some(RegisteredSlashCommand::WebSearch(command)) = registered_slash_command.as_ref()
+        {
             return Ok(DispatchOutcome::Respond(Box::new(
                 self.service
-                    .handle_web_search_command(command, &req, &mut session)
+                    .handle_web_search_command(command.clone(), &req, &mut session)
                     .await?,
             )));
         }
 
         // 检查是否为 RSS 订阅指令（如 "/rss add ..." 或 "/订阅"）
-        if let Some(command_text) = command_text
+        if matches!(
+            registered_slash_command.as_ref(),
+            Some(RegisteredSlashCommand::Rss)
+        ) && let Some(command_text) = command_text
             && let Some(response) = self
                 .service
                 .handle_rss_flow(&req, command_text, &meta, &mut session)
@@ -241,7 +303,13 @@ impl<'a> CommandDispatcher<'a> {
         if !force_tool_loop {
             // 检查是否为待办相关操作（新增、查看、完成、编辑、删除等）
             let todo_text = command_text.unwrap_or(&user_text);
-            if !foreign_command_text && should_try_todo_flow(todo_text) {
+            let registered_todo = matches!(
+                registered_slash_command.as_ref(),
+                Some(RegisteredSlashCommand::Todo)
+            );
+            if !foreign_command_text
+                && (registered_todo || (command_text.is_none() && should_try_todo_flow(todo_text)))
+            {
                 let mut interaction_session = match active_interaction_session.take() {
                     Some(session) => session,
                     None => self
@@ -264,9 +332,15 @@ impl<'a> CommandDispatcher<'a> {
 
         // 检查是否为长期记忆相关操作（记忆新增、查看、更新、删除等）
         let memory_text = command_text.unwrap_or(&user_text);
+        let registered_memory = matches!(
+            registered_slash_command.as_ref(),
+            Some(RegisteredSlashCommand::Memory)
+        );
         if !force_tool_loop
             && !foreign_command_text
-            && memory_flow::parse_memory_command(memory_text).is_some()
+            && (registered_memory
+                || (command_text.is_none()
+                    && memory_flow::parse_memory_command(memory_text).is_some()))
         {
             let mut interaction_session = match active_interaction_session.take() {
                 Some(session) => session,
@@ -311,17 +385,4 @@ impl<'a> CommandDispatcher<'a> {
             status_hint,
         })))
     }
-}
-
-fn matches_remaining_registered_command(text: &str) -> bool {
-    translation_flow::parse_translation_command(text).is_some()
-        || parse_set_command(text).is_some()
-        || parse_unset_command(text).is_some()
-        || weather_flow::parse_weather_command(text).is_some()
-        || train_flow::parse_train_command(text).is_some()
-        || radar_flow::parse_radar_command(text).is_some()
-        || search_flow::parse_web_search_command(text).is_some()
-        || rss_flow::parse_rss_command(text).is_some()
-        || should_try_todo_flow(text)
-        || memory_flow::parse_memory_command(text).is_some()
 }
