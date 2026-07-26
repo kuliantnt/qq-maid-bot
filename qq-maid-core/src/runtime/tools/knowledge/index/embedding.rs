@@ -214,6 +214,16 @@ impl SemanticRuntime {
             completed += records.len();
             batch_number += 1;
             previous_batch = Some(batch_identity);
+            let batch_elapsed_ms = batch_started.elapsed().as_millis();
+            tracing::debug!(
+                model,
+                batch_number,
+                input_count = batch_size,
+                completed_chunks = completed,
+                remaining_chunks = total_missing.saturating_sub(completed),
+                elapsed_ms = batch_elapsed_ms,
+                "knowledge embedding batch diagnostics"
+            );
             // 大知识库可能产生数万批；保留首批、周期进度与末批，避免日志反向放大。
             if batch_number == 1
                 || batch_number % PROGRESS_LOG_INTERVAL_BATCHES == 0
@@ -226,7 +236,7 @@ impl SemanticRuntime {
                     batch_size,
                     completed_chunks = completed,
                     remaining_chunks = total_missing.saturating_sub(completed),
-                    elapsed_ms = batch_started.elapsed().as_millis(),
+                    elapsed_ms = batch_elapsed_ms,
                     "knowledge embedding batch completed"
                 );
             }
