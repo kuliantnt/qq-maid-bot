@@ -4,7 +4,7 @@ use crate::{error::LlmError, storage::database::SqliteDatabase};
 
 use super::{
     KnowledgeEvidenceStatus, KnowledgeIndex, KnowledgeInjectionReason, KnowledgeRecallType,
-    KnowledgeStore, embedding, render_context,
+    KnowledgeSemanticConfig, KnowledgeStore, embedding, render_context,
 };
 use crate::runtime::tools::knowledge::storage::KNOWLEDGE_MIGRATIONS;
 
@@ -15,7 +15,7 @@ impl embedding::KnowledgeEmbedder for FixtureEmbedder {
         "fixture-semantic-v1"
     }
 
-    fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, LlmError> {
+    fn embed_documents(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, LlmError> {
         Ok(texts.iter().map(|text| fixture_vector(text)).collect())
     }
 
@@ -45,6 +45,30 @@ fn test_semantic_index(base: &Path) -> KnowledgeIndex {
         FixtureEmbedder,
     )));
     index
+}
+
+#[test]
+fn disabled_embedding_keeps_fts_search_available() {
+    let base = std::env::temp_dir().join(format!(
+        "qq-maid-knowledge-disabled-embedding-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let knowledge_dir = base.join("knowledge");
+    fs::create_dir_all(&knowledge_dir).unwrap();
+    fs::write(
+        knowledge_dir.join("fts.md"),
+        "# FTS 回退\n\nRAG-FTS-DISABLED 只通过本地 FTS 索引召回。",
+    )
+    .unwrap();
+    let index = test_index(&knowledge_dir)
+        .with_semantic_config(KnowledgeSemanticConfig::disabled(base.join("cache")))
+        .unwrap();
+
+    let summary = index.sync().unwrap();
+    let context = render_context(&index.search_auto_evidence("RAG-FTS-DISABLED"));
+
+    assert_eq!(summary.embedded_chunk_count, 0);
+    assert!(context.contains("RAG-FTS-DISABLED"));
 }
 
 #[test]
