@@ -547,7 +547,11 @@ impl KnowledgeStore {
         &self,
         model: &str,
         embedding_version: i64,
+        limit: usize,
     ) -> Result<Vec<KnowledgeEmbeddingSource>, DatabaseError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let conn = self.database.connection()?;
         let mut stmt = conn
             .prepare(
@@ -561,20 +565,52 @@ impl KnowledgeStore {
                   AND e.embedding_version = ?2
                   AND e.content_hash = c.content_hash
                  WHERE e.chunk_id IS NULL
-                 ORDER BY c.document_id, c.chunk_index",
+                 ORDER BY c.document_id, c.chunk_index
+                 LIMIT ?3",
             )
             .map_err(DatabaseError::from_sql)?;
         let rows = stmt
-            .query_map(params![model, embedding_version], |row| {
-                Ok(KnowledgeEmbeddingSource {
-                    chunk_id: row.get(0)?,
-                    content_hash: row.get(1)?,
-                    text: row.get(2)?,
-                })
-            })
+            .query_map(
+                params![
+                    model,
+                    embedding_version,
+                    i64::try_from(limit).unwrap_or(i64::MAX)
+                ],
+                |row| {
+                    Ok(KnowledgeEmbeddingSource {
+                        chunk_id: row.get(0)?,
+                        content_hash: row.get(1)?,
+                        text: row.get(2)?,
+                    })
+                },
+            )
             .map_err(DatabaseError::from_sql)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(DatabaseError::from_sql)
+    }
+
+    pub fn missing_embedding_count(
+        &self,
+        model: &str,
+        embedding_version: i64,
+    ) -> Result<usize, DatabaseError> {
+        let count = self
+            .database
+            .connection()?
+            .query_row(
+                "SELECT count(*)
+                 FROM knowledge_chunks c
+                 LEFT JOIN knowledge_chunk_embeddings e
+                   ON e.chunk_id = c.chunk_id
+                  AND e.model = ?1
+                  AND e.embedding_version = ?2
+                  AND e.content_hash = c.content_hash
+                 WHERE e.chunk_id IS NULL",
+                params![model, embedding_version],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(DatabaseError::from_sql)?;
+        Ok(count.max(0) as usize)
     }
 
     pub fn upsert_embeddings(
@@ -794,7 +830,9 @@ mod tests {
         assert_eq!(results[0].chunk_index, 0);
         assert_eq!(results[0].start_line, Some(3));
 
-        let missing = store.missing_embedding_sources("fixture-model", 1).unwrap();
+        let missing = store
+            .missing_embedding_sources("fixture-model", 1, 1)
+            .unwrap();
         assert_eq!(missing.len(), 1);
         store
             .upsert_embeddings(
@@ -809,7 +847,7 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .missing_embedding_sources("fixture-model", 1)
+                .missing_embedding_sources("fixture-model", 1, 1)
                 .unwrap()
                 .is_empty()
         );

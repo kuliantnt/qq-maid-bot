@@ -4,6 +4,7 @@
 //! 用户消息检索少量片段。它不替代固定系统 prompt，也不参与 Todo/Memory 等结构化 flow。
 
 mod chunking;
+mod diagnostics;
 mod embedding;
 pub mod eval;
 mod evidence;
@@ -33,6 +34,7 @@ use crate::{error::LlmError, storage::database::DatabaseError};
 use super::storage::{KnowledgeChunkDraft, KnowledgeStore};
 
 use chunking::{CHUNKING_VERSION, chunk_markdown};
+use diagnostics::summarize_chunks;
 use scan::{ScannedMarkdown, scan_markdown_files};
 use search::{KnowledgeSearchProfile, build_evidence, query_diagnostics, query_text};
 use text::hash_text;
@@ -301,7 +303,29 @@ impl KnowledgeIndex {
             return Ok(FileSyncOutcome::Unchanged);
         }
 
-        let chunks = chunk_markdown(&file.relative_path, &content)
+        let chunks = chunk_markdown(&file.relative_path, &content);
+        let diagnostics = summarize_chunks(&content, &chunks);
+        tracing::info!(
+            path = %file.relative_path,
+            file_bytes = diagnostics.file_bytes,
+            file_chars = diagnostics.file_chars,
+            chunk_count = diagnostics.chunk_count,
+            chunk_chars_min = diagnostics.chunk_chars_min,
+            chunk_chars_avg = diagnostics.chunk_chars_avg,
+            chunk_chars_p50 = diagnostics.chunk_chars_p50,
+            chunk_chars_p95 = diagnostics.chunk_chars_p95,
+            chunk_chars_max = diagnostics.chunk_chars_max,
+            chunks_with_heading = diagnostics.chunks_with_heading,
+            chunks_without_heading = diagnostics.chunks_without_heading,
+            heading_section_count = diagnostics.heading_section_count,
+            heading_chunks_min = diagnostics.heading_chunks_min,
+            heading_chunks_avg = diagnostics.heading_chunks_avg,
+            heading_chunks_p50 = diagnostics.heading_chunks_p50,
+            heading_chunks_p95 = diagnostics.heading_chunks_p95,
+            heading_chunks_max = diagnostics.heading_chunks_max,
+            "knowledge markdown chunking completed"
+        );
+        let chunks = chunks
             .into_iter()
             .map(|chunk| KnowledgeChunkDraft {
                 chunk_id: chunk.chunk_id,
