@@ -54,6 +54,27 @@ chat_fallback = false\n"
 }
 
 #[test]
+fn responses_provider_rejects_partially_effective_chat_fallback() {
+    let text = format!(
+        "{DEFAULT_AGENT_CONFIG}\n\
+[providers.custom_responses]\n\
+kind = \"openai_responses\"\n\
+base_url = \"https://example.com/v1\"\n\
+api_key_env = \"CUSTOM_API_KEY\"\n\
+chat_fallback = true\n"
+    );
+
+    let error = AgentRuntimeConfig::from_toml(
+        &text,
+        AgentConfigSource::File("config/agent.toml".to_owned()),
+    )
+    .unwrap_err();
+
+    assert!(error.message.contains("chat_fallback=true"));
+    assert!(error.message.contains("not supported"));
+}
+
+#[test]
 fn provider_connection_metadata_is_strictly_validated() {
     for (id, base_url, api_key_env, expected) in [
         ("openai", "https://example.com/v1", "KEY", "built-in"),

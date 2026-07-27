@@ -306,7 +306,7 @@ candidates = ["mimo:mimo-v2.5-pro", "deepseek:deepseek-chat"]
 candidates = ["mimo:mimo-v2.5", "deepseek:deepseek-chat"]
 ```
 
-OpenCode 可直接在 Web 配置中心保存共用的 `OPENCODE_API_KEY`，并按需添加三个固定预设：
+OpenCode 可直接在 Web 配置中心保存共用的 `OPENCODE_API_KEY`，并按需添加三个固定预设。卡片只允许修改 Base URL 和请求超时，`api_key_env`、认证 Header 与 Scheme 固定为 `OPENCODE_API_KEY`、`Authorization` 与 `Bearer`：
 
 ```toml
 [providers.opencode_zen]
@@ -333,6 +333,7 @@ auth_scheme = "Bearer"
 ```
 
 模型路线分别使用 `opencode_zen:<responses-model>`、`opencode_zen_chat:<chat-model>` 或 `opencode_go:<chat-model>`。模型 ID 以 OpenCode 当前文档为准；本版本不会根据模型名猜协议，也不支持要求 Anthropic `/messages` 的模型。
+OpenCode Zen Responses 以及其他自定义 `openai_responses` Provider 的 `chat_fallback` 只能省略或设为 `false`；Responses 失败时由模型候选链切换 Provider，不会在同一 Provider 内改用 Chat Completions。
 
 默认 Luna 路线需要在 `.env` 配置 `OPENAI_API_KEY`，并确认账号具备 `gpt-5.6-luna` API 访问权限。运行时始终按 `agent.toml` 候选中的 Provider 前缀自动路由；改用其他 Provider 时，`.env` 只需配置实际用到的 `DEEPSEEK_API_KEY` / `MIMO_API_KEY` 等敏感项，`agent.toml` 不写 key。Gemini 是内置 Provider，配置 `GEMINI_API_KEY` 后可直接在 `model_routes` 或 `tools.web_search.routes` 使用 `gemini:` 前缀。`/查` 可走 OpenAI Responses web_search、Gemini Google Search 或 Tavily；不使用 Provider 原生搜索时可保留 routes，后续切回时无需重新配置。
 

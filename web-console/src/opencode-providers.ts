@@ -11,9 +11,11 @@ export interface OpenCodeProviderForm {
   authHeader: string;
   authScheme: string;
   requestTimeoutSeconds: number | null;
-  chatFallback: boolean;
   enabled: boolean;
 }
+
+export const OPEN_CODE_ROUTE_TEMPLATE_NOTICE =
+  "以下内容是路线模板，保存前必须将尖括号中的占位模型名替换为 OpenCode 模型目录中的真实 ID；需要 /messages 的模型暂未支持。";
 
 const PRESETS: ReadonlyArray<OpenCodeProviderForm> = [
   {
@@ -25,7 +27,6 @@ const PRESETS: ReadonlyArray<OpenCodeProviderForm> = [
     authHeader: "Authorization",
     authScheme: "Bearer",
     requestTimeoutSeconds: null,
-    chatFallback: false,
     enabled: false,
   },
   {
@@ -37,7 +38,6 @@ const PRESETS: ReadonlyArray<OpenCodeProviderForm> = [
     authHeader: "Authorization",
     authScheme: "Bearer",
     requestTimeoutSeconds: null,
-    chatFallback: false,
     enabled: false,
   },
   {
@@ -49,7 +49,6 @@ const PRESETS: ReadonlyArray<OpenCodeProviderForm> = [
     authHeader: "Authorization",
     authScheme: "Bearer",
     requestTimeoutSeconds: null,
-    chatFallback: false,
     enabled: false,
   },
 ];
@@ -66,13 +65,13 @@ export function readOpenCodeProviders(documentValue: unknown): OpenCodeProviderF
     const timeout = saved.request_timeout_seconds;
     return {
       ...preset,
-      kind: saved.kind === "openai_responses" ? "openai_responses" : "openai_compatible",
+      kind: preset.kind,
       baseUrl: string(saved.base_url) || preset.baseUrl,
-      apiKeyEnv: string(saved.api_key_env) || preset.apiKeyEnv,
-      authHeader: string(saved.auth_header) || preset.authHeader,
-      authScheme: typeof saved.auth_scheme === "string" ? saved.auth_scheme : "",
+      // 三张预设卡片始终使用同一受管 Key 与 Bearer 认证；历史值不能反向变成可编辑表单状态。
+      apiKeyEnv: preset.apiKeyEnv,
+      authHeader: preset.authHeader,
+      authScheme: preset.authScheme,
       requestTimeoutSeconds: typeof timeout === "number" && Number.isInteger(timeout) ? timeout : null,
-      chatFallback: saved.chat_fallback === true,
       enabled: true,
     };
   });
@@ -82,8 +81,6 @@ export function openCodeProviderChange(form: OpenCodeProviderForm): Record<strin
   const preset = PRESETS.find((value) => value.id === form.id);
   if (!preset || form.kind !== preset.kind) throw new Error("OpenCode Provider ID 或协议不受支持");
   if (!isHttpUrl(form.baseUrl)) throw new Error(`${form.label} Base URL 必须是合法的 HTTP(S) 地址`);
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(form.apiKeyEnv)) throw new Error(`${form.label} API Key 环境变量名无效`);
-  if (!form.authHeader.trim()) throw new Error(`${form.label} 认证 Header 不能为空`);
   if (form.requestTimeoutSeconds !== null
     && (!Number.isInteger(form.requestTimeoutSeconds) || form.requestTimeoutSeconds < 1)) {
     throw new Error(`${form.label} 请求超时必须是大于 0 的整数秒数`);
@@ -91,13 +88,13 @@ export function openCodeProviderChange(form: OpenCodeProviderForm): Record<strin
   const provider: Record<string, unknown> = {
     kind: form.kind,
     base_url: form.baseUrl.trim(),
-    api_key_env: form.apiKeyEnv.trim(),
-    auth_header: form.authHeader.trim(),
-    auth_scheme: form.authScheme.trim() || null,
+    api_key_env: preset.apiKeyEnv,
+    auth_header: preset.authHeader,
+    auth_scheme: preset.authScheme,
     request_timeout_seconds: form.requestTimeoutSeconds,
   };
-  // Chat Provider 不发送 Responses 专属字段，后端也会拒绝含糊配置。
-  if (form.kind === "openai_responses") provider.chat_fallback = form.chatFallback;
+  // Responses 预设显式持久化 false；后端也会拒绝任何自定义 Provider 的 true。
+  if (form.kind === "openai_responses") provider.chat_fallback = false;
   return { action: "set_provider", id: form.id, provider };
 }
 
@@ -123,7 +120,7 @@ export function renderOpenCodeProviders(
   heading.textContent = "模型 Provider";
   const intro = document.createElement("p");
   intro.className = "hint";
-  intro.textContent = "三个 OpenCode 预设共用 OPENCODE_API_KEY；Provider 元数据写入 agent.toml，保存后需重启生效。";
+  intro.textContent = "三个 OpenCode 预设固定共用 OPENCODE_API_KEY、Authorization 和 Bearer；可修改 Base URL 与请求超时，保存后需重启生效。";
   const grid = document.createElement("div");
   grid.className = "provider-card-grid";
   for (const form of saved) {
@@ -145,7 +142,7 @@ export function renderOpenCodeRouteHints(
   heading.textContent = "OpenCode 模型路线提示";
   const note = document.createElement("p");
   note.className = "hint";
-  note.textContent = "模型 ID 以 OpenCode 当前文档和模型列表为准；需要 /messages 的 Claude、Qwen、MiniMax 等模型暂未支持。";
+  note.textContent = OPEN_CODE_ROUTE_TEMPLATE_NOTICE;
   const examples = [
     ["opencode_zen:<responses-model>", "opencode_zen"],
     ["opencode_zen_chat:<chat-model>", "opencode_zen_chat"],
@@ -158,7 +155,7 @@ export function renderOpenCodeRouteHints(
     const code = document.createElement("code");
     code.textContent = example;
     const buttons = document.createElement("span");
-    for (const [route, label] of [["private_main", "插入私聊"], ["group_main", "插入群聊"], ["aux", "插入辅助"]] as const) {
+    for (const [route, label] of [["private_main", "插入私聊模板"], ["group_main", "插入群聊模板"], ["aux", "插入辅助模板"]] as const) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "secondary provider-action";
@@ -210,15 +207,11 @@ function providerCard(
   const advanced = document.createElement("details");
   const summary = document.createElement("summary");
   summary.textContent = "高级连接字段";
-  const apiKeyEnv = textInput("API Key Env", `${form.id}-api-key-env`, form.apiKeyEnv, !editable);
-  const authHeader = textInput("认证 Header", `${form.id}-auth-header`, form.authHeader, !editable);
-  const authScheme = textInput("认证 Scheme", `${form.id}-auth-scheme`, form.authScheme, !editable);
+  const apiKeyEnv = textInput("API Key Env（固定）", `${form.id}-api-key-env`, form.apiKeyEnv, true);
+  const authHeader = textInput("认证 Header（固定）", `${form.id}-auth-header`, form.authHeader, true);
+  const authScheme = textInput("认证 Scheme（固定）", `${form.id}-auth-scheme`, form.authScheme, true);
   const timeout = textInput("请求超时（秒）", `${form.id}-timeout`, form.requestTimeoutSeconds?.toString() ?? "", !editable, "number");
   advanced.append(summary, apiKeyEnv.row, authHeader.row, authScheme.row, timeout.row);
-  if (form.kind === "openai_responses") {
-    const fallback = checkboxInput("Chat fallback", `${form.id}-chat-fallback`, form.chatFallback, !editable);
-    advanced.append(fallback.row);
-  }
   const actions = document.createElement("div");
   actions.className = "provider-card-actions";
   const save = document.createElement("button");
@@ -226,7 +219,7 @@ function providerCard(
   save.className = "provider-action";
   save.textContent = form.enabled ? "保存修改" : "添加 Provider";
   save.disabled = !editable;
-  save.onclick = () => void onSave(readProviderForm(form, baseUrl.input, apiKeyEnv.input, authHeader.input, authScheme.input, timeout.input, card));
+  save.onclick = () => void onSave(readProviderForm(form, baseUrl.input, apiKeyEnv.input, authHeader.input, authScheme.input, timeout.input));
   actions.append(save);
   if (form.enabled) {
     const remove = document.createElement("button");
@@ -250,9 +243,7 @@ function readProviderForm(
   authHeader: HTMLInputElement,
   authScheme: HTMLInputElement,
   timeout: HTMLInputElement,
-  card: HTMLElement,
 ): OpenCodeProviderForm {
-  const fallback = card.querySelector<HTMLInputElement>(`#${source.id}-chat-fallback`);
   return {
     ...source,
     baseUrl: baseUrl.value,
@@ -260,7 +251,6 @@ function readProviderForm(
     authHeader: authHeader.value,
     authScheme: authScheme.value,
     requestTimeoutSeconds: timeout.value.trim() ? Number(timeout.value) : null,
-    chatFallback: fallback?.checked === true,
     enabled: true,
   };
 }
@@ -276,18 +266,6 @@ function textInput(labelText: string, id: string, value: string, disabled: boole
   input.disabled = disabled;
   if (type === "number") input.min = "1";
   row.append(input);
-  return { row, input };
-}
-
-function checkboxInput(labelText: string, id: string, checked: boolean, disabled: boolean): { row: HTMLElement; input: HTMLInputElement } {
-  const row = document.createElement("label");
-  row.className = "provider-field provider-checkbox";
-  const input = document.createElement("input");
-  input.id = id;
-  input.type = "checkbox";
-  input.checked = checked;
-  input.disabled = disabled;
-  row.append(input, document.createTextNode(labelText));
   return { row, input };
 }
 

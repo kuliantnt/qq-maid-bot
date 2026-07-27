@@ -425,7 +425,7 @@ async fn test_provider_connection(
             );
         }
     };
-    let (url, api_key) = match connection_test_target(&payload.target, &environment) {
+    let targets = match connection_test_targets(&payload.target, &environment) {
         Ok(value) => value,
         Err(response) => {
             let _ = state.admin_auth.as_ref().and_then(|auth| {
@@ -435,63 +435,20 @@ async fn test_provider_connection(
             return respond(&state, &headers, *response);
         }
     };
-    let (host, addresses) = match resolve_public_connection_target(&url).await {
-        Ok(value) => value,
-        Err(response) => return respond(&state, &headers, *response),
-    };
-    let client_builder = match qq_maid_common::http_client::try_builder() {
-        Ok(value) => value,
-        Err(_) => {
-            return respond(
-                &state,
-                &headers,
-                api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "connection_test_unavailable",
-                    "connection test TLS could not be initialized",
-                ),
-            );
-        }
-    };
-    let client = match client_builder
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(8))
-        // 禁止环境代理重新解析目标；请求固定使用上一步校验过的公网地址，避免 DNS rebinding。
-        .no_proxy()
-        .resolve_to_addrs(&host, &addresses)
-        .build()
-    {
-        Ok(value) => value,
-        Err(_) => {
-            return respond(
-                &state,
-                &headers,
-                api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "connection_test_unavailable",
-                    "connection test client could not be initialized",
-                ),
-            );
-        }
-    };
-    let result = match client.get(url).bearer_auth(api_key).send().await {
-        Ok(response) => classify_connection_status(response.status()),
-        Err(error) if error.is_timeout() => (false, "timeout", "连接超时；未修改任何配置"),
-        Err(error) if error.is_connect() => {
-            (false, "connect_failed", "无法连接 Provider；未修改任何配置")
-        }
-        Err(_) => (
-            false,
-            "transport_error",
-            "Provider 连接发生传输错误；未修改任何配置",
-        ),
-    };
+    let mut results = Vec::with_capacity(targets.len());
+    for target in &targets {
+        let result = match run_connection_test(target).await {
+            Ok(value) => value,
+            Err(response) => return respond(&state, &headers, *response),
+        };
+        results.push(result);
+    }
+    let result = summarize_connection_results(&payload.target, &results);
     let _ = state.admin_auth.as_ref().and_then(|auth| {
         auth.audit(
             Some(actor_id),
             "config.connection_test",
-            if result.0 { "success" } else { "failed" },
+            if result.success { "success" } else { "failed" },
         )
         .ok()
     });
@@ -501,20 +458,67 @@ async fn test_provider_connection(
         Json(json!({
             "ok": true,
             "connection": {
-                "success": result.0,
-                "classification": result.1,
-                "message": result.2,
+                "success": result.success,
+                "classification": result.classification,
+                "message": result.message,
                 "side_effect_free": true,
+                "probes": results.iter().map(|probe| json!({
+                    "name": probe.name,
+                    "label": probe.label,
+                    "url": probe.url.as_str(),
+                    "success": probe.success,
+                    "classification": probe.classification,
+                    "message": probe.message,
+                    "anonymous": probe.anonymous,
+                })).collect::<Vec<_>>(),
             }
         }))
         .into_response(),
     )
 }
 
-fn connection_test_target(
+#[derive(Debug)]
+struct ConnectionTestTarget {
+    name: String,
+    label: String,
+    url: url::Url,
+    api_key: Option<String>,
+    anonymous: bool,
+}
+
+#[derive(Debug)]
+struct ConnectionTestResult {
+    name: String,
+    label: String,
+    url: url::Url,
+    success: bool,
+    classification: &'static str,
+    message: &'static str,
+    anonymous: bool,
+}
+
+#[derive(Debug)]
+struct ConnectionTestSummary {
+    success: bool,
+    classification: &'static str,
+    message: String,
+}
+
+fn connection_test_targets(
     target: &str,
     environment: &std::collections::HashMap<String, String>,
-) -> Result<(url::Url, String), BoxedResponse> {
+) -> Result<Vec<ConnectionTestTarget>, BoxedResponse> {
+    if target == "opencode" {
+        // OpenCode 固定探测两个官方匿名模型目录，不读取卡片里可修改的 Base URL，
+        // 也不发送 Key，避免把目录可达误报成凭据有效。
+        return [
+            ("zen", "Zen", "https://opencode.ai/zen/v1"),
+            ("go", "Go", "https://opencode.ai/zen/go/v1"),
+        ]
+        .into_iter()
+        .map(|(name, label, base_url)| connection_test_target(name, label, base_url, None, true))
+        .collect();
+    }
     let (base_url, api_key_env) = match target {
         "openai" => (
             environment
@@ -550,10 +554,6 @@ fn connection_test_target(
             "GEMINI_API_KEY",
         ),
         "mimo" => ("https://api.xiaomimimo.com/v1", "MIMO_API_KEY"),
-        // OpenCode 官方文档明确提供 Zen `/v1/models`；Zen 与 Go 共用同一凭证，
-        // 因而这里只做一次无副作用的统一连通性探测，不发送模型生成请求。
-        // 该目录当前允许匿名访问，成功只表示服务可达，不能宣称 API Key 已通过认证。
-        "opencode" => ("https://opencode.ai/zen/v1", "OPENCODE_API_KEY"),
         _ => {
             return Err(Box::new(api_error(
                 StatusCode::BAD_REQUEST,
@@ -574,6 +574,22 @@ fn connection_test_target(
             ))
         })?
         .to_owned();
+    Ok(vec![connection_test_target(
+        target,
+        target,
+        base_url,
+        Some(api_key),
+        false,
+    )?])
+}
+
+fn connection_test_target(
+    name: &str,
+    label: &str,
+    base_url: &str,
+    api_key: Option<String>,
+    anonymous: bool,
+) -> Result<ConnectionTestTarget, BoxedResponse> {
     let mut url = url::Url::parse(base_url.trim()).map_err(|_| {
         Box::new(api_error(
             StatusCode::BAD_REQUEST,
@@ -596,7 +612,113 @@ fn connection_test_target(
     url.set_path(&path);
     url.set_query(None);
     url.set_fragment(None);
-    Ok((url, api_key))
+    Ok(ConnectionTestTarget {
+        name: name.to_owned(),
+        label: label.to_owned(),
+        url,
+        api_key,
+        anonymous,
+    })
+}
+
+async fn run_connection_test(
+    target: &ConnectionTestTarget,
+) -> Result<ConnectionTestResult, BoxedResponse> {
+    let (host, addresses) = resolve_public_connection_target(&target.url).await?;
+    let client_builder = qq_maid_common::http_client::try_builder().map_err(|_| {
+        Box::new(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "connection_test_unavailable",
+            "connection test TLS could not be initialized",
+        ))
+    })?;
+    let client = client_builder
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(8))
+        // 禁止环境代理重新解析目标；请求固定使用上一步校验过的公网地址，避免 DNS rebinding。
+        .no_proxy()
+        .resolve_to_addrs(&host, &addresses)
+        .build()
+        .map_err(|_| {
+            Box::new(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "connection_test_unavailable",
+                "connection test client could not be initialized",
+            ))
+        })?;
+    let request = client.get(target.url.clone());
+    let request = match target.api_key.as_deref() {
+        Some(api_key) => request.bearer_auth(api_key),
+        None => request,
+    };
+    let result = match request.send().await {
+        Ok(response) => classify_connection_status(response.status()),
+        Err(error) if error.is_timeout() => (false, "timeout", "连接超时；未修改任何配置"),
+        Err(error) if error.is_connect() => {
+            (false, "connect_failed", "无法连接 Provider；未修改任何配置")
+        }
+        Err(_) => (
+            false,
+            "transport_error",
+            "Provider 连接发生传输错误；未修改任何配置",
+        ),
+    };
+    Ok(ConnectionTestResult {
+        name: target.name.clone(),
+        label: target.label.clone(),
+        url: target.url.clone(),
+        success: result.0,
+        classification: result.1,
+        message: result.2,
+        anonymous: target.anonymous,
+    })
+}
+
+fn summarize_connection_results(
+    target: &str,
+    results: &[ConnectionTestResult],
+) -> ConnectionTestSummary {
+    if target != "opencode" {
+        let result = &results[0];
+        return ConnectionTestSummary {
+            success: result.success,
+            classification: result.classification,
+            message: result.message.to_owned(),
+        };
+    }
+
+    let success = !results.is_empty() && results.iter().all(|result| result.success);
+    let classification = if success {
+        "official_catalogs_available"
+    } else if results.iter().any(|result| result.success) {
+        "official_catalogs_partially_available"
+    } else {
+        "official_catalogs_unavailable"
+    };
+    let statuses = results
+        .iter()
+        .map(|result| {
+            format!(
+                "{}{}（{}）",
+                result.label,
+                if result.success {
+                    "可达"
+                } else {
+                    "不可达"
+                },
+                result.classification
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("；");
+    ConnectionTestSummary {
+        success,
+        classification,
+        message: format!(
+            "OpenCode 官方模型目录探测完成：{statuses}。目录允许匿名访问；结果只证明官方模型目录可达，不证明 API Key 有效，也不验证卡片中修改的自定义 Base URL。"
+        ),
+    }
 }
 
 async fn resolve_public_connection_target(

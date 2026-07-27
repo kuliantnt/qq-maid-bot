@@ -9,18 +9,18 @@ fn connection_target_accepts_configured_custom_https_hosts() {
             "https://api.openai.com/v1".to_owned(),
         ),
     ]);
-    let (url, key) = connection_test_target("openai", &environment).unwrap();
-    assert_eq!(url.as_str(), "https://api.openai.com/v1/models");
-    assert_eq!(key, "secret-value");
+    let targets = connection_test_targets("openai", &environment).unwrap();
+    assert_eq!(targets[0].url.as_str(), "https://api.openai.com/v1/models");
+    assert_eq!(targets[0].api_key.as_deref(), Some("secret-value"));
 
     let mut custom = environment;
     custom.insert(
         "OPENAI_BASE_URLS".to_owned(),
         "https://provider.example.com/openai/v1".to_owned(),
     );
-    let (url, _) = connection_test_target("openai", &custom).unwrap();
+    let targets = connection_test_targets("openai", &custom).unwrap();
     assert_eq!(
-        url.as_str(),
+        targets[0].url.as_str(),
         "https://provider.example.com/openai/v1/models"
     );
 
@@ -28,7 +28,7 @@ fn connection_target_accepts_configured_custom_https_hosts() {
         "OPENAI_BASE_URLS".to_owned(),
         "http://127.0.0.1:8080/v1".to_owned(),
     );
-    assert!(connection_test_target("openai", &custom).is_err());
+    assert!(connection_test_targets("openai", &custom).is_err());
 }
 
 #[test]
@@ -58,14 +58,62 @@ fn connection_target_rejects_non_public_addresses() {
 }
 
 #[test]
-fn opencode_connection_target_uses_official_side_effect_free_models_endpoint() {
-    let environment = std::collections::HashMap::from([(
-        "OPENCODE_API_KEY".to_owned(),
-        "shared-secret".to_owned(),
-    )]);
-    let (url, key) = connection_test_target("opencode", &environment).unwrap();
-    assert_eq!(url.as_str(), "https://opencode.ai/zen/v1/models");
-    assert_eq!(key, "shared-secret");
+fn opencode_connection_targets_probe_both_official_anonymous_catalogs() {
+    let targets = connection_test_targets("opencode", &std::collections::HashMap::new()).unwrap();
+    assert_eq!(
+        targets
+            .iter()
+            .map(|target| (target.name.as_str(), target.url.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("zen", "https://opencode.ai/zen/v1/models"),
+            ("go", "https://opencode.ai/zen/go/v1/models"),
+        ]
+    );
+    assert!(
+        targets
+            .iter()
+            .all(|target| target.anonymous && target.api_key.is_none())
+    );
+}
+
+#[test]
+fn opencode_connection_summary_separates_zen_and_go_without_claiming_key_validity() {
+    let results = [
+        ConnectionTestResult {
+            name: "zen".to_owned(),
+            label: "Zen".to_owned(),
+            url: "https://opencode.ai/zen/v1/models".parse().unwrap(),
+            success: true,
+            classification: "available",
+            message: "available",
+            anonymous: true,
+        },
+        ConnectionTestResult {
+            name: "go".to_owned(),
+            label: "Go".to_owned(),
+            url: "https://opencode.ai/zen/go/v1/models".parse().unwrap(),
+            success: false,
+            classification: "timeout",
+            message: "timeout",
+            anonymous: true,
+        },
+    ];
+    let summary = summarize_connection_results("opencode", &results);
+    assert!(!summary.success);
+    assert_eq!(
+        summary.classification,
+        "official_catalogs_partially_available"
+    );
+    assert!(summary.message.contains("Zen可达（available）"));
+    assert!(summary.message.contains("Go不可达（timeout）"));
+    assert!(summary.message.contains("目录允许匿名访问"));
+    assert!(summary.message.contains("不证明 API Key 有效"));
+    assert!(
+        summary
+            .message
+            .contains("不验证卡片中修改的自定义 Base URL")
+    );
 }
 
 #[test]

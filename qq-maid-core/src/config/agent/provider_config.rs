@@ -88,7 +88,16 @@ pub(super) fn provider_from_file(
             }
             false
         }
-        AgentProviderKind::OpenAiResponses => provider.chat_fallback.unwrap_or(false),
+        AgentProviderKind::OpenAiResponses => {
+            // Tool Loop 目前只能沿用 Responses 协议；禁止只在普通聊天中生效的降级，
+            // 避免同一公开配置在不同调用链上表达不同语义。
+            if provider.chat_fallback == Some(true) {
+                return Err(LlmError::config(format!(
+                    "providers.{name}.chat_fallback=true is not supported; omit it or set false"
+                )));
+            }
+            false
+        }
     };
     Ok(AgentProviderConfig {
         id,

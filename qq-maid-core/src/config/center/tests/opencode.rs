@@ -97,6 +97,34 @@ fn invalid_agent_provider_change_does_not_replace_file() {
 }
 
 #[test]
+fn chat_fallback_true_is_rejected_without_replacing_agent_file() {
+    let (file, _running, _database, path) = test_agent_file();
+    let before = std::fs::read(&path).unwrap();
+    let revision = file.snapshot().unwrap().revision;
+    let error = file
+        .update(
+            &revision,
+            &[AgentConfigChange::SetProvider {
+                id: "custom_responses".to_owned(),
+                provider: AgentProviderUpdate {
+                    kind: AgentProviderKind::OpenAiResponses,
+                    base_url: "https://example.com/v1".to_owned(),
+                    api_key_env: "CUSTOM_API_KEY".to_owned(),
+                    auth_header: "Authorization".to_owned(),
+                    auth_scheme: Some("Bearer".to_owned()),
+                    request_timeout_seconds: None,
+                    chat_fallback: Some(true),
+                },
+            }],
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "invalid_config");
+    assert!(error.message().contains("chat_fallback=true"));
+    assert_eq!(std::fs::read(path).unwrap(), before);
+}
+
+#[test]
 fn provider_changes_support_all_three_opencode_presets_with_one_key_env() {
     let (file, _running, _database, path) = test_agent_file();
     let initial = file.snapshot().unwrap();
