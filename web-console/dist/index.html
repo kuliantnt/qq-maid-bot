@@ -124,6 +124,7 @@
             <option value="bigmodel">BigModel</option>
             <option value="gemini">Gemini</option>
             <option value="mimo">MiMo</option>
+            <option value="opencode">测试 OpenCode 连接</option>
           </select>
           <button id="test-provider-connection" class="secondary" type="button">受控测试</button>
         </div>
@@ -144,8 +145,8 @@
         </details>
 
         <details>
-          <summary>模型路线、联网搜索与 Tool Calling</summary>
-          <p class="hint">结构化修改现有 agent.toml；Tavily Key 只保存在安全配置中心。候选模型用英文逗号分隔，保存前执行与正式启动一致的 schema、引用和 Provider 预检。</p>
+          <summary>模型 Provider、路线、联网搜索与 Tool Calling</summary>
+          <p class="hint">结构化修改现有 agent.toml；OpenCode/Tavily Key 只保存在安全配置中心。候选模型用英文逗号分隔，保存前执行与正式启动一致的 schema、引用和 Provider 预检。</p>
           <div id="agent-config-fields" class="config-grid"></div>
           <button id="save-agent-config" type="button">保存 Agent 策略</button>
         </details>

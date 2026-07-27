@@ -6,7 +6,7 @@
 use reqwest::{StatusCode, header};
 use serde_json::Value;
 
-use crate::error::LlmError;
+use crate::{config::HttpAuthConfig, error::LlmError};
 
 /// OpenAI API 默认基础地址。
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -25,40 +25,60 @@ pub(crate) async fn send_openai_responses_request(
     client: &reqwest::Client,
     api_key: &str,
     base_url: Option<&str>,
+    provider: &str,
+    auth: Option<&HttpAuthConfig>,
     payload: &Value,
     stream: bool,
 ) -> Result<reqwest::Response, LlmError> {
-    let mut request = client
-        .post(openai_responses_url(base_url))
-        .bearer_auth(api_key)
-        .json(payload);
+    let request = client.post(openai_responses_url(base_url));
+    let mut request = match auth {
+        Some(auth) => {
+            let header_name = reqwest::header::HeaderName::from_bytes(auth.header.as_bytes())
+                .map_err(|_| {
+                    LlmError::config(format!(
+                        "{} auth header `{}` is invalid",
+                        provider, auth.header
+                    ))
+                })?;
+            let header_value = match auth.scheme.as_deref() {
+                Some(scheme) => format!("{scheme} {api_key}"),
+                None => api_key.to_owned(),
+            };
+            request.header(header_name, header_value)
+        }
+        None => request.bearer_auth(api_key),
+    }
+    .json(payload);
     if stream {
         request = request.header(header::ACCEPT, "text/event-stream");
     }
     let response = request.send().await.map_err(|err| {
-        let context = if stream {
-            "OpenAI chat stream request failed"
-        } else {
-            "OpenAI chat request failed"
-        };
-        LlmError::http(format!("{context}: {err}"))
+        let context = if stream { "stream request" } else { "request" };
+        LlmError::http(format!("{provider} Responses {context} failed: {err}"))
     })?;
 
     let status = response.status();
     if !status.is_success() {
-        return Err(openai_chat_status_error(status, response).await);
+        return Err(responses_status_error(provider, status, response).await);
     }
     Ok(response)
 }
 
-async fn openai_chat_status_error(status: StatusCode, response: reqwest::Response) -> LlmError {
+async fn responses_status_error(
+    provider: &str,
+    status: StatusCode,
+    response: reqwest::Response,
+) -> LlmError {
     let detail = response.text().await.unwrap_or_default();
     let detail = truncate_error_detail(detail.trim(), 500);
     if detail.is_empty() {
-        return LlmError::http(format!("OpenAI chat returned HTTP {}", status.as_u16()));
+        return LlmError::http(format!(
+            "{provider} Responses returned HTTP {}",
+            status.as_u16()
+        ));
     }
     LlmError::http(format!(
-        "OpenAI chat returned HTTP {}: {}",
+        "{provider} Responses returned HTTP {}: {}",
         status.as_u16(),
         detail
     ))

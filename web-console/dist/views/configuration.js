@@ -1,6 +1,7 @@
 import { ConsoleApiError, fetchConfiguration, requestRestart, testProviderConnection, updateAgentConfiguration, updateRuntimeConfiguration, updateSecretConfiguration, validateConfiguration, } from "../api.js";
 import { agentToolOptions, selectedAgentToolNames } from "../agent-tools.js";
 import { togglePasswordReveal } from "../dom.js";
+import { openCodeProviderChange, readOpenCodeProviders, renderOpenCodeProviders, renderOpenCodeRouteHints, } from "../opencode-providers.js";
 const FIELD_LABELS = {
     "command.prefix": "聊天命令前缀",
     "provider.openai.base_url": "OpenAI Base URL",
@@ -13,6 +14,7 @@ const FIELD_LABELS = {
     "provider.gemini.base_url": "Gemini Base URL",
     "provider.gemini.api_key": "Gemini API Key",
     "provider.mimo.api_key": "MiMo API Key",
+    "provider.opencode.api_key": "OpenCode API Key",
     "tools.web_search.tavily.api_key": "Tavily API Key",
     "weather.qweather.api_key": "和风天气 API Key",
     "weather.qweather.api_host": "QWeather API Host",
@@ -303,6 +305,20 @@ function renderAgent(snapshot) {
     };
     backendSelect.addEventListener("change", refreshCredentialStatus);
     refreshCredentialStatus();
+    target.append(renderOpenCodeProviders(snapshot, async (form) => {
+        let change;
+        try {
+            change = openCodeProviderChange(form);
+        }
+        catch (cause) {
+            showResult(errorMessage(cause), true);
+            return;
+        }
+        await runSave(async () => updateAgentConfiguration(current.agent.revision, [change]));
+    }, async (id) => runSave(async () => updateAgentConfiguration(current.agent.revision, [{
+            action: "remove_provider",
+            id,
+        }]))));
     const modelRoutes = record(documentValue.model_routes);
     for (const routeName of ["private_main", "group_main", "aux"]) {
         const route = record(modelRoutes[routeName]);
@@ -311,6 +327,8 @@ function renderAgent(snapshot) {
     for (const routeName of ["private_search", "group_search"]) {
         target.append(textField(AGENT_ROUTE_LABELS[routeName] ?? routeName, `agent-search-${routeName}`, savedWebSearch.routes[routeName] ?? "", !agent.editable));
     }
+    const openCodeKeyConfigured = snapshot.fields.some((field) => field.key === "provider.opencode.api_key" && field.configured);
+    target.append(renderOpenCodeRouteHints(!agent.editable, readOpenCodeProviders(documentValue).filter((provider) => provider.enabled).map((provider) => provider.id), openCodeKeyConfigured));
     const scenes = record(documentValue.scenes);
     for (const sceneName of ["private", "group"]) {
         const scene = record(scenes[sceneName]);
@@ -804,6 +822,9 @@ function setButtonsDisabled(disabled) {
         element(id, HTMLButtonElement).disabled = disabled;
     }
     for (const button of document.querySelectorAll(".tool-whitelist-save")) {
+        button.disabled = disabled || current?.agent?.editable !== true;
+    }
+    for (const button of document.querySelectorAll(".provider-action")) {
         button.disabled = disabled || current?.agent?.editable !== true;
     }
 }

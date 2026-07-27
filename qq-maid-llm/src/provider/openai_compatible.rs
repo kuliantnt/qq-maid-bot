@@ -340,6 +340,23 @@ mod tests {
         (format!("http://{addr}/v1/"), state)
     }
 
+    async fn spawn_opencode_chat_mock() -> (String, Arc<Mutex<MockState>>) {
+        let state = Arc::new(Mutex::new(MockState {
+            status: StatusCode::OK,
+            ..MockState::default()
+        }));
+        let app = Router::new()
+            .route("/zen/v1/chat/completions", post(mock_chat_handler))
+            .route("/zen/go/v1/chat/completions", post(mock_chat_handler))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), state)
+    }
+
     fn mimo_config(base_url: String) -> OpenAiCompatibleProviderConfig {
         OpenAiCompatibleProviderConfig {
             id: ModelProvider::Custom("mimo".to_owned()),
@@ -458,5 +475,58 @@ mod tests {
         assert_eq!(err.code, "provider_error");
         assert_eq!(err.stage, "provider_unavailable");
         assert!(err.message.contains("HTTP 401"));
+    }
+
+    #[tokio::test]
+    async fn opencode_zen_and_go_chat_use_distinct_urls_raw_models_and_shared_key() {
+        let (root, state) = spawn_opencode_chat_mock().await;
+        for (id, base_path, model) in [
+            ("opencode_zen_chat", "/zen/v1", "deepseek-test"),
+            ("opencode_go", "/zen/go/v1", "kimi-test"),
+        ] {
+            let provider = OpenAiCompatibleProvider::new(
+                &OpenAiCompatibleProviderConfig {
+                    id: ModelProvider::Custom(id.to_owned()),
+                    base_url: format!("{root}{base_path}"),
+                    api_key_env: "OPENCODE_API_KEY".to_owned(),
+                    api_key: Some("shared-opencode-key".to_owned()),
+                    auth: HttpAuthConfig::default(),
+                    request_timeout_seconds: None,
+                },
+                model.to_owned(),
+                false,
+                90,
+                10 * 1024 * 1024,
+                1200,
+            )
+            .unwrap();
+            provider
+                .chat(ChatRequest {
+                    session_id: "s".to_owned(),
+                    model: Some(format!("{id}:{model}")),
+                    messages: vec![ChatMessage::user("hi")],
+                    context_budget: None,
+                    max_output_tokens: None,
+                    reasoning_effort: None,
+                    metadata: Default::default(),
+                })
+                .await
+                .unwrap();
+        }
+
+        let state = state.lock().await;
+        assert_eq!(
+            state.paths,
+            vec!["/zen/v1/chat/completions", "/zen/go/v1/chat/completions"]
+        );
+        assert_eq!(state.requests[0]["model"], "deepseek-test");
+        assert_eq!(state.requests[1]["model"], "kimi-test");
+        assert_eq!(
+            state.auth_headers,
+            vec![
+                Some("Bearer shared-opencode-key".to_owned()),
+                Some("Bearer shared-opencode-key".to_owned())
+            ]
+        );
     }
 }

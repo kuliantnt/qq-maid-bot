@@ -10,6 +10,12 @@ import {
 } from "../api.js";
 import { agentToolOptions, selectedAgentToolNames, type AgentToolOption } from "../agent-tools.js";
 import { togglePasswordReveal } from "../dom.js";
+import {
+  openCodeProviderChange,
+  readOpenCodeProviders,
+  renderOpenCodeProviders,
+  renderOpenCodeRouteHints,
+} from "../opencode-providers.js";
 import type { ConfigFieldSnapshot, ConfigurationSnapshot } from "../types.js";
 
 const FIELD_LABELS: Record<string, string> = {
@@ -24,6 +30,7 @@ const FIELD_LABELS: Record<string, string> = {
   "provider.gemini.base_url": "Gemini Base URL",
   "provider.gemini.api_key": "Gemini API Key",
   "provider.mimo.api_key": "MiMo API Key",
+  "provider.opencode.api_key": "OpenCode API Key",
   "tools.web_search.tavily.api_key": "Tavily API Key",
   "weather.qweather.api_key": "和风天气 API Key",
   "weather.qweather.api_host": "QWeather API Host",
@@ -372,6 +379,23 @@ function renderAgent(snapshot: ConfigurationSnapshot): void {
   };
   backendSelect.addEventListener("change", refreshCredentialStatus);
   refreshCredentialStatus();
+  target.append(renderOpenCodeProviders(
+    snapshot,
+    async (form) => {
+      let change: Record<string, unknown>;
+      try {
+        change = openCodeProviderChange(form);
+      } catch (cause) {
+        showResult(errorMessage(cause), true);
+        return;
+      }
+      await runSave(async () => updateAgentConfiguration(current!.agent!.revision, [change]));
+    },
+    async (id) => runSave(async () => updateAgentConfiguration(current!.agent!.revision, [{
+      action: "remove_provider",
+      id,
+    }])),
+  ));
   const modelRoutes = record(documentValue.model_routes);
   for (const routeName of ["private_main", "group_main", "aux"]) {
     const route = record(modelRoutes[routeName]);
@@ -385,6 +409,14 @@ function renderAgent(snapshot: ConfigurationSnapshot): void {
       !agent.editable,
     ));
   }
+  const openCodeKeyConfigured = snapshot.fields.some(
+    (field) => field.key === "provider.opencode.api_key" && field.configured,
+  );
+  target.append(renderOpenCodeRouteHints(
+    !agent.editable,
+    readOpenCodeProviders(documentValue).filter((provider) => provider.enabled).map((provider) => provider.id),
+    openCodeKeyConfigured,
+  ));
   const scenes = record(documentValue.scenes);
   for (const sceneName of ["private", "group"]) {
     const scene = record(scenes[sceneName]);
@@ -899,6 +931,9 @@ function setButtonsDisabled(disabled: boolean): void {
     element(id, HTMLButtonElement).disabled = disabled;
   }
   for (const button of document.querySelectorAll<HTMLButtonElement>(".tool-whitelist-save")) {
+    button.disabled = disabled || current?.agent?.editable !== true;
+  }
+  for (const button of document.querySelectorAll<HTMLButtonElement>(".provider-action")) {
     button.disabled = disabled || current?.agent?.editable !== true;
   }
 }

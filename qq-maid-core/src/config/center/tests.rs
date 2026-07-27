@@ -13,6 +13,8 @@ use crate::{
 
 use super::*;
 
+mod opencode;
+
 fn fields() -> Vec<ManagedConfigField> {
     vec![
         ManagedConfigField::public(

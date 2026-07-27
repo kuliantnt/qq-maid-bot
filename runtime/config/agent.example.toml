@@ -28,6 +28,11 @@ api_key_env = "MIMO_API_KEY"
 auth_header = "Authorization"
 auth_scheme = "Bearer"
 
+# OpenCode 默认不启用，也不会自动加入现有模型路线。管理员可在 Web 配置中心添加
+# opencode_zen（Responses）、opencode_zen_chat（Chat Completions）和
+# opencode_go（Chat Completions）；三者共用 OPENCODE_API_KEY。
+# 需要 Anthropic /messages 的模型当前暂不支持，不能配置到上述 Chat Provider 后期待自动改协议。
+
 # 默认将私聊、群聊和辅助任务的第一候选统一到 GPT-5.6 Luna，
 # 同时保留 Gemini、MiMo 和 DeepSeek 降级候选；未配置对应 API Key 的 provider 会被跳过。
 # API Key 仍必须放在 .env 的 OPENAI_API_KEY，不得写入本文件。

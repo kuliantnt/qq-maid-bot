@@ -402,21 +402,27 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
                         Arc::new(gemini::GeminiProvider::new(config)?),
                     )),
                     ModelProvider::Custom(_) => {
-                        let provider_config = config
-                            .openai_compatible_providers
-                            .iter()
-                            .find(|entry| entry.id == provider_kind)
-                            .ok_or_else(|| {
-                                LlmError::config(format!(
-                                    "provider `{}` is referenced by model routes but not configured",
-                                    provider_kind.as_str()
-                                ))
-                            })?;
                         let default_model =
                             first_model_for_provider(&provider_routes, &provider_kind)
                                 .unwrap_or_else(|| provider_kind.as_str().to_owned());
-                        providers.push((
-                            provider_kind.clone(),
+                        let provider: DynLlmProvider = if let Some(provider_config) = config
+                            .openai_responses_providers
+                            .iter()
+                            .find(|entry| entry.id == provider_kind)
+                        {
+                            Arc::new(openai::ConfiguredResponsesProvider::new(
+                                provider_config,
+                                default_model,
+                                config.stream,
+                                config.request_timeout_seconds,
+                                config.media_max_bytes,
+                                config.max_output_tokens,
+                            )?)
+                        } else if let Some(provider_config) = config
+                            .openai_compatible_providers
+                            .iter()
+                            .find(|entry| entry.id == provider_kind)
+                        {
                             Arc::new(openai_compatible::OpenAiCompatibleProvider::new(
                                 provider_config,
                                 default_model,
@@ -424,8 +430,14 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
                                 config.request_timeout_seconds,
                                 config.media_max_bytes,
                                 config.max_output_tokens,
-                            )?),
-                        ));
+                            )?)
+                        } else {
+                            return Err(LlmError::config(format!(
+                                "provider `{}` is referenced by model routes but not configured",
+                                provider_kind.as_str()
+                            )));
+                        };
+                        providers.push((provider_kind.clone(), provider));
                     }
                 }
             }

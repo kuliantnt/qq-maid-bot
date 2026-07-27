@@ -20,7 +20,10 @@ use crate::config::{
     agent::{
         AgentProfileConfig, AgentSceneConfig, KnowledgeEmbeddingConfig, KnowledgeRetrievalMode,
     },
-    center::{AgentConfigChange, ConfigCenterError, ManagedConfigChange, SecretConfigChange},
+    center::{
+        AgentConfigChange, AgentProviderUpdate, ConfigCenterError, ManagedConfigChange,
+        SecretConfigChange,
+    },
 };
 
 use super::{console_routes::with_console_cors, routes::OpsHttpState};
@@ -250,6 +253,13 @@ struct AgentUpdateRequest {
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum AgentChangeRequest {
+    SetProvider {
+        id: String,
+        provider: AgentProviderUpdate,
+    },
+    RemoveProvider {
+        id: String,
+    },
     SetKnowledge {
         mode: KnowledgeRetrievalMode,
         embedding: KnowledgeEmbeddingConfig,
@@ -540,6 +550,10 @@ fn connection_test_target(
             "GEMINI_API_KEY",
         ),
         "mimo" => ("https://api.xiaomimimo.com/v1", "MIMO_API_KEY"),
+        // OpenCode 官方文档明确提供 Zen `/v1/models`；Zen 与 Go 共用同一凭证，
+        // 因而这里只做一次无副作用的统一连通性探测，不发送模型生成请求。
+        // 该目录当前允许匿名访问，成功只表示服务可达，不能宣称 API Key 已通过认证。
+        "opencode" => ("https://opencode.ai/zen/v1", "OPENCODE_API_KEY"),
         _ => {
             return Err(Box::new(api_error(
                 StatusCode::BAD_REQUEST,
@@ -677,7 +691,7 @@ fn is_non_public_ip(ip: IpAddr) -> bool {
 
 fn classify_connection_status(status: reqwest::StatusCode) -> (bool, &'static str, &'static str) {
     match status.as_u16() {
-        200..=299 => (true, "available", "Provider 认证与模型列表端点可用"),
+        200..=299 => (true, "available", "Provider 可达，模型列表端点可用"),
         401 | 403 => (
             false,
             "authentication_failed",
@@ -764,6 +778,10 @@ fn admin_context(
 
 fn agent_change(change: AgentChangeRequest) -> Result<AgentConfigChange, BoxedResponse> {
     Ok(match change {
+        AgentChangeRequest::SetProvider { id, provider } => {
+            AgentConfigChange::SetProvider { id, provider }
+        }
+        AgentChangeRequest::RemoveProvider { id } => AgentConfigChange::RemoveProvider { id },
         AgentChangeRequest::SetKnowledge { mode, embedding } => {
             AgentConfigChange::SetKnowledge { mode, embedding }
         }
@@ -941,76 +959,4 @@ fn respond(state: &OpsHttpState, headers: &HeaderMap, response: Response) -> Res
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn connection_target_accepts_configured_custom_https_hosts() {
-        let environment = std::collections::HashMap::from([
-            ("OPENAI_API_KEY".to_owned(), "secret-value".to_owned()),
-            (
-                "OPENAI_BASE_URLS".to_owned(),
-                "https://api.openai.com/v1".to_owned(),
-            ),
-        ]);
-        let (url, key) = connection_test_target("openai", &environment).unwrap();
-        assert_eq!(url.as_str(), "https://api.openai.com/v1/models");
-        assert_eq!(key, "secret-value");
-
-        let mut custom = environment;
-        custom.insert(
-            "OPENAI_BASE_URLS".to_owned(),
-            "https://provider.example.com/openai/v1".to_owned(),
-        );
-        let (url, _) = connection_test_target("openai", &custom).unwrap();
-        assert_eq!(
-            url.as_str(),
-            "https://provider.example.com/openai/v1/models"
-        );
-
-        custom.insert(
-            "OPENAI_BASE_URLS".to_owned(),
-            "http://127.0.0.1:8080/v1".to_owned(),
-        );
-        assert!(connection_test_target("openai", &custom).is_err());
-    }
-
-    #[test]
-    fn connection_target_rejects_non_public_addresses() {
-        for value in [
-            "127.0.0.1",
-            "10.0.0.1",
-            "100.64.0.1",
-            "169.254.169.254",
-            "172.16.0.1",
-            "192.168.0.1",
-            "198.18.0.1",
-            "203.0.113.1",
-            "::1",
-            "fc00::1",
-            "fe80::1",
-            "fec0::1",
-            "64:ff9b::a00:1",
-            "2001:db8::1",
-        ] {
-            assert!(is_non_public_ip(value.parse().unwrap()), "{value}");
-        }
-        for value in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"] {
-            assert!(!is_non_public_ip(value.parse().unwrap()), "{value}");
-        }
-        assert!(is_blocked_connection_hostname("metadata.google.internal"));
-    }
-
-    #[test]
-    fn connection_status_has_stable_safe_classifications() {
-        assert!(classify_connection_status(reqwest::StatusCode::OK).0);
-        assert_eq!(
-            classify_connection_status(reqwest::StatusCode::UNAUTHORIZED).1,
-            "authentication_failed"
-        );
-        assert_eq!(
-            classify_connection_status(reqwest::StatusCode::TOO_MANY_REQUESTS).1,
-            "upstream_rate_limited"
-        );
-    }
-}
+mod tests;
