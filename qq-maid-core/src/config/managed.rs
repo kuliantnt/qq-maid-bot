@@ -90,6 +90,12 @@ pub fn managed_config_fields() -> Vec<Field> {
             Apply::Restart,
         ),
         Field::secret(
+            "provider.opencode.api_key",
+            "OPENCODE_API_KEY",
+            "core.provider",
+            Apply::Restart,
+        ),
+        Field::secret(
             "tools.web_search.tavily.api_key",
             "TAVILY_API_KEY",
             "core.search",

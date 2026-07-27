@@ -92,6 +92,11 @@ const CONSOLE_ASSETS: &[(&str, &str, &str)] = &[
         "text/javascript; charset=utf-8",
     ),
     (
+        "opencode-providers.js",
+        include_str!("../../../web-console/dist/opencode-providers.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
         "types.js",
         include_str!("../../../web-console/dist/types.js"),
         "text/javascript; charset=utf-8",

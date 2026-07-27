@@ -393,6 +393,25 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(13, 138
 .tool-checkbox input { margin-top: .2rem; }
 .tool-registration-state { color: var(--warn); font-size: .72rem; font-weight: 650; }
 .tool-whitelist-save { margin-top: .8rem; }
+.provider-card-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .8rem; }
+.provider-card { min-width: 0; padding: .9rem; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.provider-card h4 { margin: 0 0 .35rem; overflow-wrap: anywhere; }
+.provider-state { margin: 0 0 .45rem; color: var(--accent-strong); font-size: .78rem; font-weight: 700; }
+.field-warning { display: block; margin: .35rem 0; color: var(--warn); font-size: .74rem; line-height: 1.45; }
+.provider-field { display: grid; min-width: 0; gap: .3rem; margin: .65rem 0 0; color: var(--muted); }
+.provider-field input:not([type="checkbox"]) { width: 100%; min-width: 0; }
+.provider-checkbox { display: flex; align-items: center; gap: .45rem; }
+.provider-card .provider-field + details { margin-top: .75rem; }
+.provider-card details { border-radius: 8px; }
+.provider-card details summary { padding: .6rem .7rem; font-size: .76rem; }
+.provider-card details .provider-field { padding: 0 .7rem; }
+.provider-card details .provider-field:last-child { margin-bottom: .75rem; }
+.provider-card-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .8rem; }
+.route-example-list { display: grid; gap: .65rem; }
+.route-example-list > div { display: grid; grid-template-columns: minmax(15rem, 1fr) auto; align-items: center; gap: .5rem; padding: .7rem; border: 1px solid var(--line); border-radius: 8px; }
+.route-example-list code { overflow-wrap: anywhere; }
+.route-example-list span { display: flex; flex-wrap: wrap; gap: .35rem; }
+.route-example-list .field-warning { grid-column: 1 / -1; margin: 0; }
 .status-message { min-height: 1.4rem; }
 
 footer { padding: 1.4rem 1rem; color: var(--muted); border-top: 1px solid var(--line); text-align: center; font-size: .76rem; }
@@ -405,6 +424,8 @@ footer { padding: 1.4rem 1rem; color: var(--muted); border-top: 1px solid var(--
   .connection-test-row { grid-template-columns: 1fr; align-items: stretch; }
   .connection-test-row label { margin: 0; }
   .config-grid, .config-field-group-grid { grid-template-columns: 1fr; }
+  .provider-card-grid { grid-template-columns: 1fr; }
+  .route-example-list > div { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 520px) {

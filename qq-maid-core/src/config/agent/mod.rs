@@ -13,8 +13,10 @@ use qq_maid_llm::{
 
 use crate::error::LlmError;
 
+mod provider_config;
 mod web_search_config;
 
+use provider_config::{default_auth_header, default_auth_scheme, provider_from_file};
 pub(in crate::config) use web_search_config::ToolsConfigFile;
 use web_search_config::web_search_from_file;
 
@@ -170,6 +172,7 @@ pub struct AgentProviderConfig {
     pub auth_header: String,
     pub auth_scheme: Option<String>,
     pub request_timeout_seconds: Option<u64>,
+    pub chat_fallback: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -177,6 +180,8 @@ pub struct AgentProviderConfig {
 pub enum AgentProviderKind {
     #[serde(rename = "openai_compatible")]
     OpenAiCompatible,
+    #[serde(rename = "openai_responses")]
+    OpenAiResponses,
 }
 
 #[derive(Debug, Clone)]
@@ -250,7 +255,7 @@ pub(in crate::config) struct AgentConfigDocument {
     #[serde(default)]
     pub(in crate::config) tools: ToolsConfigFile,
     #[serde(default)]
-    providers: HashMap<String, ProviderFile>,
+    pub(in crate::config) providers: HashMap<String, ProviderFile>,
     #[serde(default)]
     pub(in crate::config) model_routes: HashMap<String, RouteFile>,
     #[serde(default)]
@@ -275,16 +280,19 @@ pub(in crate::config) struct RouteFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct ProviderFile {
-    kind: AgentProviderKind,
-    base_url: String,
-    api_key_env: String,
+pub(in crate::config) struct ProviderFile {
+    pub(in crate::config) kind: AgentProviderKind,
+    pub(in crate::config) base_url: String,
+    pub(in crate::config) api_key_env: String,
     #[serde(default = "default_auth_header")]
-    auth_header: String,
+    pub(in crate::config) auth_header: String,
     #[serde(default = "default_auth_scheme")]
-    auth_scheme: Option<String>,
+    pub(in crate::config) auth_scheme: Option<String>,
     #[serde(default)]
-    request_timeout_seconds: Option<u64>,
+    pub(in crate::config) request_timeout_seconds: Option<u64>,
+    /// 字段是否出现需要保留；Chat Provider 出现该 Responses 专属字段时必须拒绝。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(in crate::config) chat_fallback: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -892,58 +900,6 @@ fn default_true() -> bool {
 
 fn default_max_tool_rounds() -> usize {
     5
-}
-
-fn default_auth_header() -> String {
-    "Authorization".to_owned()
-}
-
-fn default_auth_scheme() -> Option<String> {
-    Some("Bearer".to_owned())
-}
-
-fn provider_from_file(name: &str, provider: ProviderFile) -> Result<AgentProviderConfig, LlmError> {
-    let id = ModelProvider::parse_prefix(name)
-        .map_err(|err| LlmError::config(format!("invalid providers.{name}: {}", err.message)))?;
-    if !matches!(id, ModelProvider::Custom(_)) {
-        return Err(LlmError::config(format!(
-            "providers.{name} cannot override built-in provider `{}`",
-            id.as_str()
-        )));
-    }
-    let base_url = provider.base_url.trim();
-    if base_url.is_empty() {
-        return Err(LlmError::config(format!(
-            "providers.{name}.base_url must not be empty"
-        )));
-    }
-    let api_key_env = provider.api_key_env.trim();
-    if api_key_env.is_empty() {
-        return Err(LlmError::config(format!(
-            "providers.{name}.api_key_env must not be empty"
-        )));
-    }
-    let auth_header = provider.auth_header.trim();
-    if auth_header.is_empty() {
-        return Err(LlmError::config(format!(
-            "providers.{name}.auth_header must not be empty"
-        )));
-    }
-    if let Some(seconds) = provider.request_timeout_seconds {
-        validate_positive("request_timeout_seconds", seconds as usize)?;
-    }
-    Ok(AgentProviderConfig {
-        id,
-        kind: provider.kind,
-        base_url: base_url.to_owned(),
-        api_key_env: api_key_env.to_owned(),
-        auth_header: auth_header.to_owned(),
-        auth_scheme: provider
-            .auth_scheme
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty()),
-        request_timeout_seconds: provider.request_timeout_seconds,
-    })
 }
 
 #[cfg(test)]

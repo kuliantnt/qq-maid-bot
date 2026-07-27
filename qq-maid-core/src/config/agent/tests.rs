@@ -294,6 +294,8 @@ enabled_tools = ["save_memory"]
     assert_eq!(private.search_model, "gemini:gemini-2.5-flash");
 }
 
+mod opencode;
+
 #[test]
 fn toml_config_rejects_legacy_search_routes_section() {
     let text = r#"

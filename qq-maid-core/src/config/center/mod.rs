@@ -23,7 +23,9 @@ use toml::Value;
 
 use crate::{config::AgentRuntimeConfig, storage::database::SqliteDatabase};
 
-pub use agent_file::{AgentConfigChange, AgentConfigFile, AgentConfigSnapshot};
+pub use agent_file::{
+    AgentConfigChange, AgentConfigFile, AgentConfigSnapshot, AgentProviderUpdate,
+};
 pub use field::{
     ManagedConfigApplyMode, ManagedConfigField, ManagedConfigSensitivity, ManagedConfigValueType,
 };

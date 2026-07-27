@@ -62,6 +62,28 @@ pub struct OpenAiCompatibleProviderConfig {
     pub request_timeout_seconds: Option<u64>,
 }
 
+/// 配置文件声明的 OpenAI Responses provider。
+///
+/// 该结构只描述协议与连接元数据；具体供应商名称和模型前缀由 `id` 决定，
+/// 因而可以复用内置 OpenAI Responses 的请求、SSE 与 Function Tool Calling 实现。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAiResponsesProviderConfig {
+    /// provider id，对应模型候选中的 `id:model` 前缀。
+    pub id: ModelProvider,
+    /// Responses API base URL，不包含 `/responses`。
+    pub base_url: String,
+    /// API key 环境变量名，用于日志提示和配置诊断。
+    pub api_key_env: String,
+    /// 从环境变量解析出的 API key。缺失时 auto 模式会跳过该 provider。
+    pub api_key: Option<String>,
+    /// HTTP 认证头配置。
+    pub auth: HttpAuthConfig,
+    /// 可选单 provider 请求超时；未配置时继承全局超时。
+    pub request_timeout_seconds: Option<u64>,
+    /// Responses 失败时是否允许在同一 provider 内降级到 Chat Completions。
+    pub chat_fallback: bool,
+}
+
 impl ProviderMode {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -109,6 +131,8 @@ pub struct LlmConfig {
     pub gemini_model: String,
     /// 配置文件声明的 OpenAI-compatible provider 列表。
     pub openai_compatible_providers: Vec<OpenAiCompatibleProviderConfig>,
+    /// 配置文件声明的 OpenAI Responses provider 列表。
+    pub openai_responses_providers: Vec<OpenAiResponsesProviderConfig>,
     /// 是否启用流式输出。
     pub stream: bool,
     /// 请求超时秒数。
