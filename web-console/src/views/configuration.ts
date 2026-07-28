@@ -135,6 +135,17 @@ export function ttsNumberRange(key: string): readonly [number, number] | null {
   return TTS_NUMBER_RANGES[key] ?? null;
 }
 
+/** TTS 范围字段必须先完整通过整数与边界校验，不能沿用普通整数的宽松 parseInt 语义。 */
+export function parseTtsNumberValue(key: string, rawValue: string): number {
+  const range = ttsNumberRange(key);
+  if (!range) throw new Error(`${configFieldLabel(key)}没有可用的页面输入范围`);
+  const value = rawValue.trim() === "" ? Number.NaN : Number(rawValue);
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < range[0] || value > range[1]) {
+    throw new Error(`${configFieldLabel(key)}必须是 ${range[0]} 到 ${range[1]} 之间的整数`);
+  }
+  return value;
+}
+
 const AGENT_ROUTE_LABELS: Record<string, string> = {
   private_main: "私聊主路线",
   group_main: "群聊主路线",
@@ -587,7 +598,14 @@ async function savePublicFields(): Promise<void> {
       input.reportValidity();
       return showResult(`${configFieldLabel(field.key)}不符合页面输入范围，请修改后再保存。`, true);
     }
-    values.set(field.key, inputValue(input, field));
+    try {
+      const value = ttsNumberRange(field.key)
+        ? parseTtsNumberValue(field.key, input.value)
+        : inputValue(input, field);
+      values.set(field.key, value);
+    } catch (cause) {
+      return showResult(errorMessage(cause), true);
+    }
   }
   const changes = publicConfigurationChanges(current.fields, values);
   if (changes.length === 0) return showResult("没有需要保存的普通配置。", false);
@@ -844,6 +862,7 @@ function fieldInput(field: ConfigFieldSnapshot): HTMLInputElement | HTMLSelectEl
       input.min = String(range[0]);
       input.max = String(range[1]);
       input.step = "1";
+      input.required = true;
     }
   }
   return input;

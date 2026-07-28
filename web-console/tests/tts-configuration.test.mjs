@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   configFieldGroupLabel,
   configFieldLabel,
+  parseTtsNumberValue,
   publicConfigurationChanges,
   secretConfigurationChanges,
   ttsNumberRange,
@@ -63,6 +64,27 @@ test("TTS 数字字段使用后端约束对应的浏览器范围", () => {
   assert.deepEqual(ttsNumberRange("delivery.tts.request_timeout_seconds"), [1, 120]);
   assert.deepEqual(ttsNumberRange("delivery.tts.max_text_chars"), [1, 600]);
   assert.equal(ttsNumberRange("delivery.tts.qwen_model"), null);
+});
+
+test("TTS 数字字段拒绝空值、越界值和小数", () => {
+  for (const [key, invalidValues] of [
+    ["delivery.tts.request_timeout_seconds", ["", "0", "121", "1.5"]],
+    ["delivery.tts.max_text_chars", ["", "0", "601", "1.5"]],
+  ]) {
+    for (const value of invalidValues) {
+      assert.throws(
+        () => parseTtsNumberValue(key, value),
+        /必须是 \d+ 到 \d+ 之间的整数/,
+      );
+    }
+  }
+});
+
+test("TTS 数字字段允许合法边界值", () => {
+  assert.equal(parseTtsNumberValue("delivery.tts.request_timeout_seconds", "1"), 1);
+  assert.equal(parseTtsNumberValue("delivery.tts.request_timeout_seconds", "120"), 120);
+  assert.equal(parseTtsNumberValue("delivery.tts.max_text_chars", "1"), 1);
+  assert.equal(parseTtsNumberValue("delivery.tts.max_text_chars", "600"), 600);
 });
 
 test("切换 disabled 只保存 Provider，不清除或改写 Qwen 配置", () => {
