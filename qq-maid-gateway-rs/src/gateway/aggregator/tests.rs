@@ -49,6 +49,7 @@ impl CoreService for MockCore {
             command: None,
             diagnostics: None,
             visible_entity_snapshot: None,
+            delivery_hint: None,
         })))
     }
 

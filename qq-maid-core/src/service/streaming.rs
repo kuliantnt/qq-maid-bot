@@ -24,8 +24,9 @@ use crate::{
 };
 
 use super::{
-    CoreError, CoreOutputPolicy, CoreRespondFailure, CoreResponseEvent, CoreResponseStatus,
-    CoreResponseStatusKind, CoreResponseStream, warn_core_error,
+    CoreDeliveryHint, CoreError, CoreOutputPolicy, CoreRespondFailure, CoreResponse,
+    CoreResponseEvent, CoreResponseStatus, CoreResponseStatusKind, CoreResponseStream,
+    warn_core_error,
 };
 
 const AGENT_RUNNING_STATUS_DELAY: Duration = Duration::from_millis(1500);
@@ -44,6 +45,13 @@ pub(crate) struct AgentRequestBudget {
     pub finalization_reserve: Duration,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StreamDeliveryConfig {
+    pub output_policy: CoreOutputPolicy,
+    pub provider_stream_enabled: bool,
+    pub delivery_hint: Option<CoreDeliveryHint>,
+}
+
 #[derive(Clone)]
 struct AgentStreamControl {
     cancelled: Arc<AtomicBool>,
@@ -55,8 +63,7 @@ pub(crate) fn start_core_response_stream(
     service: RustRespondService,
     req: RespondRequest,
     planned: PlannedRespond,
-    output_policy: CoreOutputPolicy,
-    provider_stream_enabled: bool,
+    delivery: StreamDeliveryConfig,
     request_budget: AgentRequestBudget,
     progress_status: ProgressStatusConfig,
 ) -> CoreResponseStream {
@@ -94,7 +101,7 @@ pub(crate) fn start_core_response_stream(
                     run_handle: producer_agent_run_handle.clone(),
                     visible_text_sent: producer_visible_text_sent.clone(),
                 },
-                provider_stream_enabled,
+                delivery.provider_stream_enabled,
                 progress_status,
             ));
             match timeout(request_budget.request_timeout, &mut task).await {
@@ -133,7 +140,7 @@ pub(crate) fn start_core_response_stream(
                     run_handle: producer_agent_run_handle.clone(),
                     visible_text_sent: producer_visible_text_sent.clone(),
                 },
-                provider_stream_enabled,
+                delivery.provider_stream_enabled,
                 progress_status,
             )
             .await
@@ -142,7 +149,11 @@ pub(crate) fn start_core_response_stream(
             return;
         }
         let event = match result {
-            Ok(response) if response.ok => CoreResponseEvent::Completed(Box::new(response.into())),
+            Ok(response) if response.ok => {
+                let response = CoreResponse::from(response)
+                    .with_delivery_hint_if_eligible(delivery.delivery_hint);
+                CoreResponseEvent::Completed(Box::new(response))
+            }
             Ok(response) => {
                 let err = response.error.map(CoreError::from).unwrap_or_else(|| {
                     CoreError::new("internal_error", "respond", "处理失败，请稍后再试")
@@ -174,7 +185,7 @@ pub(crate) fn start_core_response_stream(
     CoreResponseStream {
         receiver,
         cancelled,
-        output_policy,
+        output_policy: delivery.output_policy,
         agent_run_handle,
     }
 }

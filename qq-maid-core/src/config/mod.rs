@@ -19,11 +19,17 @@ pub mod agent;
 pub mod center;
 mod managed;
 mod provider_config;
+mod voice;
 pub use agent::{
     AgentProfileConfig, AgentRuntimeConfig, AgentSceneConfig, ChatScene, KnowledgeRetrievalMode,
     ResolvedAgentPolicy, ensure_default_agent_config,
 };
 pub use managed::managed_config_fields;
+pub use voice::{
+    DEFAULT_QWEN_TTS_BASE_URL, DEFAULT_QWEN_TTS_MODEL, DEFAULT_QWEN_TTS_VOICE,
+    DEFAULT_TTS_MAX_TEXT_CHARS, DEFAULT_TTS_REQUEST_TIMEOUT_SECONDS, TtsProviderMode,
+    VoiceFeatureConfig, VoiceFeatureStatus, VoicePreflightError,
+};
 
 // ---- 默认常量 ----
 pub const DEFAULT_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com"; // DeepSeek 默认 API 地址
@@ -147,6 +153,8 @@ pub struct AppConfig {
     pub ops_config: crate::runtime::tools::ops::OpsConfig,
     /// 所有聊天入口共用的单字符命令前缀；只在进程启动时读取。
     pub command_prefix: CommandPrefix,
+    /// QQ 最终回复语音投递能力；无效配置只关闭语音，不阻断现有文本机器人启动。
+    pub voice: VoiceFeatureConfig,
     /// OpenAI API 密钥
     pub openai_api_key: Option<String>,
     /// OpenAI API 基础地址
@@ -313,11 +321,13 @@ impl AppConfig {
             crate::runtime::tools::ops::OpsConfig::load_from_environment(&effective_environment)?;
         let command_prefix = CommandPrefix::parse(&env_string("CHAT_COMMAND_PREFIX", "/"))
             .map_err(|error| LlmError::config(format!("invalid CHAT_COMMAND_PREFIX: {error}")))?;
+        let voice = VoiceFeatureConfig::from_environment(&effective_environment);
 
         Ok(Self {
             agent_config,
             ops_config,
             command_prefix,
+            voice,
             openai_api_key: env_optional("OPENAI_API_KEY"),
             openai_base_url: openai_base_url_from_env(),
             openai_api_mode: parse_openai_api_mode(&env_string("OPENAI_API_MODE", "auto"))?,

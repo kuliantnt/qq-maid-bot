@@ -72,6 +72,7 @@ async fn build_c2c_ping_reply_with_check_failure(
 fn config() -> AppConfig {
     AppConfig {
         command_prefix: Default::default(),
+        voice: qq_maid_core::config::VoiceFeatureConfig::default(),
         qq_official_enabled: true,
         app_id: Some("appid".to_owned()),
         app_secret: Some("app-secret-value".to_owned()),

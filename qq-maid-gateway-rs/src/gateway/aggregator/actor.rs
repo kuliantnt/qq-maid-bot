@@ -882,6 +882,7 @@ mod tests {
     fn key_for_builds_private_scope_key_parts() {
         let config = AppConfig {
             command_prefix: Default::default(),
+            voice: qq_maid_core::config::VoiceFeatureConfig::default(),
             qq_official_enabled: true,
             app_id: Some("appid".to_owned()),
             app_secret: Some("secret".to_owned()),

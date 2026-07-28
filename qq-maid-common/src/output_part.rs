@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use crate::markdown::to_chat_text;
+use crate::markdown::{normalize_speakable_plain_text, to_chat_text, to_speakable_text};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssistantOutput {
@@ -175,6 +175,22 @@ impl AssistantOutput {
         } else {
             (!self.text_fallback.trim().is_empty()).then(|| self.text_fallback.clone())
         }
+    }
+
+    /// 生成适合 TTS 的朗读文本，不修改任何原始输出字段。
+    ///
+    /// Markdown 非空时必须以原始 Markdown 为唯一来源，避免把为平台展示准备的
+    /// `text_fallback` 误当成朗读正文；没有 Markdown 时才最小整理纯文本 fallback。
+    /// 返回 `None` 表示跳过代码块、链接目标等内容后没有可朗读文字。
+    pub fn speakable_text(&self) -> Option<String> {
+        let text = self
+            .markdown
+            .as_deref()
+            .map(str::trim)
+            .filter(|markdown| !markdown.is_empty())
+            .map(to_speakable_text)
+            .unwrap_or_else(|| normalize_speakable_plain_text(&self.text_fallback));
+        (!text.trim().is_empty()).then_some(text)
     }
 }
 
@@ -395,5 +411,82 @@ mod tests {
             parts: Vec::new(),
         };
         assert_eq!(output.preferred_text(true), None);
+    }
+
+    #[test]
+    fn speakable_text_prefers_original_markdown_without_mutating_output() {
+        let output = AssistantOutput::markdown(
+            "这是平台文字 fallback",
+            "# 朗读标题\n\n这是 **Markdown** 正文。",
+        );
+        let original = output.clone();
+
+        assert_eq!(
+            output.speakable_text(),
+            Some("朗读标题\n\n这是 Markdown 正文。".to_owned())
+        );
+        assert_eq!(output, original);
+    }
+
+    #[test]
+    fn speakable_text_minimally_normalizes_plain_fallback() {
+        let output = AssistantOutput::text(
+            "  第一段   保留强调符号 **原样** https://example.test/a\n\n\n 第二段  ",
+        );
+
+        assert_eq!(
+            output.speakable_text(),
+            Some("第一段 保留强调符号 **原样**\n\n第二段".to_owned())
+        );
+
+        let adjacent = AssistantOutput::text("前文 https://example.test/a?x=1。后文");
+        assert_eq!(adjacent.speakable_text(), Some("前文。后文".to_owned()));
+    }
+
+    #[test]
+    fn speakable_text_skips_fenced_code_but_keeps_inline_code() {
+        let output = AssistantOutput::markdown(
+            "unused",
+            "正文 `cargo test`\n\n```rust\nlet secret = 1;\n```\n\n~~~sh\necho hidden\n~~~\n\n结尾",
+        );
+
+        assert_eq!(
+            output.speakable_text(),
+            Some("正文 cargo test\n\n结尾".to_owned())
+        );
+    }
+
+    #[test]
+    fn speakable_text_keeps_link_label_and_list_semantics_without_urls_or_images() {
+        let output = AssistantOutput::markdown(
+            "unused",
+            "> 请查看 [项目主页](https://example.test/repo)\n\n- 第一项\n1. 第二项\n\n![截图](https://img.example.test/a.png)",
+        );
+
+        assert_eq!(
+            output.speakable_text(),
+            Some("请查看 项目主页\n\n· 第一项\n· 第二项".to_owned())
+        );
+    }
+
+    #[test]
+    fn speakable_text_flattens_markdown_tables() {
+        let output =
+            AssistantOutput::markdown("unused", "| 名称 | 状态 |\n| --- | --- |\n| 构建 | 通过 |");
+
+        assert_eq!(
+            output.speakable_text(),
+            Some("名称 / 状态\n构建 / 通过".to_owned())
+        );
+    }
+
+    #[test]
+    fn speakable_text_returns_none_when_cleaning_removes_everything() {
+        let output = AssistantOutput::markdown(
+            "这段 fallback 不应被采用",
+            "```text\nonly code\n```\n\n![图](https://img.example.test/a.png)\nhttps://example.test",
+        );
+
+        assert_eq!(output.speakable_text(), None);
     }
 }

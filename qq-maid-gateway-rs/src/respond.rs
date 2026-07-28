@@ -1491,6 +1491,7 @@ mod tests {
             command: None,
             diagnostics: None,
             visible_entity_snapshot: None,
+            delivery_hint: None,
         };
 
         let text = respond_error_to_qq_text(&RespondError::Core(CoreError::new(

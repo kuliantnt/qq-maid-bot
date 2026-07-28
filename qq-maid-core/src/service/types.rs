@@ -148,6 +148,13 @@ pub struct CoreResponse {
     pub command: Option<String>,
     pub diagnostics: Option<serde_json::Value>,
     pub visible_entity_snapshot: Option<VisibleEntitySnapshot>,
+    /// 最终回复的结构化投递提示；Gateway 必须自行校验平台能力并保留文字回退。
+    pub delivery_hint: Option<CoreDeliveryHint>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreDeliveryHint {
+    Voice,
 }
 
 #[derive(Debug)]
@@ -282,6 +289,26 @@ impl CoreResponse {
     pub fn with_output(mut self, output: AssistantOutput) -> Self {
         self.output = Some(output);
         self
+    }
+
+    pub fn with_delivery_hint_if_eligible(mut self, hint: Option<CoreDeliveryHint>) -> Self {
+        if self.voice_delivery_eligible() {
+            self.delivery_hint = hint;
+        }
+        self
+    }
+
+    /// 第一版只把纯文字/Markdown 最终回答交给 TTS；含图片或文件的回复保持现有发送方式。
+    pub fn voice_delivery_eligible(&self) -> bool {
+        use qq_maid_common::output_part::OutputPart;
+
+        self.text_content()
+            .is_some_and(|text| !text.trim().is_empty())
+            && self.output.as_ref().is_some_and(|output| {
+                output.parts.iter().all(|part| {
+                    matches!(part, OutputPart::Text { .. } | OutputPart::Markdown { .. })
+                })
+            })
     }
 
     /// 用户可见文本 fallback，读取结构化 `AssistantOutput::text_fallback`。

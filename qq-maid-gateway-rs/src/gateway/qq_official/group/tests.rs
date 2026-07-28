@@ -249,6 +249,7 @@ fn respond_client_with_classification(
             command: None,
             diagnostics: None,
             visible_entity_snapshot: None,
+            delivery_hint: None,
         },
     )
 }

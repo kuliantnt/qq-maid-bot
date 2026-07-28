@@ -15,6 +15,7 @@ pub(crate) mod status;
 mod status_classifier;
 pub(crate) mod todo;
 pub mod train;
+pub mod voice;
 pub mod weather;
 
 pub(crate) use agent_turn::{

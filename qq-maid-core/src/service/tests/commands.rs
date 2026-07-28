@@ -1,4 +1,21 @@
 use super::*;
+use std::collections::HashMap;
+
+fn available_voice_config() -> crate::config::VoiceFeatureConfig {
+    crate::config::VoiceFeatureConfig::from_environment(&HashMap::from([
+        ("TTS_PROVIDER".to_owned(), "qwen".to_owned()),
+        ("QWEN_TTS_API_KEY".to_owned(), "test-key".to_owned()),
+    ]))
+}
+
+async fn voice_command_completed(output: CoreRespondOutput) -> CoreResponse {
+    match output {
+        CoreRespondOutput::Complete(response) => *response,
+        CoreRespondOutput::Stream(mut stream) => {
+            collect_completed_without_text_delta(&mut stream).await
+        }
+    }
+}
 
 #[test]
 fn core_plan_routes_help_to_command_event_only() {
@@ -55,6 +72,122 @@ async fn core_help_command_is_wrapped_as_response_events() {
     );
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn voice_preference_is_read_before_generation_and_forces_complete_without_text_delta() {
+    let provider = TestProvider::streaming(vec![
+        Ok(LlmStreamEvent::TextDelta("完整".to_owned())),
+        Ok(LlmStreamEvent::TextDelta("回复".to_owned())),
+        Ok(LlmStreamEvent::Completed {
+            usage: None,
+            finish_reason: None,
+            fallback_used: false,
+        }),
+    ]);
+    let mut state = test_state(provider.clone(), 5);
+    state.config.voice = available_voice_config();
+    let service = CoreHandle::new(state);
+
+    let enabled = voice_command_completed(
+        service
+            .respond(private_request("/语音 开启"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(enabled.command.as_deref(), Some("voice"));
+    assert_eq!(enabled.text_content(), Some("语音回复已开启"));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+
+    let mut response_stream =
+        expect_stream(service.respond(private_request("你好")).await.unwrap());
+    assert_eq!(
+        response_stream.output_policy(),
+        CoreOutputPolicy::CompleteThenSend
+    );
+    let response = collect_completed_without_text_delta(&mut response_stream).await;
+    assert_eq!(response.text_content(), Some("完整回复"));
+    assert_eq!(response.delivery_hint, Some(CoreDeliveryHint::Voice));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn voice_command_is_deterministic_and_group_writes_require_admin_or_owner() {
+    let provider = TestProvider::replying("不应调用");
+    let mut state = test_state(provider.clone(), 5);
+    state.config.voice = available_voice_config();
+    let service = CoreHandle::new(state);
+
+    let mut member_enable = group_request("/语音 开启");
+    member_enable.actor.group_member_role = Some(CoreGroupMemberRole::Member);
+    let denied = voice_command_completed(service.respond(member_enable).await.unwrap()).await;
+    assert_eq!(
+        denied.text_content(),
+        Some("只有群主或管理员可以修改群聊语音设置")
+    );
+
+    let mut unknown_query = group_request("/语音");
+    unknown_query.actor.group_member_role = Some(CoreGroupMemberRole::Unknown);
+    let queried = voice_command_completed(service.respond(unknown_query).await.unwrap()).await;
+    assert_eq!(queried.text_content(), Some("当前会话语音回复：已关闭"));
+
+    for role in [CoreGroupMemberRole::Admin, CoreGroupMemberRole::Owner] {
+        let mut enable = group_request("/语音 开启");
+        enable.actor.group_member_role = Some(role);
+        let enabled = voice_command_completed(service.respond(enable).await.unwrap()).await;
+        assert_eq!(enabled.text_content(), Some("语音回复已开启"));
+    }
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn voice_enable_rejects_unavailable_configs_without_writing_enabled_state() {
+    let configs = [
+        (
+            crate::config::VoiceFeatureConfig::default(),
+            "语音功能当前未启用，请先配置 TTS_PROVIDER=qwen",
+        ),
+        (
+            crate::config::VoiceFeatureConfig::from_environment(&HashMap::from([(
+                "TTS_PROVIDER".to_owned(),
+                "qwen".to_owned(),
+            )])),
+            "语音功能不可用：缺少 QWEN_TTS_API_KEY",
+        ),
+        (
+            crate::config::VoiceFeatureConfig::from_environment(&HashMap::from([
+                ("TTS_PROVIDER".to_owned(), "qwen".to_owned()),
+                ("QWEN_TTS_API_KEY".to_owned(), "test-key".to_owned()),
+                (
+                    "QWEN_TTS_BASE_URL".to_owned(),
+                    "http://invalid.example.test/tts".to_owned(),
+                ),
+            ])),
+            "语音功能配置预检失败，请联系管理员检查 TTS 配置",
+        ),
+    ];
+
+    for (voice, expected) in configs {
+        let provider = TestProvider::replying("不应调用");
+        let mut state = test_state(provider.clone(), 5);
+        state.config.voice = voice;
+        let service = CoreHandle::new(state);
+
+        let rejected = voice_command_completed(
+            service
+                .respond(private_request("/语音 开启"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(rejected.text_content(), Some(expected));
+
+        let queried =
+            voice_command_completed(service.respond(private_request("/语音")).await.unwrap()).await;
+        assert_eq!(queried.text_content(), Some("当前会话语音回复：已关闭"));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[tokio::test]
@@ -284,8 +417,11 @@ async fn core_command_event_failure_does_not_send_finished_or_completed() {
         service,
         req,
         PlannedRespond::command_event(),
-        CoreOutputPolicy::CompleteThenSend,
-        false,
+        StreamDeliveryConfig {
+            output_policy: CoreOutputPolicy::CompleteThenSend,
+            provider_stream_enabled: false,
+            delivery_hint: None,
+        },
         AgentRequestBudget {
             request_timeout: Duration::from_secs(5),
             finalization_reserve: Duration::from_secs(

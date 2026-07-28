@@ -40,10 +40,14 @@ enum RegisteredSlashCommand {
     Rss,
     Todo,
     Memory,
+    Voice(crate::runtime::tools::voice::VoiceCommand),
 }
 
 impl RegisteredSlashCommand {
     fn parse(text: &str) -> Option<Self> {
+        if let Some(command) = crate::runtime::tools::voice::parse_voice_command(text) {
+            return Some(Self::Voice(command));
+        }
         if let Some(command) = session_flow::parse_session_command(text) {
             return Some(Self::Session(command));
         }
@@ -192,6 +196,12 @@ impl<'a> CommandDispatcher<'a> {
                 self.service
                     .handle_session_command(command.clone(), &meta)
                     .await?,
+            )));
+        }
+
+        if let Some(RegisteredSlashCommand::Voice(command)) = registered_slash_command.as_ref() {
+            return Ok(DispatchOutcome::Respond(Box::new(
+                self.service.handle_voice_command(*command, &req)?,
             )));
         }
 
