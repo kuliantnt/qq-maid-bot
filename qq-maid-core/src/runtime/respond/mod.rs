@@ -62,6 +62,7 @@ mod title;
 mod tool_runtime;
 pub(crate) mod train_flow;
 mod translation_flow;
+mod voice_flow;
 pub(crate) mod weather_flow;
 
 pub(crate) use crate::runtime::tools::{
@@ -86,6 +87,8 @@ pub struct RespondStores {
     pub session_store: SessionStore,
     /// 任务存储；当前实现由 Todo 业务模块提供。
     pub task_store: TaskStore,
+    /// 会话级语音回复偏好。
+    pub voice_store: crate::runtime::tools::voice::VoicePreferenceStore,
     /// 统一通知 Outbox 存储
     pub notification_store: NotificationOutboxStore,
     /// Ops 入站执行原子领取存储。
@@ -137,6 +140,8 @@ pub struct RespondServiceOptions {
     pub ops_config: OpsConfig,
     /// 当前进程统一使用的聊天命令前缀。
     pub command_prefix: CommandPrefix,
+    /// TTS 能力预检快照；只用于控制偏好是否允许开启。
+    pub voice: crate::config::VoiceFeatureConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,6 +275,8 @@ pub struct RustRespondService {
     pub(crate) session_store: SessionStore,
     /// 任务存储；当前实现由 Todo 业务模块提供。
     pub(crate) task_store: TaskStore,
+    /// 语音偏好领域门面，统一处理配置、权限与持久化。
+    pub(crate) voice_service: crate::runtime::tools::voice::VoicePreferenceService,
     /// 统一通知 Outbox 存储
     pub(crate) notification_store: NotificationOutboxStore,
     /// `/ops` 权限、白名单执行和结果通知门面。
@@ -344,6 +351,10 @@ impl RustRespondService {
             stores.ops_execution_store.clone(),
             stores.ops_task_registry.clone(),
         );
+        let voice_service = crate::runtime::tools::voice::VoicePreferenceService::new(
+            stores.voice_store,
+            options.voice,
+        );
         Self {
             provider,
             query_executor: executors.query_executor,
@@ -353,6 +364,7 @@ impl RustRespondService {
             memory_store: stores.memory_store,
             session_store: stores.session_store,
             task_store: stores.task_store,
+            voice_service,
             notification_store: stores.notification_store,
             ops_service,
             rss_store: stores.rss_store,

@@ -19,10 +19,11 @@ use crate::{
 };
 
 use super::{
-    AgentRequestBudget, CoreActor, CoreConversation, CoreError, CoreGroupMemberRole,
-    CoreHealthSnapshot, CoreInboundClassification, CoreRequest, CoreRespondOutput, CoreResponse,
-    CoreService, Platform, ProgressStatusConfig, error_core_error, output_policy_for_stream,
-    start_core_response_stream, warn_core_error,
+    AgentRequestBudget, CoreActor, CoreConversation, CoreDeliveryHint, CoreError,
+    CoreGroupMemberRole, CoreHealthSnapshot, CoreInboundClassification, CoreOutputPolicy,
+    CoreRequest, CoreRespondOutput, CoreResponse, CoreService, Platform, ProgressStatusConfig,
+    StreamDeliveryConfig, error_core_error, output_policy_for_stream, start_core_response_stream,
+    warn_core_error,
 };
 
 #[derive(Clone)]
@@ -51,6 +52,7 @@ impl CoreHandle {
                 memory_store: state.stores.memory_store.clone(),
                 session_store: state.stores.session_store.clone(),
                 task_store: state.stores.todo_store.clone(),
+                voice_store: state.stores.voice_store.clone(),
                 notification_store: state.stores.notification_store.clone(),
                 ops_execution_store: state.stores.ops_execution_store.clone(),
                 ops_task_registry: state.stores.ops_task_registry.clone(),
@@ -80,6 +82,19 @@ impl CoreService for CoreHandle {
         let state = self.state.as_ref();
         let planned = service.plan_core_respond(&req).map_err(CoreError::from)?;
         let respond_plan = planned.plan();
+        let voice_delivery_enabled = matches!(
+            respond_plan,
+            RespondPlan::StreamingChat | RespondPlan::AgentRuntime
+        ) && service
+            .voice_service
+            .delivery_enabled_for_request(&req)
+            .map_err(|error| {
+                CoreError::new(
+                    error.code(),
+                    "voice_preference",
+                    "语音偏好读取失败，请稍后再试",
+                )
+            })?;
         if matches!(
             respond_plan,
             RespondPlan::CommandEvent
@@ -89,8 +104,13 @@ impl CoreService for CoreHandle {
         ) {
             // 微信服务号同步 XML 回包无法承载直出流式；这里仅对微信禁用 direct stream，
             // 让 Gateway 消费 Completed 后再渲染 XML，QQ 官方流式行为保持不变。
-            let provider_stream_enabled = state.provider.stream_enabled() && !force_complete_sync;
-            let output_policy = output_policy_for_stream(respond_plan, provider_stream_enabled);
+            let provider_stream_enabled =
+                state.provider.stream_enabled() && !force_complete_sync && !voice_delivery_enabled;
+            let output_policy = if voice_delivery_enabled {
+                CoreOutputPolicy::CompleteThenSend
+            } else {
+                output_policy_for_stream(respond_plan, provider_stream_enabled)
+            };
             let status_hint = planned.status_hint();
             let bot_display_name = service.bot_display_name().to_owned();
             let status_audience = if req
@@ -109,8 +129,12 @@ impl CoreService for CoreHandle {
                         service,
                         req,
                         planned,
-                        output_policy,
-                        provider_stream_enabled,
+                        StreamDeliveryConfig {
+                            output_policy,
+                            provider_stream_enabled,
+                            delivery_hint: voice_delivery_enabled
+                                .then_some(CoreDeliveryHint::Voice),
+                        },
                         AgentRequestBudget {
                             request_timeout: Duration::from_secs(
                                 state.config.request_timeout_seconds,
@@ -318,6 +342,7 @@ impl From<RespondResponse> for CoreResponse {
             command: value.command,
             diagnostics: value.diagnostics,
             visible_entity_snapshot: value.visible_entity_snapshot,
+            delivery_hint: None,
         }
     }
 }
@@ -407,6 +432,7 @@ fn respond_options(config: &AppConfig) -> RespondServiceOptions {
         agent_config: config.agent_config.clone(),
         ops_config: config.ops_config.clone(),
         command_prefix: config.command_prefix,
+        voice: config.voice.clone(),
     }
 }
 

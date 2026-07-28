@@ -139,10 +139,16 @@ QQ_MAID_GATEWAY_VERBOSE_LOG=false
 QQ_MAID_GROUP_MESSAGE_MODE=mention
 QQ_MAID_GROUP_ACTIVE_KEYWORDS=小女仆
 QQ_MAID_BOT_MENTION_IDS=
+TTS_PROVIDER=disabled
+QWEN_TTS_API_KEY=
+QWEN_TTS_MODEL=qwen3-tts-flash
+QWEN_TTS_VOICE=Cherry
 RUST_LOG=info,qq_maid_gateway_rs=debug
 ```
 
 `QQ_BOT_APP_ID` 与 `QQ_BOT_APP_SECRET` 必须成对配置；两项均缺失表示 QQ 官方 Bot 未绑定。此时不会创建 Token、API client、Gateway 或重连任务，微信服务号或 OneBot 11 仍可独立运行。凭证存在时可用 `QQ_BOT_ENABLED=false` 暂时禁用；旧配置未设置该开关时仍默认启用。配置由启动时读取，`qbot config bot --unbind`、`--disable` 和重新绑定都需重启生效。
+
+QQ 语音回复默认关闭。配置 `TTS_PROVIDER=qwen` 和独立的 `QWEN_TTS_API_KEY` 后，用户可用 `/语音` 查询，并用 `/语音 开启|关闭` 修改当前私聊偏好；群聊只有群主或管理员可修改。第一版只把千问返回的 WAV HTTP(S) URL 传给 QQ `/files`（`file_type=3`），随后以 `msg_type=7` 发送，不下载、不转码、不发送 `file_data`。TTS、QQ 上传或发送失败都会沿用原始文字 / Markdown 回复一次；完整字段与默认值见 [`runtime/config/.env.example`](../runtime/config/.env.example)。
 
 兼容旧变量名：
 

@@ -26,6 +26,7 @@ use super::super::{
     stream::stream_respond_c2c,
     typing::{C2cTypingStatusGuard, TypingStopReason},
 };
+use super::voice::{VoiceDeliveryAttempt, try_c2c_voice_delivery};
 use crate::{
     api::{OutboundSender, QqApiClient, SendMessageIds},
     config::AppConfig,
@@ -36,6 +37,7 @@ use crate::{
     },
     render::{OutboundMessage, render_respond_response_parts_for_profile},
     respond::{RespondClient, build_respond_content, respond_error_to_qq_text},
+    tts::provider_from_config,
 };
 use qq_maid_core::service::{
     CoreFailureKind, CoreInboundKind, CoreOutputPolicy, CoreRespondFailure, CoreRespondOutput,
@@ -134,6 +136,21 @@ pub(crate) async fn send_c2c_respond_response_with_sender<S: OutboundSender + ?S
     capability: &ReplyCapability,
 ) -> anyhow::Result<(Vec<SendMessageIds>, String)> {
     let masked_user = mask_openid(&message.user_openid);
+    let target = ReplyTarget::qq_c2c(
+        message.user_openid.clone(),
+        Some(message.message_id.clone()),
+    )
+    .to_qq_c2c_target()
+    .expect("QQ C2C reply target should adapt to QQ API target");
+    let provider = provider_from_config(&config.voice);
+    if let VoiceDeliveryAttempt::Delivered(sent_ids) =
+        try_c2c_voice_delivery(provider.as_deref(), sender, &target, response).await
+    {
+        return Ok((
+            vec![sent_ids],
+            response.text_content().unwrap_or_default().to_owned(),
+        ));
+    }
     let mut outbounds = render_respond_response_parts_for_profile(response, &capability.render);
     if outbounds.is_empty() {
         warn!(
@@ -147,12 +164,6 @@ pub(crate) async fn send_c2c_respond_response_with_sender<S: OutboundSender + ?S
         });
     }
 
-    let target = ReplyTarget::qq_c2c(
-        message.user_openid.clone(),
-        Some(message.message_id.clone()),
-    )
-    .to_qq_c2c_target()
-    .expect("QQ C2C reply target should adapt to QQ API target");
     debug!(
         message_id = target.msg_id.as_deref().unwrap_or(""),
         user = %masked_user,
@@ -412,7 +423,9 @@ pub(crate) async fn handle_c2c_message(
         }
         CoreRespondOutput::Stream(stream) => {
             let capability = ReplyCapability::qq_official_c2c(config);
-            if should_use_c2c_streaming(&capability) {
+            if should_use_c2c_streaming(&capability)
+                && stream.output_policy() != CoreOutputPolicy::CompleteThenSend
+            {
                 stream_respond_c2c(stream, api, runtime, &message, config, typing, ref_index)
                     .await?;
             } else {

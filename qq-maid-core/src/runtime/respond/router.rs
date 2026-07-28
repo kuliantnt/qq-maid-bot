@@ -271,6 +271,7 @@ impl RustRespondService {
 }
 
 fn is_event_wrapped_command(text: &str) -> bool {
-    session_flow::parse_session_command(text)
-        .is_some_and(|command| command.action.as_str() == "help")
+    crate::runtime::tools::voice::parse_voice_command(text).is_some()
+        || session_flow::parse_session_command(text)
+            .is_some_and(|command| command.action.as_str() == "help")
 }

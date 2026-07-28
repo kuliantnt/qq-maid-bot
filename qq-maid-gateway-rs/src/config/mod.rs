@@ -3,6 +3,7 @@
 use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use qq_maid_common::command_prefix::CommandPrefix;
+use qq_maid_core::config::VoiceFeatureConfig;
 use thiserror::Error;
 
 mod managed;
@@ -64,6 +65,8 @@ pub enum GroupMessageMode {
 pub struct AppConfig {
     /// Gateway 本地命令与 Core 共用的聊天命令前缀。
     pub command_prefix: CommandPrefix,
+    /// 最终回复 TTS 配置；Provider 实现仍留在 Gateway。
+    pub voice: VoiceFeatureConfig,
     /// QQ 官方 Bot 是否启用。凭证成对存在时默认启用，保持旧配置行为。
     pub qq_official_enabled: bool,
     /// QQ 官方 Bot 凭证必须成对存在；`None` 表示渠道未绑定，不使用空串占位。
@@ -281,6 +284,7 @@ impl AppConfig {
                 value: command_prefix_raw,
             }
         })?;
+        let voice = VoiceFeatureConfig::from_environment(env);
         let qq_official_enabled = parse_bool(env, "QQ_BOT_ENABLED")?.unwrap_or(true);
         let app_id = optional_with_alias(env, "QQ_BOT_APP_ID", Some("QQ_APPID"));
         let app_secret = optional_with_alias(env, "QQ_BOT_APP_SECRET", Some("QQ_SECRET"));
@@ -397,6 +401,7 @@ impl AppConfig {
         let onebot11 = parse_onebot11_config(env)?;
         Ok(Self {
             command_prefix,
+            voice,
             qq_official_enabled,
             app_id,
             app_secret,

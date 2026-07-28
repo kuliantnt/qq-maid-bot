@@ -14,6 +14,8 @@ use qq_maid_core::service::{
 };
 use tracing::{debug, info, warn};
 
+use super::voice::{VoiceDeliveryAttempt, try_group_voice_delivery};
+
 fn empty_group_reply_fallback_text(bot_display_name: &str) -> String {
     format!("唔，{bot_display_name}刚刚没整理出可用回复。可以再说一次。")
 }
@@ -61,6 +63,7 @@ use crate::{
     },
     render::{OutboundMessage, render_respond_response_parts_for_profile},
     respond::{RespondClient, build_group_command_content_with_prefix, respond_error_to_qq_text},
+    tts::provider_from_config,
 };
 
 fn group_reply_mention_prefix(
@@ -528,6 +531,31 @@ async fn send_group_respond_response(
         );
         return Ok(());
     }
+    let sender = RuntimeRecordingGroupSender {
+        inner: api,
+        runtime,
+    };
+    let target = ReplyTarget::qq_group(
+        message.group_openid.clone(),
+        Some(message.message_id.clone()),
+    )
+    .to_qq_group_target()
+    .expect("QQ group reply target should adapt to QQ API target");
+    let provider = provider_from_config(&config.voice);
+    if let VoiceDeliveryAttempt::Delivered(sent_ids) =
+        try_group_voice_delivery(provider.as_deref(), &sender, &target, response).await
+    {
+        record_group_bot_outbound_send(
+            group_outbound_cache,
+            ref_index,
+            message,
+            response,
+            config,
+            &sent_ids,
+            response.text_content().unwrap_or_default(),
+        );
+        return Ok(());
+    }
     let capability = ReplyCapability::qq_official_group(config);
     let mut outbounds = render_respond_response_parts_for_profile(response, &capability.render);
     if outbounds.is_empty() {
@@ -545,16 +573,6 @@ async fn send_group_respond_response(
         .into_iter()
         .map(|outbound| prefix_group_reply_outbound(message, outbound, &capability))
         .collect::<Vec<_>>();
-    let sender = RuntimeRecordingGroupSender {
-        inner: api,
-        runtime,
-    };
-    let target = ReplyTarget::qq_group(
-        message.group_openid.clone(),
-        Some(message.message_id.clone()),
-    )
-    .to_qq_group_target()
-    .expect("QQ group reply target should adapt to QQ API target");
     let limits = ChunkLimits::new(
         config.markdown_chunk_soft_limit,
         config.text_chunk_soft_limit,

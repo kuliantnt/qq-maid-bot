@@ -552,6 +552,7 @@ mod tests {
             command: None,
             diagnostics: None,
             visible_entity_snapshot: None,
+            delivery_hint: None,
         })
     }
 
@@ -566,6 +567,7 @@ mod tests {
                 "reason": "unknown_group_slash_command",
             })),
             visible_entity_snapshot: None,
+            delivery_hint: None,
         })
     }
 
@@ -577,6 +579,7 @@ mod tests {
             command: None,
             diagnostics: None,
             visible_entity_snapshot: None,
+            delivery_hint: None,
         })
     }
 

@@ -372,6 +372,21 @@ impl OutboundSender for RuntimeRecordingSender<'_> {
             result
         })
     }
+
+    fn send_voice_url<'a>(
+        &'a self,
+        target: &'a C2cReplyTarget,
+        audio_url: &'a str,
+    ) -> SendFuture<'a> {
+        Box::pin(async move {
+            let result = self
+                .inner
+                .send_c2c_voice_url(&target.user_openid, target.msg_id.as_deref(), audio_url)
+                .await;
+            record_qq_send_result(self.runtime, &result);
+            result
+        })
+    }
 }
 
 impl GroupOutboundSender for RuntimeRecordingGroupSender<'_> {
@@ -410,6 +425,21 @@ impl GroupOutboundSender for RuntimeRecordingGroupSender<'_> {
             let result = self
                 .inner
                 .send_group_image(&target.group_openid, target.msg_id.as_deref(), image)
+                .await;
+            record_qq_send_result(self.runtime, &result);
+            result
+        })
+    }
+
+    fn send_voice_url<'a>(
+        &'a self,
+        target: &'a GroupReplyTarget,
+        audio_url: &'a str,
+    ) -> SendFuture<'a> {
+        Box::pin(async move {
+            let result = self
+                .inner
+                .send_group_voice_url(&target.group_openid, target.msg_id.as_deref(), audio_url)
                 .await;
             record_qq_send_result(self.runtime, &result);
             result

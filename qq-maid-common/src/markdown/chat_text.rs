@@ -1,26 +1,55 @@
-//! 普通聊天 Markdown fallback 转换。
+//! 普通聊天和朗读场景的 Markdown 文本转换。
 
 use regex::Regex;
 
 /// 从文本中剥除 Markdown 修饰（标题、列表、链接、代码、加粗等），保留纯文字。
 pub fn to_chat_text(text: &str) -> String {
+    render_markdown_text(text, RenderMode::ChatFallback)
+}
+
+/// 从原始 Markdown 生成适合朗读的文字。
+///
+/// 与普通聊天 fallback 共用同一套 Markdown 行内、列表和表格解析；朗读模式仅在
+/// 围栏代码、链接目标和图片等不宜发声的内容上采用更严格的丢弃规则。
+pub(crate) fn to_speakable_text(text: &str) -> String {
+    render_markdown_text(text, RenderMode::Speakable)
+}
+
+/// 没有 Markdown 时只做朗读所需的最小纯文本整理。
+pub(crate) fn normalize_speakable_plain_text(text: &str) -> String {
+    normalize_speakable_whitespace(remove_raw_urls(text))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RenderMode {
+    ChatFallback,
+    Speakable,
+}
+
+fn render_markdown_text(text: &str, mode: RenderMode) -> String {
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     let mut rows = Vec::new();
-    let mut in_fence = false;
+    let mut fence_marker = None;
 
     for line in normalized.lines() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("```") {
-            in_fence = !in_fence;
+        if let Some(marker) = markdown_fence_marker(trimmed) {
+            match fence_marker {
+                None => fence_marker = Some(marker),
+                Some(open_marker) if open_marker == marker => fence_marker = None,
+                Some(_) => {}
+            }
             continue;
         }
 
-        if in_fence {
-            rows.push(line.to_owned());
+        if fence_marker.is_some() {
+            if mode == RenderMode::ChatFallback {
+                rows.push(line.to_owned());
+            }
             continue;
         }
 
-        rows.push(strip_markdown_line(line));
+        rows.push(strip_markdown_line(line, mode));
     }
 
     let mut text = flatten_markdown_tables(&rows.join("\n"));
@@ -40,7 +69,19 @@ pub fn to_chat_text(text: &str) -> String {
         .unwrap()
         .replace_all(&text, "\n\n")
         .to_string();
-    text.trim().to_owned()
+    if mode == RenderMode::Speakable {
+        normalize_speakable_whitespace(remove_raw_urls(&text))
+    } else {
+        text.trim().to_owned()
+    }
+}
+
+fn markdown_fence_marker(line: &str) -> Option<char> {
+    let marker = line.chars().next()?;
+    if !matches!(marker, '`' | '~') {
+        return None;
+    }
+    (line.chars().take_while(|ch| *ch == marker).count() >= 3).then_some(marker)
 }
 
 /// 将 Markdown 表格展平为"单元格1 / 单元格2"格式，同时移除分隔行。
@@ -69,10 +110,10 @@ fn flatten_markdown_tables(text: &str) -> String {
         .join("\n")
 }
 
-fn strip_markdown_line(line: &str) -> String {
+fn strip_markdown_line(line: &str, mode: RenderMode) -> String {
     let trimmed = line.trim_start();
     if trimmed.starts_with('|') && trimmed.ends_with('|') {
-        return strip_inline_markdown(line);
+        return strip_inline_markdown(line, mode);
     }
 
     let indent = line.len() - trimmed.len();
@@ -95,7 +136,7 @@ fn strip_markdown_line(line: &str) -> String {
         prefix = " ".repeat(indent);
     }
 
-    let content = strip_inline_markdown(content);
+    let content = strip_inline_markdown(content, mode);
     format!("{prefix}{content}")
 }
 
@@ -137,7 +178,7 @@ fn strip_ordered_list_prefix(line: &str) -> Option<&str> {
         .then_some(rest.trim_start())
 }
 
-fn strip_inline_markdown(text: &str) -> String {
+fn strip_inline_markdown(text: &str, mode: RenderMode) -> String {
     let mut rendered = String::new();
     let mut protected = Vec::new();
     let chars = text.chars().collect::<Vec<_>>();
@@ -167,15 +208,17 @@ fn strip_inline_markdown(text: &str) -> String {
             && chars.get(index + 1) == Some(&'[')
             && let Some((alt, url, next)) = parse_markdown_link(&chars, index + 1)
         {
-            if !alt.trim().is_empty() {
-                rendered.push_str(alt.trim());
-                if !url.trim().is_empty() {
-                    rendered.push('（');
+            if mode == RenderMode::ChatFallback {
+                if !alt.trim().is_empty() {
+                    rendered.push_str(alt.trim());
+                    if !url.trim().is_empty() {
+                        rendered.push('（');
+                        rendered.push_str(&protect_inline_literal(&mut protected, url.trim()));
+                        rendered.push('）');
+                    }
+                } else {
                     rendered.push_str(&protect_inline_literal(&mut protected, url.trim()));
-                    rendered.push('）');
                 }
-            } else {
-                rendered.push_str(&protect_inline_literal(&mut protected, url.trim()));
             }
             index = next;
             continue;
@@ -185,7 +228,7 @@ fn strip_inline_markdown(text: &str) -> String {
             && let Some((label, url, next)) = parse_markdown_link(&chars, index)
         {
             rendered.push_str(label.trim());
-            if !url.trim().is_empty() {
+            if mode == RenderMode::ChatFallback && !url.trim().is_empty() {
                 rendered.push('（');
                 rendered.push_str(&protect_inline_literal(&mut protected, url.trim()));
                 rendered.push('）');
@@ -199,6 +242,35 @@ fn strip_inline_markdown(text: &str) -> String {
     }
 
     restore_inline_literals(strip_emphasis_markers(&rendered), &protected)
+}
+
+fn remove_raw_urls(text: &str) -> String {
+    // URL 的协议和结构字符都是 ASCII；限制匹配字符集，避免 URL 后没有空格时把
+    // 紧随其后的中文正文一起吞掉。
+    Regex::new(r#"(?i)(?:https?://|www\.)[a-z0-9._~:/?#@!$&'()*+,;=%\[\]-]+"#)
+        .unwrap()
+        .replace_all(text, "")
+        .to_string()
+}
+
+fn normalize_speakable_whitespace(text: String) -> String {
+    let text = Regex::new(r"[ \t]+")
+        .unwrap()
+        .replace_all(&text, " ")
+        .to_string();
+    let text = Regex::new(r" *\n *")
+        .unwrap()
+        .replace_all(&text, "\n")
+        .to_string();
+    let text = Regex::new(r" +([，。！？；：,.!?;:])")
+        .unwrap()
+        .replace_all(&text, "$1")
+        .to_string();
+    Regex::new(r"\n{3,}")
+        .unwrap()
+        .replace_all(&text, "\n\n")
+        .trim()
+        .to_owned()
 }
 
 fn count_run(chars: &[char], start: usize, marker: char) -> usize {

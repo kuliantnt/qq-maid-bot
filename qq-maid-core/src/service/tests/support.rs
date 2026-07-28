@@ -685,6 +685,7 @@ fn test_state_with_group_tool_calling_and_query_executor(
             ),
             ops_config: crate::runtime::tools::ops::OpsConfig::default(),
             command_prefix: Default::default(),
+            voice: crate::config::VoiceFeatureConfig::default(),
             openai_api_key: Some("test".to_owned()),
             openai_base_url: None,
             openai_api_mode: OpenAiApiMode::Auto,
@@ -776,6 +777,7 @@ fn test_state_with_group_tool_calling_and_query_executor(
             memory_store: crate::runtime::tools::memory::MemoryStore::new(database.clone()),
             session_store: SessionStore::new(database.clone()),
             todo_store: crate::runtime::tools::todo::TodoStore::new(database.clone()),
+            voice_store: crate::runtime::tools::voice::VoicePreferenceStore::new(database.clone()),
             notification_store: crate::storage::notification::NotificationOutboxStore::new(
                 database.clone(),
             ),

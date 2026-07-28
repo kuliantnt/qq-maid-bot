@@ -19,6 +19,7 @@ mod qq;
 
 pub use backticks::escape_unclosed_backticks;
 pub use chat_text::to_chat_text;
+pub(crate) use chat_text::{normalize_speakable_plain_text, to_speakable_text};
 pub use plain_text::to_plain_text;
 pub use qq::{to_qq, to_qq_with_limit};
 

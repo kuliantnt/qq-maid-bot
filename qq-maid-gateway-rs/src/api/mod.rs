@@ -15,6 +15,9 @@ use tracing::{info, trace, warn};
 
 mod image;
 mod response;
+mod voice;
+
+pub use voice::{VoiceMedia, build_c2c_voice_payload, build_group_voice_payload};
 
 #[cfg(test)]
 use response::extract_sent_message_id;
@@ -60,8 +63,12 @@ pub enum ApiError {
     Status { status: StatusCode, body: String },
     #[error("{0} sending is not supported by this sender")]
     Unsupported(&'static str),
-    #[error("invalid image payload: {0}")]
+    #[error("invalid media payload: {0}")]
     InvalidMedia(&'static str),
+    #[error("QQ voice URL upload failed")]
+    VoiceUpload(#[source] Box<ApiError>),
+    #[error("QQ voice message send failed")]
+    VoiceSend(#[source] Box<ApiError>),
 }
 
 impl ApiError {
@@ -78,7 +85,9 @@ impl ApiError {
                 }
             }
             Self::Unsupported(kind) => format!("{kind} sending is unsupported"),
-            Self::InvalidMedia(reason) => format!("invalid image payload: {reason}"),
+            Self::InvalidMedia(reason) => format!("invalid media payload: {reason}"),
+            Self::VoiceUpload(source) => format!("voice_upload: {}", source.log_summary()),
+            Self::VoiceSend(source) => format!("voice_send: {}", source.log_summary()),
         }
     }
 }
@@ -307,6 +316,13 @@ pub trait OutboundSender: Send + Sync {
         target: &'a C2cReplyTarget,
         image: &'a ImagePayload,
     ) -> SendFuture<'a>;
+    fn send_voice_url<'a>(
+        &'a self,
+        _target: &'a C2cReplyTarget,
+        _audio_url: &'a str,
+    ) -> SendFuture<'a> {
+        Box::pin(async { Err(ApiError::Unsupported("voice")) })
+    }
 }
 
 pub trait GroupOutboundSender: Send + Sync {
@@ -322,6 +338,13 @@ pub trait GroupOutboundSender: Send + Sync {
         _image: &'a ImagePayload,
     ) -> SendFuture<'a> {
         Box::pin(async { Err(ApiError::Unsupported("image")) })
+    }
+    fn send_voice_url<'a>(
+        &'a self,
+        _target: &'a GroupReplyTarget,
+        _audio_url: &'a str,
+    ) -> SendFuture<'a> {
+        Box::pin(async { Err(ApiError::Unsupported("voice")) })
     }
 }
 
