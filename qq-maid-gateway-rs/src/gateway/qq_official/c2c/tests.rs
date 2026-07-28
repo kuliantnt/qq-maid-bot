@@ -1,6 +1,12 @@
 use super::*;
 use crate::markdown::MarkdownPayload;
-use axum::{Json, Router, http::StatusCode, routing::post};
+use axum::{
+    Json, Router,
+    body::{Body, Bytes},
+    http::{Response, StatusCode},
+    routing::post,
+};
+use futures_util::stream;
 
 #[test]
 fn empty_reply_fallback_uses_configured_bot_display_name() {
@@ -25,6 +31,7 @@ use qq_maid_core::{
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
+    convert::Infallible,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -187,6 +194,28 @@ async fn qwen_mock_server(
     (format!("http://{address}/tts"), requests, task)
 }
 
+async fn slow_qwen_body_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let app = Router::new().route(
+        "/tts",
+        post(|| async {
+            let body = Body::from_stream(stream::once(async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Ok::<Bytes, Infallible>(Bytes::from_static(
+                    br#"{"status_code":200,"output":{"audio":{"url":"https://audio.example.test/slow.wav"}}}"#,
+                ))
+            }));
+            Response::builder()
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap()
+        }),
+    );
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{address}/tts"), task)
+}
+
 fn enable_mock_qwen(config: &mut AppConfig, base_url: String) {
     config.voice = VoiceFeatureConfig {
         provider: TtsProviderMode::Qwen,
@@ -257,6 +286,34 @@ async fn tts_failure_sends_original_markdown_fallback_exactly_once() {
         qwen_mock_server(StatusCode::BAD_GATEWAY, json!({"message": "mock failure"})).await;
     let mut config = test_config();
     enable_mock_qwen(&mut config, base_url);
+    let sender = FakeOutboundSender::default();
+
+    send_c2c_respond_response_with_sender(
+        &sender,
+        &c2c_message(),
+        &voice_response(),
+        &config,
+        &ReplyCapability::qq_official_c2c(&config),
+    )
+    .await
+    .unwrap();
+    task.abort();
+
+    assert_eq!(
+        sender.calls(),
+        vec![FakeCall::Markdown {
+            content: "# 应朗读的标题\n\n- [项目主页](https://example.test/repo)".to_owned(),
+            msg_id: Some("msg-1".to_owned()),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn tts_body_timeout_sends_original_markdown_fallback_exactly_once() {
+    let (base_url, task) = slow_qwen_body_server().await;
+    let mut config = test_config();
+    enable_mock_qwen(&mut config, base_url);
+    config.voice.request_timeout = Duration::from_millis(5);
     let sender = FakeOutboundSender::default();
 
     send_c2c_respond_response_with_sender(

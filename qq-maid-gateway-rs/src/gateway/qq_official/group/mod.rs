@@ -10,7 +10,8 @@ use std::{
 
 use anyhow::Context;
 use qq_maid_core::service::{
-    CoreInboundKind, CoreRespondFailure, CoreRespondOutput, CoreResponse, CoreResponseEvent,
+    CoreDeliveryHint, CoreInboundKind, CoreRespondFailure, CoreRespondOutput, CoreResponse,
+    CoreResponseEvent,
 };
 use tracing::{debug, info, warn};
 
@@ -541,7 +542,10 @@ async fn send_group_respond_response(
     )
     .to_qq_group_target()
     .expect("QQ group reply target should adapt to QQ API target");
-    let provider = provider_from_config(&config.voice);
+    // 普通文字回复不构造 TTS Provider，也不克隆凭证或创建新的 HTTP Client handle。
+    let provider = (response.delivery_hint == Some(CoreDeliveryHint::Voice))
+        .then(|| provider_from_config(&config.voice))
+        .flatten();
     if let VoiceDeliveryAttempt::Delivered(sent_ids) =
         try_group_voice_delivery(provider.as_deref(), &sender, &target, response).await
     {

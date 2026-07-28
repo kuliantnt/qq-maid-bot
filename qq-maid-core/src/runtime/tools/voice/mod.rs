@@ -132,40 +132,49 @@ fn preference_key(request: &RespondRequest) -> Option<VoicePreferenceKey> {
     if request.platform != "qq_official" {
         return None;
     }
+    let account_id = request
+        .account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
     let target_id = request
         .conversation_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
-    let target_type = if request
-        .group_id
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
-    {
-        "group"
-    } else {
-        "private"
+    // 会话类型只信任 Gateway 归一化的权威字段；未知类型和不完整群上下文都不读写。
+    let target_type = match request.conversation_kind {
+        qq_maid_common::identity_context::ConversationKind::Private => "private",
+        qq_maid_common::identity_context::ConversationKind::Group => {
+            let group_id = request
+                .group_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            if group_id != target_id {
+                return None;
+            }
+            "group"
+        }
+        _ => return None,
     };
     Some(VoicePreferenceKey {
         platform: request.platform.clone(),
-        account_id: request.account_id.clone().unwrap_or_default(),
+        account_id: account_id.to_owned(),
         target_type,
         target_id: target_id.to_owned(),
     })
 }
 
 fn may_modify_group(request: &RespondRequest) -> bool {
-    if request
-        .group_id
-        .as_deref()
-        .is_none_or(|value| value.trim().is_empty())
-    {
-        return true;
+    match request.conversation_kind {
+        qq_maid_common::identity_context::ConversationKind::Private => true,
+        qq_maid_common::identity_context::ConversationKind::Group => matches!(
+            request.group_member_role.as_deref(),
+            Some("owner" | "admin")
+        ),
+        _ => false,
     }
-    matches!(
-        request.group_member_role.as_deref(),
-        Some("owner" | "admin")
-    )
 }
 
 #[cfg(test)]

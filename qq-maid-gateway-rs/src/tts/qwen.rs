@@ -83,46 +83,50 @@ impl QwenTtsProvider {
             });
         }
 
-        let request = self
-            .client
-            .post(&self.config.base_url)
-            .bearer_auth(&self.config.api_key)
-            .json(&QwenRequest {
-                model: &self.config.model,
-                input: QwenInput {
-                    text,
-                    voice: &self.config.voice,
-                },
-            })
-            .send();
-        let response = timeout(self.config.request_timeout, request)
+        // 同一个超时覆盖发送、响应头、完整 JSON body、字段提取和 URL 校验，避免
+        // Provider 先返回响应头再悬挂 body 时长期占住 QQ 最终回复。
+        let request = async {
+            let response = self
+                .client
+                .post(&self.config.base_url)
+                .bearer_auth(&self.config.api_key)
+                .json(&QwenRequest {
+                    model: &self.config.model,
+                    input: QwenInput {
+                        text,
+                        voice: &self.config.voice,
+                    },
+                })
+                .send()
+                .await
+                .map_err(TtsError::Http)?;
+            let status = response.status();
+            if !status.is_success() {
+                // 错误体可能回显请求信息；不读取正文即可完成阶段化分类。
+                return Err(TtsError::Status { status });
+            }
+            let response = response
+                .json::<QwenResponse>()
+                .await
+                .map_err(|_| TtsError::InvalidResponse)?;
+            if response.status_code.is_some_and(|status| status != 200) {
+                return Err(TtsError::ProviderStatus);
+            }
+            let audio_url = response
+                .output
+                .and_then(|output| output.audio)
+                .and_then(|audio| audio.url)
+                .map(|url| url.trim().to_owned())
+                .filter(|url| !url.is_empty())
+                .ok_or(TtsError::InvalidResponse)?;
+            validate_audio_url(&audio_url)?;
+            Ok(audio_url)
+        };
+        timeout(self.config.request_timeout, request)
             .await
             .map_err(|_| TtsError::Timeout {
                 timeout_seconds: self.config.request_timeout.as_secs(),
             })?
-            .map_err(TtsError::Http)?;
-        let status = response.status();
-        if !status.is_success() {
-            // 千问错误体可能回显请求信息；失败分类只保留 HTTP 状态。
-            let _ = response.bytes().await;
-            return Err(TtsError::Status { status });
-        }
-        let response = response
-            .json::<QwenResponse>()
-            .await
-            .map_err(|_| TtsError::InvalidResponse)?;
-        if response.status_code.is_some_and(|status| status != 200) {
-            return Err(TtsError::ProviderStatus);
-        }
-        let audio_url = response
-            .output
-            .and_then(|output| output.audio)
-            .and_then(|audio| audio.url)
-            .map(|url| url.trim().to_owned())
-            .filter(|url| !url.is_empty())
-            .ok_or(TtsError::InvalidResponse)?;
-        validate_audio_url(&audio_url)?;
-        Ok(audio_url)
     }
 }
 

@@ -82,19 +82,27 @@ impl CoreService for CoreHandle {
         let state = self.state.as_ref();
         let planned = service.plan_core_respond(&req).map_err(CoreError::from)?;
         let respond_plan = planned.plan();
-        let voice_delivery_enabled = matches!(
+        let voice_delivery_enabled = if matches!(
             respond_plan,
             RespondPlan::StreamingChat | RespondPlan::AgentRuntime
-        ) && service
-            .voice_service
-            .delivery_enabled_for_request(&req)
-            .map_err(|error| {
-                CoreError::new(
-                    error.code(),
-                    "voice_preference",
-                    "语音偏好读取失败，请稍后再试",
-                )
-            })?;
+        ) {
+            match service.voice_service.delivery_enabled_for_request(&req) {
+                Ok(enabled) => enabled,
+                Err(error) => {
+                    // 语音是可选投递增强，偏好表临时不可用不能阻断普通文字回复。
+                    // 日志仅保留作用域、阶段和稳定错误码，不输出 SQL 或存储错误正文。
+                    warn!(
+                        scope_key,
+                        error_code = error.code(),
+                        error_stage = "voice_preference",
+                        "voice preference read failed; using text delivery"
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
         if matches!(
             respond_plan,
             RespondPlan::CommandEvent

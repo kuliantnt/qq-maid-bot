@@ -40,8 +40,8 @@ use crate::{
     tts::provider_from_config,
 };
 use qq_maid_core::service::{
-    CoreFailureKind, CoreInboundKind, CoreOutputPolicy, CoreRespondFailure, CoreRespondOutput,
-    CoreResponse, CoreResponseEvent, CoreResponseStatus,
+    CoreDeliveryHint, CoreFailureKind, CoreInboundKind, CoreOutputPolicy, CoreRespondFailure,
+    CoreRespondOutput, CoreResponse, CoreResponseEvent, CoreResponseStatus,
 };
 
 const CORE_STREAM_CLOSED_FALLBACK_TEXT: &str = "处理失败，请稍后再试。";
@@ -142,7 +142,10 @@ pub(crate) async fn send_c2c_respond_response_with_sender<S: OutboundSender + ?S
     )
     .to_qq_c2c_target()
     .expect("QQ C2C reply target should adapt to QQ API target");
-    let provider = provider_from_config(&config.voice);
+    // 普通文字回复不构造 TTS Provider，也不克隆凭证或创建新的 HTTP Client handle。
+    let provider = (response.delivery_hint == Some(CoreDeliveryHint::Voice))
+        .then(|| provider_from_config(&config.voice))
+        .flatten();
     if let VoiceDeliveryAttempt::Delivered(sent_ids) =
         try_c2c_voice_delivery(provider.as_deref(), sender, &target, response).await
     {

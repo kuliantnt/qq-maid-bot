@@ -110,6 +110,29 @@ async fn stream_disabled_chat_completes_without_synthetic_delta() {
     );
 }
 
+#[tokio::test]
+async fn voice_preference_read_failure_keeps_plain_text_model_reply() {
+    let provider = TestProvider::replying("偏好读取失败后的文字回复");
+    let mut state = test_state(provider.clone(), 5);
+    state.config.voice =
+        crate::config::VoiceFeatureConfig::from_environment(&std::collections::HashMap::from([
+            ("TTS_PROVIDER".to_owned(), "qwen".to_owned()),
+            ("QWEN_TTS_API_KEY".to_owned(), "test-key".to_owned()),
+        ]));
+    // 故意注入未执行语音 migration 的数据库，稳定触发普通聊天前的偏好读取错误。
+    let broken_database =
+        crate::storage::database::SqliteDatabase::open_temp("voice-read-failure", &[]).unwrap();
+    state.stores.voice_store =
+        crate::runtime::tools::voice::VoicePreferenceStore::new(broken_database);
+    let service = CoreHandle::new(state);
+
+    let response = collect_stream_completed(service.respond(private_request("hello")).await).await;
+
+    assert_eq!(response.text_content(), Some("偏好读取失败后的文字回复"));
+    assert_eq!(response.delivery_hint, None);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+}
+
 #[test]
 fn output_policy_names_are_consistent_across_stream_plans() {
     let cases = [

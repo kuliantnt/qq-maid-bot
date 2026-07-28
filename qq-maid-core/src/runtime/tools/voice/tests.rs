@@ -121,4 +121,63 @@ fn command_parser_accepts_only_the_declared_shape() {
         Some(VoiceCommand::Invalid)
     );
     assert_eq!(parse_voice_command("声音 开启"), None);
+    for alias in ["开启", "打开", "on"] {
+        assert_eq!(
+            parse_voice_command(&format!("语音 {alias}")),
+            Some(VoiceCommand::Enable)
+        );
+    }
+    for alias in ["关闭", "关掉", "off"] {
+        assert_eq!(
+            parse_voice_command(&format!("语音 {alias}")),
+            Some(VoiceCommand::Disable)
+        );
+    }
+}
+
+#[test]
+fn incomplete_identity_or_group_context_never_reads_or_writes_preferences() {
+    // 故意不创建语音表：若边界校验失效，下面任一调用都会返回存储错误。
+    let database = SqliteDatabase::open_temp("voice-incomplete", &[]).unwrap();
+    let service =
+        VoicePreferenceService::new(VoicePreferenceStore::new(database), available_config());
+
+    let mut missing_account = request("bot-a", "user-a", None);
+    missing_account.account_id = None;
+    assert!(!service.enabled_for_request(&missing_account).unwrap());
+    assert!(
+        service
+            .execute(VoiceCommand::Enable, &missing_account)
+            .unwrap()
+            .text
+            .contains("暂不支持")
+    );
+
+    let mut incomplete_group = request("bot-a", "group-a", Some("owner"));
+    incomplete_group.group_id = None;
+    assert!(!service.enabled_for_request(&incomplete_group).unwrap());
+
+    let mut mismatched_group = request("bot-a", "group-a", Some("owner"));
+    mismatched_group.group_id = Some("group-b".to_owned());
+    assert!(!service.enabled_for_request(&mismatched_group).unwrap());
+
+    let mut unknown = request("bot-a", "user-a", None);
+    unknown.conversation_kind = ConversationKind::Unknown;
+    assert!(!service.enabled_for_request(&unknown).unwrap());
+}
+
+#[test]
+fn conversation_kind_is_authoritative_for_private_and_group_keys() {
+    let database = SqliteDatabase::open_temp("voice-kind", &[VOICE_PREFERENCE_SCHEMA_V1]).unwrap();
+    let service =
+        VoicePreferenceService::new(VoicePreferenceStore::new(database), available_config());
+    let mut private = request("bot-a", "same-target", None);
+    // 即使携带了非权威 group_id，Private 仍按私聊 key 和私聊权限处理。
+    private.group_id = Some("same-target".to_owned());
+    private.group_member_role = Some("member".to_owned());
+    service.execute(VoiceCommand::Enable, &private).unwrap();
+    assert!(service.enabled_for_request(&private).unwrap());
+
+    let group = request("bot-a", "same-target", Some("owner"));
+    assert!(!service.enabled_for_request(&group).unwrap());
 }

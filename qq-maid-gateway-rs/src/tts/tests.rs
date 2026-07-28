@@ -5,12 +5,15 @@ use std::{
 
 use axum::{
     Json, Router,
+    body::{Body, Bytes},
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Response, StatusCode},
     response::IntoResponse,
     routing::post,
 };
+use futures_util::stream;
 use serde_json::{Value, json};
+use std::convert::Infallible;
 use tokio::net::TcpListener;
 
 use super::*;
@@ -36,6 +39,28 @@ async fn qwen_handler(
     (status, Json(body))
 }
 
+async fn slow_qwen_body_handler() -> Response<Body> {
+    let body = Body::from_stream(stream::once(async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        Ok::<Bytes, Infallible>(Bytes::from_static(
+            br#"{"status_code":200,"output":{"audio":{"url":"https://audio.example.test/slow.wav"}}}"#,
+        ))
+    }));
+    Response::builder()
+        .header("content-type", "application/json")
+        .body(body)
+        .unwrap()
+}
+
+async fn pending_error_body_handler() -> Response<Body> {
+    let body = Body::from_stream(stream::pending::<Result<Bytes, Infallible>>());
+    Response::builder()
+        .status(StatusCode::BAD_GATEWAY)
+        .header("content-type", "application/json")
+        .body(body)
+        .unwrap()
+}
+
 async fn mock_provider() -> (QwenTtsProvider, MockState, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let state = MockState {
@@ -51,6 +76,8 @@ async fn mock_provider() -> (QwenTtsProvider, MockState, tokio::task::JoinHandle
     };
     let app = Router::new()
         .route("/tts", post(qwen_handler))
+        .route("/tts/slow-body", post(slow_qwen_body_handler))
+        .route("/tts/pending-error", post(pending_error_body_handler))
         .with_state(state.clone());
     let address = listener.local_addr().unwrap();
     let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -138,4 +165,32 @@ async fn qwen_rejects_empty_invalid_or_oversized_audio_url() {
     task.abort();
     assert!(matches!(error, TtsError::TextTooLong { max_chars: 2 }));
     assert_eq!(state.requests.lock().unwrap().len(), request_count);
+}
+
+#[tokio::test]
+async fn qwen_timeout_covers_body_read_and_json_parsing_after_headers() {
+    let (mut provider, _state, task) = mock_provider().await;
+    provider.config.base_url.push_str("/slow-body");
+    provider.config.request_timeout = Duration::from_millis(5);
+
+    let error = provider.synthesize("你好").await.unwrap_err();
+    task.abort();
+
+    assert!(matches!(error, TtsError::Timeout { .. }));
+}
+
+#[tokio::test]
+async fn qwen_http_error_does_not_wait_for_or_read_response_body() {
+    let (mut provider, _state, task) = mock_provider().await;
+    provider.config.base_url.push_str("/pending-error");
+
+    let result = tokio::time::timeout(Duration::from_millis(100), provider.synthesize("你好"))
+        .await
+        .expect("HTTP error should return after headers without reading the pending body");
+    task.abort();
+
+    assert!(matches!(
+        result,
+        Err(TtsError::Status { status }) if status == StatusCode::BAD_GATEWAY
+    ));
 }
