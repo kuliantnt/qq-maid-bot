@@ -5,6 +5,7 @@
 
 mod chat;
 mod chat_tool_loop;
+mod configured;
 mod extract;
 mod fallback;
 mod payload;
@@ -20,7 +21,7 @@ use futures::{StreamExt, stream as futures_stream};
 
 use crate::{
     agent_loop::{AgentSessionRequest, AgentStepSession},
-    config::{LlmConfig, OpenAiApiMode},
+    config::{HttpAuthConfig, LlmConfig, OpenAiApiMode},
     error::LlmError,
     provider::{
         ChatOutcome, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol,
@@ -52,6 +53,7 @@ pub(crate) use chat::{
 pub(crate) use chat_tool_loop::{
     begin_chat_completions_session, provider_chat_completions_tool_calling_protocol,
 };
+pub(crate) use configured::ConfiguredResponsesProvider;
 pub(crate) use stream::is_openai_responses_done_sentinel;
 
 struct OpenAiChatFallbackRequest<'a> {
@@ -61,6 +63,7 @@ struct OpenAiChatFallbackRequest<'a> {
     chat_client: &'a ChatCompletionsClient,
     api_key: &'a str,
     base_url: Option<&'a str>,
+    responses_auth: Option<&'a HttpAuthConfig>,
     provider: &'a str,
     model: &'a str,
     media_max_bytes: u64,
@@ -138,6 +141,7 @@ impl LlmProvider for OpenAiProvider {
             chat_client: &self.chat_client,
             api_key: &self.api_key,
             base_url: self.base_url.as_deref(),
+            responses_auth: None,
             provider: self.name(),
             model: &effective_model,
             media_max_bytes: self.media_max_bytes,
@@ -160,6 +164,7 @@ impl LlmProvider for OpenAiProvider {
                 chat_client: &self.chat_client,
                 api_key: &self.api_key,
                 base_url: self.base_url.as_deref(),
+                responses_auth: None,
                 provider: self.name(),
                 model: &effective_model,
                 media_max_bytes: self.media_max_bytes,
@@ -178,6 +183,7 @@ impl LlmProvider for OpenAiProvider {
             chat_client: &self.chat_client,
             api_key: &self.api_key,
             base_url: self.base_url.as_deref(),
+            responses_auth: None,
             provider: self.name(),
             model: &effective_model,
             media_max_bytes: self.media_max_bytes,
@@ -298,6 +304,7 @@ async fn openai_auto_stream_with_chat_fallback(
         client: req.responses_client,
         api_key: req.api_key,
         base_url: req.base_url,
+        auth: req.responses_auth,
         provider: req.provider,
         model: req.model,
         media_max_bytes: req.media_max_bytes,
@@ -499,6 +506,7 @@ async fn openai_auto_chat_with_chat_fallback(
             client: req.responses_client,
             api_key: req.api_key,
             base_url: req.base_url,
+            auth: req.responses_auth,
             provider: req.provider,
             model: req.model,
             media_max_bytes: req.media_max_bytes,
@@ -755,6 +763,7 @@ mod tests {
             chat_client: &chat_client,
             api_key: "test-key",
             base_url: Some(&base_url),
+            responses_auth: None,
             provider: "openai",
             model: "gpt-5.5",
             media_max_bytes: 10 * 1024 * 1024,
@@ -803,6 +812,7 @@ mod tests {
             chat_client: &chat_client,
             api_key: "test-key",
             base_url: Some(&base_url),
+            responses_auth: None,
             provider: "openai",
             model: "gpt-5.5",
             media_max_bytes: 10 * 1024 * 1024,
@@ -848,6 +858,7 @@ mod tests {
             chat_client: &chat_client,
             api_key: "test-key",
             base_url: Some(&base_url),
+            responses_auth: None,
             provider: "openai",
             model: "gpt-5.5",
             media_max_bytes: 10 * 1024 * 1024,
@@ -888,6 +899,7 @@ mod tests {
             chat_client: &chat_client,
             api_key: "test-key",
             base_url: Some(&base_url),
+            responses_auth: None,
             provider: "openai",
             model: "gpt-5.5",
             media_max_bytes: 10 * 1024 * 1024,
@@ -935,6 +947,7 @@ mod tests {
             chat_client: &chat_client,
             api_key: "test-key",
             base_url: Some(&base_url),
+            responses_auth: None,
             provider: "openai",
             model: "gpt-5.5",
             media_max_bytes: 10 * 1024 * 1024,

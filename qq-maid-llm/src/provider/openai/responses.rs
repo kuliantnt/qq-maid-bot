@@ -7,6 +7,7 @@ use futures::stream;
 use serde_json::Value;
 
 use crate::{
+    config::HttpAuthConfig,
     error::LlmError,
     metrics::MetricsRecorder,
     provider::{
@@ -39,6 +40,7 @@ pub(crate) struct OpenAiResponsesChatRequest<'a> {
     pub(crate) client: &'a reqwest::Client,
     pub(crate) api_key: &'a str,
     pub(crate) base_url: Option<&'a str>,
+    pub(crate) auth: Option<&'a HttpAuthConfig>,
     pub(crate) provider: &'a str,
     pub(crate) model: &'a str,
     pub(crate) media_max_bytes: u64,
@@ -97,9 +99,16 @@ pub(crate) async fn openai_responses_non_stream_chat(
         false,
         req.image_generation_enabled,
     )?;
-    let response =
-        send_openai_responses_request(req.client, req.api_key, req.base_url, &payload, false)
-            .await?;
+    let response = send_openai_responses_request(
+        req.client,
+        req.api_key,
+        req.base_url,
+        req.provider,
+        req.auth,
+        &payload,
+        false,
+    )
+    .await?;
 
     let body: Value = response
         .json()
@@ -147,9 +156,16 @@ pub(crate) async fn openai_responses_chat_stream(
         true,
         req.image_generation_enabled,
     )?;
-    let response =
-        send_openai_responses_request(req.client, req.api_key, req.base_url, &payload, true)
-            .await?;
+    let response = send_openai_responses_request(
+        req.client,
+        req.api_key,
+        req.base_url,
+        req.provider,
+        req.auth,
+        &payload,
+        true,
+    )
+    .await?;
 
     let frame_buffer = Vec::new();
     let answer = String::new();
@@ -445,6 +461,7 @@ mod tests {
             client,
             api_key: "test-key",
             base_url: Some(base_url),
+            auth: None,
             provider: "openai",
             model: "gpt-5.5",
             media_max_bytes: 10 * 1024 * 1024,

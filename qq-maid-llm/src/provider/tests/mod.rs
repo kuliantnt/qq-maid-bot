@@ -1,7 +1,8 @@
 use super::*;
 use crate::{
     config::{
-        HttpAuthConfig, LlmConfig, OpenAiApiMode, OpenAiCompatibleProviderConfig, ProviderMode,
+        HttpAuthConfig, LlmConfig, OpenAiApiMode, OpenAiCompatibleProviderConfig,
+        OpenAiResponsesProviderConfig, ProviderMode,
     },
     metrics::LlmMetrics,
     provider::types::{ChatMessage, ChatRequest, ModelId},
@@ -414,6 +415,7 @@ fn app_config(provider: ProviderMode, model: &str) -> LlmConfig {
         gemini_base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_owned(),
         gemini_model: "gemini:gemini-2.5-flash".to_owned(),
         openai_compatible_providers: Vec::new(),
+        openai_responses_providers: Vec::new(),
         stream: true,
         request_timeout_seconds: 90,
         media_max_bytes: 10 * 1024 * 1024,

@@ -4,7 +4,6 @@
 use std::{cell::RefCell, collections::HashMap, env, fmt, net::IpAddr, path::Path, sync::OnceLock};
 
 use qq_maid_common::command_prefix::CommandPrefix;
-use qq_maid_llm::config::{HttpAuthConfig, OpenAiCompatibleProviderConfig};
 use qq_maid_llm::context_budget::ContextBudgetConfig;
 use qq_maid_llm::provider::types::{ModelId, ModelProvider, ModelRoute};
 
@@ -19,6 +18,7 @@ use crate::{
 pub mod agent;
 pub mod center;
 mod managed;
+mod provider_config;
 mod voice;
 pub use agent::{
     AgentProfileConfig, AgentRuntimeConfig, AgentSceneConfig, ChatScene, KnowledgeRetrievalMode,
@@ -525,6 +525,8 @@ impl AppConfig {
             .expect("agent config is validated when AppConfig is created");
         let mut web_search = self.agent_config.web_search().clone();
         web_search.default_model = private_policy.search_model.clone();
+        let (openai_compatible_providers, openai_responses_providers) =
+            provider_config::llm_provider_configs(&self.agent_config);
         qq_maid_llm::config::LlmConfig {
             provider: qq_maid_llm::config::ProviderMode::Auto,
             model_route: private_policy.main_route,
@@ -548,22 +550,8 @@ impl AppConfig {
             gemini_api_key: self.gemini_api_key.clone(),
             gemini_base_url: self.gemini_base_url.clone(),
             gemini_model: DEFAULT_GEMINI_MODEL.to_owned(),
-            openai_compatible_providers: self
-                .agent_config
-                .provider_configs()
-                .into_iter()
-                .map(|provider| OpenAiCompatibleProviderConfig {
-                    id: provider.id,
-                    base_url: provider.base_url,
-                    api_key_env: provider.api_key_env.clone(),
-                    api_key: env_optional(&provider.api_key_env),
-                    auth: HttpAuthConfig {
-                        header: provider.auth_header,
-                        scheme: provider.auth_scheme,
-                    },
-                    request_timeout_seconds: provider.request_timeout_seconds,
-                })
-                .collect(),
+            openai_compatible_providers,
+            openai_responses_providers,
             stream: self.stream,
             request_timeout_seconds: self.request_timeout_seconds,
             media_max_bytes: self.media_max_bytes,

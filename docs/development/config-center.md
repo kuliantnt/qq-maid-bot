@@ -42,7 +42,7 @@ runtime 或 secret 保存前会构造候选最终环境视图：未修改的当�
 | 模块 | 普通受管字段 | 加密敏感字段 |
 | --- | --- | --- |
 | 命令 | `command.prefix`（WebUI 提供 `/`、`#`、`*` 下拉选项，重启生效） | 无 |
-| Provider | 各内置 Provider 的 Base URL、API mode 等连接元数据 | OpenAI、DeepSeek、BigModel、Gemini、MiMo API Key |
+| Provider | 各内置 Provider 的 Base URL、API mode，以及 `agent.toml` 中的 OpenCode Provider 元数据 | OpenAI、DeepSeek、BigModel、Gemini、MiMo、OpenCode API Key |
 | Core 功能 | RSS、Memory、Todo 与 Todo 提醒时间 | `weather.qweather.api_key`、`tools.web_search.tavily.api_key` |
 | 控制台 | `console.enabled`、`console.allowed_origins` | 无 |
 | QQ 官方 | `platform.qq_official.enabled` | AppID、AppSecret |
@@ -57,7 +57,7 @@ runtime 或 secret 保存前会构造候选最终环境视图：未修改的当�
 
 配置快照的 `agent` 节点返回独立的 `revision`、`source=agent_toml`、`saved_value`、`running_value`、`pending_restart`、`read_only` 与 `editable`。保存只更新文件值；当前进程继续使用启动时捕获的 `running_value`，两者不同时 `pending_restart=true`，重启重新加载后恢复一致。
 
-领域写接口只接受 route、联网搜索后端与参数、search route、profile 和 private/group scene 的结构化变更，不接受文件路径。每次保存都会先解析当前完整文档，应用局部变更，再调用 `AgentRuntimeConfig` 的同一 schema 与引用校验；非法后端、Tavily 参数、route/profile/scene/Tool 引用不会进入正式文件。符号链接、非普通文件、只读文件或组/其他用户可写的不安全权限均拒绝写入。
+领域写接口只接受 Provider set/remove、route、联网搜索后端与参数、search route、profile 和 private/group scene 的结构化变更，不接受文件路径。每次保存都会先解析当前完整文档，应用局部变更，再调用 `AgentRuntimeConfig` 的同一 schema 与引用校验；非法 Provider 元数据、后端、Tavily 参数、route/profile/scene/Tool 引用不会进入正式文件。符号链接、非普通文件、只读文件或组/其他用户可写的不安全权限均拒绝写入。
 
 联网搜索的后端、默认参数和 OpenAI/Gemini 搜索 route 统一位于 `[tools.web_search]` 与 `[tools.web_search.routes.*]`。运行时、配置中心和 WebUI 不再读取旧的顶层搜索 route；`qbot update`、`qbot upgrade` 或 `qbot patch` 会在启动新版本前通过 Release 内置脚本备份并一次性迁移旧配置，使已有部署无需手工修改。WebUI 保存后端与 Tavily 参数时不会删除已有 route。Tavily API Key 不写入 `agent.toml`，只通过配置中心的 `tools.web_search.tavily.api_key` 或兼容环境变量 `TAVILY_API_KEY` 注入。
 
@@ -65,4 +65,4 @@ runtime 或 secret 保存前会构造候选最终环境视图：未修改的当�
 
 启用控制台后，`GET /api/v1/console/configuration` 返回 runtime 与 agent 两个配置域的安全快照，但必须先通过独立部署管理员会话。HTTP 写接口分别接受 runtime 普通值 set/remove、agent 结构化变更和带 expected revision 的 secret replace/clear/批量修改，不能把脱敏占位符当作真实 secret 保存。所有认证与配置写操作要求同源 Origin、HttpOnly 服务端会话、轮换 CSRF、权限和脱敏审计；现有跨域 allowlist 只保留给只读状态与 Markdown 兼容接口，不授予管理 API 跨域凭据能力。
 
-`setup_required` 降级态允许按向导分步保存“字段自身合法、整体启动候选尚缺其他域”的配置，以支持首次配置中断后继续；此放宽不跳过字段类型/语义、Agent schema、revision 冲突、文件权限、原子写入或 secret CAS。正常运行态仍要求每次变更通过完整启动预检。配置页将本地正式启动预检与外部连接测试分开：连接测试必须由管理员显式触发，只访问所选 Provider 已配置的 HTTPS 模型列表端点，使用 8 秒超时、禁止重定向，不发送聊天内容，也不覆盖现有配置。自定义兼容地址会先解析并拒绝环回、私网、链路本地和其他非公网目标，再把本次请求固定到已校验地址，避免管理接口成为内网探测入口。
+`setup_required` 降级态允许按向导分步保存“字段自身合法、整体启动候选尚缺其他域”的配置，以支持首次配置中断后继续；此放宽不跳过字段类型/语义、Agent schema、revision 冲突、文件权限、原子写入或 secret CAS。正常运行态仍要求每次变更通过完整启动预检。配置页将本地正式启动预检与外部连接测试分开：连接测试必须由管理员显式触发，只访问 HTTPS 模型列表端点，使用 8 秒超时、禁止重定向，不发送聊天内容，也不覆盖现有配置。OpenCode 测试固定分别访问 Zen `https://opencode.ai/zen/v1/models` 与 Go `https://opencode.ai/zen/go/v1/models` 官方目录并分别报告结果；目录允许匿名访问，因此成功只证明相应官方模型目录可达，不证明 Key 有效，也不验证卡片中修改的自定义 Base URL。其他自定义兼容地址会先解析并拒绝环回、私网、链路本地和其他非公网目标，再把本次请求固定到已校验地址，避免管理接口成为内网探测入口。

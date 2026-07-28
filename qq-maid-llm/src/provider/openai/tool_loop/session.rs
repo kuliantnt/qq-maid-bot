@@ -12,6 +12,7 @@ use crate::{
         AgentStep, AgentStepSession, AgentStreamingDiagnostics, AgentTextDeltaSink, AgentToolCall,
         AgentToolResult,
     },
+    config::HttpAuthConfig,
     context_budget::ContextBudgetConfig,
     error::LlmError,
     provider::types::{ChatMessage, ReasoningEffort},
@@ -44,6 +45,7 @@ pub(crate) struct ResponsesAgentSession {
     client: reqwest::Client,
     api_key: String,
     base_url: Option<String>,
+    auth: Option<HttpAuthConfig>,
     provider: String,
     model: String,
     max_output_tokens: u64,
@@ -102,6 +104,41 @@ impl ResponsesAgentSession {
         context_budget: Option<ContextBudgetConfig>,
         image_generation_enabled: bool,
     ) -> Result<Self, LlmError> {
+        Self::new_configured(
+            client,
+            api_key,
+            base_url,
+            None,
+            provider,
+            model,
+            media_max_bytes,
+            max_output_tokens,
+            reasoning_effort,
+            messages,
+            tools,
+            context_budget,
+            image_generation_enabled,
+        )
+    }
+
+    /// 为配置驱动的 Responses provider 创建会话；只替换连接与认证元数据，
+    /// Function Tool Calling 的 payload、解析和轮次语义仍与内置 OpenAI 共用。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_configured(
+        client: reqwest::Client,
+        api_key: String,
+        base_url: Option<String>,
+        auth: Option<HttpAuthConfig>,
+        provider: &str,
+        model: String,
+        media_max_bytes: u64,
+        max_output_tokens: u64,
+        reasoning_effort: Option<ReasoningEffort>,
+        messages: &[ChatMessage],
+        tools: &ToolRegistry,
+        context_budget: Option<ContextBudgetConfig>,
+        image_generation_enabled: bool,
+    ) -> Result<Self, LlmError> {
         let input = openai_tool_loop_input(messages, media_max_bytes)?;
         let mut tool_defs = openai_tool_defs(tools.metadata());
         if image_generation_enabled {
@@ -111,6 +148,7 @@ impl ResponsesAgentSession {
             client,
             api_key,
             base_url,
+            auth,
             provider: provider.to_owned(),
             model,
             max_output_tokens,
@@ -167,6 +205,8 @@ impl AgentStepSession for ResponsesAgentSession {
             &self.client,
             &self.api_key,
             self.base_url.as_deref(),
+            &self.provider,
+            self.auth.as_ref(),
             &payload,
             false,
         )
@@ -238,6 +278,8 @@ impl AgentStepSession for ResponsesAgentSession {
             &self.client,
             &self.api_key,
             self.base_url.as_deref(),
+            &self.provider,
+            self.auth.as_ref(),
             &payload,
             true,
         )
