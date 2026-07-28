@@ -2,6 +2,31 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.22.0] - 2026-07-29
+
+### Release Focus
+
+* **QQ 语音回复与模型接入扩展**：在现有多入口文本机器人基础上增加 QQ 官方最终回复 TTS，并补齐 Web 全局配置体验；同时扩展 OpenCode Zen / Go 模型接入，收紧命令和本地 embedding 的运行边界。
+
+### Added
+
+* **QQ 官方语音回复与会话开关**（PR #600）：新增 `/语音`、`/语音 开启`、`/语音 关闭`，按平台、机器人账号和私聊/群聊目标隔离持久化偏好；开启时使用千问非流式 TTS 生成 WAV URL，再通过 QQ `/files` 与 `msg_type=7` 投递，失败时只回退一次原始文字。
+* **TTS Web 配置卡片**：Web 控制台新增独立“语音回复”分组、Provider 下拉框、千问配置中文标签、超时与朗读字符范围，并继续通过安全配置中心保存、替换或显式清除 API Key；关闭 Provider 只弱化显示，不删除已保存的千问配置。
+* **OpenCode Zen 与 Go Provider**（PR #598）：新增配置驱动的 `openai_responses` 能力和 Zen Responses、Zen Chat、Go 三个固定 Web 预设，共用受管 `OPENCODE_API_KEY`，支持模型路线模板、revision 冲突保护和官方匿名模型目录探测。
+* **社区反馈入口**（PR #594）：README 增加社区交流、问题反馈和功能建议入口。
+
+### Changed
+
+* **未知 Slash 命令确定性收口**（PR #595）：所有已注册命令均未匹配时不再进入 LLM、Tool Loop 或创建 Session；私聊返回统一提示，群聊仅在消息明确指向机器人时回复。
+* **知识库 embedding 内存限制**（PR #597）：缺失向量固定按 8 条分批读取、推理和事务写入，避免初次索引大型 Markdown 时同时持有全部文本与向量；已完成批次可在失败后断点续跑。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.22.0`；`qq-maid-common`、`qq-maid-llm`、`qq-maid-core`、`qq-maid-gateway-rs` 分别提升到 `0.1.3`、`0.1.8`、`0.1.17`、`0.1.12`。
+* 本版本无数据库 migration、无必需配置迁移。TTS 默认 `disabled`；已有部署升级后仍保持文字回复，只有配置可用的千问 Key 并在具体私聊或群聊执行 `/语音 开启` 后才使用语音。
+* Web 控制台只管理全局 TTS 能力，不新增会话 scope 管理、试听、连接测试或音色在线枚举；会话开关、群管理员权限和已有保存语义保持不变。
+* QQ TTS、OpenCode 和配置中心已通过本地 mock / 单元测试覆盖；未使用真实 QQ AppID/AppSecret、千问 API Key 或 OpenCode 凭证进行生产环境联调，签名 WAV URL 的 QQ 拉取与真实模型调用仍需在目标部署环境确认。
+
 ## [v0.21.6] - 2026-07-25
 
 ### Changed

@@ -363,6 +363,7 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(13, 138
   font-size: .78rem;
   letter-spacing: .06em;
 }
+.config-field-group-hint { margin: 0; padding: 0 .15rem; color: var(--muted); font-size: .78rem; line-height: 1.6; }
 .config-field-group-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; }
 .config-row {
   display: grid;
@@ -380,6 +381,8 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(13, 138
 .config-row:focus-within { border-color: #9fd3bd; box-shadow: 0 0 0 3px rgba(13, 138, 95, .08); }
 .config-row-warning { border-color: #e2ad6d; background: #fffaf3; }
 .config-row-warning > strong, .config-row-warning .field-meta { color: var(--warn); }
+.config-row-muted { background: #f7f8f7; opacity: .72; }
+.config-row-muted:focus-within { opacity: 1; }
 .config-row > label:first-child { margin: 0; color: var(--ink); }
 .config-row > input:not([type="checkbox"]) { width: 100%; }
 .config-row .password-field { width: 100%; }

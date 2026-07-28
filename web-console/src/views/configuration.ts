@@ -20,6 +20,13 @@ import type { ConfigFieldSnapshot, ConfigurationSnapshot } from "../types.js";
 
 const FIELD_LABELS: Record<string, string> = {
   "command.prefix": "聊天命令前缀",
+  "delivery.tts.provider": "语音 Provider",
+  "delivery.tts.qwen_api_key": "千问 TTS API Key",
+  "delivery.tts.qwen_base_url": "千问 TTS Base URL",
+  "delivery.tts.qwen_model": "千问 TTS 模型",
+  "delivery.tts.qwen_voice": "千问 TTS 音色",
+  "delivery.tts.request_timeout_seconds": "请求超时（秒）",
+  "delivery.tts.max_text_chars": "最大朗读字符数",
   "provider.openai.base_url": "OpenAI Base URL",
   "provider.openai.api_mode": "OpenAI API 模式",
   "provider.openai.api_key": "OpenAI API Key",
@@ -72,8 +79,19 @@ const FIELD_LABELS: Record<string, string> = {
   "bootstrap.ops_config_file": "运维配置文件",
 };
 
-const FIELD_GROUPS = [
+interface FieldGroupDefinition {
+  label: string;
+  prefix: string;
+  description?: string;
+}
+
+const FIELD_GROUPS: readonly FieldGroupDefinition[] = [
   { label: "命令设置", prefix: "command." },
+  {
+    label: "语音回复",
+    prefix: "delivery.tts.",
+    description: "修改后需要重启。Web 控制台只配置全局 TTS 能力；Provider 关闭或千问 API Key 未配置时，/语音 开启会被拒绝。私聊或群聊是否启用仍通过 /语音 开启、/语音 关闭管理。关闭 Provider 不会清除已保存的千问配置，也可以提前填写。",
+  },
   { label: "模型服务", prefix: "provider." },
   { label: "QQ 官方入口", prefix: "platform.qq_official." },
   { label: "OneBot 11 入口", prefix: "platform.onebot11." },
@@ -83,7 +101,39 @@ const FIELD_GROUPS = [
   { label: "天气服务", prefix: "weather." },
   { label: "Web 控制台", prefix: "console." },
   { label: "基础运行", prefix: "bootstrap." },
-] as const;
+];
+
+const TTS_PROVIDER_OPTIONS: ReadonlyArray<readonly [string, string]> = [
+  ["disabled", "关闭"],
+  ["qwen", "千问"],
+];
+
+const TTS_NUMBER_RANGES: Readonly<Record<string, readonly [number, number]>> = {
+  "delivery.tts.request_timeout_seconds": [1, 120],
+  "delivery.tts.max_text_chars": [1, 600],
+};
+
+export function configFieldLabel(key: string): string {
+  return FIELD_LABELS[key] ?? key;
+}
+
+export function configFieldGroupLabel(key: string): string {
+  return FIELD_GROUPS.find((group) => key.startsWith(group.prefix))?.label ?? "其他配置";
+}
+
+/** 未识别的历史 Provider 必须原样保留，避免页面加载或保存时静默改成受支持值。 */
+export function ttsProviderOptions(currentValue: unknown): Array<[string, string]> {
+  const current = currentValue === null || currentValue === undefined ? "disabled" : String(currentValue);
+  const options = TTS_PROVIDER_OPTIONS.map(([value, label]): [string, string] => [value, label]);
+  if (!options.some(([value]) => value === current)) {
+    options.push([current, `${current}（当前自定义值）`]);
+  }
+  return options;
+}
+
+export function ttsNumberRange(key: string): readonly [number, number] | null {
+  return TTS_NUMBER_RANGES[key] ?? null;
+}
 
 const AGENT_ROUTE_LABELS: Record<string, string> = {
   private_main: "私聊主路线",
@@ -208,6 +258,7 @@ function render(snapshot: ConfigurationSnapshot): void {
   renderSummary(snapshot);
   renderPublicFields(snapshot);
   renderSecretFields(snapshot);
+  bindTtsProviderState();
   renderAgent(snapshot);
   bindRestart(snapshot);
   bindValidation();
@@ -236,9 +287,10 @@ function renderPublicFields(snapshot: ConfigurationSnapshot): void {
     (field) => {
     const row = document.createElement("div");
     row.className = "config-row";
+    decorateTtsRow(row, field);
     const label = document.createElement("label");
     label.htmlFor = inputId(field.key);
-    label.textContent = FIELD_LABELS[field.key] ?? field.key;
+    label.textContent = configFieldLabel(field.key);
     label.append(meta(field));
     const input = fieldInput(field);
     row.append(label, input);
@@ -249,6 +301,7 @@ function renderPublicFields(snapshot: ConfigurationSnapshot): void {
     }
       return row;
     },
+    true,
   );
   const save = element("save-public-config", HTMLButtonElement);
   save.onclick = () => void savePublicFields();
@@ -263,9 +316,10 @@ function renderSecretFields(snapshot: ConfigurationSnapshot): void {
     (field) => {
     const row = document.createElement("div");
     row.className = "config-row secret-row";
+    decorateTtsRow(row, field);
     const label = document.createElement("label");
     label.htmlFor = inputId(field.key);
-    label.textContent = FIELD_LABELS[field.key] ?? field.key;
+    label.textContent = configFieldLabel(field.key);
     label.append(meta(field));
     const input = document.createElement("input");
     input.id = inputId(field.key);
@@ -471,18 +525,23 @@ function appendGroupedFields(
   target: HTMLElement,
   fields: ConfigFieldSnapshot[],
   row: (field: ConfigFieldSnapshot) => HTMLElement,
+  showDescriptions = false,
 ): void {
   const remaining = new Set(fields);
   for (const group of FIELD_GROUPS) {
     const grouped = fields.filter((field) => field.key.startsWith(group.prefix));
     if (grouped.length === 0) continue;
-    target.append(fieldGroup(group.label, grouped.map(row)));
+    target.append(fieldGroup(
+      group.label,
+      grouped.map(row),
+      showDescriptions ? group.description : undefined,
+    ));
     grouped.forEach((field) => remaining.delete(field));
   }
   if (remaining.size > 0) target.append(fieldGroup("其他配置", [...remaining].map(row)));
 }
 
-function fieldGroup(label: string, rows: HTMLElement[]): HTMLElement {
+function fieldGroup(label: string, rows: HTMLElement[], description?: string): HTMLElement {
   const section = document.createElement("section");
   section.className = "config-field-group";
   const heading = document.createElement("h3");
@@ -490,16 +549,25 @@ function fieldGroup(label: string, rows: HTMLElement[]): HTMLElement {
   const grid = document.createElement("div");
   grid.className = "config-field-group-grid";
   grid.append(...rows);
-  section.append(heading, grid);
+  section.append(heading);
+  if (description) {
+    const hint = document.createElement("p");
+    hint.className = "config-field-group-hint";
+    hint.textContent = description;
+    section.append(hint);
+  }
+  section.append(grid);
   return section;
 }
 
-async function savePublicFields(): Promise<void> {
-  if (!current) return;
-  const changes: unknown[] = [];
-  for (const field of current.fields.filter((value) => value.sensitivity === "public" && value.editable)) {
-    const input = configInput(field.key);
-    const value = inputValue(input, field);
+export function publicConfigurationChanges(
+  fields: ConfigFieldSnapshot[],
+  values: ReadonlyMap<string, unknown>,
+): Array<Record<string, unknown>> {
+  const changes: Array<Record<string, unknown>> = [];
+  for (const field of fields.filter((value) => value.sensitivity === "public" && value.editable)) {
+    if (!values.has(field.key)) continue;
+    const value = values.get(field.key);
     const baseline = field.savedValue ?? field.effectiveValue;
     // 未配置的可选字段会显示为空输入框；用户未触碰时不能把空字符串误当成新配置提交。
     if ((baseline === null || baseline === undefined) && isEmptyInputValue(value)) continue;
@@ -507,6 +575,21 @@ async function savePublicFields(): Promise<void> {
       changes.push({ action: "set", key: field.key, value });
     }
   }
+  return changes;
+}
+
+async function savePublicFields(): Promise<void> {
+  if (!current) return;
+  const values = new Map<string, unknown>();
+  for (const field of current.fields.filter((value) => value.sensitivity === "public" && value.editable)) {
+    const input = configInput(field.key);
+    if (!input.checkValidity()) {
+      input.reportValidity();
+      return showResult(`${configFieldLabel(field.key)}不符合页面输入范围，请修改后再保存。`, true);
+    }
+    values.set(field.key, inputValue(input, field));
+  }
+  const changes = publicConfigurationChanges(current.fields, values);
   if (changes.length === 0) return showResult("没有需要保存的普通配置。", false);
   await runSave(async () => updateRuntimeConfiguration(current!.revision, changes));
 }
@@ -516,18 +599,35 @@ async function removePublicField(key: string): Promise<void> {
   await runSave(async () => updateRuntimeConfiguration(current!.revision, [{ action: "remove", key }]));
 }
 
-async function saveSecrets(): Promise<void> {
-  if (!current) return;
-  const changes: unknown[] = [];
-  for (const field of current.fields.filter((value) => value.sensitivity === "secret" && value.editable)) {
-    const input = element(inputId(field.key), HTMLInputElement);
-    const clear = document.querySelector<HTMLInputElement>(`input[data-clear-key="${field.key}"]`);
-    if (clear?.checked) {
+export function secretConfigurationChanges(
+  fields: ConfigFieldSnapshot[],
+  values: ReadonlyMap<string, string>,
+  clearKeys: ReadonlySet<string>,
+): Array<Record<string, unknown>> {
+  const changes: Array<Record<string, unknown>> = [];
+  for (const field of fields.filter((value) => value.sensitivity === "secret" && value.editable)) {
+    if (clearKeys.has(field.key)) {
       changes.push({ action: "clear", key: field.key, expected_revision: field.revision ?? "missing" });
-    } else if (input.value.length > 0) {
-      changes.push({ action: "replace", key: field.key, value: input.value, expected_revision: field.revision ?? "missing" });
+    } else {
+      const value = values.get(field.key) ?? "";
+      if (value.length > 0) {
+        changes.push({ action: "replace", key: field.key, value, expected_revision: field.revision ?? "missing" });
+      }
     }
   }
+  return changes;
+}
+
+async function saveSecrets(): Promise<void> {
+  if (!current) return;
+  const values = new Map<string, string>();
+  const clearKeys = new Set<string>();
+  for (const field of current.fields.filter((value) => value.sensitivity === "secret" && value.editable)) {
+    values.set(field.key, element(inputId(field.key), HTMLInputElement).value);
+    const clear = document.querySelector<HTMLInputElement>(`input[data-clear-key="${field.key}"]`);
+    if (clear?.checked) clearKeys.add(field.key);
+  }
+  const changes = secretConfigurationChanges(current.fields, values, clearKeys);
   if (changes.length === 0) return showResult("留空不会清除 secret；当前没有显式变更。", false);
   await runSave(async () => updateSecretConfiguration(changes));
 }
@@ -691,6 +791,21 @@ async function runSave(action: () => Promise<ConfigurationSnapshot>): Promise<vo
 
 function fieldInput(field: ConfigFieldSnapshot): HTMLInputElement | HTMLSelectElement {
   const value = field.savedValue ?? field.effectiveValue;
+  if (field.key === "delivery.tts.provider") {
+    const select = document.createElement("select");
+    select.id = inputId(field.key);
+    select.dataset.configKey = field.key;
+    select.disabled = !field.editable;
+    const currentValue = value === null || value === undefined ? "disabled" : String(value);
+    for (const [optionValue, label] of ttsProviderOptions(currentValue)) {
+      const option = document.createElement("option");
+      option.value = optionValue;
+      option.textContent = label;
+      select.append(option);
+    }
+    select.value = currentValue;
+    return select;
+  }
   if (field.key === "command.prefix") {
     const select = document.createElement("select");
     select.id = inputId(field.key);
@@ -724,8 +839,33 @@ function fieldInput(field: ConfigFieldSnapshot): HTMLInputElement | HTMLSelectEl
   } else {
     input.type = field.valueType === "integer" ? "number" : "text";
     input.value = Array.isArray(value) ? value.join(", ") : value === null || value === undefined ? "" : String(value);
+    const range = ttsNumberRange(field.key);
+    if (range) {
+      input.min = String(range[0]);
+      input.max = String(range[1]);
+      input.step = "1";
+    }
   }
   return input;
+}
+
+function decorateTtsRow(row: HTMLElement, field: ConfigFieldSnapshot): void {
+  row.dataset.configFieldKey = field.key;
+  if (field.key.startsWith("delivery.tts.qwen_")) row.dataset.ttsQwenField = "true";
+}
+
+/** 关闭 Provider 只做视觉提示，字段始终保持可编辑且不会生成清除操作。 */
+function bindTtsProviderState(): void {
+  const provider = document.getElementById(inputId("delivery.tts.provider"));
+  if (!(provider instanceof HTMLSelectElement)) return;
+  const refresh = (): void => {
+    const disabled = provider.value === "disabled";
+    for (const row of document.querySelectorAll<HTMLElement>("[data-tts-qwen-field='true']")) {
+      row.classList.toggle("config-row-muted", disabled);
+    }
+  };
+  provider.addEventListener("change", refresh);
+  refresh();
 }
 
 function inputValue(input: HTMLInputElement | HTMLSelectElement, field: ConfigFieldSnapshot): unknown {
