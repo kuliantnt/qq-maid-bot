@@ -19,7 +19,7 @@ use crate::{
 
 use super::dto::{
     CreateTodoRequest, DeleteTodoRequest, DeleteTodoResponse, GetTodoRequest, ListTodoRequest,
-    TodoDto, UpdateTodoRequest,
+    ListTodoTargetsRequest, TodoDto, TodoTargetDiscoveryDto, UpdateTodoRequest,
 };
 
 pub(super) async fn create(
@@ -75,6 +75,43 @@ pub(super) async fn list(
             pagination,
             total,
         ))
+    })();
+    respond(&state, &headers, &context, result)
+}
+
+pub(super) async fn targets(
+    State(state): State<OpsHttpState>,
+    headers: HeaderMap,
+    payload: Result<Json<ListTodoTargetsRequest>, JsonRejection>,
+) -> Response {
+    let context = match ApiRequestContext::authenticate(&state, &headers) {
+        Ok(context) => context,
+        Err(error) => return respond_error(&state, &headers, error),
+    };
+    tracing::debug!(
+        actor = context.actor.subject(),
+        action = "targets",
+        "Todo 管理请求已认证"
+    );
+    let result = (|| {
+        let request = json_payload(payload, &context)?;
+        let pagination = request.pagination()?;
+        let filter = request.into_filter()?;
+        let limit = usize::try_from(pagination.page_size())
+            .map_err(|_| ApiError::validation("page_size is too large"))?;
+        let offset = usize::try_from(pagination.offset())
+            .map_err(|_| ApiError::validation("pagination offset is too large"))?;
+        let page = service(&state)?
+            .targets(filter, limit, offset)
+            .map_err(map_todo_error)?;
+        let items = page
+            .items
+            .into_iter()
+            .map(TodoTargetDiscoveryDto::try_from_target)
+            .collect::<Result<Vec<_>, _>>()?;
+        let total = u64::try_from(page.total_count)
+            .map_err(|_| ApiError::internal("todo target count overflow"))?;
+        Ok(PagedResponse::new(items, pagination, total))
     })();
     respond(&state, &headers, &context, result)
 }

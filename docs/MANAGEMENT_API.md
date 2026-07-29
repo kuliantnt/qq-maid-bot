@@ -75,12 +75,13 @@ SQLite 使用同一组筛选分别执行 `COUNT(*)` 与带 `LIMIT/OFFSET` 的当
 
 ## Todo API
 
-五个接口均为 `POST`：
+六个接口均为 `POST`：
 
 | 路径 | 用途 |
 | --- | --- |
 | `/api/v1/console/todo/create` | 向经过验证的真实平台目标创建 Todo |
 | `/api/v1/console/todo/list` | 全局分页和组合筛选 |
+| `/api/v1/console/todo/targets` | 分页发现可创建 Todo 的真实会话目标 |
 | `/api/v1/console/todo/get` | 全局按 ID 查询单项 |
 | `/api/v1/console/todo/update` | 全局部分更新 / 状态转换 |
 | `/api/v1/console/todo/delete` | 按现有物理删除语义删除 |
@@ -108,7 +109,8 @@ Todo ID 在响应中使用十进制字符串。输入兼容正整数 JSON number
 - `target_ref` 是服务端基于真实 owner/scope 生成的版本化稳定引用；客户端应把它视为不透明字符串，不应自行拼接或解析内部 key。
 - 创建时服务端会把引用回查到已有 Todo 目标或已知 Session 目标，并再次校验 owner、conversation scope、平台、账号和目标类型。请求体不能直接提交 `owner_key`、`scope_key`、`group_id` 或 `account_id` 来绕过校验。
 - 对无法完整解析的旧 scope，单项会降级为 `scope_type="unknown"`、`target_ref=null`，并返回受控 `diagnostic`；单条异常记录不会使整个列表失败。
-- 当前五路由协议没有单独的“目标目录”接口。控制台可直接复用列表/详情返回的 `target_ref`；若未来需要为从未出现过 Todo 的会话提供选择器，应增加只读的服务端目标发现接口，而不是允许前端提交内部 key。
+- `/api/v1/console/todo/targets` 从已有 Todo 与 Session 的服务端可信身份字段中分页发现目标，因此即使会话从未创建过 Todo，控制台也能先取得 `target_ref` 再创建第一条记录。无法完整恢复真实 owner、成员或 conversation scope 的旧记录不会进入创建目标列表。
+- 目标发现支持 `platform`、`account_id`、`scope_type`、`user_id` 和 `group_id` 精确筛选；响应只包含 `target_ref`、平台/账号、作用域类型、用户/群和 `reminder_supported`，不返回 owner/scope 内部 key。
 
 ### 创建
 
@@ -128,7 +130,7 @@ Todo ID 在响应中使用十进制字符串。输入兼容正整数 JSON number
 }
 ```
 
-`target_ref` 和 `title` 必填。管理 API 不执行自然语言时间推断；日期、时间、重复规则和敏感文本处理继续复用 Todo 领域的草稿归一与校验。
+`target_ref` 和 `title` 必填。管理 API 不执行自然语言时间推断；日期、时间、重复规则和敏感文本处理继续复用 Todo 领域的草稿归一与校验。创建请求只要包含非空 `reminder_at`，就必须同时满足“晚于当前时间”和目标平台支持主动提醒，否则返回 422。
 
 创建 Todo 与创建对应 reminder Outbox 记录在同一个 SQLite 事务中提交。目标无效、提醒时间无效、Outbox 写入失败时不会留下 Todo。
 
@@ -197,6 +199,8 @@ Todo 筛选：
 
 - 管理 Service 先按 ID 全局读取记录，再使用记录自身的真实 owner/scope 执行写入。
 - 未传字段保持原值；`detail`、`due_date`、`due_at`、`reminder_at` 传 `null` 表示显式清空，`title=null` 非法。
+- 更新时只有本次请求显式设置的非空 `reminder_at` 才重新校验未来时间和平台能力；显式清空会取消旧未终结 Outbox。未修改提醒字段时允许保留历史值，已经过去的提醒不会重新创建 Outbox，也不会阻止标题、详情或日期更新。
+- 完成 Todo 会取消旧未终结提醒，不因保留的历史 `reminder_at` 已过期而失败；恢复为 `pending` 时沿用领域 Outbox 语义，过期值保留但不重新排程。
 - 已完成 Todo 的普通字段不能直接修改；同一请求显式恢复为 `pending` 后可以修改。
 - 一次性 Todo 完成后进入 `completed`；周期 Todo 沿用聊天侧“完成本次并推进下一周期”的规则。
 - 删除继续使用物理删除语义，并在同一事务内取消尚未终结的 reminder Outbox。

@@ -20,11 +20,13 @@ use super::{
     reminder::{prepare_reminder_upsert, validate_draft_reminder},
     storage::{
         TodoManagementPage, TodoManagementRecord, TodoManagementScopeType,
-        TodoManagementTargetFilter, advance_after_completion, is_recurring, normalize_draft,
+        TodoManagementTargetCandidateFilter, TodoManagementTargetFilter, advance_after_completion,
+        is_recurring, normalize_draft,
     },
 };
 
 const TARGET_REF_PREFIX: &str = "todo_target:v1:";
+const TARGET_RESOLUTION_PAGE_SIZE: usize = 100;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TodoManagementUpdate {
@@ -57,6 +59,15 @@ pub(crate) struct TodoManagementListFilter {
     pub(crate) target_ref: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TodoManagementTargetListFilter {
+    pub(crate) platform: Option<String>,
+    pub(crate) account_id: Option<String>,
+    pub(crate) scope_type: Option<TodoManagementScopeType>,
+    pub(crate) user_id: Option<String>,
+    pub(crate) group_id: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct TodoManagementTarget {
     pub(crate) target_ref: Option<String>,
@@ -78,6 +89,12 @@ pub(crate) struct TodoManagementItem {
 #[derive(Debug, Clone)]
 pub(crate) struct TodoManagementListPage {
     pub(crate) items: Vec<TodoManagementItem>,
+    pub(crate) total_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TodoManagementTargetListPage {
+    pub(crate) items: Vec<TodoManagementTarget>,
     pub(crate) total_count: usize,
 }
 
@@ -146,8 +163,7 @@ impl TodoManagementService {
         self.ensure_shared_database()?;
         let owner = self.resolve_target_ref(target_ref)?;
         let draft = normalize_draft(draft)?;
-        let preview = record_from_draft(&owner, "preview", &draft, TodoStatus::Pending);
-        self.validate_pending_reminder(&preview)?;
+        self.validate_reminder(&owner, &draft)?;
         let created = self
             .store
             .create_todo_for_management(&owner, draft, reminder_upsert)?;
@@ -182,6 +198,38 @@ impl TodoManagementService {
         Ok(self.present(record))
     }
 
+    /// 分页发现服务端已知且能完整恢复的创建目标，不暴露内部 owner/scope。
+    pub(crate) fn targets(
+        &self,
+        filter: TodoManagementTargetListFilter,
+        limit: usize,
+        offset: usize,
+    ) -> Result<TodoManagementTargetListPage, TodoManagementError> {
+        let page = self.store.management_target_candidates_page(
+            &TodoManagementTargetCandidateFilter {
+                platform: filter.platform,
+                account_id: filter.account_id,
+                scope_type: filter.scope_type,
+                user_id: filter.user_id,
+                group_id: filter.group_id,
+            },
+            limit,
+            offset,
+        )?;
+        let items = page
+            .items
+            .into_iter()
+            .filter_map(|owner| {
+                let target = target_from_owner(&owner);
+                target.target_ref.is_some().then_some(target)
+            })
+            .collect();
+        Ok(TodoManagementTargetListPage {
+            items,
+            total_count: page.total_count,
+        })
+    }
+
     pub(crate) fn update(
         &self,
         id: &str,
@@ -192,16 +240,22 @@ impl TodoManagementService {
         if !update.has_field_changes() && update.status.as_ref() == Some(&current.item.status) {
             return Ok(self.present(current));
         }
-        let (draft, final_status) = plan_update(&current, &update)?;
-        let preview = record_from_draft(
-            &current.owner,
-            &current.item.id,
-            &draft,
-            final_status.clone(),
-        );
-        if final_status == TodoStatus::Pending {
-            self.validate_pending_reminder(&preview)?;
+        if let Some(reminder_at) = update
+            .fields
+            .reminder_at
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            // 显式新值始终按请求值校验，即使同一请求还会完成 Todo 或推进周期；
+            // 不能让状态转换掩盖“用户本次提交了过去时间”。
+            let mut reminder_draft = TodoItemDraft::from_item(
+                &current.item,
+                current.item.raw_text.clone().unwrap_or_default(),
+            );
+            reminder_draft.reminder_at = Some(reminder_at.to_owned());
+            self.validate_reminder(&current.owner, &reminder_draft)?;
         }
+        let (draft, final_status) = plan_update(&current, &update)?;
         let updated =
             self.store
                 .update_todo_for_management(&current, draft, final_status, |record| {
@@ -225,15 +279,28 @@ impl TodoManagementService {
 
     fn resolve_target_ref(&self, target_ref: &str) -> Result<TodoOwner, TodoManagementError> {
         validate_target_ref_format(target_ref)?;
-        let candidates = self.store.management_target_candidates()?;
-        let owner = candidates
-            .into_iter()
-            .find(|owner| target_ref_for(owner) == target_ref)
-            .ok_or_else(|| {
-                TodoManagementError::InvalidTarget(
+        let mut offset = 0;
+        let owner = loop {
+            let page = self.store.management_target_candidates_page(
+                &TodoManagementTargetCandidateFilter::default(),
+                TARGET_RESOLUTION_PAGE_SIZE,
+                offset,
+            )?;
+            if let Some(owner) = page
+                .items
+                .iter()
+                .find(|owner| target_ref_for(owner) == target_ref)
+                .cloned()
+            {
+                break owner;
+            }
+            offset = offset.saturating_add(page.limit);
+            if offset >= page.total_count || page.items.is_empty() {
+                return Err(TodoManagementError::InvalidTarget(
                     "target_ref is unknown or no longer references a known conversation".to_owned(),
-                )
-            })?;
+                ));
+            }
+        };
         let target = target_from_owner(&owner);
         if target.target_ref.as_deref() != Some(target_ref) {
             return Err(TodoManagementError::InvalidTarget(
@@ -243,19 +310,16 @@ impl TodoManagementService {
         Ok(owner)
     }
 
-    fn validate_pending_reminder(
+    fn validate_reminder(
         &self,
-        record: &TodoManagementRecord,
+        owner: &TodoOwner,
+        draft: &TodoItemDraft,
     ) -> Result<(), TodoManagementError> {
-        if record.item.reminder_at.is_none() {
+        if draft.reminder_at.is_none() {
             return Ok(());
         }
-        validate_draft_reminder(&TodoItemDraft::from_item(
-            &record.item,
-            record.item.raw_text.clone().unwrap_or_default(),
-        ))
-        .map_err(TodoManagementError::InvalidTarget)?;
-        let target = target_from_owner(&record.owner);
+        validate_draft_reminder(draft).map_err(TodoManagementError::InvalidTarget)?;
+        let target = target_from_owner(owner);
         if target.target_ref.is_none() {
             return Err(TodoManagementError::InvalidTarget(
                 "todo target cannot be restored from its owner/scope".to_owned(),

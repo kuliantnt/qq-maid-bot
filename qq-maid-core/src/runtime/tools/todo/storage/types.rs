@@ -256,6 +256,26 @@ pub(crate) struct TodoManagementPage {
     pub offset: usize,
 }
 
+/// 管理控制台发现可创建 Todo 的真实会话目标时使用的筛选。
+///
+/// 这些字段只参与服务端可信候选查询；HTTP 层不能提交 owner_key / scope_key。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TodoManagementTargetCandidateFilter {
+    pub platform: Option<String>,
+    pub account_id: Option<String>,
+    pub scope_type: Option<TodoManagementScopeType>,
+    pub user_id: Option<String>,
+    pub group_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TodoManagementTargetCandidatePage {
+    pub items: Vec<TodoOwner>,
+    pub total_count: usize,
+    pub limit: usize,
+    pub offset: usize,
+}
+
 /// 根据查询状态和参数决定时间范围筛哪个业务字段。
 pub fn resolve_todo_list_date_filter(
     status: Option<TodoStatus>,

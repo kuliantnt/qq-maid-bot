@@ -1,5 +1,8 @@
 //! Todo 管理 API 集成测试。
 
+mod reminders;
+mod targets;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -19,7 +22,7 @@ use tower::ServiceExt;
 use crate::{
     error::LlmError,
     http::routes::{OpsHttpConfig, OpsHttpState, build_router},
-    identity::conversation_scope_key,
+    identity::{conversation_scope_key, interaction_scope_key},
     management::{AdminAuth, SESSION_COOKIE_NAME},
     runtime::{
         session::{SessionMeta, SessionStore},
@@ -84,6 +87,7 @@ struct TestApi {
     other_cookie: String,
     other_csrf: String,
     target_ref: String,
+    database: SqliteDatabase,
     todo_store: TodoStore,
     notification_store: NotificationOutboxStore,
 }
@@ -178,6 +182,7 @@ impl TestApi {
             other_cookie: other_issued.cookie_value,
             other_csrf: other_issued.session.csrf_token,
             target_ref,
+            database,
             todo_store,
             notification_store,
         }
@@ -288,6 +293,47 @@ impl TestApi {
             .target
             .target_ref
             .unwrap()
+    }
+
+    fn seed_session_target(
+        &self,
+        platform: &str,
+        account_id: &str,
+        scope_type: &str,
+        target_id: &str,
+        user_id: &str,
+    ) -> String {
+        let conversation =
+            conversation_scope_key(platform, Some(account_id), scope_type, target_id);
+        let session_scope = if scope_type == "group" {
+            interaction_scope_key(Some(user_id), &conversation)
+        } else {
+            conversation.clone()
+        };
+        SessionStore::new(self.database.clone())
+            .get_or_create_active(&SessionMeta::new_with_account(
+                session_scope,
+                Some(user_id.to_owned()),
+                (scope_type == "group").then(|| target_id.to_owned()),
+                None,
+                None,
+                platform,
+                Some(account_id.to_owned()),
+            ))
+            .unwrap();
+        conversation
+    }
+
+    fn replace_reminder_at(&self, id: &str, reminder_at: &str) {
+        let id = id.parse::<i64>().unwrap();
+        self.database
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE todos SET reminder_at = ?2 WHERE id = ?1",
+                rusqlite::params![id, reminder_at],
+            )
+            .unwrap();
     }
 }
 
@@ -706,175 +752,6 @@ async fn global_management_is_shared_by_admins_and_preserves_chat_owner_scope() 
 }
 
 #[tokio::test]
-async fn create_uses_verified_private_or_group_target_and_rejects_unsupported_reminder() {
-    let api = TestApi::new();
-    let (private_owner, private_anchor) = api.seed_todo(
-        "qq_official",
-        "app-2",
-        "private",
-        "private-2",
-        "private-2",
-        "私聊锚点",
-    );
-    let private_ref = api.target_ref_for_item(&private_anchor.id);
-    let (status, private_created) = api
-        .post(
-            "/api/v1/console/todo/create",
-            json!({"target_ref": private_ref, "title": "API 私聊待办"}),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{private_created}");
-    assert_eq!(private_created["data"]["target"]["scope_type"], "private");
-    assert!(
-        api.todo_store
-            .list_all(&private_owner)
-            .unwrap()
-            .iter()
-            .any(|item| item.title == "API 私聊待办")
-    );
-
-    let (group_owner, group_anchor) = api.seed_todo(
-        "onebot",
-        "bot-2",
-        "group",
-        "group-2",
-        "member-2",
-        "群聊锚点",
-    );
-    let group_ref = api.target_ref_for_item(&group_anchor.id);
-    let (status, group_created) = api
-        .post(
-            "/api/v1/console/todo/create",
-            json!({
-                "target_ref": group_ref,
-                "title": "API 群聊提醒",
-                "reminder_at": "2099-08-01T09:00:00+08:00"
-            }),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{group_created}");
-    assert_eq!(group_created["data"]["target"]["platform"], "onebot");
-    assert!(
-        api.todo_store
-            .list_all(&group_owner)
-            .unwrap()
-            .iter()
-            .any(|item| item.title == "API 群聊提醒")
-    );
-    let tasks = api.notification_store.list_all_for_test().unwrap();
-    let group_task = tasks
-        .iter()
-        .find(|task| task.source_id == group_created["data"]["id"].as_str().unwrap())
-        .unwrap();
-    assert_eq!(group_task.target.platform, "onebot11");
-    assert_eq!(group_task.target.target_id, "group-2");
-
-    let (_, wechat_anchor) = api.seed_todo(
-        "wechat_service",
-        "wx-2",
-        "private",
-        "wx-user-2",
-        "wx-user-2",
-        "微信锚点",
-    );
-    let wechat_ref = api.target_ref_for_item(&wechat_anchor.id);
-    let (status, rejected) = api
-        .post(
-            "/api/v1/console/todo/create",
-            json!({
-                "target_ref": wechat_ref,
-                "title": "不可投递提醒",
-                "reminder_at": "2099-08-01T10:00:00+08:00"
-            }),
-        )
-        .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(rejected["error"]["code"], "validation_error");
-    let (_, absent) = api
-        .post(
-            "/api/v1/console/todo/list",
-            json!({"keyword": "不可投递提醒"}),
-        )
-        .await;
-    assert_eq!(absent["data"]["total"], 0);
-}
-
-#[tokio::test]
-async fn reminder_update_replaces_outbox_and_delete_cancels_it() {
-    let api = TestApi::new();
-    let (_, item) = api.seed_todo(
-        "qq_official",
-        "app-3",
-        "private",
-        "user-3",
-        "user-3",
-        "提醒待办",
-    );
-    let (status, first) = api
-        .post(
-            "/api/v1/console/todo/update",
-            json!({"id": item.id, "reminder_at": "2099-08-01T09:00:00+08:00"}),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{first}");
-    let (status, second) = api
-        .post(
-            "/api/v1/console/todo/update",
-            json!({"id": item.id, "reminder_at": "2099-08-01T10:00:00+08:00"}),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{second}");
-    let tasks = api.notification_store.list_all_for_test().unwrap();
-    assert_eq!(tasks.len(), 2);
-    assert_eq!(tasks[0].status, NotificationStatus::Cancelled);
-    assert_eq!(tasks[1].status, NotificationStatus::Pending);
-    assert_eq!(tasks[1].scheduled_at, "2099-08-01T10:00:00+08:00");
-
-    let (status, _) = api
-        .post("/api/v1/console/todo/delete", json!({"id": item.id}))
-        .await;
-    assert_eq!(status, StatusCode::OK);
-    let tasks = api.notification_store.list_all_for_test().unwrap();
-    assert_eq!(tasks[1].status, NotificationStatus::Cancelled);
-}
-
-#[tokio::test]
-async fn recurring_completion_advances_atomically_and_reschedules_reminder() {
-    let api = TestApi::new();
-    let scope = conversation_scope_key(
-        "qq_official",
-        Some("app-recurring"),
-        "private",
-        "recurring-user",
-    );
-    let owner = TodoStore::owner(Some("recurring-user"), &scope);
-    let mut draft = todo_draft("周期提醒");
-    draft.due_date = Some("2099-08-01".to_owned());
-    draft.reminder_at = Some("2099-08-01T09:00:00+08:00".to_owned());
-    draft.recurrence_kind = TodoRecurrenceKind::Daily;
-    draft.recurrence_interval_days = 1;
-    let item = api.todo_store.create(&owner, draft).unwrap();
-
-    let (status, completed) = api
-        .post(
-            "/api/v1/console/todo/update",
-            json!({"id": item.id, "title": "周期提醒已更新", "status": "completed"}),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{completed}");
-    assert_eq!(completed["data"]["status"], "pending");
-    assert_eq!(completed["data"]["title"], "周期提醒已更新");
-    assert_ne!(completed["data"]["reminder_at"], item.reminder_at.unwrap());
-    let stored = api.todo_store.get_by_id(&owner, &item.id).unwrap().unwrap();
-    assert_eq!(
-        stored.status,
-        crate::runtime::tools::todo::TodoStatus::Pending
-    );
-    assert_eq!(stored.title, "周期提醒已更新");
-    assert_eq!(api.notification_store.list_all_for_test().unwrap().len(), 1);
-}
-
-#[tokio::test]
 async fn invalid_target_atomic_restore_patch_and_invalid_ids_leave_data_unchanged() {
     let api = TestApi::new();
     let created = api.create("原子恢复", json!({})).await;
@@ -929,6 +806,14 @@ async fn invalid_target_atomic_restore_patch_and_invalid_ids_leave_data_unchange
         degraded["data"]["items"][0]["target"]["diagnostic"],
         "unrecognized_scope"
     );
+    let (status, undiscoverable) = api
+        .post(
+            "/api/v1/console/todo/targets",
+            json!({"user_id": "legacy-user"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{undiscoverable}");
+    assert_eq!(undiscoverable["data"]["total"], 0);
 
     for id in [
         json!("0"),

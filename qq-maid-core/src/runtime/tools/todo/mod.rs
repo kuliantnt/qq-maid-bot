@@ -66,7 +66,8 @@ pub(crate) use get::GetTodoTool;
 pub(crate) use list::ListTodoTool;
 pub(crate) use management::{
     TodoManagementError, TodoManagementItem, TodoManagementListFilter, TodoManagementService,
-    TodoManagementUpdate, management_group_scope_type, management_private_scope_type,
+    TodoManagementTarget, TodoManagementTargetListFilter, TodoManagementUpdate,
+    management_group_scope_type, management_private_scope_type,
 };
 pub(crate) use merge::MergeTodoTool;
 pub(crate) use pending::{

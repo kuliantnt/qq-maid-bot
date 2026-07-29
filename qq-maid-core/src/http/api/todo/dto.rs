@@ -6,9 +6,9 @@ use serde_json::Value;
 
 use crate::runtime::tools::todo::{
     TodoEditPatch, TodoItemDraft, TodoListDateFilter, TodoManagementItem, TodoManagementListFilter,
-    TodoQuery, TodoQueryStatus, TodoQueryTimeFilter, TodoRecurrenceKind, TodoRecurrenceUnit,
-    TodoStatus, TodoTimePrecision, management_group_scope_type, management_private_scope_type,
-    resolve_todo_list_date_filter,
+    TodoManagementTarget, TodoManagementTargetListFilter, TodoQuery, TodoQueryStatus,
+    TodoQueryTimeFilter, TodoRecurrenceKind, TodoRecurrenceUnit, TodoStatus, TodoTimePrecision,
+    management_group_scope_type, management_private_scope_type, resolve_todo_list_date_filter,
 };
 
 use super::super::common::{ApiError, PaginationRequest, ValidatedPagination};
@@ -193,6 +193,38 @@ impl ListTodoRequest {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ListTodoTargetsRequest {
+    /// 目标发现与资源列表共用顶层分页协议和上限。
+    #[serde(flatten)]
+    pub pagination: PaginationRequest,
+    pub platform: Option<String>,
+    pub account_id: Option<String>,
+    pub scope_type: Option<TodoTargetScopeType>,
+    pub user_id: Option<String>,
+    pub group_id: Option<String>,
+}
+
+impl ListTodoTargetsRequest {
+    pub(super) fn pagination(&self) -> Result<ValidatedPagination, ApiError> {
+        self.pagination.clone().validate()
+    }
+
+    pub(super) fn into_filter(self) -> Result<TodoManagementTargetListFilter, ApiError> {
+        Ok(TodoManagementTargetListFilter {
+            platform: optional_segment(self.platform, "platform", 64)?,
+            account_id: optional_segment(self.account_id, "account_id", 128)?,
+            scope_type: self.scope_type.map(|scope_type| match scope_type {
+                TodoTargetScopeType::Private => management_private_scope_type(),
+                TodoTargetScopeType::Group => management_group_scope_type(),
+            }),
+            user_id: optional_text(self.user_id, "user_id", 256)?,
+            group_id: optional_text(self.group_id, "group_id", 256)?,
+        })
+    }
+}
+
 fn time_filter_from_date(filter: TodoListDateFilter) -> TodoQueryTimeFilter {
     TodoQueryTimeFilter::DateRange {
         start: filter.start,
@@ -366,6 +398,35 @@ pub(super) struct TodoTargetDto {
     reminder_supported: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     diagnostic: Option<String>,
+}
+
+/// 创建目标发现只返回客户端选择目标所需的公开字段；内部 key 和诊断信息不出域。
+#[derive(Debug, Serialize)]
+pub(super) struct TodoTargetDiscoveryDto {
+    target_ref: String,
+    platform: String,
+    account_id: Option<String>,
+    scope_type: String,
+    user_id: Option<String>,
+    group_id: Option<String>,
+    reminder_supported: bool,
+}
+
+impl TodoTargetDiscoveryDto {
+    pub(super) fn try_from_target(value: TodoManagementTarget) -> Result<Self, ApiError> {
+        let target_ref = value.target_ref.ok_or_else(|| {
+            ApiError::internal("target candidate cannot be restored to a public reference")
+        })?;
+        Ok(Self {
+            target_ref,
+            platform: value.platform,
+            account_id: value.account_id,
+            scope_type: value.scope_type,
+            user_id: value.user_id,
+            group_id: value.group_id,
+            reminder_supported: value.reminder_supported,
+        })
+    }
 }
 
 impl From<TodoManagementItem> for TodoDto {

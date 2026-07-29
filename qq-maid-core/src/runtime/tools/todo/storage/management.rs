@@ -3,12 +3,9 @@
 //! 普通聊天仍只能调用 owner-scoped Repository 方法；本模块只向 Todo 管理 Service
 //! 暴露全局读取，以及 Todo 与 Notification Outbox 的同库事务写入。
 
-use std::collections::BTreeMap;
-
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value as SqlValue};
 
 use crate::{
-    identity::{group_raw_target_from_scope_key, private_raw_target_from_scope_key},
     runtime::tools::todo::reminder::TODO_REMINDER_SOURCE,
     storage::{
         notification::{NotificationUpsert, cancel_by_source_on_connection, upsert_on_connection},
@@ -17,7 +14,9 @@ use crate::{
 };
 
 use super::{
-    TodoError, TodoItemDraft, TodoManagementRecord, TodoOwner, TodoStatus, TodoStore,
+    TodoError, TodoItemDraft, TodoManagementRecord, TodoManagementScopeType,
+    TodoManagementTargetCandidateFilter, TodoManagementTargetCandidatePage, TodoOwner, TodoStatus,
+    TodoStore,
     id::{clean_todo_id, parse_todo_db_id},
     normalize::normalize_draft,
     query::todo_item_from_row,
@@ -28,6 +27,110 @@ const MANAGEMENT_SELECT: &str = "id, user_id, scope_key, title, detail, raw_text
     due_date, due_at, reminder_at, time_precision, recurrence_kind,
     recurrence_interval_days, recurrence_interval, recurrence_unit, status,
     created_at, updated_at, completed_at, owner_key";
+
+const MANAGEMENT_TARGET_QUERY_MAX_LIMIT: usize = 100;
+
+/// 先把 Todo 事实记录和可完整恢复的 Session 规整成相同的真实 owner/scope 行。
+/// Session 的群聊候选只接受 actor interaction session；共享 conversation session
+/// 不能可靠代表具体成员，不能据此为某个成员创建 Todo。
+const MANAGEMENT_TARGET_CANDIDATES_CTE: &str = r#"
+WITH session_group_candidates(session_scope, user_id, group_id) AS (
+    SELECT TRIM(scope_key), TRIM(user_id), TRIM(group_id)
+    FROM sessions
+    WHERE NULLIF(TRIM(user_id), '') IS NOT NULL
+      AND NULLIF(TRIM(group_id), '') IS NOT NULL
+      AND SUBSTR(
+            TRIM(scope_key),
+            -LENGTH(':actor:' || TRIM(user_id))
+          ) = ':actor:' || TRIM(user_id)
+),
+raw_candidates(owner_key, user_id, scope_key) AS (
+    SELECT owner_key, NULLIF(TRIM(user_id), ''), TRIM(scope_key)
+    FROM todos
+
+    UNION
+
+    SELECT
+        CASE
+            WHEN TRIM(scope_key) GLOB 'platform:?*:account:?*:private:?*'
+                THEN TRIM(scope_key) || ':actor:' || TRIM(user_id)
+            ELSE TRIM(user_id)
+        END,
+        TRIM(user_id),
+        TRIM(scope_key)
+    FROM sessions
+    WHERE NULLIF(TRIM(user_id), '') IS NOT NULL
+      AND (
+            (
+                TRIM(scope_key) GLOB 'platform:?*:account:?*:private:?*'
+                AND SUBSTR(
+                        TRIM(scope_key),
+                        -(LENGTH(TRIM(user_id)) + LENGTH(':private:'))
+                    ) = ':private:' || TRIM(user_id)
+            )
+            OR TRIM(scope_key) = 'private:' || TRIM(user_id)
+          )
+
+    UNION
+
+    SELECT
+        session_scope,
+        user_id,
+        SUBSTR(
+            session_scope,
+            1,
+            LENGTH(session_scope) - LENGTH(':actor:' || user_id)
+        )
+    FROM session_group_candidates
+    WHERE (
+            SUBSTR(
+                session_scope,
+                1,
+                LENGTH(session_scope) - LENGTH(':actor:' || user_id)
+            ) = 'group:' || group_id
+          )
+       OR (
+            SUBSTR(
+                session_scope,
+                1,
+                LENGTH(session_scope) - LENGTH(':actor:' || user_id)
+            ) GLOB 'platform:?*:account:?*:group:?*'
+            AND SUBSTR(
+                    SUBSTR(
+                        session_scope,
+                        1,
+                        LENGTH(session_scope) - LENGTH(':actor:' || user_id)
+                    ),
+                    -(LENGTH(group_id) + LENGTH(':group:'))
+                ) = ':group:' || group_id
+          )
+),
+candidates(owner_key, user_id, scope_key) AS (
+    SELECT DISTINCT owner_key, user_id, scope_key
+    FROM raw_candidates
+    WHERE NULLIF(TRIM(owner_key), '') IS NOT NULL
+      AND NULLIF(TRIM(scope_key), '') IS NOT NULL
+      AND owner_key = CASE
+            WHEN user_id IS NULL THEN scope_key
+            WHEN scope_key GLOB 'platform:?*:account:?*:*:?*'
+                THEN scope_key || ':actor:' || user_id
+            ELSE user_id
+          END
+      AND (
+            (
+                scope_key GLOB 'platform:?*:account:?*:private:?*'
+                AND user_id IS NOT NULL
+                AND SUBSTR(
+                        scope_key,
+                        -(LENGTH(user_id) + LENGTH(':private:'))
+                    ) = ':private:' || user_id
+            )
+            OR scope_key = 'private:' || user_id
+            OR scope_key GLOB 'platform:?*:account:?*:group:?*'
+            OR scope_key GLOB 'group:?*'
+          )
+)
+"#;
 
 impl TodoStore {
     /// 按内部 ID 全局读取 Todo，仅供已通过部署管理员鉴权的领域 Service。
@@ -42,48 +145,60 @@ impl TodoStore {
         get_management_record_unlocked(&conn, id)
     }
 
-    /// 返回服务端已经见过的真实 Todo 目标。Todo 记录是事实来源；Session 只补充
-    /// 已发生过聊天但尚无 Todo 的私聊或群成员交互目标。
-    pub(crate) fn management_target_candidates(&self) -> Result<Vec<TodoOwner>, TodoError> {
+    /// 分页返回服务端已经见过的真实 Todo 目标。Todo 记录是事实来源；Session
+    /// 只补充已发生过聊天但尚无 Todo 的私聊或群成员交互目标。
+    pub(crate) fn management_target_candidates_page(
+        &self,
+        filter: &TodoManagementTargetCandidateFilter,
+        limit: usize,
+        offset: usize,
+    ) -> Result<TodoManagementTargetCandidatePage, TodoError> {
+        if limit == 0 {
+            return Err(TodoError::bad_request(
+                "target page size must be greater than 0",
+            ));
+        }
         let conn = self.connection()?;
-        let mut targets = BTreeMap::<(String, Option<String>, String), TodoOwner>::new();
-        {
-            let mut stmt = conn
-                .prepare("SELECT DISTINCT owner_key, user_id, scope_key FROM todos")
-                .map_err(TodoError::from_sql)?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok(TodoOwner {
-                        key: row.get(0)?,
-                        user_id: row.get(1)?,
-                        scope_key: row.get(2)?,
-                    })
-                })
-                .map_err(TodoError::from_sql)?;
-            for target in rows {
-                insert_target(&mut targets, target.map_err(TodoError::from_sql)?);
-            }
-        }
-
-        let mut stmt = conn
-            .prepare("SELECT DISTINCT scope_key, user_id, group_id FROM sessions")
-            .map_err(TodoError::from_sql)?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
+        let (where_sql, params) = management_target_where(filter);
+        let count_sql = format!(
+            "{MANAGEMENT_TARGET_CANDIDATES_CTE}\nSELECT COUNT(*) FROM candidates WHERE {where_sql}"
+        );
+        let total_count = conn
+            .query_row(&count_sql, params_from_iter(params.iter()), |row| {
+                row.get::<_, i64>(0)
             })
+            .map_err(TodoError::from_sql)?
+            .try_into()
+            .map_err(|_| TodoError::data("target candidate count overflow"))?;
+
+        let limit = limit.min(MANAGEMENT_TARGET_QUERY_MAX_LIMIT);
+        let page_sql = format!(
+            "{MANAGEMENT_TARGET_CANDIDATES_CTE}
+             SELECT owner_key, user_id, scope_key
+             FROM candidates
+             WHERE {where_sql}
+             ORDER BY scope_key ASC, user_id ASC, owner_key ASC
+             LIMIT {limit} OFFSET {offset}"
+        );
+        let mut stmt = conn.prepare(&page_sql).map_err(TodoError::from_sql)?;
+        let items = stmt
+            .query_map(params_from_iter(params.iter()), |row| {
+                Ok(TodoOwner {
+                    key: row.get(0)?,
+                    user_id: row.get(1)?,
+                    scope_key: row.get(2)?,
+                })
+            })
+            .map_err(TodoError::from_sql)?
+            .collect::<Result<Vec<_>, _>>()
             .map_err(TodoError::from_sql)?;
-        for row in rows {
-            let (session_scope, user_id, group_id) = row.map_err(TodoError::from_sql)?;
-            if let Some(target) = target_from_session(&session_scope, user_id, group_id) {
-                insert_target(&mut targets, target);
-            }
-        }
-        Ok(targets.into_values().collect())
+
+        Ok(TodoManagementTargetCandidatePage {
+            items,
+            total_count,
+            limit,
+            offset,
+        })
     }
 
     /// 管理创建与 reminder Outbox 在同一个事务内提交。
@@ -243,36 +358,56 @@ fn get_management_record_unlocked(
     .map_err(TodoError::from_sql)
 }
 
-fn target_from_session(
-    session_scope: &str,
-    user_id: Option<String>,
-    group_id: Option<String>,
-) -> Option<TodoOwner> {
-    let user_id = user_id.filter(|value| !value.trim().is_empty())?;
-    if private_raw_target_from_scope_key(session_scope).is_some() {
-        return Some(TodoStore::owner(Some(&user_id), session_scope));
+fn management_target_where(
+    filter: &TodoManagementTargetCandidateFilter,
+) -> (String, Vec<SqlValue>) {
+    let mut clauses = vec!["1 = 1".to_owned()];
+    let mut params = Vec::new();
+    if let Some(platform) = &filter.platform {
+        let stable_prefix = format!("platform:{}:account:%", escape_like(platform));
+        if platform == "qq_official" {
+            clauses.push(
+                "(scope_key LIKE ? ESCAPE '\\' OR scope_key LIKE 'private:%' OR scope_key LIKE 'group:%')"
+                    .to_owned(),
+            );
+        } else {
+            clauses.push("scope_key LIKE ? ESCAPE '\\'".to_owned());
+        }
+        params.push(SqlValue::Text(stable_prefix));
     }
-    let actor_suffix = format!(":actor:{user_id}");
-    let conversation_scope = session_scope.strip_suffix(&actor_suffix)?;
-    let raw_group = group_raw_target_from_scope_key(conversation_scope)?;
-    if group_id.as_deref().map(str::trim) != Some(raw_group.as_str()) {
-        return None;
+    if let Some(account_id) = &filter.account_id {
+        clauses.push("scope_key LIKE ? ESCAPE '\\'".to_owned());
+        params.push(SqlValue::Text(format!(
+            "platform:%:account:{}:%",
+            escape_like(account_id)
+        )));
     }
-    let owner = TodoStore::owner(Some(&user_id), conversation_scope);
-    (owner.key == session_scope).then_some(owner)
+    if let Some(scope_type) = filter.scope_type {
+        let (stable_type, legacy_type) = match scope_type {
+            TodoManagementScopeType::Private => ("private", "private:%"),
+            TodoManagementScopeType::Group => ("group", "group:%"),
+        };
+        clauses.push(format!(
+            "(scope_key LIKE 'platform:%:account:%:{stable_type}:%' OR scope_key LIKE '{legacy_type}')"
+        ));
+    }
+    if let Some(user_id) = &filter.user_id {
+        clauses.push("user_id = ?".to_owned());
+        params.push(SqlValue::Text(user_id.clone()));
+    }
+    if let Some(group_id) = &filter.group_id {
+        clauses.push("(scope_key = ? OR scope_key LIKE ? ESCAPE '\\')".to_owned());
+        params.push(SqlValue::Text(format!("group:{group_id}")));
+        params.push(SqlValue::Text(format!("%:group:{}", escape_like(group_id))));
+    }
+    (clauses.join(" AND "), params)
 }
 
-fn insert_target(
-    targets: &mut BTreeMap<(String, Option<String>, String), TodoOwner>,
-    target: TodoOwner,
-) {
-    targets
-        .entry((
-            target.key.clone(),
-            target.user_id.clone(),
-            target.scope_key.clone(),
-        ))
-        .or_insert(target);
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 fn notification_error(error: crate::storage::notification::NotificationError) -> TodoError {

@@ -11,6 +11,7 @@ pub(crate) fn router() -> Router<OpsHttpState> {
     Router::new()
         .route("/api/v1/console/todo/create", post(handlers::create))
         .route("/api/v1/console/todo/list", post(handlers::list))
+        .route("/api/v1/console/todo/targets", post(handlers::targets))
         .route("/api/v1/console/todo/get", post(handlers::get))
         .route("/api/v1/console/todo/update", post(handlers::update))
         .route("/api/v1/console/todo/delete", post(handlers::delete))
