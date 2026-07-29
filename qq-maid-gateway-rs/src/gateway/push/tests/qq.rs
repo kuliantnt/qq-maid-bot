@@ -1,5 +1,179 @@
 use super::*;
 
+fn qq_content(
+    target_type: PushTargetType,
+    mentions: &[PushMention],
+    text: &str,
+    fallback_text: &str,
+    message_type: &str,
+) -> PreparedQqBot2Content {
+    prepare_qq_bot2_content(target_type, mentions, text, fallback_text, message_type)
+}
+
+#[test]
+fn qq_group_text_payload_contains_single_real_member_mention() {
+    let mentions = normalize_push_mentions(vec![PushMention::new("member-openid-1", None)]);
+    let prepared = qq_content(
+        PushTargetType::Group,
+        &mentions,
+        "待办提醒：提交周报",
+        "待办提醒：提交周报",
+        "text",
+    );
+    let payload = build_group_text_payload(&prepared.content, None, 1);
+
+    assert_eq!(payload["content"], "<@member-openid-1>\n待办提醒：提交周报");
+    assert_eq!(payload["msg_type"], 0);
+    assert_eq!(prepared.ref_index_content, "待办提醒：提交周报");
+}
+
+#[test]
+fn qq_group_mentions_ignore_empty_ids_and_stably_deduplicate_multiple_members() {
+    let mentions = normalize_push_mentions(vec![
+        PushMention::new(" member-openid-1 ", None),
+        PushMention::new("", Some("空 ID".to_owned())),
+        PushMention::new("member-openid-2", None),
+        PushMention::new("member-openid-1", Some("重复".to_owned())),
+    ]);
+    let prepared = qq_content(
+        PushTargetType::Group,
+        &mentions,
+        "完整提醒正文",
+        "完整提醒正文",
+        "text",
+    );
+
+    assert_eq!(
+        prepared.content,
+        "<@member-openid-1> <@member-openid-2>\n完整提醒正文"
+    );
+}
+
+#[tokio::test]
+async fn qq_group_markdown_carries_real_member_mention() {
+    let sender = MockPushSender::default();
+    let mentions = vec![PushMention::new("member-openid-1", None)];
+    let prepared = qq_content(
+        PushTargetType::Group,
+        &mentions,
+        "## 待办提醒\n\n提交周报",
+        "待办提醒\n提交周报",
+        "markdown",
+    );
+
+    let outcome = send_group_push(&sender, "group-openid", "markdown", &prepared)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        sender.calls(),
+        vec!["group-markdown:group-openid:<@member-openid-1>\n## 待办提醒\n\n提交周报"]
+    );
+    assert_eq!(outcome.delivered_text, "## 待办提醒\n\n提交周报");
+}
+
+#[tokio::test]
+async fn qq_group_markdown_fallback_keeps_real_mention_and_ref_index_hides_member_id() {
+    let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
+    let ref_index = crate::gateway::ref_index::ref_index();
+    let runtime = GatewayPushRuntime {
+        api: panic_api_client(),
+        qq_official_account_id: "bot-account".to_owned(),
+        runtime: GatewayRuntimeStatus::default(),
+        group_outbound_cache: cache,
+        ref_index: ref_index.clone(),
+    };
+    let sender = MockPushSender {
+        fail_markdown: true,
+        message_id: Some("qq-fallback-message".to_owned()),
+        ref_index_id: Some("REFIDX_mention_fallback".to_owned()),
+        ..MockPushSender::default()
+    };
+    let intent = PushIntent {
+        target: PushTarget::new(
+            QQ_OFFICIAL_PLATFORM,
+            Some("bot-account".to_owned()),
+            PushTargetType::Group,
+            "group-openid",
+        ),
+        mentions: vec![PushMention::new("sensitive-member-openid", None)],
+        text: "## 待办提醒".to_owned(),
+        fallback_text: Some("待办提醒".to_owned()),
+        message_type: "markdown".to_owned(),
+        visible_entity_snapshot: None,
+    };
+    validate_qq_official_target(&intent, "bot-account").unwrap();
+    let prepared = qq_content(
+        intent.target.target_type,
+        &intent.mentions,
+        &intent.text,
+        intent.fallback_text.as_deref().unwrap(),
+        &intent.message_type,
+    );
+
+    let outcome = send_group_push(
+        &sender,
+        &intent.target.target_id,
+        &intent.message_type,
+        &prepared,
+    )
+    .await
+    .unwrap();
+    runtime.record_successful_push(&intent, &intent.target.target_id, outcome);
+
+    assert_eq!(
+        sender.calls(),
+        vec![
+            "group-markdown:group-openid:<@sensitive-member-openid>\n## 待办提醒",
+            "group-text:group-openid:<@sensitive-member-openid>\n待办提醒",
+        ]
+    );
+    assert!(
+        sender
+            .calls()
+            .iter()
+            .all(|call| !call.contains("bot-account>"))
+    );
+    let quoted = quoted_group_context_for_account(
+        &ref_index,
+        "bot-account",
+        "group-openid",
+        "REFIDX_mention_fallback",
+    );
+    assert_eq!(quoted.text_summary.as_deref(), Some("待办提醒"));
+    assert!(
+        !quoted
+            .text_summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("sensitive-member-openid")
+    );
+}
+
+#[test]
+fn qq_private_push_ignores_member_mentions_and_no_mentions_remain_unchanged() {
+    let mention = PushMention::new("member-openid-1", None);
+    let private = qq_content(
+        PushTargetType::Private,
+        std::slice::from_ref(&mention),
+        "私聊正文",
+        "私聊降级正文",
+        "markdown",
+    );
+    let group_without_mentions = qq_content(
+        PushTargetType::Group,
+        &[],
+        "原 Markdown",
+        "原文本",
+        "markdown",
+    );
+
+    assert_eq!(private.content, "私聊正文");
+    assert_eq!(private.fallback_content, "私聊降级正文");
+    assert_eq!(group_without_mentions.content, "原 Markdown");
+    assert_eq!(group_without_mentions.fallback_content, "原文本");
+}
+
 #[tokio::test]
 async fn private_markdown_push_falls_back_to_text() {
     let sender = MockPushSender {
@@ -25,7 +199,8 @@ async fn group_markdown_push_falls_back_to_text() {
         ..MockPushSender::default()
     };
 
-    let outcome = send_group_push(&sender, "g1", "markdown", "# title", "title")
+    let prepared = qq_content(PushTargetType::Group, &[], "# title", "title", "markdown");
+    let outcome = send_group_push(&sender, "g1", "markdown", &prepared)
         .await
         .unwrap();
 
@@ -51,7 +226,8 @@ async fn push_runtime_records_group_message_id_in_bot_outbound_cache() {
         ..MockPushSender::default()
     };
 
-    let result = send_group_push(&sender, "g1", "text", "hello", "hello")
+    let prepared = qq_content(PushTargetType::Group, &[], "hello", "hello", "text");
+    let result = send_group_push(&sender, "g1", "text", &prepared)
         .await
         .unwrap();
     // `GatewayPushRuntime::push` 的 QQ 发送成功路径会把群消息 ID 写入缓存；
@@ -138,15 +314,16 @@ async fn group_markdown_push_success_ref_index_uses_delivered_markdown_text() {
         visible_entity_snapshot: None,
     };
 
-    let outcome = send_group_push(
-        &sender,
-        "g1",
-        "markdown",
+    let prepared = qq_content(
+        PushTargetType::Group,
+        &[],
         "# Markdown 标题",
         "Markdown 标题",
-    )
-    .await
-    .unwrap();
+        "markdown",
+    );
+    let outcome = send_group_push(&sender, "g1", "markdown", &prepared)
+        .await
+        .unwrap();
     let push_result = runtime.record_successful_push(&intent, "g1", outcome);
 
     assert_eq!(sender.calls(), vec!["group-markdown:g1:# Markdown 标题"]);
@@ -182,7 +359,14 @@ async fn group_markdown_push_fallback_ref_index_uses_fallback_text() {
         visible_entity_snapshot: None,
     };
 
-    let outcome = send_group_push(&sender, "g1", "markdown", "# 失败的 Markdown", "降级文本")
+    let prepared = qq_content(
+        PushTargetType::Group,
+        &[],
+        "# 失败的 Markdown",
+        "降级文本",
+        "markdown",
+    );
+    let outcome = send_group_push(&sender, "g1", "markdown", &prepared)
         .await
         .unwrap();
     let push_result = runtime.record_successful_push(&intent, "g1", outcome);

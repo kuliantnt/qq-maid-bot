@@ -19,8 +19,8 @@ use tokio::{sync::Notify, time::Instant};
 use tracing::{info, warn};
 
 use mention::{
-    mention_display_names, partition_onebot_mentions, prepare_qq_bot2_content,
-    prepend_mention_notice,
+    PreparedQqBot2Content, mention_display_names, partition_onebot_mentions,
+    prepare_qq_bot2_content, prepend_mention_notice,
 };
 
 use crate::{
@@ -406,7 +406,7 @@ impl GatewayPushRuntime {
             .filter(|value| !value.is_empty())
             .unwrap_or(text);
         let mentions = normalize_push_mentions(intent.mentions.clone());
-        let (text, fallback_text) = prepare_qq_bot2_content(
+        let prepared = prepare_qq_bot2_content(
             intent.target.target_type,
             &mentions,
             text,
@@ -416,10 +416,17 @@ impl GatewayPushRuntime {
         let message_type = intent.message_type.trim();
         let result = match intent.target.target_type {
             PushTargetType::Private => {
-                send_private_push(&self.api, target_id, message_type, &text, &fallback_text).await
+                send_private_push(
+                    &self.api,
+                    target_id,
+                    message_type,
+                    &prepared.content,
+                    &prepared.fallback_content,
+                )
+                .await
             }
             PushTargetType::Group => {
-                send_group_push(&self.api, target_id, message_type, &text, &fallback_text).await
+                send_group_push(&self.api, target_id, message_type, &prepared).await
             }
         };
         match &result {
@@ -582,16 +589,15 @@ async fn send_group_push<S: PushQqSender + ?Sized>(
     sender: &S,
     target_id: &str,
     message_type: &str,
-    text: &str,
-    fallback_text: &str,
+    prepared: &PreparedQqBot2Content,
 ) -> Result<PushSendOutcome, crate::api::ApiError> {
     match message_type {
         "markdown" => {
-            let markdown = MarkdownPayload::new(text.to_owned());
+            let markdown = MarkdownPayload::new(prepared.content.clone());
             match sender.send_group_markdown(target_id, &markdown).await {
                 Ok(ids) => Ok(PushSendOutcome {
                     ids,
-                    delivered_text: text.to_owned(),
+                    delivered_text: prepared.ref_index_content.clone(),
                 }),
                 Err(err) => {
                     warn!(
@@ -600,24 +606,24 @@ async fn send_group_push<S: PushQqSender + ?Sized>(
                         "group markdown push failed; falling back to text"
                     );
                     sender
-                        .send_group_text(target_id, fallback_text)
+                        .send_group_text(target_id, &prepared.fallback_content)
                         .await
                         .map(|ids| PushSendOutcome {
                             ids,
-                            delivered_text: fallback_text.to_owned(),
+                            delivered_text: prepared.fallback_ref_index_content.clone(),
                         })
                 }
             }
         }
         "text" | "" => {
             // QQ 群 openid 主动消息使用 /v2/groups/{group_openid}/messages。
-            let _shape = build_group_text_payload(text, None, 1);
+            let _shape = build_group_text_payload(&prepared.content, None, 1);
             sender
-                .send_group_text(target_id, text)
+                .send_group_text(target_id, &prepared.content)
                 .await
                 .map(|ids| PushSendOutcome {
                     ids,
-                    delivered_text: text.to_owned(),
+                    delivered_text: prepared.ref_index_content.clone(),
                 })
         }
         _ => Err(crate::api::ApiError::Unsupported("message_type")),

@@ -132,27 +132,6 @@ async fn private_push_ignores_group_mentions_and_keeps_body_unchanged() {
     assert_eq!(sender.calls(), vec!["private:1000:私聊正文"]);
 }
 
-#[test]
-fn qq_bot2_mentions_explicitly_degrade_without_exposing_member_ids() {
-    let mentions = vec![
-        PushMention::new("sensitive-openid-1", Some("张三".to_owned())),
-        PushMention::new("sensitive-openid-2", None),
-    ];
-
-    let (markdown, fallback) = prepare_qq_bot2_content(
-        PushTargetType::Group,
-        &mentions,
-        "# 提醒正文",
-        "提醒正文",
-        "markdown",
-    );
-
-    assert_eq!(markdown, "提醒成员：张三\n\n# 提醒正文");
-    assert_eq!(fallback, "提醒成员：张三\n\n提醒正文");
-    assert!(!markdown.contains("sensitive-openid"));
-    assert!(!fallback.contains("sensitive-openid"));
-}
-
 #[tokio::test]
 async fn onebot_push_records_returned_message_id_in_ref_index() {
     let sink = GatewayPushSink::unbound();

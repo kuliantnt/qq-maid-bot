@@ -1,6 +1,31 @@
 use qq_maid_core::runtime::push::{PushMention, PushTargetType, QQ_OFFICIAL_PLATFORM};
 use tracing::warn;
 
+use crate::gateway::platform::qq_official::member_mention;
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct PreparedQqBot2Content {
+    /// 实际提交给 QQ API 的 Markdown 或文本内容。
+    pub content: String,
+    /// Markdown 失败时实际提交给 QQ API 的纯文本内容。
+    pub fallback_content: String,
+    /// QQ 客户端实际可见内容的安全索引表示，不包含成员敏感 ID。
+    pub ref_index_content: String,
+    /// 文本 fallback 对应的安全索引表示，不包含成员敏感 ID。
+    pub fallback_ref_index_content: String,
+}
+
+impl PreparedQqBot2Content {
+    fn unchanged(text: &str, fallback_text: &str) -> Self {
+        Self {
+            content: text.to_owned(),
+            fallback_content: fallback_text.to_owned(),
+            ref_index_content: text.to_owned(),
+            fallback_ref_index_content: fallback_text.to_owned(),
+        }
+    }
+}
+
 pub(super) fn partition_onebot_mentions(
     mentions: &[PushMention],
 ) -> (Vec<String>, Vec<PushMention>) {
@@ -63,10 +88,10 @@ pub(super) fn prepare_qq_bot2_content(
     mentions: &[PushMention],
     text: &str,
     fallback_text: &str,
-    message_type: &str,
-) -> (String, String) {
+    _message_type: &str,
+) -> PreparedQqBot2Content {
     if mentions.is_empty() {
-        return (text.to_owned(), fallback_text.to_owned());
+        return PreparedQqBot2Content::unchanged(text, fallback_text);
     }
     if target_type == PushTargetType::Private {
         warn!(
@@ -74,19 +99,26 @@ pub(super) fn prepare_qq_bot2_content(
             mention_count = mentions.len(),
             "push mentions ignored because private messages do not support group member mention"
         );
-        return (text.to_owned(), fallback_text.to_owned());
+        return PreparedQqBot2Content::unchanged(text, fallback_text);
     }
 
-    // QQ Bot 2.0 当前群消息请求体没有成员 mention 字段，官方列出的可发送类型中也没有
-    // at 消息；因此不能拼接 openid 伪造原生提醒，只在有安全昵称时显式降级展示。
-    warn!(
-        platform = QQ_OFFICIAL_PLATFORM,
-        mention_count = mentions.len(),
-        "push mentions downgraded because QQ Bot 2.0 does not expose outbound member mention"
-    );
-    let names = mention_display_names(mentions);
-    (
-        prepend_mention_notice(text, &names, message_type == "markdown"),
-        prepend_mention_notice(fallback_text, &names, false),
-    )
+    // QQ 官方群消息通过 content/markdown.content 中的 `<@user_id>` 表达原生成员 @；
+    // 请求体没有独立 mentions 字段并不代表平台不支持。这里与被动群回复共用格式。
+    let prefix = mentions
+        .iter()
+        .filter_map(|mention| member_mention(&mention.user_id))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if prefix.is_empty() {
+        return PreparedQqBot2Content::unchanged(text, fallback_text);
+    }
+
+    PreparedQqBot2Content {
+        content: format!("{prefix}\n{text}"),
+        fallback_content: format!("{prefix}\n{fallback_text}"),
+        // QQ 客户端会把协议标记渲染为昵称；Gateway 没有安全昵称时只索引正文，
+        // 避免引用索引持久化或回显原始成员 ID。
+        ref_index_content: text.to_owned(),
+        fallback_ref_index_content: fallback_text.to_owned(),
+    }
 }

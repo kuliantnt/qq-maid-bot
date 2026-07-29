@@ -175,9 +175,18 @@ fn quoted_group_context(
     group_id: &str,
     ref_id: &str,
 ) -> qq_maid_common::input_part::QuotedMessageContext {
+    quoted_group_context_for_account(ref_index, "app", group_id, ref_id)
+}
+
+fn quoted_group_context_for_account(
+    ref_index: &SharedRefIndex,
+    account_id: &str,
+    group_id: &str,
+    ref_id: &str,
+) -> qq_maid_common::input_part::QuotedMessageContext {
     let mut quoted = crate::gateway::platform::InboundMessage {
         platform: crate::gateway::platform::Platform::QqOfficial,
-        account_id: Some("app".to_owned()),
+        account_id: Some(account_id.to_owned()),
         conversation: ConversationTarget::Group {
             target_id: group_id.to_owned(),
         },
