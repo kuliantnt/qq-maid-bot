@@ -2,6 +2,8 @@
 
 本文面向项目开发者和维护者，保留仓库级架构边界、开发命令、维护约定和检查规则。运行目录、部署、私有配置和运行数据细节已经分流到 [runtime/README.md](../runtime/README.md)；QQ 官方 gateway 细节见 [qq-maid-gateway-rs/README.md](../qq-maid-gateway-rs/README.md)；Rust Core 模块细节见 [qq-maid-core/README.md](../qq-maid-core/README.md)。
 
+当前稳定版本线为 `22.x`（`v0.22.1`）；发布变更与升级边界见 [CHANGELOG.md](../CHANGELOG.md)。
+
 如果只是第一次了解项目，请先阅读 [README.md](../README.md)。
 
 容器镜像、Compose、GHCR 标签、测试环境自动部署与回滚约定见
@@ -10,7 +12,7 @@
 
 ## 架构边界
 
-- `qq-maid-gateway-rs/`：QQ 官方 C2C / 群 at 和可选微信服务号接入层，负责平台事件接收、统一入站转换、`/ping` 诊断、回复发送和主动推送出口。
+- `qq-maid-gateway-rs/`：QQ 官方 C2C / 群 at、OneBot 11 反向 WebSocket 和可选微信服务号接入层，负责平台事件接收、统一入站转换、`/ping` 诊断、回复发送和主动推送出口；群主动推送的成员提醒在 Gateway 侧转换为平台协议。
 - `qq-maid-core/`：Rust Core / 查询 / 记忆 / session / prompt / 业务 Tool 模块，通过 `CoreService` 提供进程内业务入口；HTTP 层固定公开 `GET /healthz`，启用只读控制台时再公开对应管理路由。
 - `qq-maid-llm/`：模型协议、Provider 路由、fallback、SSE、usage、健康观测、OpenAI Web Search 和模型原生 Tool Loop 基础设施。
 - `src/main.rs`：统一 `qq-maid-bot` 程序入口，负责一次性初始化 dotenv / tracing，并按顺序拉起 Core HTTP 与 Gateway。
@@ -22,6 +24,8 @@
 QQ、OneBot、微信等入口接入相关能力优先在 gateway 的平台 adapter / sender 边界演进；模型协议、provider fallback 和 Tool Loop 协议优先在 `qq-maid-llm/` 演进；普通聊天、查询命令、记忆、session、待办、会话命令、prompt 和具体业务 Tool 等业务逻辑优先在 `qq-maid-core/` 内部维护。
 
 多平台入口维护时必须区分三类 ID：平台原始 ID 是 `ReplyTarget` / `DeliveryTarget` 的真实投递目标；`scope_key` / `owner_key` 是 Session、Pending、Memory、Todo 的业务隔离键；Core、LLM 和 Tool Loop 不应理解 QQ、OneBot 或微信协议字段。RSS、Notification、Todo 提醒和 Push 需要保留平台原始发送目标，不允许发送逻辑从 `scope_key` / `owner_key` 反解析 raw target。conversation / actor / interaction / owner / delivery target 的术语边界见 [scope-identity-boundary.md](./design/scope-identity-boundary.md)。
+
+主动推送的成员提醒使用平台无关的 `PushMention { user_id, display_name }`。Core 只传递实际成员身份和业务归属，Gateway 再按平台生成 QQ 官方 `<@user_id>` 或 OneBot `at` segment；`PushTarget.account_id` 只选择机器人发送账号，不能代替被提醒成员身份。旧通知 payload 缺少 `mentions` 时按空列表兼容。
 
 群聊和频道属于多人共享 conversation session。Session 历史通过可选 `turn_actor` 保存当轮成员的脱敏 `actor_ref`、展示名来源和群角色，并让对应 user/assistant 消息保持同一归属；会话压缩与上下文裁剪必须保留该归属。`actor_ref` 只用于模型上下文中的历史成员对齐，不得作为权限判断、平台投递目标或对用户展示的稳定标识。
 

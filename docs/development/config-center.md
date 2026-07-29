@@ -43,7 +43,7 @@ runtime 或 secret 保存前会构造候选最终环境视图：未修改的当�
 | --- | --- | --- |
 | 命令 | `command.prefix`（WebUI 提供 `/`、`#`、`*` 下拉选项，重启生效） | 无 |
 | Provider | 各内置 Provider 的 Base URL、API mode，以及 `agent.toml` 中的 OpenCode Provider 元数据 | OpenAI、DeepSeek、BigModel、Gemini、MiMo、OpenCode API Key |
-| Core 功能 | RSS、Memory、Todo 与 Todo 提醒时间 | `weather.qweather.api_key`、`tools.web_search.tavily.api_key` |
+| Core / 交付 | RSS、Memory、Todo 与 Todo 提醒时间、QQ 最终回复 TTS 参数 | `weather.qweather.api_key`、`tools.web_search.tavily.api_key`、Qwen TTS API Key |
 | 控制台 | `console.enabled`、`console.allowed_origins` | 无 |
 | QQ 官方 | `platform.qq_official.enabled` | AppID、AppSecret |
 | OneBot 11 | enabled、bind host/port、WebSocket path | Access Token |
