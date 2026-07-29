@@ -159,7 +159,7 @@ make clean
 Rust HTTP 层只公开外部运维 / 管理能力：
 
 - 始终公开：`GET /healthz`。
-- 仅在 `WEB_CONSOLE_ENABLED=true` 时公开：`GET /console/`、`GET /console/{asset}`、`GET /api/v1/console/status` 和 `POST /api/v1/markdown/render`；Markdown 预览路由同时处理 CORS preflight。
+- 仅在 `WEB_CONSOLE_ENABLED=true` 时公开：`GET /console/`、`GET /console/{asset}`、控制台状态/配置接口、`POST /api/v1/markdown/render`，以及受管理员 Session、同源和 CSRF 保护的全局 Todo 管理 API。管理员 actor 不参与 Todo owner/scope；目标引用、全局分页、提醒 Outbox 原子写入和统一响应约定见 [管理 API 约定](./MANAGEMENT_API.md)。
 
 旧 HTTP 路由 `/query`、HTTP `/memory`、`/v1/chat` 和内部 respond 主入口不再公开。查询、记忆、待办、会话和 RSS 都通过 `CoreService::respond` 进程内命令流程承载。
 
@@ -180,7 +180,7 @@ Rust HTTP 层只公开外部运维 / 管理能力：
 - 修改模型协议、Provider 路由、fallback、SSE、usage、健康观测、OpenAI Web Search 传输或 Tool Loop 协议时，优先修改 `qq-maid-llm/`。
 - Gateway 内部继续保持分层边界：`gateway/mod.rs` 负责顶层编排，`gateway/platform/` 负责平台协议到 `InboundMessage` / `CoreRequest` 的映射，`gateway/protocol.rs` 负责 WebSocket 协议与事件分发，`gateway/outbound.rs` 负责出站投递能力和发送状态记录，`respond.rs` 负责 CoreService 进程内桥接；不要把这些职责重新混回单个超长文件。
 - 修改普通聊天、查询命令、记忆、session、待办、会话命令、prompt 或具体业务 Tool 时，优先修改 `qq-maid-core/`。
-- Rust HTTP 层只公开 `GET /healthz`，以及启用控制台时的 `/console/`、静态资源、`/api/v1/console/status` 和 `/api/v1/markdown/render`；不要重新公开 `/query`、HTTP `/memory`、`/v1/chat` 或内部 respond 主入口。
+- Rust HTTP 层只公开 `GET /healthz`，以及启用控制台时的 `/console/`、静态资源、控制台运维接口、`/api/v1/markdown/render` 和受保护的领域管理 API；不要重新公开 `/query`、旧 HTTP `/memory`、`/v1/chat` 或内部 respond 主入口。
 - 通用日期、时间和时区语义优先复用 `qq-maid-common/src/time_context/`；跨 crate 的身份上下文、输入输出结构、Markdown 转换和脱敏也应优先复用 common 现有模块，不要在 Core 或 Gateway 重复实现。
 - Tool Calling 的最终目标参考 Codex 的受控工具调用体验，但本项目必须保持 QQ 场景边界：私聊优先、群聊谨慎、工具白名单、权限校验、超时和输出大小限制不可省略。
 - 自定义业务 Tool 的二开步骤见 [custom-tools.md](./development/custom-tools.md)，包括新增文件、注册、`agent.toml` 白名单和测试要求。

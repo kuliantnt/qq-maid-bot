@@ -1,4 +1,10 @@
 //! Web 控制台 API 模块。
+//!
+//! `common` 只承载鉴权、分页、响应 envelope 和 HTTP 错误等 Web API 基础设施；
+//! Todo、后续 Memory 等资源仍各自维护领域 DTO、权限规则和业务服务。
+
+pub(crate) mod common;
+pub(crate) mod todo;
 
 use axum::{
     Json,

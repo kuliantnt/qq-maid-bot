@@ -481,6 +481,31 @@ async fn group_tool_loop_exposes_rss_management_but_not_todo_when_enabled() {
 }
 
 #[tokio::test]
+async fn ordinary_chat_tool_loop_cannot_access_todo_management_target_discovery() {
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    service
+        .respond(private_message("查看普通聊天工具边界"))
+        .await
+        .unwrap();
+    let tool_request = inspector.tool_requests().remove(0);
+    assert!(
+        tool_request
+            .tools
+            .metadata()
+            .iter()
+            .all(|metadata| metadata.name != "list_todo_targets")
+    );
+    let error = tool_request
+        .tools
+        .execute_json(&tool_request.tool_context, "list_todo_targets", r#"{}"#)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "tool_not_found");
+}
+
+#[tokio::test]
 async fn private_natural_search_requests_wait_for_structured_tool_status() {
     let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(provider, true);

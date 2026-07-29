@@ -6,9 +6,13 @@
 use rusqlite::{params_from_iter, types::Value as SqlValue};
 
 use super::{
-    TODO_QUERY_MAX_LIMIT, TodoError, TodoListDateField, TodoQuery, TodoQueryPage, TodoQueryStatus,
-    TodoQueryTimeFilter, TodoRecurrenceKind, TodoStatus, TodoStore, query::todo_item_from_row,
+    TODO_QUERY_MAX_LIMIT, TodoError, TodoListDateField, TodoManagementPage, TodoManagementRecord,
+    TodoManagementScopeType, TodoManagementTargetFilter, TodoOwner, TodoQuery, TodoQueryPage,
+    TodoQueryStatus, TodoQueryTimeFilter, TodoRecurrenceKind, TodoStatus, TodoStore,
+    query::todo_item_from_row,
 };
+
+const TODO_MANAGEMENT_QUERY_MAX_LIMIT: usize = 100;
 
 const SELECT_COLUMNS: &str = "id, user_id, scope_key, title, detail, raw_text,
     due_date, due_at, reminder_at, time_precision, recurrence_kind,
@@ -22,6 +26,65 @@ impl TodoStore {
         owner: &super::TodoOwner,
         query: &TodoQuery,
     ) -> Result<TodoQueryPage, TodoError> {
+        self.query_todos_with_max_limit(owner, query, TODO_QUERY_MAX_LIMIT)
+    }
+
+    /// 管理 API 独立执行全局查询，不复用任何管理员 actor 作为 Todo owner。
+    /// Tool/Slash 仍走上面的 owner-scoped 入口，20 条展示边界保持不变。
+    pub(crate) fn query_todos_for_management(
+        &self,
+        query: &TodoQuery,
+        target_filter: &TodoManagementTargetFilter,
+    ) -> Result<TodoManagementPage, TodoError> {
+        validate_todo_query(query)?;
+        let conn = self.connection()?;
+        let (where_sql, params) = build_management_where(query, target_filter);
+        let count_sql = format!("SELECT COUNT(*) FROM todos WHERE {where_sql}");
+        let total_count = conn
+            .query_row(&count_sql, params_from_iter(params.iter()), |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(TodoError::from_sql)?
+            .try_into()
+            .map_err(|_| TodoError::data("todo count overflow"))?;
+
+        let limit = query.limit.min(TODO_MANAGEMENT_QUERY_MAX_LIMIT);
+        let order_sql = order_by_sql(query.status);
+        let page_sql = format!(
+            "SELECT {SELECT_COLUMNS}, owner_key FROM todos WHERE {where_sql} {order_sql} LIMIT {limit} OFFSET {}",
+            query.offset
+        );
+        let mut stmt = conn.prepare(&page_sql).map_err(TodoError::from_sql)?;
+        let items = stmt
+            .query_map(params_from_iter(params.iter()), |row| {
+                let item = todo_item_from_row(row)?;
+                Ok(TodoManagementRecord {
+                    owner: TodoOwner {
+                        key: row.get(18)?,
+                        user_id: item.user_id.clone(),
+                        scope_key: item.scope_key.clone(),
+                    },
+                    item,
+                })
+            })
+            .map_err(TodoError::from_sql)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(TodoError::from_sql)?;
+
+        Ok(TodoManagementPage {
+            items,
+            total_count,
+            limit,
+            offset: query.offset,
+        })
+    }
+
+    fn query_todos_with_max_limit(
+        &self,
+        owner: &super::TodoOwner,
+        query: &TodoQuery,
+        max_limit: usize,
+    ) -> Result<TodoQueryPage, TodoError> {
         validate_todo_query(query)?;
         let conn = self.connection()?;
         let (where_sql, params) = build_where(owner, query);
@@ -34,7 +97,7 @@ impl TodoStore {
             .try_into()
             .map_err(|_| TodoError::data("todo count overflow"))?;
 
-        let limit = query.limit.min(TODO_QUERY_MAX_LIMIT);
+        let limit = query.limit.min(max_limit);
         let order_sql = order_by_sql(query.status);
         let page_sql = format!(
             "SELECT {SELECT_COLUMNS} FROM todos WHERE {where_sql} {order_sql} LIMIT {limit} OFFSET {}",
@@ -82,6 +145,65 @@ fn build_where(owner: &super::TodoOwner, query: &TodoQuery) -> (String, Vec<SqlV
         SqlValue::Text(owner.key.clone()),
         SqlValue::Text(owner.scope_key.clone()),
     ];
+    append_query_filters(&mut clauses, &mut params, query);
+    (clauses.join(" AND "), params)
+}
+
+fn build_management_where(
+    query: &TodoQuery,
+    filter: &TodoManagementTargetFilter,
+) -> (String, Vec<SqlValue>) {
+    let mut clauses = vec!["1 = 1".to_owned()];
+    let mut params = Vec::new();
+    if let Some(target) = &filter.target {
+        clauses.push("owner_key = ?".to_owned());
+        clauses.push("scope_key = ?".to_owned());
+        params.push(SqlValue::Text(target.key.clone()));
+        params.push(SqlValue::Text(target.scope_key.clone()));
+    }
+    if let Some(user_id) = &filter.user_id {
+        clauses.push("user_id = ?".to_owned());
+        params.push(SqlValue::Text(user_id.clone()));
+    }
+    if let Some(platform) = &filter.platform {
+        let stable_prefix = format!("platform:{}:account:%", escape_like(platform));
+        if platform == "qq_official" {
+            clauses.push(
+                "(scope_key LIKE ? ESCAPE '\\' OR scope_key LIKE 'private:%' OR scope_key LIKE 'group:%' OR scope_key LIKE 'service_account:%')"
+                    .to_owned(),
+            );
+        } else {
+            clauses.push("scope_key LIKE ? ESCAPE '\\'".to_owned());
+        }
+        params.push(SqlValue::Text(stable_prefix));
+    }
+    if let Some(account_id) = &filter.account_id {
+        clauses.push("scope_key LIKE ? ESCAPE '\\'".to_owned());
+        params.push(SqlValue::Text(format!(
+            "platform:%:account:{}:%",
+            escape_like(account_id)
+        )));
+    }
+    if let Some(scope_type) = filter.scope_type {
+        let target_type = match scope_type {
+            TodoManagementScopeType::Private => "private",
+            TodoManagementScopeType::Group => "group",
+        };
+        let legacy_clause = match scope_type {
+            TodoManagementScopeType::Private => {
+                "scope_key LIKE 'private:%' OR scope_key LIKE 'service_account:%'"
+            }
+            TodoManagementScopeType::Group => "scope_key LIKE 'group:%'",
+        };
+        clauses.push(format!(
+            "(scope_key LIKE 'platform:%:account:%:{target_type}:%' OR {legacy_clause})"
+        ));
+    }
+    append_query_filters(&mut clauses, &mut params, query);
+    (clauses.join(" AND "), params)
+}
+
+fn append_query_filters(clauses: &mut Vec<String>, params: &mut Vec<SqlValue>, query: &TodoQuery) {
     match query.status {
         TodoQueryStatus::Pending => {
             clauses.push("status = ?".to_owned());
@@ -94,7 +216,7 @@ fn build_where(owner: &super::TodoOwner, query: &TodoQuery) -> (String, Vec<SqlV
         TodoQueryStatus::All => {}
     }
     if let Some(time) = &query.time {
-        append_time_filter(&mut clauses, &mut params, time);
+        append_time_filter(clauses, params, time);
     }
     if let Some(recurring) = query.recurring {
         clauses.push(if recurring {
@@ -121,7 +243,6 @@ fn build_where(owner: &super::TodoOwner, query: &TodoQuery) -> (String, Vec<SqlV
             )));
         }
     }
-    (clauses.join(" AND "), params)
 }
 
 fn append_time_filter(
