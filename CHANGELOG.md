@@ -2,6 +2,29 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.22.1] - 2026-07-29
+
+### Release Focus
+
+* **主动推送成员提醒**：让群聊中的个人 Todo 提醒能够准确 @ 实际归属成员，并在 QQ 官方与 OneBot 11 入口使用各自平台支持的成员提醒协议。
+
+### Added
+
+* **跨平台主动推送成员提醒**（PR #603）：Core 新增平台无关的结构化 `PushMention`，按成员 ID 稳定去重并保留顺序；群聊个人 Todo 使用实际 `TodoOwner.user_id` 生成提醒对象，私聊和无明确归属的群共享 Todo 不附加成员提醒。
+* **OneBot 11 原生群成员提醒**（PR #603）：主动群推送使用标准 `at` segment，多个成员后继续发送正文；无效成员 ID 只跳过对应 segment，不阻断提醒正文。
+* **QQ 官方群成员提醒**（PR #603）：主动推送复用被动群回复的 `<@user_id>` 内容协议，支持单成员、多成员以及 Markdown 失败后的纯文本 fallback。
+
+### Fixed
+
+* **主动推送成员身份与发送账号隔离**（PR #603）：成员 `user_id` 只用于生成成员提醒，机器人 `account_id` 只用于选择发送账号；RefIndex 记录实际可见正文，不持久化或回显协议标记中的原始成员 ID。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.22.1`；内部 crate 版本不统一提升。
+* 本版本无数据库 migration、无必需配置迁移。历史 Notification Outbox payload 缺少 `mentions` 字段时按空列表读取，已有部署可直接升级。
+* 私聊主动推送不会附加群成员提醒；无明确归属的群共享 Todo 不猜测创建者。普通回复的既有平台能力边界保持不变。
+* 成员提醒传递、QQ 官方协议 payload、OneBot segment、Markdown fallback、RefIndex 脱敏和 Todo owner 隔离已通过本地测试覆盖；本次未使用真实 QQ / OneBot 凭证重新执行目标环境到期提醒复测。
+
 ## [v0.22.0] - 2026-07-29
 
 ### Release Focus

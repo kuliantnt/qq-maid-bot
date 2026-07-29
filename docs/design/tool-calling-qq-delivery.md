@@ -161,7 +161,7 @@
 | 普通回复渲染 | `qq-maid-gateway-rs/src/render.rs` | `render_respond_response` |
 | 私聊发送包装 | `qq-maid-gateway-rs/src/gateway/qq_official/c2c/mod.rs` | `send_c2c_respond_response_with_sender` |
 | 群发送包装 | `qq-maid-gateway-rs/src/gateway/qq_official/group/mod.rs` | `send_group_respond_response` |
-| 主动推送 | `qq-maid-gateway-rs/src/gateway/push.rs` | `GatewayPushRuntime::push` |
+| 主动推送 | `qq-maid-gateway-rs/src/gateway/push/mod.rs` | `GatewayPushRuntime::push` |
 
 ## 3.2 题目中各字段当前在哪里生成
 
@@ -170,7 +170,7 @@
 - **被动私聊/群聊回复**：来自入站 `message.message_id`，在 Gateway 里组装成 `C2cReplyTarget.msg_id` / `GroupReplyTarget.msg_id`，再传给 payload builder。  
   参考：`qq-maid-gateway-rs/src/gateway/qq_official/c2c/mod.rs::send_c2c_respond_response_with_sender`、`qq-maid-gateway-rs/src/gateway/qq_official/group/mod.rs::send_group_respond_response`
 - **主动推送**：没有原始入站消息，因此 `msg_id = None`。  
-  参考：`qq-maid-gateway-rs/src/gateway/push.rs::send_private_push`、`send_group_push`
+  参考：`qq-maid-gateway-rs/src/gateway/push/mod.rs::send_private_push`、`send_group_push`
 - **说明**：当前代码把 `msg_id` 视为“回复所绑定的原始 QQ 消息 id”，不是 Tool Loop 任务 id，也不是 C2C stream id。  
   参考：`qq-maid-gateway-rs/src/api/mod.rs::send_c2c_markdown_stream` 注释
 
