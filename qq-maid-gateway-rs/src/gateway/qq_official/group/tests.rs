@@ -287,9 +287,9 @@ fn assert_group_send_error(err: anyhow::Error) {
     assert!(
         matches!(
             err.downcast_ref::<ApiError>(),
-            Some(ApiError::Auth(_) | ApiError::Http(_) | ApiError::Status { .. })
+            Some(ApiError::Http(_) | ApiError::Status { .. })
         ),
-        "expected QQ send/auth error from fake API endpoint, got: {err:#}"
+        "expected QQ API send error without authentication request, got: {err:#}"
     );
 }
 
