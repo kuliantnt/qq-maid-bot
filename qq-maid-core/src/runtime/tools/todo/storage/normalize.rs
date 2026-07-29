@@ -16,7 +16,7 @@ use super::{
 use crate::storage::session::redact_sensitive_text;
 
 /// 规范化待办草稿：校验必填字段、脱敏敏感文本、截断超长文本。
-pub(super) fn normalize_draft(mut draft: TodoItemDraft) -> Result<TodoItemDraft, TodoError> {
+pub(crate) fn normalize_draft(mut draft: TodoItemDraft) -> Result<TodoItemDraft, TodoError> {
     let title = clean_optional(&draft.title)
         .ok_or_else(|| TodoError::bad_request("todo title is required"))?;
     draft.title = truncate_chars(&redact_sensitive_text(title), 120);

@@ -64,7 +64,10 @@ pub use edit_patch::TodoEditPatch;
 pub(crate) use freshness::valid_last_visible_todo_query;
 pub(crate) use get::GetTodoTool;
 pub(crate) use list::ListTodoTool;
-pub(crate) use management::{TodoManagementError, TodoManagementService, TodoManagementUpdate};
+pub(crate) use management::{
+    TodoManagementError, TodoManagementItem, TodoManagementListFilter, TodoManagementService,
+    TodoManagementUpdate, management_group_scope_type, management_private_scope_type,
+};
 pub(crate) use merge::MergeTodoTool;
 pub(crate) use pending::{
     ClarificationCandidate, PendingTodoClarification, TODO_PENDING_DOMAIN, TodoPendingPayload,

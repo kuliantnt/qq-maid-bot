@@ -1,16 +1,30 @@
 //! Todo 管理 API 使用的领域门面。
 //!
-//! 本模块只复用 Todo 现有草稿归一、状态转换、提醒同步和 Repository；它不理解
-//! HTTP 状态码、cookie、JSON envelope，也不抽象其他领域的 CRUD。
+//! 管理员 actor 只在 HTTP 公共层完成认证、审计和限流；本模块始终从 Todo 记录或
+//! 服务端已知目标恢复真实 owner/scope，不把管理员身份写入 Todo。
 
-use crate::storage::notification::NotificationOutboxStore;
+use qq_maid_common::time_context::request_time_context;
+use sha2::{Digest, Sha256};
 
-use super::{
-    TodoEditPatch, TodoError, TodoItem, TodoItemDraft, TodoOwner, TodoQuery, TodoQueryPage,
-    TodoStatus, TodoStore, cancel_reminder_task, edit_patch, sync_reminder_task,
+use crate::{
+    identity::{
+        group_raw_target_from_scope_key, parse_stable_scope_key, private_raw_target_from_scope_key,
+    },
+    runtime::push::{ONEBOT11_PLATFORM, QQ_OFFICIAL_PLATFORM},
+    storage::notification::NotificationOutboxStore,
 };
 
-const MANAGEMENT_SCOPE_PREFIX: &str = "management:";
+use super::{
+    TodoEditPatch, TodoError, TodoItem, TodoItemDraft, TodoOwner, TodoQuery, TodoStatus, TodoStore,
+    edit_patch,
+    reminder::{prepare_reminder_upsert, validate_draft_reminder},
+    storage::{
+        TodoManagementPage, TodoManagementRecord, TodoManagementScopeType,
+        TodoManagementTargetFilter, advance_after_completion, is_recurring, normalize_draft,
+    },
+};
+
+const TARGET_REF_PREFIX: &str = "todo_target:v1:";
 
 #[derive(Debug, Clone)]
 pub(crate) struct TodoManagementUpdate {
@@ -34,13 +48,46 @@ impl TodoManagementUpdate {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TodoManagementListFilter {
+    pub(crate) platform: Option<String>,
+    pub(crate) account_id: Option<String>,
+    pub(crate) scope_type: Option<TodoManagementScopeType>,
+    pub(crate) user_id: Option<String>,
+    pub(crate) target_ref: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TodoManagementTarget {
+    pub(crate) target_ref: Option<String>,
+    pub(crate) platform: String,
+    pub(crate) scope_type: String,
+    pub(crate) user_id: Option<String>,
+    pub(crate) group_id: Option<String>,
+    pub(crate) account_id: Option<String>,
+    pub(crate) reminder_supported: bool,
+    pub(crate) diagnostic: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TodoManagementItem {
+    pub(crate) item: TodoItem,
+    pub(crate) target: TodoManagementTarget,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TodoManagementListPage {
+    pub(crate) items: Vec<TodoManagementItem>,
+    pub(crate) total_count: usize,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum TodoManagementError {
     Domain(TodoError),
     NotFound,
     Conflict(String),
+    InvalidTarget(String),
     Notification(String),
-    InvalidActor,
 }
 
 impl TodoManagementError {
@@ -49,8 +96,8 @@ impl TodoManagementError {
             Self::Domain(error) => error.code(),
             Self::NotFound => "not_found",
             Self::Conflict(_) => "conflict",
+            Self::InvalidTarget(_) => "bad_request",
             Self::Notification(_) => "notification_error",
-            Self::InvalidActor => "permission_denied",
         }
     }
 
@@ -58,19 +105,25 @@ impl TodoManagementError {
         match self {
             Self::Domain(error) => error.message(),
             Self::NotFound => "todo not found",
-            Self::Conflict(message) | Self::Notification(message) => message,
-            Self::InvalidActor => "authenticated API actor is invalid",
+            Self::Conflict(message)
+            | Self::InvalidTarget(message)
+            | Self::Notification(message) => message,
         }
     }
 }
 
 impl From<TodoError> for TodoManagementError {
     fn from(value: TodoError) -> Self {
-        Self::Domain(value)
+        match value.code() {
+            "not_found" => Self::NotFound,
+            "conflict" => Self::Conflict(value.message().to_owned()),
+            "notification_error" => Self::Notification(value.message().to_owned()),
+            _ => Self::Domain(value),
+        }
     }
 }
 
-/// Todo 管理场景的领域 Service；未来 Memory API 应实现自己的独立 Service。
+/// Todo 管理场景的领域 Service；未来 Memory API 应实现自己的独立权限模型。
 #[derive(Clone)]
 pub(crate) struct TodoManagementService {
     store: TodoStore,
@@ -87,151 +140,376 @@ impl TodoManagementService {
 
     pub(crate) fn create(
         &self,
-        actor_subject: &str,
+        target_ref: &str,
         draft: TodoItemDraft,
-    ) -> Result<TodoItem, TodoManagementError> {
-        let owner = owner_for_actor(actor_subject)?;
-        let item = self.store.create(&owner, draft)?;
-        self.sync_reminder(&owner, &item)?;
-        Ok(item)
+    ) -> Result<TodoManagementItem, TodoManagementError> {
+        self.ensure_shared_database()?;
+        let owner = self.resolve_target_ref(target_ref)?;
+        let draft = normalize_draft(draft)?;
+        let preview = record_from_draft(&owner, "preview", &draft, TodoStatus::Pending);
+        self.validate_pending_reminder(&preview)?;
+        let created = self
+            .store
+            .create_todo_for_management(&owner, draft, reminder_upsert)?;
+        Ok(self.present(created))
     }
 
     pub(crate) fn list(
         &self,
-        actor_subject: &str,
         query: &TodoQuery,
-    ) -> Result<TodoQueryPage, TodoManagementError> {
-        let owner = owner_for_actor(actor_subject)?;
-        self.store
-            .query_todos_for_management(&owner, query)
-            .map_err(Into::into)
+        filter: TodoManagementListFilter,
+    ) -> Result<TodoManagementListPage, TodoManagementError> {
+        let target = filter
+            .target_ref
+            .as_deref()
+            .map(|target_ref| self.resolve_target_ref(target_ref))
+            .transpose()?;
+        let page = self.store.query_todos_for_management(
+            query,
+            &TodoManagementTargetFilter {
+                platform: filter.platform,
+                account_id: filter.account_id,
+                scope_type: filter.scope_type,
+                user_id: filter.user_id,
+                target,
+            },
+        )?;
+        Ok(self.present_page(page))
     }
 
-    pub(crate) fn get(
-        &self,
-        actor_subject: &str,
-        id: &str,
-    ) -> Result<TodoItem, TodoManagementError> {
-        let owner = owner_for_actor(actor_subject)?;
-        self.get_for_owner(&owner, id)
+    pub(crate) fn get(&self, id: &str) -> Result<TodoManagementItem, TodoManagementError> {
+        let record = self.get_record(id)?;
+        Ok(self.present(record))
     }
 
     pub(crate) fn update(
         &self,
-        actor_subject: &str,
         id: &str,
         update: TodoManagementUpdate,
-    ) -> Result<TodoItem, TodoManagementError> {
-        let owner = owner_for_actor(actor_subject)?;
-        let current = self.get_for_owner(&owner, id)?;
-        let has_fields = update.has_field_changes();
-
-        let mut item = match (&current.status, &update.status) {
-            (TodoStatus::Completed, Some(TodoStatus::Pending)) => {
-                let outcome = self
-                    .store
-                    .restore_completed_by_ids(&owner, &[id.to_owned()])?;
-                outcome.restored.into_iter().next().ok_or_else(|| {
-                    TodoManagementError::Conflict("todo status changed".to_owned())
-                })?
-            }
-            (TodoStatus::Pending, Some(TodoStatus::Completed)) => current.clone(),
-            (TodoStatus::Completed, _) if has_fields => {
-                return Err(TodoManagementError::Conflict(
-                    "completed todo fields cannot be edited before restoring it".to_owned(),
-                ));
-            }
-            _ => current.clone(),
-        };
-
-        if has_fields {
-            let raw_text = item.raw_text.clone().unwrap_or_else(|| item.title.clone());
-            let draft = edit_patch::apply_to_draft(
-                TodoItemDraft::from_item(&item, &raw_text),
-                &update.fields,
-                &raw_text,
-            );
-            item = self.store.edit(&owner, id, draft)?;
+    ) -> Result<TodoManagementItem, TodoManagementError> {
+        self.ensure_shared_database()?;
+        let current = self.get_record(id)?;
+        if !update.has_field_changes() && update.status.as_ref() == Some(&current.item.status) {
+            return Ok(self.present(current));
         }
-
-        if matches!(current.status, TodoStatus::Pending)
-            && matches!(update.status, Some(TodoStatus::Completed))
-        {
-            let outcome = self
-                .store
-                .complete_by_ids_with_recurrence(&owner, &[id.to_owned()])?;
-            if outcome.completed.is_empty() && outcome.advanced.is_empty() {
-                return Err(TodoManagementError::Conflict(
-                    "todo status changed".to_owned(),
-                ));
-            }
-            item = self.get_for_owner(&owner, id)?;
+        let (draft, final_status) = plan_update(&current, &update)?;
+        let preview = record_from_draft(
+            &current.owner,
+            &current.item.id,
+            &draft,
+            final_status.clone(),
+        );
+        if final_status == TodoStatus::Pending {
+            self.validate_pending_reminder(&preview)?;
         }
-
-        self.sync_reminder(&owner, &item)?;
-        Ok(item)
+        let updated =
+            self.store
+                .update_todo_for_management(&current, draft, final_status, |record| {
+                    reminder_upsert(record)
+                })?;
+        Ok(self.present(updated))
     }
 
-    pub(crate) fn delete(&self, actor_subject: &str, id: &str) -> Result<(), TodoManagementError> {
-        let owner = owner_for_actor(actor_subject)?;
-        let item = self.get_for_owner(&owner, id)?;
-        let outcome = self.store.delete_by_ids(&owner, &[id.to_owned()])?;
-        if outcome.deleted_count == 0 {
-            return Err(TodoManagementError::NotFound);
-        }
-        cancel_reminder_task(&self.notification_store, &item)
-            .map_err(TodoManagementError::Notification)
+    pub(crate) fn delete(&self, id: &str) -> Result<(), TodoManagementError> {
+        self.ensure_shared_database()?;
+        let current = self.get_record(id)?;
+        self.store.delete_todo_for_management(&current)?;
+        Ok(())
     }
 
-    fn get_for_owner(&self, owner: &TodoOwner, id: &str) -> Result<TodoItem, TodoManagementError> {
+    fn get_record(&self, id: &str) -> Result<TodoManagementRecord, TodoManagementError> {
         self.store
-            .get_by_id(owner, id)?
+            .get_todo_for_management(id)?
             .ok_or(TodoManagementError::NotFound)
     }
 
-    fn sync_reminder(&self, owner: &TodoOwner, item: &TodoItem) -> Result<(), TodoManagementError> {
-        if item.reminder_at.is_none() {
-            return cancel_reminder_task(&self.notification_store, item)
-                .map_err(TodoManagementError::Notification);
+    fn resolve_target_ref(&self, target_ref: &str) -> Result<TodoOwner, TodoManagementError> {
+        validate_target_ref_format(target_ref)?;
+        let candidates = self.store.management_target_candidates()?;
+        let owner = candidates
+            .into_iter()
+            .find(|owner| target_ref_for(owner) == target_ref)
+            .ok_or_else(|| {
+                TodoManagementError::InvalidTarget(
+                    "target_ref is unknown or no longer references a known conversation".to_owned(),
+                )
+            })?;
+        let target = target_from_owner(&owner);
+        if target.target_ref.as_deref() != Some(target_ref) {
+            return Err(TodoManagementError::InvalidTarget(
+                "target_ref does not identify a complete platform target".to_owned(),
+            ));
         }
-        sync_reminder_task(&self.notification_store, owner, item)
-            .map_err(TodoManagementError::Notification)
+        Ok(owner)
+    }
+
+    fn validate_pending_reminder(
+        &self,
+        record: &TodoManagementRecord,
+    ) -> Result<(), TodoManagementError> {
+        if record.item.reminder_at.is_none() {
+            return Ok(());
+        }
+        validate_draft_reminder(&TodoItemDraft::from_item(
+            &record.item,
+            record.item.raw_text.clone().unwrap_or_default(),
+        ))
+        .map_err(TodoManagementError::InvalidTarget)?;
+        let target = target_from_owner(&record.owner);
+        if target.target_ref.is_none() {
+            return Err(TodoManagementError::InvalidTarget(
+                "todo target cannot be restored from its owner/scope".to_owned(),
+            ));
+        }
+        if !target.reminder_supported {
+            return Err(TodoManagementError::InvalidTarget(format!(
+                "platform `{}` does not support proactive Todo reminders",
+                target.platform
+            )));
+        }
+        Ok(())
+    }
+
+    fn ensure_shared_database(&self) -> Result<(), TodoManagementError> {
+        if self.store.database_path() == self.notification_store.database_path() {
+            Ok(())
+        } else {
+            Err(TodoManagementError::Notification(
+                "Todo and Notification Outbox must use the same SQLite database".to_owned(),
+            ))
+        }
+    }
+
+    fn present(&self, record: TodoManagementRecord) -> TodoManagementItem {
+        TodoManagementItem {
+            target: target_from_owner(&record.owner),
+            item: record.item,
+        }
+    }
+
+    fn present_page(&self, page: TodoManagementPage) -> TodoManagementListPage {
+        TodoManagementListPage {
+            items: page
+                .items
+                .into_iter()
+                .map(|record| self.present(record))
+                .collect(),
+            total_count: page.total_count,
+        }
     }
 }
 
-fn owner_for_actor(actor_subject: &str) -> Result<TodoOwner, TodoManagementError> {
-    let actor_subject = actor_subject.trim();
-    if actor_subject.is_empty() || actor_subject.len() > 128 {
-        return Err(TodoManagementError::InvalidActor);
+fn plan_update(
+    current: &TodoManagementRecord,
+    update: &TodoManagementUpdate,
+) -> Result<(TodoItemDraft, TodoStatus), TodoManagementError> {
+    let has_fields = update.has_field_changes();
+    if current.item.status == TodoStatus::Completed
+        && has_fields
+        && update.status != Some(TodoStatus::Pending)
+    {
+        return Err(TodoManagementError::Conflict(
+            "completed todo fields cannot be edited before restoring it".to_owned(),
+        ));
     }
-    // 管理 API Todo 与聊天入口 Todo 使用不同 conversation scope；认证 subject 既决定
-    // owner 又参与 scope，未来即使出现多个管理员也不会越权读取彼此的数据。
-    Ok(TodoStore::owner(
-        Some(actor_subject),
-        &format!("{MANAGEMENT_SCOPE_PREFIX}{actor_subject}"),
-    ))
+
+    let raw_text = current
+        .item
+        .raw_text
+        .clone()
+        .unwrap_or_else(|| current.item.title.clone());
+    let base = TodoItemDraft::from_item(&current.item, &raw_text);
+    let mut draft = if has_fields {
+        edit_patch::apply_to_draft(base, &update.fields, &raw_text)
+    } else {
+        base
+    };
+    draft = normalize_draft(draft)?;
+
+    let requested_status = update
+        .status
+        .clone()
+        .unwrap_or_else(|| current.item.status.clone());
+    if current.item.status == TodoStatus::Pending && requested_status == TodoStatus::Completed {
+        let pending = record_from_draft(
+            &current.owner,
+            &current.item.id,
+            &draft,
+            TodoStatus::Pending,
+        );
+        if is_recurring(&pending.item) {
+            draft = normalize_draft(advance_after_completion(&pending.item)?)?;
+            return Ok((draft, TodoStatus::Pending));
+        }
+    }
+    Ok((draft, requested_status))
+}
+
+fn record_from_draft(
+    owner: &TodoOwner,
+    id: &str,
+    draft: &TodoItemDraft,
+    status: TodoStatus,
+) -> TodoManagementRecord {
+    let now = request_time_context().current_time().to_owned();
+    TodoManagementRecord {
+        owner: owner.clone(),
+        item: TodoItem {
+            id: id.to_owned(),
+            user_id: owner.user_id.clone(),
+            scope_key: owner.scope_key.clone(),
+            title: draft.title.clone(),
+            detail: draft.detail.clone(),
+            raw_text: draft.raw_text.clone(),
+            due_date: draft.due_date.clone(),
+            due_at: draft.due_at.clone(),
+            reminder_at: draft.reminder_at.clone(),
+            time_precision: draft.time_precision,
+            recurrence_kind: draft.recurrence_kind.clone(),
+            recurrence_interval_days: draft.recurrence_interval_days,
+            recurrence_interval: draft.recurrence_interval,
+            recurrence_unit: draft.recurrence_unit,
+            status,
+            created_at: now.clone(),
+            updated_at: now,
+            completed_at: None,
+        },
+    }
+}
+
+fn reminder_upsert(
+    record: &TodoManagementRecord,
+) -> Result<Option<crate::storage::notification::NotificationUpsert>, TodoError> {
+    prepare_reminder_upsert(&record.owner, &record.item).map_err(TodoError::notification)
+}
+
+fn target_from_owner(owner: &TodoOwner) -> TodoManagementTarget {
+    if TodoStore::owner(owner.user_id.as_deref(), &owner.scope_key).key != owner.key {
+        return unknown_target(owner, "owner_scope_mismatch");
+    }
+    let (platform, account_id) = parse_stable_scope_key(&owner.scope_key)
+        .map(|parsed| {
+            (
+                parsed.platform.to_owned(),
+                (parsed.account_id != "-").then(|| parsed.account_id.to_owned()),
+            )
+        })
+        .unwrap_or_else(|| (QQ_OFFICIAL_PLATFORM.to_owned(), None));
+
+    if let Some(group_id) = group_raw_target_from_scope_key(&owner.scope_key) {
+        return known_target(owner, platform, account_id, "group", None, Some(group_id));
+    }
+    if let Some(private_id) = private_raw_target_from_scope_key(&owner.scope_key) {
+        let user_id = owner.user_id.clone();
+        if user_id.as_deref().map(str::trim) != Some(private_id.as_str()) {
+            return unknown_target(owner, "private_owner_target_mismatch");
+        }
+        return known_target(owner, platform, account_id, "private", user_id, None);
+    }
+    unknown_target(owner, "unrecognized_scope")
+}
+
+fn known_target(
+    owner: &TodoOwner,
+    platform: String,
+    account_id: Option<String>,
+    scope_type: &str,
+    user_id: Option<String>,
+    group_id: Option<String>,
+) -> TodoManagementTarget {
+    let reminder_supported = match platform.as_str() {
+        QQ_OFFICIAL_PLATFORM => true,
+        "onebot" | ONEBOT11_PLATFORM => account_id.is_some(),
+        _ => false,
+    };
+    TodoManagementTarget {
+        target_ref: Some(target_ref_for(owner)),
+        platform,
+        scope_type: scope_type.to_owned(),
+        user_id: user_id.or_else(|| owner.user_id.clone()),
+        group_id,
+        account_id,
+        reminder_supported,
+        diagnostic: None,
+    }
+}
+
+fn unknown_target(owner: &TodoOwner, diagnostic: &str) -> TodoManagementTarget {
+    TodoManagementTarget {
+        target_ref: None,
+        platform: parse_stable_scope_key(&owner.scope_key)
+            .map(|parsed| parsed.platform.to_owned())
+            .unwrap_or_else(|| "unknown".to_owned()),
+        scope_type: "unknown".to_owned(),
+        user_id: owner.user_id.clone(),
+        group_id: None,
+        account_id: None,
+        reminder_supported: false,
+        diagnostic: Some(diagnostic.to_owned()),
+    }
+}
+
+fn target_ref_for(owner: &TodoOwner) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"qq-maid-todo-target-v1\0");
+    digest.update(owner.key.as_bytes());
+    digest.update(b"\0");
+    digest.update(owner.user_id.as_deref().unwrap_or_default().as_bytes());
+    digest.update(b"\0");
+    digest.update(owner.scope_key.as_bytes());
+    let bytes = digest.finalize();
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    format!("{TARGET_REF_PREFIX}{encoded}")
+}
+
+fn validate_target_ref_format(target_ref: &str) -> Result<(), TodoManagementError> {
+    let digest = target_ref
+        .trim()
+        .strip_prefix(TARGET_REF_PREFIX)
+        .filter(|value| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        });
+    if digest.is_none() {
+        return Err(TodoManagementError::InvalidTarget(
+            "target_ref format is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn management_private_scope_type() -> TodoManagementScopeType {
+    TodoManagementScopeType::Private
+}
+
+pub(crate) fn management_group_scope_type() -> TodoManagementScopeType {
+    TodoManagementScopeType::Group
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        runtime::tools::todo::{
-            TodoRecurrenceKind, TodoRecurrenceUnit, TodoTimePrecision, storage::TODO_MIGRATIONS,
-        },
-        storage::{
-            database::SqliteDatabase,
-            notification::{NOTIFICATION_MIGRATIONS, NotificationOutboxStore},
-        },
+        identity::conversation_scope_key,
+        runtime::tools::todo::{TodoRecurrenceKind, TodoRecurrenceUnit, TodoTimePrecision},
+        storage::{APP_MIGRATIONS, database::SqliteDatabase},
     };
 
-    fn service() -> TodoManagementService {
-        let mut migrations = TODO_MIGRATIONS.to_vec();
-        migrations.extend_from_slice(NOTIFICATION_MIGRATIONS);
-        let database = SqliteDatabase::open_temp("todo-management-service", &migrations).unwrap();
-        TodoManagementService::new(
-            TodoStore::new(database.clone()),
-            NotificationOutboxStore::new(database),
+    fn service() -> (TodoManagementService, TodoStore, NotificationOutboxStore) {
+        let database =
+            SqliteDatabase::open_temp("todo-management-service", APP_MIGRATIONS).unwrap();
+        let store = TodoStore::new(database.clone());
+        let notifications = NotificationOutboxStore::new(database);
+        (
+            TodoManagementService::new(store.clone(), notifications.clone()),
+            store,
+            notifications,
         )
     }
 
@@ -252,100 +530,99 @@ mod tests {
     }
 
     #[test]
-    fn management_service_isolates_actors_and_supports_crud() {
-        let service = service();
-        let created = service
-            .create("console_admin:1", draft("原始标题"))
-            .unwrap();
-        assert!(matches!(
-            service.get("console_admin:2", &created.id),
-            Err(TodoManagementError::NotFound)
-        ));
-        let other_page = service
+    fn management_service_reads_and_updates_global_real_owner() {
+        let (service, store, _) = service();
+        let scope = conversation_scope_key("qq_official", Some("app-1"), "private", "u1");
+        let owner = TodoStore::owner(Some("u1"), &scope);
+        let created = store.create(&owner, draft("原始标题")).unwrap();
+
+        let listed = service
             .list(
-                "console_admin:2",
                 &TodoQuery {
-                    status: crate::runtime::tools::todo::TodoQueryStatus::All,
+                    status: super::super::TodoQueryStatus::All,
                     ..TodoQuery::default()
                 },
+                TodoManagementListFilter::default(),
             )
             .unwrap();
-        assert_eq!(other_page.total_count, 0);
-        assert!(matches!(
-            service.update(
-                "console_admin:2",
-                &created.id,
-                TodoManagementUpdate {
-                    fields: TodoEditPatch {
-                        title: Some("越权更新".to_owned()),
-                        ..Default::default()
-                    },
-                    status: None,
-                }
-            ),
-            Err(TodoManagementError::NotFound)
-        ));
-        assert!(matches!(
-            service.delete("console_admin:2", &created.id),
-            Err(TodoManagementError::NotFound)
-        ));
+        assert_eq!(listed.total_count, 1);
+        assert_eq!(listed.items[0].item.id, created.id);
 
         let updated = service
             .update(
-                "console_admin:1",
                 &created.id,
                 TodoManagementUpdate {
                     fields: TodoEditPatch {
                         title: Some("更新标题".to_owned()),
-                        detail: Some("详情".to_owned()),
                         ..Default::default()
                     },
                     status: None,
                 },
             )
             .unwrap();
-        assert_eq!(updated.title, "更新标题");
-        assert_eq!(updated.detail.as_deref(), Some("详情"));
-
-        service.delete("console_admin:1", &created.id).unwrap();
-        assert!(matches!(
-            service.get("console_admin:1", &created.id),
-            Err(TodoManagementError::NotFound)
-        ));
+        assert_eq!(updated.item.title, "更新标题");
+        assert_eq!(
+            store.get_by_id(&owner, &created.id).unwrap().unwrap().title,
+            "更新标题"
+        );
     }
 
     #[test]
-    fn management_update_clears_nullable_fields_and_uses_status_transitions() {
-        let service = service();
-        let mut initial = draft("待办");
-        initial.detail = Some("将清空".to_owned());
-        let created = service.create("console_admin:1", initial).unwrap();
-        let completed = service
-            .update(
-                "console_admin:1",
-                &created.id,
-                TodoManagementUpdate {
-                    fields: TodoEditPatch {
-                        detail: Some(String::new()),
-                        ..Default::default()
-                    },
-                    status: Some(TodoStatus::Completed),
-                },
-            )
-            .unwrap();
-        assert_eq!(completed.detail, None);
-        assert_eq!(completed.status, TodoStatus::Completed);
+    fn invalid_patch_after_restore_does_not_partially_change_completed_todo() {
+        let (service, store, _) = service();
+        let scope = conversation_scope_key("qq_official", Some("app-1"), "private", "u1");
+        let owner = TodoStore::owner(Some("u1"), &scope);
+        let created = store.create(&owner, draft("原始标题")).unwrap();
+        store.complete(&owner, &created.id).unwrap();
 
-        let restored = service
-            .update(
-                "console_admin:1",
-                &created.id,
-                TodoManagementUpdate {
-                    fields: TodoEditPatch::default(),
-                    status: Some(TodoStatus::Pending),
+        let result = service.update(
+            &created.id,
+            TodoManagementUpdate {
+                fields: TodoEditPatch {
+                    title: Some("   ".to_owned()),
+                    ..Default::default()
                 },
-            )
+                status: Some(TodoStatus::Pending),
+            },
+        );
+        assert!(matches!(result, Err(TodoManagementError::Domain(_))));
+        let unchanged = store.get_by_id(&owner, &created.id).unwrap().unwrap();
+        assert_eq!(unchanged.status, TodoStatus::Completed);
+        assert_eq!(unchanged.title, "原始标题");
+    }
+
+    #[test]
+    fn notification_failure_rolls_back_todo_update() {
+        let database =
+            SqliteDatabase::open_temp("todo-management-rollback", APP_MIGRATIONS).unwrap();
+        let store = TodoStore::new(database.clone());
+        let service = TodoManagementService::new(
+            store.clone(),
+            NotificationOutboxStore::new(database.clone()),
+        );
+        let scope = conversation_scope_key("qq_official", Some("app-1"), "private", "u1");
+        let owner = TodoStore::owner(Some("u1"), &scope);
+        let created = store.create(&owner, draft("原始标题")).unwrap();
+        database
+            .connection()
+            .unwrap()
+            .execute("DROP TABLE notification_outbox", [])
             .unwrap();
-        assert_eq!(restored.status, TodoStatus::Pending);
+
+        let result = service.update(
+            &created.id,
+            TodoManagementUpdate {
+                fields: TodoEditPatch {
+                    title: Some("不应落库".to_owned()),
+                    ..Default::default()
+                },
+                status: None,
+            },
+        );
+        assert!(matches!(result, Err(TodoManagementError::Notification(_))));
+        assert_eq!(
+            store.get_by_id(&owner, &created.id).unwrap().unwrap().title,
+            "原始标题"
+        );
     }
 }

@@ -224,6 +224,38 @@ pub struct TodoQueryPage {
     pub offset: usize,
 }
 
+/// 部署管理员全局查询使用的目标范围；普通聊天查询不会消费这些字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TodoManagementScopeType {
+    Private,
+    Group,
+}
+
+/// 管理查询的身份筛选。`target` 只能来自服务端解析并回查成功的 target_ref，
+/// HTTP 请求不能直接拼接 owner_key / scope_key。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TodoManagementTargetFilter {
+    pub platform: Option<String>,
+    pub account_id: Option<String>,
+    pub scope_type: Option<TodoManagementScopeType>,
+    pub user_id: Option<String>,
+    pub target: Option<TodoOwner>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TodoManagementRecord {
+    pub owner: TodoOwner,
+    pub item: TodoItem,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TodoManagementPage {
+    pub items: Vec<TodoManagementRecord>,
+    pub total_count: usize,
+    pub limit: usize,
+    pub offset: usize,
+}
+
 /// 根据查询状态和参数决定时间范围筛哪个业务字段。
 pub fn resolve_todo_list_date_filter(
     status: Option<TodoStatus>,
@@ -375,6 +407,20 @@ impl TodoError {
     pub(super) fn not_found(message: impl Into<String>) -> Self {
         Self {
             code: "not_found",
+            message: message.into(),
+        }
+    }
+
+    pub(super) fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            code: "conflict",
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn notification(message: impl Into<String>) -> Self {
+        Self {
+            code: "notification_error",
             message: message.into(),
         }
     }
