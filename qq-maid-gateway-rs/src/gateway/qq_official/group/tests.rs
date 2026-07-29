@@ -272,11 +272,13 @@ fn api_client() -> QqApiClient {
     QqApiClient::new(
         qq_maid_common::http_client::client(),
         "http://127.0.0.1:1",
-        AccessTokenManager::new(
+        AccessTokenManager::new_with_cached_token_for_test(
             qq_maid_common::http_client::client(),
             "app",
             "secret",
             Duration::from_secs(60),
+            "test-access-token",
+            Duration::from_secs(3600),
         ),
     )
 }
