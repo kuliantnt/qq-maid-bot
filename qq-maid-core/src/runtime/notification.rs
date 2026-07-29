@@ -16,7 +16,7 @@ use serde::Deserialize;
 use tracing::{debug, info, warn};
 
 use crate::{
-    runtime::push::{PushError, PushIntent, PushSink},
+    runtime::push::{PushError, PushIntent, PushMention, PushSink, normalize_push_mentions},
     service::VisibleEntitySnapshot,
     storage::notification::{
         NotificationDeliveryState, NotificationOutboxStore, NotificationTask,
@@ -88,6 +88,9 @@ pub trait NotificationSentHook: Send + Sync {
 
 #[derive(Debug, Deserialize)]
 struct NotificationPushPayload {
+    /// 历史 Outbox payload 没有此字段时按空列表处理。
+    #[serde(default)]
+    mentions: Vec<PushMention>,
     #[serde(default)]
     message_type: Option<String>,
     #[serde(default)]
@@ -286,6 +289,7 @@ impl NotificationWorker {
                 part
             })
             .collect::<Vec<_>>();
+        let mentions = normalize_push_mentions(payload.mentions);
         let part_count = u32::try_from(parts.len()).map_err(|_| {
             DeliveryError::InvalidPayload(
                 "push payload part count exceeds supported range".to_owned(),
@@ -317,6 +321,7 @@ impl NotificationWorker {
             self.push_sink
                 .push(PushIntent {
                     target: task.target.clone(),
+                    mentions: mentions.clone(),
                     message_type: part.message_type,
                     text: part.text,
                     fallback_text: part.fallback_text,
@@ -631,7 +636,50 @@ mod tests {
 
         assert_eq!(stats.sent_count, 1);
         assert_eq!(task.status, NotificationStatus::Sent);
-        assert_eq!(sink.requests.lock().unwrap().len(), 1);
+        let requests = sink.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].mentions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn worker_normalizes_mentions_and_keeps_first_member_order() {
+        let store = test_store();
+        store
+            .upsert(NotificationUpsert {
+                source_type: "todo".to_owned(),
+                source_id: "mention-1".to_owned(),
+                dedupe_key: "todo:mention-1".to_owned(),
+                target: PushTarget::qq_official(PushTargetType::Group, "g1"),
+                channel: "push".to_owned(),
+                kind: "todo_reminder".to_owned(),
+                payload: json!({
+                    "message_type": "text",
+                    "text": "提醒",
+                    "mentions": [
+                        {"user_id": " member-1 ", "display_name": " 张三 "},
+                        {"user_id": ""},
+                        {"user_id": "member-2"},
+                        {"user_id": "member-1", "display_name": "重复昵称"}
+                    ]
+                }),
+                scheduled_at: "2020-01-01T09:00:00+08:00".to_owned(),
+                max_attempts: 3,
+                reactivate_cancelled: false,
+            })
+            .unwrap();
+        let sink = Arc::new(TestPushSink::default());
+        let worker =
+            NotificationWorker::new(store, sink.clone(), NotificationWorkerConfig::default());
+
+        worker.run_once().await.unwrap();
+
+        assert_eq!(
+            sink.requests.lock().unwrap()[0].mentions,
+            vec![
+                PushMention::new("member-1", Some("张三".to_owned())),
+                PushMention::new("member-2", None),
+            ]
+        );
     }
 
     #[tokio::test]

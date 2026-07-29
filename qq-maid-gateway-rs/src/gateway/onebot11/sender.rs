@@ -93,6 +93,18 @@ impl OneBotSender {
             .await
     }
 
+    /// 使用 OneBot 原生 `at` segment 发送群消息；无效成员 ID 仅跳过对应 segment，
+    /// 不能阻断后面的通知正文。
+    pub async fn send_group_text_with_mentions(
+        &self,
+        group_id: &str,
+        mention_user_ids: &[String],
+        text: &str,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        self.send_group_segments(group_id, mention_user_ids, text)
+            .await
+    }
+
     pub async fn send_private_image(
         &self,
         user_id: &str,
@@ -148,6 +160,44 @@ impl OneBotSender {
                 elapsed_ms,
                 target = %target,
                 "OneBot 11 text send failed"
+            ),
+        }
+        result
+    }
+
+    async fn send_group_segments(
+        &self,
+        group_id: &str,
+        mention_user_ids: &[String],
+        text: &str,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        let started = Instant::now();
+        let group_id = parse_target_id(group_id)?;
+        let params = build_text_params("group_id", group_id, mention_user_ids, text);
+        let result = self
+            .connection
+            .call(SEND_GROUP_MSG, params)
+            .await
+            .map_err(OneBotSendError::from)
+            .and_then(validate_send_response);
+        let elapsed_ms = started.elapsed().as_millis();
+        let target = mask_identifier(&group_id.to_string());
+        match &result {
+            Ok(_) => info!(
+                action = SEND_GROUP_MSG,
+                retcode = 0,
+                elapsed_ms,
+                target = %target,
+                mention_count = mention_user_ids.len(),
+                "OneBot 11 group message sent"
+            ),
+            Err(error) => warn!(
+                action = SEND_GROUP_MSG,
+                retcode = ?error.retcode(),
+                elapsed_ms,
+                target = %target,
+                mention_count = mention_user_ids.len(),
+                "OneBot 11 group message send failed"
             ),
         }
         result
@@ -237,6 +287,29 @@ fn build_image_params(
     }))
 }
 
+fn build_text_params(
+    target_key: &'static str,
+    target_id: u64,
+    mention_user_ids: &[String],
+    text: &str,
+) -> Value {
+    let mut message = mention_user_ids
+        .iter()
+        .filter_map(|user_id| parse_target_id(user_id).ok())
+        .map(|user_id| json!({"type": "at", "data": {"qq": user_id.to_string()}}))
+        .collect::<Vec<_>>();
+    let text = if message.is_empty() {
+        text.to_owned()
+    } else {
+        format!("\n{text}")
+    };
+    message.push(json!({"type": "text", "data": {"text": text}}));
+    json!({
+        target_key: Value::Number(Number::from(target_id)),
+        "message": message,
+    })
+}
+
 fn parse_target_id(target_id: &str) -> Result<u64, OneBotSendError> {
     if target_id.is_empty() || !target_id.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(OneBotSendError::InvalidTargetId);
@@ -314,6 +387,28 @@ mod tests {
                 Err(OneBotSendError::InvalidTargetId)
             ));
         }
+    }
+
+    #[test]
+    fn group_text_params_use_native_at_segments_and_skip_invalid_members() {
+        let params = build_text_params(
+            "group_id",
+            42,
+            &["1001".to_owned(), "bad".to_owned(), "1002".to_owned()],
+            "提醒正文",
+        );
+
+        assert_eq!(
+            params,
+            json!({
+                "group_id": 42,
+                "message": [
+                    {"type": "at", "data": {"qq": "1001"}},
+                    {"type": "at", "data": {"qq": "1002"}},
+                    {"type": "text", "data": {"text": "\n提醒正文"}},
+                ],
+            })
+        );
     }
 
     #[test]

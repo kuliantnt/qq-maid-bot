@@ -82,9 +82,7 @@ fn group_reply_mention_prefix(
     message
         .member_openid
         .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|member_openid| format!("<@{member_openid}>"))
+        .and_then(platform::qq_official::member_mention)
 }
 
 fn prefix_group_reply_outbound(
