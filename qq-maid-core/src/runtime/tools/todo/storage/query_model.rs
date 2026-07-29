@@ -10,6 +10,8 @@ use super::{
     TodoQueryTimeFilter, TodoRecurrenceKind, TodoStatus, TodoStore, query::todo_item_from_row,
 };
 
+const TODO_MANAGEMENT_QUERY_MAX_LIMIT: usize = 100;
+
 const SELECT_COLUMNS: &str = "id, user_id, scope_key, title, detail, raw_text,
     due_date, due_at, reminder_at, time_precision, recurrence_kind,
     recurrence_interval_days, recurrence_interval, recurrence_unit, status,
@@ -21,6 +23,25 @@ impl TodoStore {
         &self,
         owner: &super::TodoOwner,
         query: &TodoQuery,
+    ) -> Result<TodoQueryPage, TodoError> {
+        self.query_todos_with_max_limit(owner, query, TODO_QUERY_MAX_LIMIT)
+    }
+
+    /// 管理 API 复用同一套 Todo 查询条件，但允许使用通用 API 的 100 条分页上限。
+    /// Tool/Slash 的 20 条展示边界保持不变，避免扩大模型上下文。
+    pub(crate) fn query_todos_for_management(
+        &self,
+        owner: &super::TodoOwner,
+        query: &TodoQuery,
+    ) -> Result<TodoQueryPage, TodoError> {
+        self.query_todos_with_max_limit(owner, query, TODO_MANAGEMENT_QUERY_MAX_LIMIT)
+    }
+
+    fn query_todos_with_max_limit(
+        &self,
+        owner: &super::TodoOwner,
+        query: &TodoQuery,
+        max_limit: usize,
     ) -> Result<TodoQueryPage, TodoError> {
         validate_todo_query(query)?;
         let conn = self.connection()?;
@@ -34,7 +55,7 @@ impl TodoStore {
             .try_into()
             .map_err(|_| TodoError::data("todo count overflow"))?;
 
-        let limit = query.limit.min(TODO_QUERY_MAX_LIMIT);
+        let limit = query.limit.min(max_limit);
         let order_sql = order_by_sql(query.status);
         let page_sql = format!(
             "SELECT {SELECT_COLUMNS} FROM todos WHERE {where_sql} {order_sql} LIMIT {limit} OFFSET {}",

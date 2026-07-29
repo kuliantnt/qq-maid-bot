@@ -17,6 +17,7 @@ use crate::{
         DynConsoleStatusSource, EmptyConsoleStatusSource,
     },
     management::AdminAuth,
+    runtime::tools::todo::TodoManagementService,
 };
 
 pub use super::router_builder::build_router;
@@ -56,6 +57,8 @@ pub struct OpsHttpState {
     pub config_center: Option<ConfigCenter>,
     /// 配置 WebUI 与后续 Memory WebUI 统一复用的部署管理员安全边界。
     pub admin_auth: Option<AdminAuth>,
+    /// Todo 管理领域门面；Handler 不直接持有数据库或通知 Store。
+    pub(crate) todo_management: Option<TodoManagementService>,
     /// 当前进程真实注册的 Tool 元数据，供 WebUI 动态展示白名单选项。
     pub registered_tools: Arc<Vec<ConsoleToolMetadata>>,
     /// 仅复用部署目录中的受控 botctl 脚本，不直接操作 systemd 或 Docker。
@@ -67,6 +70,11 @@ pub struct OpsHttpState {
 impl OpsHttpState {
     pub fn with_registered_tools(mut self, tools: Vec<ConsoleToolMetadata>) -> Self {
         self.registered_tools = Arc::new(tools);
+        self
+    }
+
+    pub(crate) fn with_todo_management(mut self, service: TodoManagementService) -> Self {
+        self.todo_management = Some(service);
         self
     }
 
@@ -92,6 +100,7 @@ impl OpsHttpState {
             console_status_source: Arc::new(EmptyConsoleStatusSource),
             config_center: None,
             admin_auth: None,
+            todo_management: None,
             registered_tools: Arc::new(Vec::new()),
             restart_controller: ConsoleRestartController::default(),
             setup_required: false,
@@ -133,6 +142,7 @@ impl OpsHttpState {
             console_status_source,
             config_center,
             admin_auth,
+            todo_management: None,
             registered_tools: Arc::new(Vec::new()),
             restart_controller: ConsoleRestartController::from_current_dir(),
             setup_required: false,
@@ -153,6 +163,7 @@ impl OpsHttpState {
             console_status_source: Arc::new(EmptyConsoleStatusSource),
             config_center: Some(config_center),
             admin_auth,
+            todo_management: None,
             registered_tools: Arc::new(Vec::new()),
             restart_controller: ConsoleRestartController::from_current_dir(),
             setup_required: true,

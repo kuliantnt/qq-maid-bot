@@ -163,6 +163,10 @@ impl LlmRuntime {
             config_center,
             admin_auth,
         )
+        .with_todo_management(crate::runtime::tools::todo::TodoManagementService::new(
+            core_state.stores.todo_store.clone(),
+            core_state.stores.notification_store.clone(),
+        ))
         .with_registered_tools(registered_tools);
         let workers = CoreWorkers::from_runtime_state(&core_state, push_sink)?;
 
