@@ -99,7 +99,8 @@ async fn mode_policy_blocked_group_message_does_not_download_media() {
     config.group_message_mode = GroupMessageMode::Off;
     config.media_dir = unique_media_dir("mode-policy");
     let (url, hits) = spawn_media_server().await;
-    let message = media_message("group-off", "普通聊天", GroupEventType::GroupMessage, url);
+    let mut message = media_message("group-off", "普通聊天", GroupEventType::GroupMessage, url);
+    message.current_msg_idx = Some("REFIDX_ignored_image".to_owned());
     let ref_index = crate::gateway::ref_index::ref_index();
 
     handle_group_message_for_test(
@@ -119,6 +120,25 @@ async fn mode_policy_blocked_group_message_does_not_download_media() {
 
     assert_eq!(hits.load(Ordering::SeqCst), 0);
     assert_eq!(media_file_count(&config.media_dir), 0);
+
+    // 被动观察允许保留媒体摘要，但索引中不得保存 QQ 临时 URL。
+    let mut quoted = group_message("查看图片", GroupEventType::GroupAtMessage);
+    quoted.reply = Some(crate::gateway::event::MessageReply {
+        message_id: "quoted-ignored-image".to_owned(),
+        ref_msg_idx: Some("REFIDX_ignored_image".to_owned()),
+        content: None,
+        input_parts: Vec::new(),
+        media_summaries: Vec::new(),
+    });
+    let mut inbound =
+        respond_client().prepare_inbound(platform::qq_official::inbound_from_group(&quoted));
+    ref_index.lock().unwrap().enrich_inbound(&mut inbound);
+    let media = inbound.quoted.as_ref().unwrap().input_parts[1]
+        .media()
+        .expect("passively observed image");
+    assert_eq!(media.url, None);
+    assert_eq!(media.local_path, None);
+    assert_eq!(media.status, MediaStatus::MissingReadableUrl);
 }
 
 #[tokio::test]
@@ -169,6 +189,103 @@ async fn plain_group_message_ignored_by_mode_policy_remains_quotable() {
     assert_eq!(quoted_context.text_summary.as_deref(), Some("普通群友消息"));
     assert_eq!(quoted_context.from_bot, Some(false));
     assert_eq!(quoted_context.fallback_reason, None);
+    assert_eq!(
+        quoted_context
+            .input_parts
+            .iter()
+            .filter_map(MessageInputPart::text_content)
+            .collect::<Vec<_>>(),
+        vec!["普通群友消息"]
+    );
+}
+
+#[tokio::test]
+async fn quoted_downloaded_image_survives_passive_ref_index_hit() {
+    let mut config = test_config();
+    config.group_message_mode = GroupMessageMode::Off;
+    config.media_dir = unique_media_dir("passive-quote-download");
+    let (url, hits) = spawn_media_server().await;
+    let mut original = media_message(
+        "group-passive-image",
+        "被忽略的图片",
+        GroupEventType::GroupMessage,
+        url.clone(),
+    );
+    original.current_msg_idx = Some("REFIDX_passive_image".to_owned());
+    let ref_index = crate::gateway::ref_index::ref_index();
+
+    handle_group_message_for_test(
+        original,
+        &config,
+        &respond_client(),
+        &api_client(),
+        &crate::gateway::dedupe::MessageDedupe::new(Duration::from_secs(60)),
+        &Arc::new(Mutex::new(BotOutboundCache::default())),
+        &Arc::new(Mutex::new(GroupCooldowns::default())),
+        &bot_identity(),
+        &GatewayRuntimeStatus::new(),
+        &ref_index,
+    )
+    .await
+    .unwrap();
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+    let mut quoted = group_message("查看这张图", GroupEventType::GroupAtMessage);
+    quoted.message_id = "group-quote-passive-image".to_owned();
+    quoted.reply = Some(crate::gateway::event::MessageReply {
+        message_id: "quoted-passive-image".to_owned(),
+        ref_msg_idx: Some("REFIDX_passive_image".to_owned()),
+        content: Some("payload 展示正文".to_owned()),
+        input_parts: vec![
+            MessageInputPart::text("payload 展示正文"),
+            MessageInputPart::image(MessageMedia {
+                mime_type: Some("image/jpeg".to_owned()),
+                filename: Some("a.jpg".to_owned()),
+                url: Some(url),
+                status: MediaStatus::Available,
+                ..Default::default()
+            }),
+        ],
+        media_summaries: Vec::new(),
+    });
+    let media_context = MediaFetchContext {
+        platform: "qq_official",
+        app_id: config.app_id.clone().unwrap(),
+        peer_id: quoted.group_openid.clone(),
+        root_dir: config.media_dir.clone(),
+        timeout: config.media_download_timeout,
+        max_bytes: config.media_max_bytes,
+    };
+    fetch_qq_official_quoted_images(
+        &qq_maid_common::http_client::client(),
+        &media_context,
+        &quoted.message_id,
+        quoted.reply.as_mut(),
+    )
+    .await;
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    let mut inbound =
+        respond_client().prepare_inbound(crate::respond::normalized_group_inbound_with_prefix(
+            &quoted,
+            &config.group_active_keywords,
+            config.command_prefix,
+        ));
+    ref_index.lock().unwrap().enrich_inbound(&mut inbound);
+
+    let quoted_context = inbound.quoted.as_ref().unwrap();
+    assert_eq!(quoted_context.text_summary.as_deref(), Some("被忽略的图片"));
+    assert_eq!(
+        quoted_context.input_parts[0].text_content(),
+        Some("被忽略的图片")
+    );
+    let media = quoted_context.input_parts[1]
+        .media()
+        .expect("downloaded quoted image");
+    let local_path = media.local_path.as_deref().expect("downloaded local path");
+    assert!(std::path::Path::new(local_path).is_file());
+    assert_eq!(media.status, MediaStatus::Available);
+    assert_eq!(media.url, None);
 }
 
 struct GroupHandlerHarness {

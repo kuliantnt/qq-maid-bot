@@ -369,7 +369,7 @@ pub(crate) async fn handle_group_message(
         ));
     // 在群聊归一化正文后、RefIndex enrich 前检测引用文字污染。
     // 归一化已移除 @机器人/唤醒词/分隔符，此时当前正文与 Core 最终一致。
-    // RefIndex 命中时会用索引原文覆盖 input_parts，因此本处只影响 miss 的最终状态。
+    // 完整 RefIndex 命中会覆盖 input_parts；被动观察命中则用索引正文与事件媒体合并。
     if let Some(ref mut quoted) = inbound.quoted {
         strip_contaminated_quote_from_context(quoted, &inbound.text);
     }
@@ -640,7 +640,7 @@ fn observe_mode_ignored_group_message_ref_index(
         config.command_prefix,
     ));
     match ref_index.lock() {
-        Ok(mut index) => index.insert_inbound(&inbound),
+        Ok(mut index) => index.insert_passive_observation(&inbound),
         Err(_) => warn!(
             message_id = %message.message_id,
             group = %mask_openid(&message.group_openid),
