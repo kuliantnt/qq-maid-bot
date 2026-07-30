@@ -163,3 +163,66 @@ fn missing_ref_msg_idx_with_payload_marks_quoted_payload_without_reference_id() 
     // reference_id 不产生 Some("")。
     assert_eq!(quoted.reference_id, None);
 }
+
+#[test]
+fn second_quote_keeps_current_parts_without_recursive_media() {
+    let mut store = RefIndex::default();
+    let mut first_quote = group_inbound("gm-first-quote", Some("TMP_first_quote"), "第一次分析");
+    first_quote.input_parts = vec![
+        MessageInputPart::text("第一次分析"),
+        MessageInputPart::image(MessageMedia {
+            mime_type: Some("image/png".to_owned()),
+            filename: Some("current.png".to_owned()),
+            url: Some("https://example.test/current.png?rkey=secret".to_owned()),
+            local_path: Some("/tmp/current.png".to_owned()),
+            status: MediaStatus::Available,
+            ..Default::default()
+        }),
+    ];
+    first_quote.quoted = Some(QuotedMessageContext {
+        ref_msg_idx: Some("REFIDX_history".to_owned()),
+        lookup_found: true,
+        text_summary: Some("历史原文".to_owned()),
+        input_parts: vec![
+            MessageInputPart::text("历史原文"),
+            MessageInputPart::image(MessageMedia {
+                filename: Some("history.png".to_owned()),
+                url: Some(
+                    "https://example.test/history.png?rkey=secret&auth_token=secret".to_owned(),
+                ),
+                local_path: Some("/tmp/history.png".to_owned()),
+                status: MediaStatus::Available,
+                ..Default::default()
+            }),
+        ],
+        ..Default::default()
+    });
+    store.insert_inbound(&first_quote);
+
+    let mut second_quote = group_inbound("gm-second", Some("TMP_second"), "继续");
+    second_quote.quoted = Some(QuotedMessageContext {
+        ref_msg_idx: Some("TMP_first_quote".to_owned()),
+        ..Default::default()
+    });
+    store.enrich_inbound(&mut second_quote);
+
+    let parts = &second_quote.quoted.as_ref().unwrap().input_parts;
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].text_content(), Some("第一次分析"));
+    let current_media = parts[1].media().expect("current message image");
+    assert_eq!(current_media.filename.as_deref(), Some("current.png"));
+    assert_eq!(
+        current_media.local_path.as_deref(),
+        Some("/tmp/current.png")
+    );
+    assert_eq!(
+        current_media.url, None,
+        "QQ temporary URL must not enter RefIndex"
+    );
+    let rendered = parts
+        .iter()
+        .map(MessageInputPart::fallback_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!rendered.contains("history.png"));
+}

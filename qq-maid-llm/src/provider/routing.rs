@@ -332,11 +332,10 @@ impl LlmProvider for ModelRouteProvider {
                         !diagnostics.side_effecting_tools_started.is_empty()
                             || !diagnostics.tools_with_unknown_result.is_empty()
                     };
-                    // Tool Loop 本地上下文超限不代表 Provider 不可用；在尚未外发
-                    // 内容且未启动副作用时可安全换候选，但绝不重跑已产生副作用的轮次。
-                    let local_budget_fallback = err.code == "context_budget_exceeded";
+                    // 只有可恢复的上游错误才切换候选。本地预算/请求构造错误对等价
+                    // payload 必然重复失败，必须原样返回，不能误报为候选 Provider 不可用。
                     let fallback = index + 1 < candidates.len()
-                        && (should_try_next_model(&err) || local_budget_fallback)
+                        && should_try_next_model(&err)
                         && !visible_delta_sent
                         && !tool_side_effect_started;
                     tracing::warn!(

@@ -1,13 +1,13 @@
 # qq-maid-llm 项目清单 —— 只承载模型调用、Provider 路由和 Web Search 协议能力。
 [package]
 name = "qq-maid-llm"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 publish = false
 
 [dependencies]
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 futures = "0.3"
 qq-maid-common = { path = "../qq-maid-common" }
 reqwest = { version = "0.13", default-features = false, features = ["gzip", "json", "rustls-no-provider"] }

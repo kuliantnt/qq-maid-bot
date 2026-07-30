@@ -12,7 +12,7 @@ use crate::{
     identity::{group_raw_target_from_scope_key, private_raw_target_from_scope_key},
     runtime::{
         notification::NotificationSentHook,
-        push::{PushTarget, PushTargetType},
+        push::{PushMention, PushTarget, PushTargetType},
         tools::todo::{TodoItem, TodoItemDraft, TodoOwner, todo_item_visible_entity_snapshot},
     },
     storage::notification::{NotificationOutboxStore, NotificationTask, NotificationUpsert},
@@ -96,14 +96,34 @@ pub fn sync_reminder_task(
     owner: &TodoOwner,
     item: &TodoItem,
 ) -> Result<(), String> {
-    let Some(reminder_at) = item.reminder_at.as_deref() else {
-        cancel_reminder_task(store, item)?;
+    let request = prepare_reminder_upsert(owner, item)?;
+    // 无提醒或已经完成的 Todo 只取消旧任务；不能因为记录还保留 reminder_at
+    // 就把 completed Todo 重新排入 Outbox。
+    cancel_reminder_task(store, item)?;
+    let Some(request) = request else {
         return Ok(());
+    };
+    store
+        .upsert(request)
+        .map(|_| ())
+        .map_err(|err| err.message().to_owned())
+}
+
+/// 纯构造 Todo reminder 的 Outbox 快照，供管理更新与 Todo 写入共用事务。
+/// 返回 `None` 表示最终状态不应再投递；本函数本身不写数据库。
+pub(crate) fn prepare_reminder_upsert(
+    owner: &TodoOwner,
+    item: &TodoItem,
+) -> Result<Option<NotificationUpsert>, String> {
+    if item.status != super::TodoStatus::Pending {
+        return Ok(None);
+    }
+    let Some(reminder_at) = item.reminder_at.as_deref() else {
+        return Ok(None);
     };
     let scheduled_at = parse_reminder_at(reminder_at)?;
     if scheduled_at <= Utc::now().with_timezone(&shanghai_offset()) {
-        cancel_reminder_task(store, item)?;
-        return Ok(());
+        return Ok(None);
     }
     let target = push_target_from_scope(&owner.scope_key)
         .ok_or_else(|| "当前会话没有可用的提醒推送目标。".to_owned())?;
@@ -115,30 +135,40 @@ pub fn sync_reminder_task(
         item,
         Some("todo_reminder"),
     );
-    // 单次提醒重排时，新时间会生成新 dedupe_key；先取消旧的未发送任务，
-    // 避免未来时间 A 改到 B 后两个 pending/retry 提醒都发出。sent 记录由存储层保留。
-    cancel_reminder_task(store, item)?;
     let message = render_todo_reminder(item);
-    store
-        .upsert(NotificationUpsert {
-            source_type: TODO_REMINDER_SOURCE.to_owned(),
-            source_id: item.id.clone(),
-            dedupe_key: reminder_dedupe_key(item, &scheduled_at),
-            target,
-            channel: "qq".to_owned(),
-            kind: TODO_REMINDER_KIND.to_owned(),
-            payload: json!({
-                "message_type": "markdown",
-                "text": message.markdown,
-                "fallback_text": message.text,
-                "visible_entity_snapshot": visible_entity_snapshot,
-            }),
-            scheduled_at: scheduled_at.to_rfc3339(),
-            max_attempts: 5,
-            reactivate_cancelled: true,
-        })
-        .map(|_| ())
-        .map_err(|err| err.message().to_owned())
+    let mentions = todo_reminder_mentions(&target, owner);
+    Ok(Some(NotificationUpsert {
+        source_type: TODO_REMINDER_SOURCE.to_owned(),
+        source_id: item.id.clone(),
+        dedupe_key: reminder_dedupe_key(item, &scheduled_at),
+        target,
+        channel: "qq".to_owned(),
+        kind: TODO_REMINDER_KIND.to_owned(),
+        payload: json!({
+            "message_type": "markdown",
+            "text": message.markdown,
+            "fallback_text": message.text,
+            "mentions": mentions,
+            "visible_entity_snapshot": visible_entity_snapshot,
+        }),
+        scheduled_at: scheduled_at.to_rfc3339(),
+        max_attempts: 5,
+        reactivate_cancelled: true,
+    }))
+}
+
+fn todo_reminder_mentions(target: &PushTarget, owner: &TodoOwner) -> Vec<PushMention> {
+    if target.target_type != PushTargetType::Group {
+        return Vec::new();
+    }
+    // 群内个人 Todo 的 owner 是实际归属成员；无 owner 的群共享 Todo 不猜测创建者。
+    owner
+        .user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|user_id| !user_id.is_empty())
+        .map(|user_id| vec![PushMention::new(user_id, None)])
+        .unwrap_or_default()
 }
 
 pub fn cancel_reminder_task(
@@ -413,6 +443,46 @@ mod tests {
 
         assert_eq!(task.target.target_type, PushTargetType::Private);
         assert_eq!(task.target.target_id, "u1");
+        assert_eq!(task.payload["mentions"], json!([]));
+    }
+
+    #[test]
+    fn group_reminder_mentions_actual_todo_owner() {
+        let store = test_store();
+        // 调用方是否为管理员不影响这里的业务语义；传入的 owner 才是 Todo 实际归属成员。
+        let owner = TodoStore::owner(Some("actual-member"), "group:g1");
+        let mut item = reminder_item();
+        item.user_id = owner.user_id.clone();
+        item.scope_key = owner.scope_key.clone();
+
+        sync_reminder_task(&store, &owner, &item).unwrap();
+        let task = store
+            .get_by_dedupe_key("todo:1:reminder:2099-01-01T09:30:00+08:00")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(task.target.target_type, PushTargetType::Group);
+        assert_eq!(
+            task.payload["mentions"],
+            json!([{"user_id": "actual-member"}])
+        );
+    }
+
+    #[test]
+    fn shared_group_reminder_does_not_guess_a_member() {
+        let store = test_store();
+        let owner = TodoStore::owner(None, "group:g1");
+        let mut item = reminder_item();
+        item.user_id = None;
+        item.scope_key = owner.scope_key.clone();
+
+        sync_reminder_task(&store, &owner, &item).unwrap();
+        let task = store
+            .get_by_dedupe_key("todo:1:reminder:2099-01-01T09:30:00+08:00")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(task.payload["mentions"], json!([]));
     }
 
     #[test]

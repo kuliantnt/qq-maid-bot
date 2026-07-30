@@ -100,6 +100,32 @@ impl AccessTokenManager {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_with_cached_token_for_test(
+        client: reqwest::Client,
+        app_id: impl Into<String>,
+        app_secret: impl Into<String>,
+        refresh_margin: Duration,
+        token: impl Into<String>,
+        expires_in: Duration,
+    ) -> Self {
+        // 发送链路测试只验证 QQ API 行为，预置 token 可避免单元测试访问真实鉴权端点。
+        let now = Instant::now();
+        Self {
+            inner: Arc::new(AccessTokenManagerInner {
+                client,
+                app_id: app_id.into(),
+                app_secret: app_secret.into(),
+                refresh_margin,
+                cached: Mutex::new(Some(CachedAccessToken {
+                    token: token.into(),
+                    expires_at: now + expires_in,
+                    refresh_margin,
+                })),
+            }),
+        }
+    }
+
     pub async fn token(&self) -> Result<String, AuthError> {
         let now = Instant::now();
         let mut cached = self.inner.cached.lock().await;

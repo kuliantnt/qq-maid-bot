@@ -493,6 +493,7 @@ mod tests {
         let err = push_probe
             .push(PushIntent {
                 target: PushTarget::qq_official(PushTargetType::Private, "user-1"),
+                mentions: Vec::new(),
                 text: "hello".to_owned(),
                 fallback_text: None,
                 message_type: "text".to_owned(),

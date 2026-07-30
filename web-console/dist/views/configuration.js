@@ -5,6 +5,13 @@ import { openCodeProviderChange, readOpenCodeProviders, renderOpenCodeProviders,
 import { renderThemeSelector } from "./theme-selector.js";
 const FIELD_LABELS = {
     "command.prefix": "聊天命令前缀",
+    "delivery.tts.provider": "语音 Provider",
+    "delivery.tts.qwen_api_key": "千问 TTS API Key",
+    "delivery.tts.qwen_base_url": "千问 TTS Base URL",
+    "delivery.tts.qwen_model": "千问 TTS 模型",
+    "delivery.tts.qwen_voice": "千问 TTS 音色",
+    "delivery.tts.request_timeout_seconds": "请求超时（秒）",
+    "delivery.tts.max_text_chars": "最大朗读字符数",
     "provider.openai.base_url": "OpenAI Base URL",
     "provider.openai.api_mode": "OpenAI API 模式",
     "provider.openai.api_key": "OpenAI API Key",
@@ -58,6 +65,11 @@ const FIELD_LABELS = {
 };
 const FIELD_GROUPS = [
     { label: "命令设置", prefix: "command." },
+    {
+        label: "语音回复",
+        prefix: "delivery.tts.",
+        description: "修改后需要重启。Web 控制台只配置全局 TTS 能力；Provider 关闭或千问 API Key 未配置时，/语音 开启会被拒绝。私聊或群聊是否启用仍通过 /语音 开启、/语音 关闭管理。关闭 Provider 不会清除已保存的千问配置，也可以提前填写。",
+    },
     { label: "模型服务", prefix: "provider." },
     { label: "QQ 官方入口", prefix: "platform.qq_official." },
     { label: "OneBot 11 入口", prefix: "platform.onebot11." },
@@ -68,6 +80,43 @@ const FIELD_GROUPS = [
     { label: "Web 控制台", prefix: "console." },
     { label: "基础运行", prefix: "bootstrap." },
 ];
+const TTS_PROVIDER_OPTIONS = [
+    ["disabled", "关闭"],
+    ["qwen", "千问"],
+];
+const TTS_NUMBER_RANGES = {
+    "delivery.tts.request_timeout_seconds": [1, 120],
+    "delivery.tts.max_text_chars": [1, 600],
+};
+export function configFieldLabel(key) {
+    return FIELD_LABELS[key] ?? key;
+}
+export function configFieldGroupLabel(key) {
+    return FIELD_GROUPS.find((group) => key.startsWith(group.prefix))?.label ?? "其他配置";
+}
+/** 未识别的历史 Provider 必须原样保留，避免页面加载或保存时静默改成受支持值。 */
+export function ttsProviderOptions(currentValue) {
+    const current = currentValue === null || currentValue === undefined ? "disabled" : String(currentValue);
+    const options = TTS_PROVIDER_OPTIONS.map(([value, label]) => [value, label]);
+    if (!options.some(([value]) => value === current)) {
+        options.push([current, `${current}（当前自定义值）`]);
+    }
+    return options;
+}
+export function ttsNumberRange(key) {
+    return TTS_NUMBER_RANGES[key] ?? null;
+}
+/** TTS 范围字段必须先完整通过整数与边界校验，不能沿用普通整数的宽松 parseInt 语义。 */
+export function parseTtsNumberValue(key, rawValue) {
+    const range = ttsNumberRange(key);
+    if (!range)
+        throw new Error(`${configFieldLabel(key)}没有可用的页面输入范围`);
+    const value = rawValue.trim() === "" ? Number.NaN : Number(rawValue);
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value < range[0] || value > range[1]) {
+        throw new Error(`${configFieldLabel(key)}必须是 ${range[0]} 到 ${range[1]} 之间的整数`);
+    }
+    return value;
+}
 const AGENT_ROUTE_LABELS = {
     private_main: "私聊主路线",
     group_main: "群聊主路线",
@@ -201,6 +250,7 @@ function render(snapshot, themeController, backgroundController) {
     renderThemeSelector(element("console-theme-selector"), themeController, backgroundController);
     renderPublicFields(snapshot);
     renderSecretFields(snapshot);
+    bindTtsProviderState();
     renderAgent(snapshot);
     renderConfigurationNavigation();
     bindRestart(snapshot);
@@ -221,9 +271,10 @@ function renderPublicFields(snapshot) {
     appendGroupedFields(target, snapshot.fields.filter((value) => value.sensitivity !== "secret"), (field) => {
         const row = document.createElement("div");
         row.className = "config-row";
+        decorateTtsRow(row, field);
         const label = document.createElement("label");
         label.htmlFor = inputId(field.key);
-        label.textContent = FIELD_LABELS[field.key] ?? field.key;
+        label.textContent = configFieldLabel(field.key);
         label.append(meta(field));
         const input = fieldInput(field);
         input.dataset.autosaveScope = "public";
@@ -244,9 +295,10 @@ function renderSecretFields(snapshot) {
     appendGroupedFields(target, snapshot.fields.filter((value) => value.sensitivity === "secret"), (field) => {
         const row = document.createElement("div");
         row.className = "config-row secret-row";
+        decorateTtsRow(row, field);
         const label = document.createElement("label");
         label.htmlFor = inputId(field.key);
-        label.textContent = FIELD_LABELS[field.key] ?? field.key;
+        label.textContent = configFieldLabel(field.key);
         label.append(meta(field));
         const input = document.createElement("input");
         input.id = inputId(field.key);
@@ -446,7 +498,7 @@ function configurationGroup(primary, group, content) {
     wrapper.append(content);
     return wrapper;
 }
-function fieldGroup(label, rows) {
+function fieldGroup(label, rows, description) {
     const section = document.createElement("section");
     section.className = "config-field-group";
     const heading = document.createElement("h3");
@@ -454,7 +506,14 @@ function fieldGroup(label, rows) {
     const grid = document.createElement("div");
     grid.className = "config-field-group-grid";
     grid.append(...rows);
-    section.append(heading, grid);
+    section.append(heading);
+    if (description) {
+        const hint = document.createElement("p");
+        hint.className = "config-field-group-hint";
+        hint.textContent = description;
+        section.append(hint);
+    }
+    section.append(grid);
     return section;
 }
 function renderConfigurationNavigation() {
@@ -563,13 +622,12 @@ function secondaryLabel(primary, group) {
     }
     return SECONDARY_LABELS[group] ?? group;
 }
-async function savePublicFields() {
-    if (!current)
-        return;
+export function publicConfigurationChanges(fields, values) {
     const changes = [];
-    for (const field of current.fields.filter((value) => value.sensitivity === "public" && value.editable)) {
-        const input = configInput(field.key);
-        const value = inputValue(input, field);
+    for (const field of fields.filter((value) => value.sensitivity === "public" && value.editable)) {
+        if (!values.has(field.key))
+            continue;
+        const value = values.get(field.key);
         const baseline = field.savedValue ?? field.effectiveValue;
         // 未配置的可选字段会显示为空输入框；用户未触碰时不能把空字符串误当成新配置提交。
         if ((baseline === null || baseline === undefined) && isEmptyInputValue(value))
@@ -578,6 +636,29 @@ async function savePublicFields() {
             changes.push({ action: "set", key: field.key, value });
         }
     }
+    return changes;
+}
+async function savePublicFields() {
+    if (!current)
+        return;
+    const values = new Map();
+    for (const field of current.fields.filter((value) => value.sensitivity === "public" && value.editable)) {
+        const input = configInput(field.key);
+        if (!input.checkValidity()) {
+            input.reportValidity();
+            return showResult(`${configFieldLabel(field.key)}不符合页面输入范围，请修改后再保存。`, true);
+        }
+        try {
+            const value = ttsNumberRange(field.key)
+                ? parseTtsNumberValue(field.key, input.value)
+                : inputValue(input, field);
+            values.set(field.key, value);
+        }
+        catch (cause) {
+            return showResult(errorMessage(cause), true);
+        }
+    }
+    const changes = publicConfigurationChanges(current.fields, values);
     if (changes.length === 0)
         return showResult("没有需要保存的普通配置。", false);
     await runSave(async () => updateRuntimeConfiguration(current.revision, changes));
@@ -587,20 +668,33 @@ async function removePublicField(key) {
         return;
     await runSave(async () => updateRuntimeConfiguration(current.revision, [{ action: "remove", key }]));
 }
+export function secretConfigurationChanges(fields, values, clearKeys) {
+    const changes = [];
+    for (const field of fields.filter((value) => value.sensitivity === "secret" && value.editable)) {
+        if (clearKeys.has(field.key)) {
+            changes.push({ action: "clear", key: field.key, expected_revision: field.revision ?? "missing" });
+        }
+        else {
+            const value = values.get(field.key) ?? "";
+            if (value.length > 0) {
+                changes.push({ action: "replace", key: field.key, value, expected_revision: field.revision ?? "missing" });
+            }
+        }
+    }
+    return changes;
+}
 async function saveSecrets() {
     if (!current)
         return;
-    const changes = [];
+    const values = new Map();
+    const clearKeys = new Set();
     for (const field of current.fields.filter((value) => value.sensitivity === "secret" && value.editable)) {
-        const input = element(inputId(field.key), HTMLInputElement);
+        values.set(field.key, element(inputId(field.key), HTMLInputElement).value);
         const clear = document.querySelector(`input[data-clear-key="${field.key}"]`);
-        if (clear?.checked) {
-            changes.push({ action: "clear", key: field.key, expected_revision: field.revision ?? "missing" });
-        }
-        else if (input.value.length > 0) {
-            changes.push({ action: "replace", key: field.key, value: input.value, expected_revision: field.revision ?? "missing" });
-        }
+        if (clear?.checked)
+            clearKeys.add(field.key);
     }
+    const changes = secretConfigurationChanges(current.fields, values, clearKeys);
     if (changes.length === 0)
         return showResult("留空不会清除 secret；当前没有显式变更。", false);
     await runSave(async () => updateSecretConfiguration(changes));
@@ -914,6 +1008,21 @@ async function runSave(action) {
 }
 function fieldInput(field) {
     const value = field.savedValue ?? field.effectiveValue;
+    if (field.key === "delivery.tts.provider") {
+        const select = document.createElement("select");
+        select.id = inputId(field.key);
+        select.dataset.configKey = field.key;
+        select.disabled = !field.editable;
+        const currentValue = value === null || value === undefined ? "disabled" : String(value);
+        for (const [optionValue, label] of ttsProviderOptions(currentValue)) {
+            const option = document.createElement("option");
+            option.value = optionValue;
+            option.textContent = label;
+            select.append(option);
+        }
+        select.value = currentValue;
+        return select;
+    }
     if (field.key === "command.prefix") {
         const select = document.createElement("select");
         select.id = inputId(field.key);
@@ -948,8 +1057,34 @@ function fieldInput(field) {
     else {
         input.type = field.valueType === "integer" ? "number" : "text";
         input.value = Array.isArray(value) ? value.join(", ") : value === null || value === undefined ? "" : String(value);
+        const range = ttsNumberRange(field.key);
+        if (range) {
+            input.min = String(range[0]);
+            input.max = String(range[1]);
+            input.step = "1";
+            input.required = true;
+        }
     }
     return input;
+}
+function decorateTtsRow(row, field) {
+    row.dataset.configFieldKey = field.key;
+    if (field.key.startsWith("delivery.tts.qwen_"))
+        row.dataset.ttsQwenField = "true";
+}
+/** 关闭 Provider 只做视觉提示，字段始终保持可编辑且不会生成清除操作。 */
+function bindTtsProviderState() {
+    const provider = document.getElementById(inputId("delivery.tts.provider"));
+    if (!(provider instanceof HTMLSelectElement))
+        return;
+    const refresh = () => {
+        const disabled = provider.value === "disabled";
+        for (const row of document.querySelectorAll("[data-tts-qwen-field='true']")) {
+            row.classList.toggle("config-row-muted", disabled);
+        }
+    };
+    provider.addEventListener("change", refresh);
+    refresh();
 }
 function inputValue(input, field) {
     if (field.valueType === "boolean")

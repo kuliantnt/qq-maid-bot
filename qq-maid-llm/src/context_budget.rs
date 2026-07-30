@@ -10,6 +10,13 @@ use tracing::{debug, warn};
 
 use crate::error::LlmError;
 
+/// 结构化图片在字符预算中的固定估算成本。
+///
+/// Data URL 的 Base64 长度反映传输体积，不等同于模型实际占用的文本 token；图片字节数
+/// 已由 provider 的 `media_max_bytes` 单独限制。这里仍为每张图片保留固定成本，使图片数量
+/// 会进入预算，同时避免把数百 KB 的编码正文误当作用户文本。
+const STRUCTURED_IMAGE_ESTIMATED_CHARS: usize = 1024;
+
 /// 上下文预算配置。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContextBudgetConfig {
@@ -307,14 +314,21 @@ pub fn fit_tool_loop_payload(
     config.validate()?;
     let max_input_chars = config.effective_input_limit();
     let estimate = |value: &Value| {
-        let model_context = if value.get("input").is_some() {
-            json!({"input": value.get("input"), "tools": value.get("tools")})
-        } else {
-            json!({"messages": value.get("messages"), "tools": value.get("tools")})
-        };
-        estimated_json_chars(&model_context, stage)
+        tool_loop_budget_estimate(value, stage).map(|estimate| estimate.budgeted_chars)
     };
-    if estimate(&payload)? <= max_input_chars {
+    let initial_estimate = tool_loop_budget_estimate(&payload, stage)?;
+    debug!(
+        stage,
+        raw_model_context_chars = initial_estimate.raw_chars,
+        budgeted_model_context_chars = initial_estimate.budgeted_chars,
+        structured_image_count = initial_estimate.structured_image_count,
+        structured_image_data_chars = initial_estimate.structured_image_data_chars,
+        structured_image_budget_chars = initial_estimate.structured_image_budget_chars,
+        tool_schema_chars = initial_estimate.tool_schema_chars,
+        text_and_protocol_chars = initial_estimate.text_and_protocol_chars,
+        "tool loop context budget estimate"
+    );
+    if initial_estimate.budgeted_chars <= max_input_chars {
         return Ok((payload, false));
     }
 
@@ -364,6 +378,114 @@ pub fn fit_tool_loop_payload(
         "tool loop entered forced finalization budget"
     );
     Ok((payload, true))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ToolLoopBudgetEstimate {
+    raw_chars: usize,
+    budgeted_chars: usize,
+    structured_image_count: usize,
+    structured_image_data_chars: usize,
+    structured_image_budget_chars: usize,
+    tool_schema_chars: usize,
+    text_and_protocol_chars: usize,
+}
+
+fn tool_loop_budget_estimate(
+    payload: &Value,
+    stage: &'static str,
+) -> Result<ToolLoopBudgetEstimate, LlmError> {
+    // 只估算真正进入模型上下文的字段；model、stream、max token 等传输控制字段不计入。
+    let model_context = if payload.get("input").is_some() {
+        json!({"input": payload.get("input"), "tools": payload.get("tools")})
+    } else {
+        json!({"messages": payload.get("messages"), "tools": payload.get("tools")})
+    };
+    let raw_chars = estimated_json_chars(&model_context, stage)?;
+    let tool_schema_chars = payload
+        .get("tools")
+        .map(|tools| estimated_json_chars(tools, stage))
+        .transpose()?
+        .unwrap_or(0);
+    let mut budget_view = model_context;
+    let mut media = StructuredImageBudget::default();
+    mask_structured_image_data_urls(&mut budget_view, &mut media);
+    let budgeted_chars = estimated_json_chars(&budget_view, stage)?;
+    let structured_image_budget_chars =
+        media.count.saturating_mul(STRUCTURED_IMAGE_ESTIMATED_CHARS);
+
+    Ok(ToolLoopBudgetEstimate {
+        raw_chars,
+        budgeted_chars,
+        structured_image_count: media.count,
+        structured_image_data_chars: media.data_url_chars,
+        structured_image_budget_chars,
+        tool_schema_chars,
+        // 这是“文本 + JSON 协议开销”，不会记录或输出任何正文内容。
+        text_and_protocol_chars: raw_chars
+            .saturating_sub(media.data_url_chars)
+            .saturating_sub(tool_schema_chars),
+    })
+}
+
+#[derive(Debug, Default)]
+struct StructuredImageBudget {
+    count: usize,
+    data_url_chars: usize,
+}
+
+fn mask_structured_image_data_urls(value: &mut Value, budget: &mut StructuredImageBudget) {
+    match value {
+        Value::Object(object) => {
+            match object.get("type").and_then(Value::as_str) {
+                // OpenAI Responses：{"type":"input_image","image_url":"data:image/..."}
+                Some("input_image") => {
+                    if let Some(url) = object.get_mut("image_url") {
+                        mask_image_data_url(url, budget);
+                    }
+                }
+                // Chat Completions：
+                // {"type":"image_url","image_url":{"url":"data:image/..."}}
+                Some("image_url") => {
+                    if let Some(url) = object
+                        .get_mut("image_url")
+                        .and_then(Value::as_object_mut)
+                        .and_then(|image_url| image_url.get_mut("url"))
+                    {
+                        mask_image_data_url(url, budget);
+                    }
+                }
+                _ => {}
+            }
+            for child in object.values_mut() {
+                mask_structured_image_data_urls(child, budget);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                mask_structured_image_data_urls(child, budget);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+fn mask_image_data_url(value: &mut Value, budget: &mut StructuredImageBudget) {
+    let Some(url) = value.as_str().filter(|url| is_base64_image_data_url(url)) else {
+        return;
+    };
+    budget.count += 1;
+    budget.data_url_chars = budget.data_url_chars.saturating_add(url.chars().count());
+    // 预算视图只替换估算副本；返回给 provider 的原始 payload 不会被修改。
+    *value = Value::String("i".repeat(STRUCTURED_IMAGE_ESTIMATED_CHARS));
+}
+
+fn is_base64_image_data_url(value: &str) -> bool {
+    let Some((header, _data)) = value.trim().split_once(',') else {
+        return false;
+    };
+    let header = header.to_ascii_lowercase();
+    header.starts_with("data:image/") && header.ends_with(";base64")
 }
 
 fn compact_tool_outputs(
@@ -681,6 +803,101 @@ mod tests {
             );
         }
         serde_json::to_string(&fitted).unwrap();
+    }
+
+    #[test]
+    fn responses_tool_loop_counts_structured_images_without_base64_body() {
+        let first_data_url = format!("data:image/png;base64,{}", "a".repeat(80_000));
+        let second_data_url = format!("data:image/jpeg;base64,{}", "b".repeat(90_000));
+        let payload = json!({
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "依次看这两张图"},
+                    {"type": "input_image", "image_url": first_data_url},
+                    {"type": "input_image", "image_url": second_data_url}
+                ]
+            }],
+            "tools": [{"type": "function", "name": "inspect"}]
+        });
+
+        let (fitted, disabled) = fit_tool_loop_payload(config(4_000), payload.clone(), "tool_loop")
+            .expect("structured image data should use the independent media estimate");
+
+        assert!(!disabled);
+        assert_eq!(
+            fitted, payload,
+            "the real provider payload must stay intact"
+        );
+        let estimate = tool_loop_budget_estimate(&fitted, "tool_loop").unwrap();
+        assert_eq!(estimate.structured_image_count, 2);
+        assert!(estimate.structured_image_data_chars > 160_000);
+        assert_eq!(estimate.structured_image_budget_chars, 2_048);
+        assert!(estimate.budgeted_chars < 4_000);
+    }
+
+    #[test]
+    fn chat_tool_loop_counts_structured_images_without_base64_body() {
+        let payload = json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "看图"},
+                    {"type": "image_url", "image_url": {
+                        "url": format!("data:image/webp;base64,{}", "a".repeat(100_000))
+                    }}
+                ]
+            }],
+            "tools": [{"type": "function", "function": {"name": "inspect"}}]
+        });
+
+        let (fitted, disabled) = fit_tool_loop_payload(config(2_500), payload.clone(), "tool_loop")
+            .expect("chat image data should use the same independent media estimate");
+
+        assert!(!disabled);
+        assert_eq!(fitted, payload);
+        let estimate = tool_loop_budget_estimate(&fitted, "tool_loop").unwrap();
+        assert_eq!(estimate.structured_image_count, 1);
+        assert_eq!(estimate.structured_image_budget_chars, 1_024);
+    }
+
+    #[test]
+    fn plain_text_data_url_is_not_exempt_from_tool_loop_budget() {
+        let payload = json!({
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": format!("data:image/png;base64,{}", "a".repeat(8_000))
+                }]
+            }],
+            "tools": []
+        });
+
+        let err = fit_tool_loop_payload(config(2_000), payload, "tool_loop").unwrap_err();
+
+        assert_eq!(err.code, "context_budget_exceeded");
+        assert_eq!(err.stage, "tool_loop");
+    }
+
+    #[test]
+    fn unrelated_image_url_field_is_not_exempt_from_tool_loop_budget() {
+        let payload = json!({
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "image_url": {"url": format!("data:image/png;base64,{}", "a".repeat(8_000))}
+                }]
+            }],
+            "tools": []
+        });
+
+        let err = fit_tool_loop_payload(config(2_000), payload, "tool_loop").unwrap_err();
+
+        assert_eq!(err.code, "context_budget_exceeded");
     }
 
     struct FailingSerialize;

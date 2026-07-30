@@ -151,6 +151,8 @@ pub(crate) async fn fetch_qq_official_quoted_images(
     let Some(reply) = reply else {
         return;
     };
+    // `reply.input_parts` 只承载当前消息的这一条直接引用 payload；在这里创建并销毁
+    // filename 集合，可保证去重不跨当前附件、其他引用、其他消息或 RefIndex 历史。
     deduplicate_quoted_images_by_filename(&mut reply.input_parts);
     let attachments = reply
         .input_parts
@@ -200,10 +202,11 @@ fn deduplicate_quoted_images_by_filename(input_parts: &mut Vec<MessageInputPart>
             .map(str::trim)
             .filter(|value| !value.is_empty())
         else {
+            // filename 缺失时没有经真实事件验证的稳定证据，不做推测性去重。
             return true;
         };
-        // QQ 官方图片文件名实测按内容摘要稳定生成；同一引用内保留首个即可，
-        // 避免相同图片因临时 URL/fileid 不同而重复下载、重复发送给模型。
+        // #578 的真实 QQ 事件表明，同一直接引用中同图重复记录的临时 URL/file_id
+        // 可能不同，但规范化 filename 相同；只保留第一次出现的位置。
         seen.insert(filename.to_ascii_lowercase())
     });
 }

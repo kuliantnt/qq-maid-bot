@@ -386,20 +386,27 @@ fn entry_from_inbound(inbound: &InboundMessage) -> RefIndexEntry {
 }
 
 fn effective_index_parts(inbound: &InboundMessage) -> Vec<MessageInputPart> {
-    if !inbound.input_parts.is_empty() {
-        return sanitize_index_parts(inbound.input_parts.clone());
-    }
-    let mut parts = Vec::new();
-    if !inbound.text.trim().is_empty() {
-        parts.push(MessageInputPart::text(truncate_summary_text(&inbound.text)));
-    }
-    parts.extend(
-        inbound
-            .attachments
-            .iter()
-            .map(|attachment| attachment.to_input_part(inbound.platform)),
-    );
-    sanitize_index_parts(parts)
+    let parts = if !inbound.input_parts.is_empty() {
+        inbound.input_parts.clone()
+    } else {
+        let mut parts = Vec::new();
+        if !inbound.text.trim().is_empty() {
+            parts.push(MessageInputPart::text(truncate_summary_text(&inbound.text)));
+        }
+        parts.extend(
+            inbound
+                .attachments
+                .iter()
+                .map(|attachment| attachment.to_input_part(inbound.platform)),
+        );
+        parts
+    };
+    // RefIndex 只保存当前消息自身的 parts，不复制 quoted 结构，因此不会形成递归
+    // 媒体树。QQ 拍平到当前正文中的展示文本仍由普通 Text part 原样处理。
+    sanitize_index_parts(
+        parts,
+        matches!(inbound.platform, super::platform::Platform::QqOfficial),
+    )
 }
 
 fn key_for(
@@ -550,36 +557,43 @@ fn truncate_summary_text(value: &str) -> String {
     output
 }
 
-fn sanitize_index_parts(parts: Vec<MessageInputPart>) -> Vec<MessageInputPart> {
-    parts.into_iter().map(sanitize_index_part).collect()
+fn sanitize_index_parts(
+    parts: Vec<MessageInputPart>,
+    clear_remote_media_urls: bool,
+) -> Vec<MessageInputPart> {
+    parts
+        .into_iter()
+        .map(|part| sanitize_index_part(part, clear_remote_media_urls))
+        .collect()
 }
 
-fn sanitize_index_part(part: MessageInputPart) -> MessageInputPart {
+fn sanitize_index_part(part: MessageInputPart, clear_remote_media_urls: bool) -> MessageInputPart {
     match part {
         MessageInputPart::Text { text, source } => MessageInputPart::Text {
             text: truncate_summary_text(&text),
             source,
         },
         MessageInputPart::Image { media } => MessageInputPart::Image {
-            media: sanitize_index_media(media),
+            media: sanitize_index_media(media, clear_remote_media_urls),
         },
         MessageInputPart::File { media } => MessageInputPart::File {
-            media: sanitize_index_media(media),
+            media: sanitize_index_media(media, clear_remote_media_urls),
         },
         MessageInputPart::Unknown { media, reason } => MessageInputPart::Unknown {
-            media: sanitize_index_media(media),
+            media: sanitize_index_media(media, clear_remote_media_urls),
             reason,
         },
     }
 }
 
-fn sanitize_index_media(mut media: MessageMedia) -> MessageMedia {
-    // ref_index 只保存轻量引用元信息。data URL 可能携带 base64 内容，不能进入内存索引。
-    if media
+fn sanitize_index_media(mut media: MessageMedia, clear_remote_media_urls: bool) -> MessageMedia {
+    // QQ 临时媒体 URL 可能带 rkey/auth_token；下载完成后只保留本地缓存路径。
+    // 其他平台仍保留普通 http(s) 引用，但 data URL 对所有平台都不得进入内存索引。
+    let is_data_url = media
         .url
         .as_deref()
-        .is_some_and(|value| value.trim_start().to_ascii_lowercase().starts_with("data:"))
-    {
+        .is_some_and(|value| value.trim_start().to_ascii_lowercase().starts_with("data:"));
+    if clear_remote_media_urls || is_data_url {
         media.url = None;
         if media
             .local_path

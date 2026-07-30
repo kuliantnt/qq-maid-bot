@@ -164,6 +164,41 @@ async fn model_route_tool_calling_falls_back_after_eligible_candidate_error() {
 }
 
 #[tokio::test]
+async fn model_route_tool_calling_stops_after_local_budget_error() {
+    let openai = Arc::new(
+        MockProvider::new("openai", Vec::new())
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+            .with_tool_results(vec![Err(LlmError::new(
+                "context_budget_exceeded",
+                "local payload exceeds context budget",
+                "tool_loop",
+            ))]),
+    );
+    let deepseek = Arc::new(
+        MockProvider::new("deepseek", Vec::new())
+            .with_tool_protocol(ToolCallingProtocol::ChatCompletionsToolCalls)
+            .with_tool_results(vec![Ok(outcome("must not run"))]),
+    );
+    let provider = ModelRouteProvider::new(
+        "auto",
+        ModelProvider::OpenAi,
+        ModelRoute::parse_config("openai:gpt-a,deepseek:deepseek-chat", "LLM_MODEL").unwrap(),
+        vec![
+            (ModelProvider::OpenAi, openai.clone()),
+            (ModelProvider::DeepSeek, deepseek.clone()),
+        ],
+    )
+    .unwrap();
+
+    let err = provider.chat_with_tools(tool_request()).await.unwrap_err();
+
+    assert_eq!(err.code, "context_budget_exceeded");
+    assert_eq!(err.stage, "tool_loop");
+    assert_eq!(openai.tool_calls(), 1);
+    assert_eq!(deepseek.tool_calls(), 0);
+}
+
+#[tokio::test]
 async fn tool_candidate_failure_then_timeout_uses_latest_terminal_reason() {
     let (provider, first, second) =
         handle_route_provider(HandleBehavior::Failed, HandleBehavior::Timeout);

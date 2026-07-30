@@ -19,6 +19,7 @@ use crate::{
 // 拆分出的纯 helper 子模块：均不改变 schema 与对外 API。
 mod delete;
 mod id;
+mod management;
 mod normalize;
 mod query;
 mod query_model;
@@ -55,7 +56,7 @@ mod group_admin_tests;
 use self::id::{
     clean_todo_id, parse_required_todo_db_id, parse_todo_db_id, private_target_from_scope_key,
 };
-use normalize::normalize_draft;
+pub(crate) use normalize::normalize_draft;
 #[cfg(test)]
 use query::query_private_pending_owner_scopes;
 use query::{
@@ -70,10 +71,16 @@ use sort::{
 };
 use write::{complete_pending_unlocked, insert_todo_unlocked, update_pending_todo_unlocked};
 
+pub(crate) use recurrence::{advance_after_completion, is_recurring};
+
 impl TodoStore {
     /// 创建一个新的 TodoStore，复用应用级 SQLite 句柄。
     pub fn new(database: SqliteDatabase) -> Self {
         Self { database }
+    }
+
+    pub(crate) fn database_path(&self) -> &std::path::Path {
+        self.database.path()
     }
 
     /// 构造所有者标识。

@@ -17,11 +17,17 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.21.6`，项目处于 `21.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.22.1`，项目处于 `22.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
-## 21.x 版本线更新
+## 22.x 版本线更新
+
+- **主动推送成员提醒**（v0.22.1）：群聊个人 Todo 提醒会准确 @ 实际归属成员；QQ 官方使用 `<@user_id>` 协议，OneBot 11 使用原生 `at` segment，并对私聊、共享 Todo、无效成员 ID 和 RefIndex 脱敏保持安全边界。
+- **QQ 语音回复与 Provider 扩展**（v0.22.0）：QQ 官方私聊和群聊支持按会话开启千问 TTS 最终回复；Web 控制台补齐全局 TTS 配置卡片，同时新增 OpenCode Zen / Go Provider、未知 Slash 确定性收口和知识库 embedding 内存限制。
+
+### 更早版本（21.x）
+
 - **联网搜索与群聊触发修复**（v0.21.6）：收紧长结果、嵌套调研和空结果的搜索证据语义，补充 `/todo daily status` 帮助，并避免 @全体成员误触发机器人。
 - **QQ 群消息触发修复**（v0.21.5）：修复群聊 @ 机器人识别和 mention 文本污染，兼容 `GROUP_AT_MESSAGE_CREATE`、稳定机器人身份匹配及旧事件字段，同时避免误触发其它机器人。
 - **QQ API v2 消息协议与富媒体上传**（v0.21.4）：对齐图片分片上传、入站消息归一化、稳定群聊 @ 判断和复合消息去重；收紧 ARK、临时上传 URL 与被动回复分段的安全边界。
@@ -36,9 +42,6 @@
 ### 配置方式变化
 
 0.19 及之前需要在 `config/.env` 中手写凭证和开关；0.20 起推荐新部署走 `/console/` 引导；0.21 起 Docker / Release / 源码共用同一配置中心与运维 CLI，旧 `.env` 部署继续可用。
-
-### 上一版（20.x）
-- 安全配置中心与 `/console/`、QQ 语音转写与统一命令前缀、知识库 Agent 化、Tavily 可选搜索、图片生成与多平台发送、Session Dream 续批稳定性。
 
 完整变更与升级说明见 [CHANGELOG.md](./CHANGELOG.md)。
 

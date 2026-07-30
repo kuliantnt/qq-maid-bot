@@ -15,6 +15,15 @@ use crate::gateway::event::{
 };
 use qq_maid_core::service::CoreGroupMemberRole;
 
+/// 生成 QQ 官方群消息内容中的成员 @ 协议标记。
+///
+/// 被动回复和主动推送必须复用同一格式，传入值是群事件下发并贯穿 Core 的成员
+/// `user_id`/openid；机器人 `account_id` 只用于选择发送账号，不能进入此标记。
+pub(crate) fn member_mention(user_id: &str) -> Option<String> {
+    let user_id = user_id.trim();
+    (!user_id.is_empty()).then(|| format!("<@{user_id}>"))
+}
+
 pub(crate) fn inbound_from_c2c(message: &C2cMessage) -> InboundMessage {
     InboundMessage {
         platform: Platform::QqOfficial,

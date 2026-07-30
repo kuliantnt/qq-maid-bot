@@ -26,11 +26,13 @@ use crate::config::{
     },
 };
 
-use super::{console_routes::with_console_cors, routes::OpsHttpState};
+use super::{
+    api::common::{authenticate_admin_request, error_response as api_error},
+    console_routes::with_console_cors,
+    routes::OpsHttpState,
+};
 
 mod auth_routes;
-
-use auth_routes::{auth_error, csrf_token, origin_allowed, session_cookie};
 
 pub(super) type BoxedResponse = Box<Response>;
 
@@ -855,47 +857,14 @@ fn admin_context(
     headers: &HeaderMap,
     require_csrf: bool,
 ) -> Result<(crate::management::AdminAuth, String, Option<String>, i64), BoxedResponse> {
-    if !origin_allowed(headers) {
-        return Err(Box::new(api_error(
-            StatusCode::FORBIDDEN,
-            "origin_denied",
-            "request origin is not allowed",
-        )));
-    }
-    let auth = state.admin_auth.clone().ok_or_else(|| {
-        Box::new(api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "auth_unavailable",
-            "administrator authentication is unavailable",
-        ))
-    })?;
-    let cookie =
-        session_cookie(headers, state.config.web_console_secure_cookies).ok_or_else(|| {
-            Box::new(api_error(
-                StatusCode::UNAUTHORIZED,
-                "unauthenticated",
-                "administrator session is missing",
-            ))
-        })?;
-    let csrf = csrf_token(headers);
-    if require_csrf && csrf.is_none() {
-        return Err(Box::new(api_error(
-            StatusCode::FORBIDDEN,
-            "csrf_failed",
-            "CSRF token is missing",
-        )));
-    }
-    let (id, _) = auth
-        .authorize_admin(
-            &cookie,
-            require_csrf.then_some(csrf.as_deref().unwrap_or_default()),
-        )
-        .map_err(|error| Box::new(auth_error(error)))?;
-    if require_csrf {
-        auth.check_management_rate_limit(id)
-            .map_err(|error| Box::new(auth_error(error)))?;
-    }
-    Ok((auth, cookie, csrf, id))
+    let authenticated = authenticate_admin_request(state, headers, require_csrf)
+        .map_err(|error| Box::new(error.into_response()))?;
+    Ok((
+        authenticated.auth,
+        authenticated.cookie,
+        authenticated.csrf,
+        authenticated.actor_id,
+    ))
 }
 
 fn agent_change(change: AgentChangeRequest) -> Result<AgentConfigChange, BoxedResponse> {
@@ -1063,17 +1032,6 @@ fn config_error(error: ConfigCenterError) -> Response {
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     api_error(status, error.code(), error.message())
-}
-
-fn api_error(status: StatusCode, code: &str, message: &str) -> Response {
-    (
-        status,
-        Json(json!({
-            "ok": false,
-            "error": {"code": code, "message": message},
-        })),
-    )
-        .into_response()
 }
 
 fn respond(state: &OpsHttpState, headers: &HeaderMap, response: Response) -> Response {
