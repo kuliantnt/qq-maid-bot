@@ -2,6 +2,37 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.22.2] - 2026-07-30
+
+### Release Focus
+
+* **Todo 管理 API 与 QQ 引用可靠性**：为部署管理端提供基于真实平台归属的全局 Todo 管理能力，并修复 QQ 一级图文引用、Tool Loop 图片预算和被忽略群消息的引用恢复边界。
+
+### Added
+
+* **全局 Todo 管理 API**（PR #606）：在既有部署管理员 Session、同源 Origin、CSRF、限流和统一响应基础设施上新增 Todo 创建、列表、详情、更新、删除与真实目标发现接口；所有管理员操作 QQ 官方、OneBot 11、微信入口的同一批真实 Todo，不创建管理端专属 owner/scope。
+* **可信提醒目标发现**（PR #606）：创建请求使用服务端签发的不透明 `target_ref`，从已有 Todo 或 Session 恢复并复核平台、账号、成员和会话范围；Todo 与 Notification Outbox 在同一 SQLite 事务中提交，微信目标明确报告不支持主动提醒。
+
+### Changed
+
+* **依赖更新**（PR #605）：刷新根 `Cargo.lock`，将 Core、Gateway 与 LLM 的直接 `base64` 依赖提升到 `0.23`；上游仍要求的 `base64 0.22.1` 继续并存。
+* **QQ 群成员详情补全默认关闭**（PR #609）：默认不再请求额外成员详情，仍保留 `QQ_MAID_MEMBER_DETAIL_ENRICH_ENABLED=true` 显式开启能力；已有部署中的显式配置不会被覆盖。
+
+### Fixed
+
+* **Todo 历史提醒更新语义**（PR #606）：仅在本次显式设置新提醒时校验未来时间与平台能力；修改标题等字段可继承已过期的历史提醒而不重新排程，完成、恢复、清空提醒与 Outbox 取消保持原子语义。
+* **Tool Loop 图片上下文预算**（PR #608）：Responses 与 Chat Completions 只遮蔽结构化图片字段中的 Base64，并按独立媒体成本计入预算；真实发送 payload 不变，本地永久的容量错误不再轮询等价模型候选。
+* **QQ 一级图文引用边界**（PR #608）：只解析 `message_type=103` 的顶层直接引用媒体，保留多段文字和不同文件名图片顺序；嵌套历史引用不再恢复临时 URL、Base64 或媒体对象，同层同文件名图片按受控规则去重。
+* **被忽略群消息的引用恢复**（PR #609）：RefIndex 区分完整入站、被动观察与机器人出站记录；引用事件已下载的可读媒体不再被低质量索引媒体覆盖，事件独有媒体与图文顺序得到保留，临时 URL、rkey 和鉴权参数不会写入索引。
+* **RefIndex 容量与告警噪声**（PR #609）：容量超限时优先淘汰最旧的被动观察记录；索引 miss 但事件 payload 可安全降级时改记 DEBUG，仅在引用确实无法恢复时保留 WARN。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.22.2`；内部 crate 版本不统一提升。
+* 本版本无数据库 migration、无必需配置迁移。Todo 管理 API 为新增受保护接口，普通聊天 Tool、Slash 命令和 owner-scoped 查询语义保持不变。
+* QQ 群成员详情补全的新默认值只影响未显式配置的部署；已设置 `QQ_MAID_MEMBER_DETAIL_ENRICH_ENABLED=true` 的环境仍保持开启，若需关闭必须修改真实配置并重启。
+* 自动化测试覆盖 Todo 管理与提醒事务、QQ 引用解析和媒体恢复、两类 OpenAI Tool Loop 图片预算以及 RefIndex 容量边界；未使用真实 QQ、OneBot、微信或 Provider 凭据执行本版本目标环境联调。
+
 ## [v0.22.1] - 2026-07-29
 
 ### Release Focus
