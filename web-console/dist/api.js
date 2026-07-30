@@ -132,6 +132,89 @@ export async function renderMarkdown(markdown) {
     }
     return payload.html;
 }
+export async function listTodos(filters = {}) {
+    const payload = record(await mutatingJson("/api/v1/console/todo/list", "POST", {
+        page: 1,
+        page_size: 50,
+        ...filters,
+    }));
+    return parseTodoPage(payload.data);
+}
+export async function listTodoTargets() {
+    const payload = record(await mutatingJson("/api/v1/console/todo/targets", "POST", {
+        page: 1,
+        page_size: 100,
+    }));
+    return array(record(payload.data).items).map(parseTodoTargetOption);
+}
+export async function createTodo(input) {
+    const payload = record(await mutatingJson("/api/v1/console/todo/create", "POST", input));
+    return parseTodoItem(payload.data);
+}
+export async function getTodo(id) {
+    const payload = record(await mutatingJson("/api/v1/console/todo/get", "POST", { id }));
+    return parseTodoItem(payload.data);
+}
+export async function updateTodo(id, changes) {
+    const payload = record(await mutatingJson("/api/v1/console/todo/update", "POST", { id, ...changes }));
+    return parseTodoItem(payload.data);
+}
+export async function deleteTodo(id) {
+    await mutatingJson("/api/v1/console/todo/delete", "POST", { id });
+}
+function parseTodoPage(value) {
+    const data = record(value);
+    return {
+        items: array(data.items).map(parseTodoItem),
+        page: finiteNumber(data.page) ?? 1,
+        pageSize: finiteNumber(data.page_size) ?? 50,
+        total: finiteNumber(data.total) ?? 0,
+        totalPages: finiteNumber(data.total_pages) ?? 1,
+    };
+}
+function parseTodoItem(value) {
+    const item = record(value);
+    const target = record(item.target);
+    return {
+        id: string(item.id, ""),
+        title: string(item.title, "未命名 Todo"),
+        detail: nullableString(item.detail),
+        dueDate: nullableString(item.due_date),
+        dueAt: nullableString(item.due_at),
+        reminderAt: nullableString(item.reminder_at),
+        timePrecision: string(item.time_precision, "none"),
+        recurrenceKind: string(item.recurrence_kind, "none"),
+        recurrenceIntervalDays: finiteNumber(item.recurrence_interval_days) ?? 0,
+        recurrenceInterval: finiteNumber(item.recurrence_interval) ?? 0,
+        recurrenceUnit: string(item.recurrence_unit, "day"),
+        status: item.status === "completed" ? "completed" : "pending",
+        createdAt: string(item.created_at, ""),
+        updatedAt: string(item.updated_at, ""),
+        completedAt: nullableString(item.completed_at),
+        target: {
+            targetRef: nullableString(target.target_ref),
+            platform: string(target.platform, "unknown"),
+            scopeType: string(target.scope_type, "unknown"),
+            userId: nullableString(target.user_id),
+            groupId: nullableString(target.group_id),
+            accountId: nullableString(target.account_id),
+            reminderSupported: target.reminder_supported === true,
+            diagnostic: nullableString(target.diagnostic),
+        },
+    };
+}
+function parseTodoTargetOption(value) {
+    const item = record(value);
+    return {
+        targetRef: string(item.target_ref, ""),
+        platform: string(item.platform, "unknown"),
+        accountId: nullableString(item.account_id),
+        scopeType: string(item.scope_type, "unknown"),
+        userId: nullableString(item.user_id),
+        groupId: nullableString(item.group_id),
+        reminderSupported: item.reminder_supported === true,
+    };
+}
 async function fetchJson(input, init) {
     let response;
     try {

@@ -7,6 +7,7 @@ import { renderStorage } from "./views/storage.js";
 import { initializeConfiguration } from "./views/configuration.js";
 import { createThemeController } from "./theme.js";
 import { bindConsoleNavigation } from "./console-shell.js";
+import { initializeTodo } from "./views/todo.js";
 import { createBackgroundController, installBackgroundConsoleUnlock } from "./background.js";
 let localStorage = null;
 try {
@@ -182,6 +183,7 @@ async function showConsole(username) {
         appBound = true;
     }
     await Promise.all([refreshStatus(), refreshConfiguration()]);
+    await initializeTodo();
 }
 async function refreshConfiguration() {
     try {
