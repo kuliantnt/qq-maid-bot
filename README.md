@@ -17,12 +17,13 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.22.1`，项目处于 `22.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.22.2`，项目处于 `22.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
 ## 22.x 版本线更新
 
+- **Todo 管理 API 与 QQ 引用可靠性**（v0.22.2）：部署管理员可通过受保护的全局 API 管理真实平台 Todo 和发现提醒目标；QQ 官方一级图文引用、Tool Loop 图片预算与被忽略群消息的引用恢复更稳定，群成员详情补全改为默认关闭。
 - **主动推送成员提醒**（v0.22.1）：群聊个人 Todo 提醒会准确 @ 实际归属成员；QQ 官方使用 `<@user_id>` 协议，OneBot 11 使用原生 `at` segment，并对私聊、共享 Todo、无效成员 ID 和 RefIndex 脱敏保持安全边界。
 - **QQ 语音回复与 Provider 扩展**（v0.22.0）：QQ 官方私聊和群聊支持按会话开启千问 TTS 最终回复；Web 控制台补齐全局 TTS 配置卡片，同时新增 OpenCode Zen / Go Provider、未知 Slash 确定性收口和知识库 embedding 内存限制。
 
