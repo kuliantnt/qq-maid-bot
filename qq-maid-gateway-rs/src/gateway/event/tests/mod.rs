@@ -859,17 +859,9 @@ fn nested_quoted_elements_from_single_root_only_keep_direct_layer() {
             .iter()
             .any(|item| item.filename.as_deref() == Some("current.png"))
     );
-    assert_eq!(
-        reply.content.as_deref(),
-        Some("引用第一段\n历史引用摘要：该消息还引用了更早的消息，历史内容和媒体未展开。")
-    );
+    assert_eq!(reply.content.as_deref(), Some("引用第一段"));
     assert_eq!(reply.input_parts[0].text_content(), Some("引用第一段"));
-    assert!(
-        reply.input_parts[1]
-            .text_content()
-            .is_some_and(|text| text.contains("历史引用摘要"))
-    );
-    assert_eq!(reply.input_parts.len(), 2);
+    assert_eq!(reply.input_parts.len(), 1);
     assert!(reply.media_summaries.is_empty());
     assert!(!reply.input_parts.iter().any(|part| {
         part.media().and_then(|media| media.filename.as_deref()) == Some("current.png")

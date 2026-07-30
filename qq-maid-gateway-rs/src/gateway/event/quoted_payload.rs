@@ -3,7 +3,8 @@
 //! 根据 QQ 最新消息结构文档：
 //! - 顶层 `content` 是当前用户本轮发送的正文。
 //! - `message_type = 103` 时的顶层 `msg_elements` 是本轮直接引用目标的内容元素。
-//! - 元素内部的 `msg_elements` 属于更早的历史引用，只生成固定摘要，不恢复其中媒体。
+//! - 元素内部的 `msg_elements` 属于更早的历史引用，不递归恢复其中正文或媒体。
+//! - QQ 拍平到顶层元素 `content` 的展示文本按普通引用文本保留，不解释其中字段。
 //! - 不再要求元素的 `msg_idx` 必须等于 `ref_msg_idx`（官方事件不保证携带 `msg_idx`）。
 //! - `ref_msg_idx` 仅用于 RefIndex 查询和引用元数据展示。
 
@@ -16,8 +17,6 @@ use crate::gateway::ref_index::qq::{MSG_TYPE_QUOTE, RawMsgElement};
 
 use super::content_normalizer::MAX_NORMALIZED_MEDIA_PARTS;
 use super::{input_parts_from_content_and_attachments, parse_safe_content_parts};
-
-const NESTED_QUOTE_SUMMARY: &str = "历史引用摘要：该消息还引用了更早的消息，历史内容和媒体未展开。";
 
 /// 使用归一化后的当前正文检测并移除 `QuotedMessageContext` 中被污染的引用文字。
 ///
@@ -77,7 +76,8 @@ pub(crate) fn strip_contaminated_quote_from_context(
 /// 当 `message_type == 103` 时，按原始顺序解析顶层 `msg_elements` 作为直接引用内容。
 ///
 /// 无论元素是否携带 `msg_idx`，该层的文字和全部附件均组成引用内容；子元素只表示
-/// 更早的历史引用，不递归恢复其 URL、Base64 或媒体对象。
+/// 更早的结构化历史引用，不递归恢复。平台拍平到该层 `content` 的展示文本仍按普通
+/// 引用文本保留，不提取其中的附件描述或临时 URL。
 /// `ref_msg_idx` 不参与元素筛选；调用方自行决定是否用于 RefIndex 查询和元数据展示。
 pub(super) fn parse_quoted_message_elements(
     message_type: Option<u64>,
@@ -137,12 +137,23 @@ fn append_direct_quoted_element_parts(
     input_parts: &mut Vec<MessageInputPart>,
 ) {
     let raw_content = element.content.as_deref().unwrap_or_default();
-    let cleaned_content = strip_qq_image_placeholders(raw_content);
+    // 只有同层确实携带结构化附件时，`[图片]` 才作为附件顺序占位符处理。
+    // 拍平引用展示文本没有结构化附件，必须整体按普通文本保留，不能据此恢复媒体。
+    let has_structured_attachments = !element.attachments.is_empty();
+    let cleaned_content = if has_structured_attachments {
+        strip_qq_image_placeholders(raw_content)
+    } else {
+        raw_content.trim().to_owned()
+    };
     let summary_content = parse_safe_content_parts(&cleaned_content, "qq_official")
         .text
         .trim()
         .to_owned();
-    let protocol_content = raw_content.replace("[图片]", "<img>");
+    let protocol_content = if has_structured_attachments {
+        raw_content.replace("[图片]", "<img>")
+    } else {
+        raw_content.to_owned()
+    };
     let parsed = parse_safe_content_parts(&protocol_content, "qq_official");
     if !summary_content.is_empty() {
         content_fragments.push(summary_content);
@@ -167,15 +178,8 @@ fn append_direct_quoted_element_parts(
         .retain(|part| !matches!(part, MessageInputPart::Text { text, .. } if text.is_empty()));
     input_parts.extend(element_parts);
 
-    if !element.msg_elements.is_empty() {
-        // 内层拍平文本可能包含临时下载 URL、rkey 或 auth_token，因此不提取任何
-        // 子元素字段，只提供固定摘要。第一次视觉分析应由会话历史承接。
-        content_fragments.push(NESTED_QUOTE_SUMMARY.to_owned());
-        input_parts.push(MessageInputPart::Text {
-            text: NESTED_QUOTE_SUMMARY.to_owned(),
-            source: Some(TextSource::Quote),
-        });
-    }
+    // `element.msg_elements` 是更早的结构化引用：不递归访问即可阻止历史媒体恢复。
+    // 若 QQ 已把二次引用展示拍平进本层 `content`，上面的普通文本路径会原样保留它。
 }
 
 fn strip_qq_image_placeholders(value: &str) -> String {

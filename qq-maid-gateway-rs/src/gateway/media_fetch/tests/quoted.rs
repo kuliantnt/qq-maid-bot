@@ -1,6 +1,109 @@
 use super::*;
 
 #[tokio::test]
+async fn flattened_secondary_quote_stays_text_without_media_download_or_data_url() {
+    use crate::gateway::event::{EVENT_GROUP_MESSAGE_CREATE, GatewayEnvelope, parse_group_message};
+
+    let download_count = Arc::new(AtomicUsize::new(0));
+    let handler_count = Arc::clone(&download_count);
+    let app = Router::new().route(
+        "/history.png",
+        get(move || {
+            let handler_count = Arc::clone(&handler_count);
+            async move {
+                handler_count.fetch_add(1, Ordering::Relaxed);
+                ([(header::CONTENT_TYPE.as_str(), "image/png")], "history")
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // 脱敏自 QQ 二次引用真实字段形态：历史附件信息已经被平台拍平进 content，
+    // 同时仍可能携带内层结构化 msg_elements。Gateway 只把前者视为普通文本。
+    let flattened = format!(
+        "[关联消息]\n发送者：member_redacted\n[消息内容]\n请看历史图片\n\
+[附件1]\nfilename: history_redacted.png\nfile_id: file_redacted\n\
+URL:http://{addr}/history.png?rkey=rkey_redacted"
+    );
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+        id: Some("event-redacted".to_owned()),
+        d: serde_json::json!({
+            "id": "message-redacted",
+            "group_openid": "group-redacted",
+            "author": {"member_openid": "member-redacted"},
+            "content": "继续分析",
+            "message_type": 103,
+            "message_scene": {"ext": [
+                "msg_idx=TMP_current_redacted",
+                "ref_msg_idx=REFIDX_quote_redacted"
+            ]},
+            "msg_elements": [{
+                "content": flattened,
+                "msg_elements": [{
+                    "content": "[图片]",
+                    "attachments": [{
+                        "content_type": "image/png",
+                        "filename": "history_redacted.png",
+                        "fileid": "file_redacted",
+                        "url": format!("http://{addr}/history.png?rkey=rkey_redacted")
+                    }]
+                }]
+            }]
+        }),
+    };
+
+    let mut message = parse_group_message(&envelope).unwrap().unwrap();
+    let reply = message.reply.as_mut().expect("quoted payload");
+    assert_eq!(reply.content.as_deref(), Some(flattened.as_str()));
+    assert_eq!(reply.input_parts.len(), 1);
+    assert_eq!(
+        reply.input_parts[0].text_content(),
+        Some(flattened.as_str())
+    );
+    assert!(reply.input_parts.iter().all(|part| part.media().is_none()));
+    assert!(reply.media_summaries.is_empty());
+
+    let root_dir = std::env::temp_dir().join(format!(
+        "qq-maid-flattened-quote-test-{}",
+        MEDIA_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let context = MediaFetchContext {
+        platform: "qq_official",
+        app_id: "app-redacted".to_owned(),
+        peer_id: "peer-redacted".to_owned(),
+        root_dir: root_dir.clone(),
+        timeout: Duration::from_secs(1),
+        max_bytes: 1024,
+    };
+    fetch_qq_official_quoted_images(
+        &qq_maid_common::http_client::client(),
+        &context,
+        "message-redacted",
+        Some(reply),
+    )
+    .await;
+
+    assert_eq!(download_count.load(Ordering::Relaxed), 0);
+    assert_eq!(media_file_count(&root_dir), 0);
+    assert_eq!(
+        reply.input_parts[0].text_content(),
+        Some(flattened.as_str())
+    );
+    let serialized = serde_json::to_string(&reply.input_parts).unwrap();
+    assert!(serialized.contains("filename: history_redacted.png"));
+    assert!(serialized.contains("file_id: file_redacted"));
+    assert!(serialized.contains("rkey=rkey_redacted"));
+    assert!(!serialized.contains("data:image"));
+}
+
+#[tokio::test]
 async fn quoted_images_with_same_filename_download_and_send_only_first_image() {
     let app = Router::new()
         .route(

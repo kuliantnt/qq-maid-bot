@@ -177,7 +177,7 @@ fn missing_ref_msg_idx_keeps_quoted_payload() {
     assert_eq!(reply.input_parts[0].text_content(), Some("引用内容"));
 }
 
-/// 嵌套图文引用：只保留直接层正文和固定历史摘要，不恢复内层媒体。
+/// 嵌套结构化图文引用：只保留直接层正文，不递归恢复内层正文或媒体。
 #[test]
 fn nested_text_image_quote_stops_before_historical_media() {
     let envelope = GatewayEnvelope {
@@ -231,18 +231,10 @@ fn nested_text_image_quote_stops_before_historical_media() {
             .any(|item| item.filename.as_deref() == Some("current.png"))
     );
 
-    // 直接层正文保留，子元素只生成安全摘要；临时 URL 与媒体对象均不恢复。
-    assert_eq!(
-        reply.content.as_deref(),
-        Some("图前文字\n历史引用摘要：该消息还引用了更早的消息，历史内容和媒体未展开。")
-    );
+    // 直接层正文保留，子元素不递归解析；内层结构化媒体不会被恢复。
+    assert_eq!(reply.content.as_deref(), Some("图前文字"));
     assert_eq!(reply.input_parts[0].text_content(), Some("图前文字"));
-    assert!(
-        reply.input_parts[1]
-            .text_content()
-            .is_some_and(|text| text.contains("历史引用摘要"))
-    );
-    assert_eq!(reply.input_parts.len(), 2);
+    assert_eq!(reply.input_parts.len(), 1);
     assert!(reply.media_summaries.is_empty());
     assert!(
         !reply
