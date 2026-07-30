@@ -171,8 +171,9 @@ impl RefIndex {
             inbound.visible_entity_snapshot = entry.visible_entity_snapshot.clone();
             log_ref_index_hit("quoted_lookup", &key, entry);
         } else {
-            log_ref_index_miss(&self.entries, &key);
-            if quoted_has_payload_fallback(quoted) {
+            let payload_fallback_available = quoted_has_payload_fallback(quoted);
+            log_ref_index_miss(&self.entries, &key, payload_fallback_available);
+            if payload_fallback_available {
                 quoted.lookup_found = true;
                 quoted.from_bot = None;
                 quoted.fallback_reason = Some("quoted_payload".to_owned());
@@ -468,30 +469,48 @@ fn log_ref_index_hit(reason: &'static str, key: &RefIndexKey, entry: &RefIndexEn
     );
 }
 
-fn log_ref_index_miss(entries: &HashMap<RefIndexKey, RefIndexRecord>, query: &RefIndexKey) {
+fn log_ref_index_miss(
+    entries: &HashMap<RefIndexKey, RefIndexRecord>,
+    query: &RefIndexKey,
+    payload_fallback_available: bool,
+) {
     let same_ref_candidates = entries
         .keys()
         .filter(|key| key.platform == query.platform && key.ref_id == query.ref_id)
         .collect::<Vec<_>>();
     let first_candidate = same_ref_candidates.first().copied();
-    warn!(
-        platform = %query.platform,
-        account = %mask_identifier(&query.app_id),
-        account_present = query.app_id != "-",
-        peer_kind = %query.peer_kind,
-        peer_id = %mask_identifier(&query.peer_id),
-        ref_id = %mask_identifier(&query.ref_id),
-        same_ref_candidate_count = same_ref_candidates.len(),
-        candidate_account = %first_candidate
-            .map(|key| mask_identifier(&key.app_id))
-            .unwrap_or_default(),
-        candidate_account_present = first_candidate.is_some_and(|key| key.app_id != "-"),
-        candidate_peer_kind = first_candidate.map(|key| key.peer_kind.as_str()).unwrap_or(""),
-        candidate_peer_id = %first_candidate
-            .map(|key| mask_identifier(&key.peer_id))
-            .unwrap_or_default(),
-        "ref_index miss"
-    );
+    macro_rules! emit_miss {
+        ($level:ident) => {
+            $level!(
+                platform = %query.platform,
+                account = %mask_identifier(&query.app_id),
+                account_present = query.app_id != "-",
+                peer_kind = %query.peer_kind,
+                peer_id = %mask_identifier(&query.peer_id),
+                ref_id = %mask_identifier(&query.ref_id),
+                payload_fallback_available,
+                same_ref_candidate_count = same_ref_candidates.len(),
+                candidate_account = %first_candidate
+                    .map(|key| mask_identifier(&key.app_id))
+                    .unwrap_or_default(),
+                candidate_account_present = first_candidate.is_some_and(|key| key.app_id != "-"),
+                candidate_peer_kind = first_candidate
+                    .map(|key| key.peer_kind.as_str())
+                    .unwrap_or(""),
+                candidate_peer_id = %first_candidate
+                    .map(|key| mask_identifier(&key.peer_id))
+                    .unwrap_or_default(),
+                "ref_index miss"
+            );
+        };
+    }
+    // 事件已自带引用 payload 时可以无损降级，不应作为运行告警；只有引用内容确实
+    // 无法恢复时保留 WARN，便于区分索引断档与可预期的进程内缓存 miss。
+    if payload_fallback_available {
+        emit_miss!(debug);
+    } else {
+        emit_miss!(warn);
+    }
 }
 
 fn log_ref_index_eviction(reason: &'static str, key: &RefIndexKey, store: &RefIndex) {

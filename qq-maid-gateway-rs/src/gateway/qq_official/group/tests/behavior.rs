@@ -122,9 +122,9 @@ async fn mode_policy_blocked_group_message_does_not_download_media() {
 }
 
 #[tokio::test]
-async fn plain_group_message_ignored_by_mode_policy_is_not_ref_indexed() {
-    // 移除早期 observe_group_message_ref_index 后，被 mode policy 忽略的消息
-    // 不会进入 RefIndex。后续引用该消息时 RefIndex miss，需经 payload fallback。
+async fn plain_group_message_ignored_by_mode_policy_remains_quotable() {
+    // mode policy 忽略的普通群消息不进入 Core，但仍应轻量写入 RefIndex，
+    // 否则后续 @机器人引用这条消息时会产生无法恢复的 miss。
     let config = test_config();
     let mut message = group_message("普通群友消息", GroupEventType::GroupMessage);
     message.message_id = "group-observed".to_owned();
@@ -150,7 +150,7 @@ async fn plain_group_message_ignored_by_mode_policy_is_not_ref_indexed() {
     // mode policy 忽略后不调用 Core。
     assert_eq!(respond_calls.load(Ordering::SeqCst), 0);
 
-    // 因无早期观察插入，RefIndex 无此消息记录。
+    // 后续引用能够恢复被忽略消息的标准化正文。
     let mut quoted = group_message("查看这条", GroupEventType::GroupAtMessage);
     quoted.message_id = "group-quote".to_owned();
     quoted.reply = Some(crate::gateway::event::MessageReply {
@@ -165,11 +165,10 @@ async fn plain_group_message_ignored_by_mode_policy_is_not_ref_indexed() {
     ref_index.lock().unwrap().enrich_inbound(&mut inbound);
 
     let quoted_context = inbound.quoted.as_ref().unwrap();
-    assert!(!quoted_context.lookup_found);
-    assert_eq!(
-        quoted_context.fallback_reason.as_deref(),
-        Some("ref_index_miss")
-    );
+    assert!(quoted_context.lookup_found);
+    assert_eq!(quoted_context.text_summary.as_deref(), Some("普通群友消息"));
+    assert_eq!(quoted_context.from_bot, Some(false));
+    assert_eq!(quoted_context.fallback_reason, None);
 }
 
 struct GroupHandlerHarness {
