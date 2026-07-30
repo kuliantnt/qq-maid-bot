@@ -104,7 +104,7 @@ Todo 提醒当前支持分钟/小时级调度边界：自然语言可以创建�
 
 前端源码和构建说明见 [`../web-console/README.md`](../web-console/README.md)。Rust 直接嵌入已提交的 `web-console/dist/`，普通 Cargo 构建和运行不需要 Node.js。
 
-Todo 管理接口复用同一管理员 Session、同源和 CSRF 安全边界，并统一使用 `/api/v1/console/todo/*` POST 路由。部署管理员全局管理聊天入口的同一批 Todo；管理员 actor 只用于认证、审计和限流，Todo 仍保留 QQ / OneBot / 微信真实 owner、conversation scope 与提醒目标。目标引用、全局分页、Outbox 原子更新、平台限制和后续 Memory API 的复用边界见 [管理 API 约定](../docs/MANAGEMENT_API.md)。
+Todo 管理接口复用同一管理员 Session、同源和 CSRF 安全边界，并统一使用 `/api/v1/console/todo/*` POST 路由。部署管理员全局管理聊天入口的同一批 Todo；管理员 actor 只用于认证、审计和限流，Todo 仍保留 QQ / OneBot / 微信真实 owner、conversation scope 与提醒目标。目标引用、全局分页、Outbox 原子更新、平台限制和后续 Memory API 的复用边界见 [管理 API 约定](../docs/development/management-api.md)。
 
 ## 指令能力
 
