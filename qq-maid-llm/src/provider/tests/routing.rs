@@ -660,3 +660,25 @@ async fn model_route_provider_uses_request_route_override() {
     assert_eq!(openai.calls(), 0);
     assert_eq!(deepseek.calls(), 1);
 }
+
+#[test]
+fn model_route_provider_rejects_duplicate_provider_registration() {
+    let routera = ModelProvider::Custom("routera".to_owned());
+    let first = Arc::new(MockProvider::new("routera", Vec::new()));
+    let second = Arc::new(MockProvider::new("routera", Vec::new()));
+
+    let error = ModelRouteProvider::new(
+        "auto",
+        ModelProvider::OpenAi,
+        ModelRoute::parse_config("routera:gpt-5.6-luna", "LLM_MODEL").unwrap(),
+        vec![(routera.clone(), first), (routera, second)],
+    )
+    .err()
+    .expect("duplicate provider registration should fail");
+
+    assert!(
+        error
+            .message
+            .contains("provider `routera` is registered more than once")
+    );
+}

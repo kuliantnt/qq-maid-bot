@@ -38,6 +38,7 @@ pub(crate) struct MockProvider {
     tool_requests: Arc<Mutex<Vec<ToolChatRequest>>>,
     stream_enabled: bool,
     tool_protocol: Option<ToolCallingProtocol>,
+    supports_vision: bool,
     tool_actions: Arc<Mutex<Vec<MockToolAction>>>,
     title_replies: Arc<Mutex<Vec<Result<String, LlmError>>>>,
     compact_replies: Arc<Mutex<Vec<Result<String, LlmError>>>>,
@@ -92,6 +93,7 @@ impl MockProvider {
             tool_requests: Arc::new(Mutex::new(Vec::new())),
             stream_enabled: false,
             tool_protocol: None,
+            supports_vision: false,
             tool_actions: Arc::new(Mutex::new(Vec::new())),
             title_replies: Arc::new(Mutex::new(Vec::new())),
             compact_replies: Arc::new(Mutex::new(Vec::new())),
@@ -110,6 +112,7 @@ impl MockProvider {
             tool_requests: Arc::new(Mutex::new(Vec::new())),
             stream_enabled: false,
             tool_protocol: None,
+            supports_vision: false,
             tool_actions: Arc::new(Mutex::new(Vec::new())),
             title_replies: Arc::new(Mutex::new(Vec::new())),
             compact_replies: Arc::new(Mutex::new(Vec::new())),
@@ -177,6 +180,11 @@ impl MockProvider {
 
     pub(crate) fn with_tool_protocol(mut self, protocol: ToolCallingProtocol) -> Self {
         self.tool_protocol = Some(protocol);
+        self
+    }
+
+    pub(crate) fn with_vision(mut self) -> Self {
+        self.supports_vision = true;
         self
     }
 
@@ -493,6 +501,10 @@ impl LlmProvider for MockProvider {
 
     fn tool_calling_protocol(&self, _model: Option<&str>) -> Option<ToolCallingProtocol> {
         self.tool_protocol
+    }
+
+    fn supports_vision(&self, _model: Option<&str>) -> bool {
+        self.supports_vision
     }
 
     async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {

@@ -26,6 +26,7 @@ pub(crate) struct ProviderBuildPlan {
 
 pub(crate) fn provider_build_plan(config: &LlmConfig) -> Result<ProviderBuildPlan, LlmError> {
     let configured_custom_providers = configured_custom_provider_ids(config);
+    ensure_unique_provider_declarations(&configured_custom_providers)?;
     ensure_custom_providers_declared(
         &config.configured_model_routes,
         &configured_custom_providers,
@@ -245,6 +246,20 @@ fn configured_custom_provider_ids(config: &LlmConfig) -> Vec<ModelProvider> {
                 .map(|provider| provider.id.clone()),
         )
         .collect()
+}
+
+/// Provider 注册表只以 provider_id 为键；同一个 ID 不能同时声明为两种协议。
+fn ensure_unique_provider_declarations(providers: &[ModelProvider]) -> Result<(), LlmError> {
+    let mut seen = std::collections::HashSet::with_capacity(providers.len());
+    for provider in providers {
+        if !seen.insert(provider) {
+            return Err(LlmError::config(format!(
+                "provider `{}` is declared more than once",
+                provider.as_str()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// 单 provider 模式下校验某条 route 的所有候选都落在该 provider 上。

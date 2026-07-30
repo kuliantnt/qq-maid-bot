@@ -18,8 +18,8 @@
 
 | 路径 | 当前入口 | 当前输出形态 | 现状判断 |
 | --- | --- | --- | --- |
-| Agent Chat | `RespondPlan::AgentChat` -> `handle_chat` -> `respond_with_tools` | `Status(AgentStarted/Running/Finalizing)`；provider 支持时产生最终回答 `TextDelta`，最后 `Completed` | 普通纯文本消息在能力允许时统一走此路径；模型首轮可直接回答或发出 Tool Call。 |
-| 普通聊天降级 | `RespondPlan::StreamingChat` -> `respond_stream` -> `handle_chat_stream` | provider 支持时产生 `TextDelta`，最终 `Completed` | 仅用于 Tool Calling 未启用、Provider 不支持、工具为空或多模态等兼容场景。 |
+| Agent Chat | `RespondPlan::AgentRuntime` -> `handle_chat` -> `respond_with_tools` | `Status(AgentStarted/Running/Finalizing)`；provider 支持时产生最终回答 `TextDelta`，最后 `Completed` | 普通消息（含已适配的图片输入）在能力允许时统一走此路径；模型首轮可直接回答或发出 Tool Call。 |
+| 普通聊天降级 | `RespondPlan::StreamingChat` -> `respond_stream` -> `handle_chat_stream` | provider 支持时产生 `TextDelta`，最终 `Completed` | 仅用于 Tool Calling 未启用、Provider 不支持或工具为空等兼容场景。 |
 | WebSearch | `RespondPlan::WebSearch` -> `respond_web_search_stream` | provider 支持时复用 `/查` 的 `query_stream` delta，最终 `Completed` | 已接入 `CoreResponseStream`，但事件语义仍被压成普通文本 delta。 |
 | slash command | `/help` 试点走 `RespondPlan::CommandEvent`；其它命令仍由 `CommandDispatcher` 内确定性分发 | `/help` 输出 `Status(CommandStarted/CommandFinished)` + `Completed`；其它命令仍是 `RespondResponse` complete | 已有 `/help` 事件化试点，命令执行仍保持确定性；其余 slash command 尚未迁移。 |
 | pending 确认 | `handle_pending_operation` | `RespondResponse` complete | 应保持确定性，不默认进入 Agent Loop。 |

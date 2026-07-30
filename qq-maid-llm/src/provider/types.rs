@@ -437,6 +437,22 @@ mod tests {
     }
 
     #[test]
+    fn model_route_keeps_same_model_name_for_distinct_providers_in_order() {
+        let route =
+            ModelRoute::parse("routera:gpt-5.6-luna,routerb:gpt-5.6-luna", "request").unwrap();
+
+        assert_eq!(route.len(), 2);
+        assert_eq!(
+            route
+                .candidates()
+                .iter()
+                .map(ModelId::to_request_model)
+                .collect::<Vec<_>>(),
+            ["routera:gpt-5.6-luna", "routerb:gpt-5.6-luna"]
+        );
+    }
+
+    #[test]
     fn model_route_rejects_empty_candidates() {
         let err =
             ModelRoute::parse_config("openai:gpt-5.4-mini,,deepseek:deepseek-chat", "LLM_MODEL")

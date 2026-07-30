@@ -8,7 +8,7 @@ mod openai;
 mod routing;
 mod tavily;
 
-use std::{env, sync::Arc};
+use std::{collections::HashMap, env, sync::Arc};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -17,11 +17,12 @@ use tokio::sync::mpsc;
 use crate::{
     config::{LlmConfig, OpenAiApiMode},
     error::{ErrorInfo, LlmError},
+    provider::types::ModelProvider,
 };
 use qq_maid_common::time_context::RequestTimeContext;
 
 use gemini::{GeminiWebSearchExecutor, MissingGeminiWebSearchExecutor};
-use openai::{ChatOnlyWebSearchExecutor, MissingWebSearchExecutor, OpenAiWebSearchExecutor};
+use openai::{ChatOnlyWebSearchExecutor, MissingWebSearchExecutor, ResponsesWebSearchExecutor};
 use routing::RoutedWebSearchExecutor;
 use tavily::{MissingTavilyWebSearchExecutor, TavilyWebSearchExecutor};
 
@@ -304,7 +305,7 @@ pub fn build_web_search_executor(config: &LlmConfig) -> Result<DynWebSearchExecu
     } else if config.openai_api_mode == OpenAiApiMode::ChatOnly {
         Arc::new(ChatOnlyWebSearchExecutor)
     } else {
-        Arc::new(OpenAiWebSearchExecutor::new(config)?)
+        Arc::new(ResponsesWebSearchExecutor::new_openai(config)?)
     };
     let gemini: DynWebSearchExecutor = if config.gemini_api_key.is_none() {
         Arc::new(MissingGeminiWebSearchExecutor)
@@ -318,15 +319,79 @@ pub fn build_web_search_executor(config: &LlmConfig) -> Result<DynWebSearchExecu
         )?),
         None => Arc::new(MissingTavilyWebSearchExecutor),
     };
+    let mut native_providers = HashMap::new();
+    insert_native_provider(&mut native_providers, ModelProvider::OpenAi, openai)?;
+    insert_native_provider(&mut native_providers, ModelProvider::Gemini, gemini)?;
+
+    let mut custom_provider_ids = std::collections::HashSet::new();
+    for provider in &config.openai_compatible_providers {
+        if !custom_provider_ids.insert(provider.id.clone()) {
+            return Err(duplicate_provider_error(&provider.id));
+        }
+    }
+    for provider in &config.openai_responses_providers {
+        if !custom_provider_ids.insert(provider.id.clone()) {
+            return Err(duplicate_provider_error(&provider.id));
+        }
+        let executor: DynWebSearchExecutor = match provider.api_key.as_deref() {
+            Some(api_key) if !api_key.trim().is_empty() => {
+                Arc::new(ResponsesWebSearchExecutor::new_configured(
+                    provider,
+                    config.web_search.default_model.clone(),
+                    config.request_timeout_seconds,
+                )?)
+            }
+            _ => Arc::new(MissingConfiguredResponsesWebSearchExecutor {
+                api_key_env: provider.api_key_env.clone(),
+            }),
+        };
+        insert_native_provider(&mut native_providers, provider.id.clone(), executor)?;
+    }
+
     Ok(Arc::new(RoutedWebSearchExecutor::new(
         config.web_search.default_backend,
         config.web_search.default_model.clone(),
         config.web_search.max_results,
-        openai,
-        gemini,
+        native_providers,
         tavily,
         Arc::new(DisabledWebSearchExecutor),
     )))
+}
+
+fn insert_native_provider(
+    providers: &mut HashMap<ModelProvider, DynWebSearchExecutor>,
+    provider: ModelProvider,
+    executor: DynWebSearchExecutor,
+) -> Result<(), LlmError> {
+    if providers.insert(provider.clone(), executor).is_some() {
+        return Err(duplicate_provider_error(&provider));
+    }
+    Ok(())
+}
+
+fn duplicate_provider_error(provider: &ModelProvider) -> LlmError {
+    LlmError::config(format!(
+        "provider `{}` is declared more than once",
+        provider.as_str()
+    ))
+}
+
+struct MissingConfiguredResponsesWebSearchExecutor {
+    api_key_env: String,
+}
+
+#[async_trait]
+impl WebSearchExecutor for MissingConfiguredResponsesWebSearchExecutor {
+    async fn query(&self, _req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
+        Err(LlmError::config(format!(
+            "{} is required for configured Responses web search",
+            self.api_key_env
+        )))
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "openai_responses"
+    }
 }
 
 struct DisabledWebSearchExecutor;

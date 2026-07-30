@@ -1,7 +1,7 @@
 //! 普通消息 Agent 能力前置路由。
 //!
 //! 代码侧只决定当前请求是否允许向模型暴露工具。通过场景、Provider 能力、
-//! 群聊开关和白名单约束后，普通纯文本消息统一进入具备原生 Tool Calling 的
+//! 群聊开关和白名单约束后，普通消息统一进入具备原生 Tool Calling 的
 //! 模型流程。本模块不读取业务交互状态，也不生成状态提示。
 
 use super::RespondRequest;
@@ -84,9 +84,6 @@ pub(super) fn route_agent_runtime(
     if !ctx.scene_enabled {
         return standard_decision("agent_unavailable");
     }
-    if req.has_non_text_input_parts() {
-        return standard_decision("multimodal_standard_chat");
-    }
     let text = req.effective_user_text();
     let trimmed = text.trim();
     if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.starts_with('／') {
@@ -134,6 +131,7 @@ fn agent_decision(reason: &'static str, tool_mode: AgentToolMode) -> AgentRouteD
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qq_maid_common::input_part::{MessageInputPart, MessageMedia};
 
     fn request(text: &str) -> RespondRequest {
         RespondRequest {
@@ -173,6 +171,27 @@ mod tests {
             let decision = route_agent_runtime(&request(input), context());
             assert_eq!(decision.route, RespondRoute::AgentRuntime, "{input}");
         }
+    }
+
+    #[test]
+    fn private_image_message_enters_tool_capable_agent() {
+        let mut req = request("看看这张图");
+        req.input_parts = vec![
+            MessageInputPart::text("看看这张图"),
+            MessageInputPart::image(MessageMedia {
+                mime_type: Some("image/png".to_owned()),
+                url: Some("https://example.test/image.png".to_owned()),
+                ..Default::default()
+            }),
+        ];
+
+        let decision = route_agent_runtime(&req, context());
+
+        assert_eq!(decision.route, RespondRoute::AgentRuntime);
+        assert_eq!(
+            decision.tool_mode(),
+            Some(AgentToolMode::ConfiguredWhitelist)
+        );
     }
 
     #[test]

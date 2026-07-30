@@ -1,15 +1,16 @@
 use std::time::Instant;
 
 use async_trait::async_trait;
-use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use crate::{
-    config::LlmConfig,
+    config::{HttpAuthConfig, LlmConfig, OpenAiResponsesProviderConfig},
     error::LlmError,
     metrics::duration_ms,
-    provider::openai::is_openai_responses_done_sentinel,
+    provider::openai::{
+        is_openai_responses_done_sentinel, openai_responses_url, send_openai_responses_request,
+    },
     sse::{SseFrame, parse_sse_frame, take_sse_frame},
 };
 use qq_maid_common::time_context::request_time_context;
@@ -17,11 +18,7 @@ use qq_maid_common::time_context::request_time_context;
 use super::{
     DEFAULT_SEARCH_CONTEXT_SIZE, WebSearchExecutor, WebSearchOutcome, WebSearchRequest,
     WebSearchSource, build_query_prompt, configured_max_results, trace_query_input_enabled,
-    truncate_error_detail,
 };
-
-/// OpenAI API 默认基础地址。
-const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
 pub(super) struct MissingWebSearchExecutor;
 
@@ -53,16 +50,22 @@ impl WebSearchExecutor for ChatOnlyWebSearchExecutor {
     }
 }
 
-/// 基于 OpenAI Responses API 的 Web Search 执行器。
-pub(super) struct OpenAiWebSearchExecutor {
+/// 基于 Responses API 的公共 Web Search 执行器。
+///
+/// 内置 OpenAI 与配置驱动的 `openai_responses` Provider 只提供不同的连接和认证
+/// 元数据；payload、HTTP transport、SSE、正文与来源解析始终走同一份实现。
+pub(super) struct ResponsesWebSearchExecutor {
     client: reqwest::Client,
     api_key: String,
     base_url: Option<String>,
+    auth: Option<HttpAuthConfig>,
+    provider: String,
     search_model: String,
+    search_context_size_supported: bool,
 }
 
-impl OpenAiWebSearchExecutor {
-    pub(super) fn new(config: &LlmConfig) -> Result<Self, LlmError> {
+impl ResponsesWebSearchExecutor {
+    pub(super) fn new_openai(config: &LlmConfig) -> Result<Self, LlmError> {
         let api_key = config
             .openai_api_key
             .clone()
@@ -83,13 +86,57 @@ impl OpenAiWebSearchExecutor {
             client,
             api_key,
             base_url: config.openai_base_url.clone(),
+            auth: None,
+            provider: "openai".to_owned(),
             search_model: config.web_search.default_model.clone(),
+            search_context_size_supported: true,
+        })
+    }
+
+    pub(super) fn new_configured(
+        config: &OpenAiResponsesProviderConfig,
+        default_model: String,
+        request_timeout_seconds: u64,
+    ) -> Result<Self, LlmError> {
+        let provider = config.id.as_str();
+        let api_key = config
+            .api_key
+            .clone()
+            .ok_or_else(|| LlmError::config(format!("{} is required", config.api_key_env)))?;
+        let client = qq_maid_common::http_client::try_builder()
+            .map_err(|err| {
+                LlmError::config(format!(
+                    "failed to configure {provider} web search TLS: {err}"
+                ))
+            })?
+            .timeout(std::time::Duration::from_secs(
+                config
+                    .request_timeout_seconds
+                    .unwrap_or(request_timeout_seconds),
+            ))
+            .build()
+            .map_err(|err| {
+                LlmError::config(format!(
+                    "failed to build {provider} web search HTTP client: {err}"
+                ))
+            })?;
+
+        Ok(Self {
+            client,
+            api_key,
+            base_url: Some(config.base_url.clone()),
+            auth: Some(config.auth.clone()),
+            provider: provider.to_owned(),
+            search_model: default_model,
+            // search_context_size 是 OpenAI 扩展字段；通用 Responses Provider
+            // 只发送标准 web_search tool，避免向 XAI 等上游夹带未知参数。
+            search_context_size_supported: false,
         })
     }
 }
 
 #[async_trait]
-impl WebSearchExecutor for OpenAiWebSearchExecutor {
+impl WebSearchExecutor for ResponsesWebSearchExecutor {
     async fn query(&self, req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
         let query = req.query.trim();
         if query.is_empty() {
@@ -103,42 +150,43 @@ impl WebSearchExecutor for OpenAiWebSearchExecutor {
         let started = Instant::now();
         let max_results = configured_max_results(req.max_results);
         let model = req.model_override.as_deref().unwrap_or(&self.search_model);
-        let payload = openai_web_search_payload(&req, query, max_results, model, false);
+        let payload = responses_web_search_payload(
+            &req,
+            query,
+            max_results,
+            model,
+            false,
+            self.search_context_size_supported,
+        );
         let url = openai_responses_url(self.base_url.as_deref());
-        trace_openai_query_payload(&req, &url, &payload);
+        trace_responses_query_payload(&req, &url, &payload);
 
-        let response = self
-            .client
-            .post(url)
-            .bearer_auth(&self.api_key)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|err| {
-                if err.is_timeout() {
-                    LlmError::timeout("http")
-                } else {
-                    LlmError::http(format!("OpenAI web query request failed: {err}"))
-                }
-            })?;
-
-        let status = response.status();
-        if !status.is_success() {
-            return Err(openai_status_error(status, response).await);
-        }
+        let response = send_openai_responses_request(
+            &self.client,
+            &self.api_key,
+            self.base_url.as_deref(),
+            &self.provider,
+            self.auth.as_ref(),
+            &payload,
+            false,
+        )
+        .await?;
 
         let body: Value = response.json().await.map_err(|err| {
-            LlmError::provider(format!("invalid OpenAI query JSON: {err}"), "json")
+            LlmError::provider(format!("invalid Responses web search JSON: {err}"), "json")
         })?;
         let answer = extract_output_text(&body).ok_or_else(|| {
-            LlmError::provider("OpenAI web query returned empty text output", "provider")
+            LlmError::provider(
+                "Responses web search returned empty text output",
+                "provider",
+            )
         })?;
         let sources = extract_sources(&body, usize::from(max_results));
 
         Ok(WebSearchOutcome {
             answer,
             sources,
-            provider: "openai".to_owned(),
+            provider: self.provider.clone(),
             elapsed_ms: duration_ms(started.elapsed()),
         })
     }
@@ -160,29 +208,27 @@ impl WebSearchExecutor for OpenAiWebSearchExecutor {
         let started = Instant::now();
         let max_results = configured_max_results(req.max_results);
         let model = req.model_override.as_deref().unwrap_or(&self.search_model);
-        let payload = openai_web_search_payload(&req, query, max_results, model, true);
+        let payload = responses_web_search_payload(
+            &req,
+            query,
+            max_results,
+            model,
+            true,
+            self.search_context_size_supported,
+        );
         let url = openai_responses_url(self.base_url.as_deref());
-        trace_openai_query_payload(&req, &url, &payload);
+        trace_responses_query_payload(&req, &url, &payload);
 
-        let mut response = self
-            .client
-            .post(url)
-            .bearer_auth(&self.api_key)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|err| {
-                if err.is_timeout() {
-                    LlmError::timeout("http")
-                } else {
-                    LlmError::http(format!("OpenAI web query request failed: {err}"))
-                }
-            })?;
-
-        let status = response.status();
-        if !status.is_success() {
-            return Err(openai_status_error(status, response).await);
-        }
+        let mut response = send_openai_responses_request(
+            &self.client,
+            &self.api_key,
+            self.base_url.as_deref(),
+            &self.provider,
+            self.auth.as_ref(),
+            &payload,
+            true,
+        )
+        .await?;
 
         let mut frame_buffer = Vec::new();
         let mut answer = String::new();
@@ -203,7 +249,7 @@ impl WebSearchExecutor for OpenAiWebSearchExecutor {
                 if is_openai_responses_done_sentinel(&event.data) {
                     continue;
                 }
-                handle_openai_web_search_stream_event(
+                handle_responses_web_search_stream_event(
                     event,
                     &mut answer,
                     &mut completed_response,
@@ -217,7 +263,7 @@ impl WebSearchExecutor for OpenAiWebSearchExecutor {
             && let Some(event) = parse_sse_frame(&frame_buffer)?
             && !is_openai_responses_done_sentinel(&event.data)
         {
-            handle_openai_web_search_stream_event(
+            handle_responses_web_search_stream_event(
                 event,
                 &mut answer,
                 &mut completed_response,
@@ -239,7 +285,7 @@ impl WebSearchExecutor for OpenAiWebSearchExecutor {
         let answer = answer.trim().to_owned();
         if answer.is_empty() {
             return Err(LlmError::provider(
-                "OpenAI web query returned empty text output",
+                "Responses web search returned empty text output",
                 "provider",
             ));
         }
@@ -251,22 +297,14 @@ impl WebSearchExecutor for OpenAiWebSearchExecutor {
         Ok(WebSearchOutcome {
             answer,
             sources,
-            provider: "openai".to_owned(),
+            provider: self.provider.clone(),
             elapsed_ms: duration_ms(started.elapsed()),
         })
     }
 
     fn provider_name(&self) -> &'static str {
-        "openai"
+        "openai_responses"
     }
-}
-
-fn openai_responses_url(base_url: Option<&str>) -> String {
-    let base_url = base_url
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(OPENAI_DEFAULT_BASE_URL);
-    format!("{}/responses", base_url.trim_end_matches('/'))
 }
 
 fn normalized_context_size(value: Option<&str>) -> &str {
@@ -278,17 +316,22 @@ fn normalized_context_size(value: Option<&str>) -> &str {
     }
 }
 
-fn openai_web_search_payload(
+fn responses_web_search_payload(
     req: &WebSearchRequest,
     query: &str,
     max_results: u8,
     search_model: &str,
     stream: bool,
+    search_context_size_supported: bool,
 ) -> Value {
-    let tool = json!({
-        "type": "web_search",
-        "search_context_size": normalized_context_size(req.context_size.as_deref())
-    });
+    let tool = if search_context_size_supported {
+        json!({
+            "type": "web_search",
+            "search_context_size": normalized_context_size(req.context_size.as_deref())
+        })
+    } else {
+        json!({"type": "web_search"})
+    };
 
     let mut payload = json!({
         "model": search_model,
@@ -308,7 +351,7 @@ fn openai_web_search_payload(
     payload
 }
 
-fn trace_openai_query_payload(req: &WebSearchRequest, url: &str, payload: &Value) {
+fn trace_responses_query_payload(req: &WebSearchRequest, url: &str, payload: &Value) {
     if !tracing::enabled!(tracing::Level::TRACE) {
         return;
     }
@@ -335,27 +378,31 @@ fn trace_openai_query_payload(req: &WebSearchRequest, url: &str, payload: &Value
         include = %include,
         input_chars = input.chars().count(),
         query_chars = req.query.trim().chars().count(),
-        "openai query request payload summary"
+        "Responses web search request payload summary"
     );
 
     if trace_query_input_enabled() {
         tracing::trace!(
             upstream_url = url,
             input = %input,
-            "openai query request input"
+            "Responses web search request input"
         );
     }
 }
 
-async fn handle_openai_web_search_stream_event(
+async fn handle_responses_web_search_stream_event(
     event: SseFrame,
     answer: &mut String,
     completed_response: &mut Option<Value>,
     saw_completed: &mut bool,
     delta_tx: &mpsc::Sender<String>,
 ) -> Result<(), LlmError> {
-    let value = serde_json::from_str::<Value>(&event.data)
-        .map_err(|err| LlmError::provider(format!("invalid OpenAI stream JSON: {err}"), "sse"))?;
+    let value = serde_json::from_str::<Value>(&event.data).map_err(|err| {
+        LlmError::provider(
+            format!("invalid Responses web search stream JSON: {err}"),
+            "sse",
+        )
+    })?;
     let event_type = event
         .event
         .as_deref()
@@ -380,7 +427,7 @@ async fn handle_openai_web_search_stream_event(
         }
         "response.failed" | "response.incomplete" | "error" => {
             let message = stream_error_message(&value)
-                .unwrap_or_else(|| format!("OpenAI web query stream event {event_type}"));
+                .unwrap_or_else(|| format!("Responses web search stream event {event_type}"));
             return Err(LlmError::provider(message, "sse"));
         }
         _ => {}
@@ -396,7 +443,7 @@ fn web_search_incomplete_eof_error(answer: &str) -> LlmError {
         "stream_after_delta"
     };
     LlmError::provider(
-        "OpenAI web query stream ended before response.completed",
+        "Responses web search stream ended before response.completed",
         stage,
     )
 }
@@ -409,7 +456,7 @@ fn web_search_stream_transport_error(err: reqwest::Error, answer: &str) -> LlmEr
     };
     LlmError::new(
         "http_error",
-        format!("OpenAI web query stream failed: {err}"),
+        format!("Responses web search stream failed: {err}"),
         stage,
     )
 }
@@ -425,25 +472,6 @@ fn stream_error_message(value: &Value) -> Option<String> {
         .and_then(|error| error.get("message").or(Some(error)))
         .and_then(Value::as_str)
         .map(str::to_owned)
-}
-
-async fn openai_status_error(status: StatusCode, response: reqwest::Response) -> LlmError {
-    let detail = response.text().await.unwrap_or_default();
-    let detail = truncate_error_detail(detail.trim(), 500);
-    let message = if detail.is_empty() {
-        format!("OpenAI web query returned HTTP {}", status.as_u16())
-    } else {
-        format!(
-            "OpenAI web query returned HTTP {}: {detail}",
-            status.as_u16()
-        )
-    };
-    match status.as_u16() {
-        401 | 403 => LlmError::config(message),
-        429 => LlmError::new("rate_limited", message, "http"),
-        500..=599 => LlmError::new("upstream_unavailable", message, "http"),
-        _ => LlmError::http(message),
-    }
 }
 
 fn extract_output_text(body: &Value) -> Option<String> {
@@ -558,6 +586,9 @@ fn collect_sources(
 }
 
 #[cfg(test)]
+mod configured_search_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::{
@@ -595,7 +626,7 @@ mod tests {
             backend_override: None,
             model_override: None,
         };
-        let payload = openai_web_search_payload(&req, &req.query, 3, "gpt-search", false);
+        let payload = responses_web_search_payload(&req, &req.query, 3, "gpt-search", false, true);
 
         assert_eq!(payload["model"], "gpt-search");
         assert_eq!(payload["tools"][0]["type"], "web_search");
@@ -628,7 +659,7 @@ mod tests {
             backend_override: None,
             model_override: None,
         };
-        let payload = openai_web_search_payload(&req, &req.query, 3, "gpt-search", true);
+        let payload = responses_web_search_payload(&req, &req.query, 3, "gpt-search", true, true);
 
         assert_eq!(payload["stream"], true);
     }
@@ -686,7 +717,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_stream_emits_real_sse_deltas_and_accepts_done_sentinel() {
+    async fn configured_responses_query_stream_emits_deltas_and_accepts_done_sentinel() {
         let body = concat!(
             "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"你\"}\n\n",
             "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"好\"}\n\n",
@@ -695,11 +726,14 @@ mod tests {
         )
         .to_owned();
         let (base_url, state) = spawn_mock_search(body).await;
-        let executor = OpenAiWebSearchExecutor {
+        let executor = ResponsesWebSearchExecutor {
             client: qq_maid_common::http_client::client(),
             api_key: "test-key".to_owned(),
             base_url: Some(base_url),
+            auth: Some(HttpAuthConfig::default()),
+            provider: "xai".to_owned(),
             search_model: "gpt-search".to_owned(),
+            search_context_size_supported: false,
         };
         let (delta_tx, mut delta_rx) = mpsc::channel(4);
 
@@ -724,6 +758,7 @@ mod tests {
         assert_eq!(delta_rx.recv().await.as_deref(), Some("好"));
         assert!(delta_rx.recv().await.is_none());
         assert_eq!(outcome.answer, "你好");
+        assert_eq!(outcome.provider, "xai");
         assert_eq!(state.lock().await.requests[0]["stream"], true);
     }
 
@@ -732,11 +767,14 @@ mod tests {
         let body = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"半截\"}\n\n"
             .to_owned();
         let (base_url, _state) = spawn_mock_search(body).await;
-        let executor = OpenAiWebSearchExecutor {
+        let executor = ResponsesWebSearchExecutor {
             client: qq_maid_common::http_client::client(),
             api_key: "test-key".to_owned(),
             base_url: Some(base_url),
+            auth: None,
+            provider: "openai".to_owned(),
             search_model: "gpt-search".to_owned(),
+            search_context_size_supported: true,
         };
         let (delta_tx, _delta_rx) = mpsc::channel(4);
 
