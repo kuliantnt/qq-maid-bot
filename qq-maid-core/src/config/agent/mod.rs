@@ -7,7 +7,7 @@ use std::{collections::HashMap, env, fs, fs::OpenOptions, io::Write, path::Path}
 use serde::{Deserialize, Serialize};
 
 use qq_maid_llm::{
-    provider::types::{ModelProvider, ModelRoute, ReasoningEffort},
+    provider::types::{ModelId, ModelProvider, ModelRoute, ReasoningEffort},
     web_search::{WebSearchBackend, WebSearchConfig, WebSearchTimeRange},
 };
 
@@ -444,8 +444,9 @@ impl AgentRuntimeConfig {
         }
         let mut web_search_routes = HashMap::new();
         for (name, route) in file.tools.web_search.routes {
-            let model =
-                super::openai_model_name(&route.model, &format!("tools.web_search.routes.{name}"))?;
+            let field_name = format!("tools.web_search.routes.{name}");
+            let model = ModelId::parse_config(&route.model, &field_name)?;
+            let model = model.to_request_model();
             web_search_routes.insert(name, model);
         }
         let mut profiles = HashMap::new();
@@ -660,11 +661,43 @@ impl AgentRuntimeConfig {
                 )));
             }
         }
+        if self.web_search.default_backend == WebSearchBackend::ProviderNative {
+            for (name, model) in &self.web_search_routes {
+                self.validate_provider_native_search_model(name, model)?;
+            }
+        }
         validate_scene_enabled_tools("private", &self.scenes.private.enabled_tools)?;
         validate_scene_enabled_tools("group", &self.scenes.group.enabled_tools)?;
         self.resolve(ChatScene::Private)?;
         self.resolve(ChatScene::Group)?;
         Ok(())
+    }
+
+    fn validate_provider_native_search_model(
+        &self,
+        route_name: &str,
+        value: &str,
+    ) -> Result<(), LlmError> {
+        let field_name = format!("tools.web_search.routes.{route_name}");
+        let model = ModelId::parse_config(value, &field_name)?;
+        // 裸搜索模型只作为历史格式兼容为内置 OpenAI；显式前缀始终严格校验。
+        let provider = model.provider.unwrap_or(ModelProvider::OpenAi);
+        match provider {
+            ModelProvider::OpenAi | ModelProvider::Gemini => Ok(()),
+            ModelProvider::Custom(name) => match self.providers.get(&name) {
+                Some(provider) if provider.kind == AgentProviderKind::OpenAiResponses => Ok(()),
+                Some(_) => Err(LlmError::config(format!(
+                    "{field_name} references provider `{name}`, but openai_compatible does not support provider_native search; configure an openai_responses provider or Tavily"
+                ))),
+                None => Err(LlmError::config(format!(
+                    "{field_name} references custom provider `{name}`, but providers.{name} is not configured"
+                ))),
+            },
+            ModelProvider::DeepSeek | ModelProvider::BigModel => Err(LlmError::config(format!(
+                "{field_name} references provider `{}`, which does not support provider_native search; configure Tavily instead",
+                provider.as_str()
+            ))),
+        }
     }
 }
 

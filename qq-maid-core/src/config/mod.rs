@@ -5,7 +5,7 @@ use std::{cell::RefCell, collections::HashMap, env, fmt, net::IpAddr, path::Path
 
 use qq_maid_common::command_prefix::CommandPrefix;
 use qq_maid_llm::context_budget::ContextBudgetConfig;
-use qq_maid_llm::provider::types::{ModelId, ModelProvider, ModelRoute};
+use qq_maid_llm::provider::types::ModelRoute;
 
 use crate::{
     error::LlmError,
@@ -860,21 +860,6 @@ fn parse_two_ascii_digits(high: u8, low: u8) -> Option<u8> {
         return None;
     }
     Some((high - b'0') * 10 + (low - b'0'))
-}
-
-/// 校验查询模型名：允许纯模型名、`openai:` 或 `gemini:` 前缀，拒绝不支持查询工具的 provider。
-fn openai_model_name(value: &str, name: &str) -> Result<String, LlmError> {
-    let model = ModelId::parse_config(value, name)?;
-    match model.provider {
-        Some(ModelProvider::OpenAi) | Some(ModelProvider::Gemini) | None => {
-            Ok(model.to_request_model())
-        }
-        Some(ModelProvider::DeepSeek)
-        | Some(ModelProvider::BigModel)
-        | Some(ModelProvider::Custom(_)) => Err(LlmError::config(format!(
-            "{name} cannot use provider prefix without supported query tool; supported: openai, gemini"
-        ))),
-    }
 }
 
 /// 从 `OPENAI_BASE_URLS` 读取 OpenAI 基础地址，逗号分隔时取第一个非空值。

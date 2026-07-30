@@ -294,7 +294,86 @@ enabled_tools = ["save_memory"]
     assert_eq!(private.search_model, "gemini:gemini-2.5-flash");
 }
 
+#[test]
+fn provider_native_accepts_configured_responses_search_with_full_identity() {
+    let text = DEFAULT_AGENT_CONFIG.replace("model = \"gpt-5.6-luna\"", "model = \"xai:grok-4\"")
+        + r#"
+
+[providers.xai]
+kind = "openai_responses"
+base_url = "https://api.x.ai/v1"
+api_key_env = "XAI_API_KEY"
+"#;
+
+    let config = AgentRuntimeConfig::from_toml(
+        &text,
+        AgentConfigSource::File("config/agent.toml".to_owned()),
+    )
+    .unwrap();
+
+    assert_eq!(
+        config.resolve(ChatScene::Private).unwrap().search_model,
+        "xai:grok-4"
+    );
+}
+
+#[test]
+fn provider_native_rejects_undeclared_custom_search_provider_prefix() {
+    let text =
+        DEFAULT_AGENT_CONFIG.replace("model = \"gpt-5.6-luna\"", "model = \"xai_typo:grok-4\"");
+
+    let error = AgentRuntimeConfig::from_toml(
+        &text,
+        AgentConfigSource::File("config/agent.toml".to_owned()),
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .message
+            .contains("providers.xai_typo is not configured")
+    );
+}
+
+#[test]
+fn provider_native_rejects_compatible_provider_but_tavily_can_ignore_route() {
+    let provider_native =
+        DEFAULT_AGENT_CONFIG.replace("model = \"gpt-5.6-luna\"", "model = \"mimo:mimo-v2.5\"");
+    let error = AgentRuntimeConfig::from_toml(
+        &provider_native,
+        AgentConfigSource::File("config/agent.toml".to_owned()),
+    )
+    .unwrap_err();
+    assert!(error.message.contains("openai_compatible"));
+    assert!(error.message.contains("Tavily"));
+
+    let tavily = provider_native.replace("backend = \"provider_native\"", "backend = \"tavily\"");
+    let config = AgentRuntimeConfig::from_toml(
+        &tavily,
+        AgentConfigSource::File("config/agent.toml".to_owned()),
+    )
+    .unwrap();
+    assert_eq!(
+        config.resolve(ChatScene::Private).unwrap().search_backend,
+        WebSearchBackend::Tavily
+    );
+}
+
+#[test]
+fn provider_native_search_route_keeps_bare_model_as_openai_compatibility_default() {
+    let config = AgentRuntimeConfig::from_toml(
+        DEFAULT_AGENT_CONFIG,
+        AgentConfigSource::File("config/agent.toml".to_owned()),
+    )
+    .unwrap();
+    assert_eq!(
+        config.resolve(ChatScene::Private).unwrap().search_model,
+        "gpt-5.6-luna"
+    );
+}
+
 mod opencode;
+mod provider_startup;
 
 #[test]
 fn toml_config_rejects_legacy_search_routes_section() {

@@ -23,9 +23,6 @@ use crate::{
     },
 };
 
-const MULTIMODAL_UNSUPPORTED_MESSAGE: &str =
-    "我收到图片或文件了，但当前模型暂时不支持图片/文件理解。你可以补充文字说明，我先帮你记录。";
-
 /// 配置驱动的 OpenAI-compatible provider。
 pub struct OpenAiCompatibleProvider {
     id: ModelProvider,
@@ -108,7 +105,6 @@ impl OpenAiCompatibleProvider {
 #[async_trait]
 impl LlmProvider for OpenAiCompatibleProvider {
     async fn chat(&self, req: ChatRequest) -> Result<ChatOutcome, LlmError> {
-        reject_multimodal_if_needed(&req)?;
         let effective_model = self.effective_model(req.model.as_deref())?;
         chat_completions_with_stream_fallback(
             self.stream,
@@ -124,7 +120,6 @@ impl LlmProvider for OpenAiCompatibleProvider {
     }
 
     async fn stream_chat(&self, req: ChatRequest) -> Result<LlmStream, LlmError> {
-        reject_multimodal_if_needed(&req)?;
         let effective_model = self.effective_model(req.model.as_deref())?;
         if !self.stream {
             let outcome = chat_completions_with_stream_fallback(
@@ -186,6 +181,12 @@ impl LlmProvider for OpenAiCompatibleProvider {
         })
     }
 
+    fn supports_vision(&self, model: Option<&str>) -> bool {
+        // 是否真正支持图片由上游模型决定；这里只确认该请求属于当前 Provider，
+        // 图片编码继续复用公共 Chat Completions payload，不维护模型白名单。
+        self.effective_model(model).is_ok()
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -197,17 +198,6 @@ impl LlmProvider for OpenAiCompatibleProvider {
     fn stream_enabled(&self) -> bool {
         self.stream
     }
-}
-
-fn reject_multimodal_if_needed(req: &ChatRequest) -> Result<(), LlmError> {
-    if req.has_non_text_parts() {
-        return Err(LlmError::new(
-            "unsupported_input_part",
-            MULTIMODAL_UNSUPPORTED_MESSAGE,
-            "request",
-        ));
-    }
-    Ok(())
 }
 
 struct AuthMappingAgentSession {
@@ -254,7 +244,15 @@ fn map_auth_error_to_unavailable(err: LlmError) -> LlmError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::HttpAuthConfig, provider::types::ChatMessage};
+    use crate::{
+        config::HttpAuthConfig,
+        provider::{
+            ToolChatRequest, collect_llm_stream,
+            test_support::{WeatherToolStub, test_tool_context},
+            types::ChatMessage,
+        },
+        tool::ToolRegistry,
+    };
     use axum::{
         Router,
         body::Body,
@@ -263,6 +261,7 @@ mod tests {
         response::IntoResponse,
         routing::post,
     };
+    use qq_maid_common::input_part::{MessageInputPart, MessageMedia};
     use serde_json::{Value, json};
     use std::sync::Arc;
     use tokio::{net::TcpListener, sync::Mutex};
@@ -305,21 +304,34 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
         let mut state = state.lock().await;
+        let streaming = request["stream"].as_bool() == Some(true);
         state.paths.push(uri.path().to_owned());
         state.auth_headers.push(auth);
         state.api_key_headers.push(api_key);
         state.requests.push(request);
-        let response_body = if state.status.is_success() {
-            json!({"choices": [{"message": {"content": "mimo reply"}}]}).to_string()
+        let (content_type, response_body) = if state.status.is_success() && streaming {
+            (
+                "text/event-stream",
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"mimo reply\"}}]}\n\n",
+                    "data: [DONE]\n\n"
+                )
+                .to_owned(),
+            )
+        } else if state.status.is_success() {
+            (
+                "application/json",
+                json!({"choices": [{"message": {"content": "mimo reply"}}]}).to_string(),
+            )
         } else {
-            json!({"error": {"message": "unauthorized"}}).to_string()
+            (
+                "application/json",
+                json!({"error": {"message": "unauthorized"}}).to_string(),
+            )
         };
         (
             state.status,
-            [(
-                header::CONTENT_TYPE,
-                header::HeaderValue::from_static("application/json"),
-            )],
+            [(header::CONTENT_TYPE, content_type)],
             response_body,
         )
     }
@@ -368,6 +380,42 @@ mod tests {
         }
     }
 
+    fn image_request(model: &str) -> ChatRequest {
+        ChatRequest {
+            session_id: "s".to_owned(),
+            model: Some(model.to_owned()),
+            messages: vec![ChatMessage::user_with_parts(
+                "看图",
+                vec![
+                    MessageInputPart::text("看图"),
+                    MessageInputPart::image(MessageMedia {
+                        mime_type: Some("image/jpeg".to_owned()),
+                        url: Some("https://example.test/image.jpg".to_owned()),
+                        ..Default::default()
+                    }),
+                ],
+            )],
+            context_budget: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
+            metadata: Default::default(),
+        }
+    }
+
+    fn file_request(model: &str) -> ChatRequest {
+        ChatRequest {
+            messages: vec![ChatMessage::user_with_parts(
+                "读文件",
+                vec![MessageInputPart::file(MessageMedia {
+                    mime_type: Some("application/pdf".to_owned()),
+                    url: Some("https://example.test/document.pdf".to_owned()),
+                    ..Default::default()
+                })],
+            )],
+            ..image_request(model)
+        }
+    }
+
     #[tokio::test]
     async fn custom_provider_uses_chat_completions_endpoint_header_and_model() {
         let (base_url, state) = spawn_mock_chat(StatusCode::OK).await;
@@ -403,6 +451,129 @@ mod tests {
         );
         assert_eq!(state.requests[0]["model"], "mimo-v2.5-pro");
         assert!(state.requests[0].get("stream").is_none());
+    }
+
+    #[tokio::test]
+    async fn custom_provider_chat_sends_text_and_image_with_common_payload() {
+        let (base_url, state) = spawn_mock_chat(StatusCode::OK).await;
+        let provider = OpenAiCompatibleProvider::new(
+            &mimo_config(base_url),
+            "mimo-v2.5".to_owned(),
+            false,
+            90,
+            10 * 1024 * 1024,
+            1200,
+        )
+        .unwrap();
+
+        let outcome = provider
+            .chat(image_request("mimo:mimo-v2.5-pro"))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.reply, "mimo reply");
+        assert!(provider.supports_vision(Some("mimo:mimo-v2.5-pro")));
+        let state = state.lock().await;
+        let content = state.requests[0]["messages"][0]["content"]
+            .as_array()
+            .unwrap();
+        assert_eq!(content[0], json!({"type": "text", "text": "看图"}));
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "https://example.test/image.jpg"
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_provider_stream_sends_text_and_image_with_common_payload() {
+        let (base_url, state) = spawn_mock_chat(StatusCode::OK).await;
+        let provider = OpenAiCompatibleProvider::new(
+            &mimo_config(base_url),
+            "mimo-v2.5".to_owned(),
+            true,
+            90,
+            10 * 1024 * 1024,
+            1200,
+        )
+        .unwrap();
+
+        let stream = provider
+            .stream_chat(image_request("mimo:mimo-v2.5-pro"))
+            .await
+            .unwrap();
+        let outcome = collect_llm_stream(stream, "mimo", "mimo-v2.5-pro")
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.reply, "mimo reply");
+        let state = state.lock().await;
+        assert_eq!(state.requests[0]["stream"], true);
+        assert_eq!(
+            state.requests[0]["messages"][0]["content"][1]["type"],
+            "image_url"
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_provider_agent_loop_sends_text_and_image_with_common_payload() {
+        let (base_url, state) = spawn_mock_chat(StatusCode::OK).await;
+        let provider = OpenAiCompatibleProvider::new(
+            &mimo_config(base_url),
+            "mimo-v2.5".to_owned(),
+            false,
+            90,
+            10 * 1024 * 1024,
+            1200,
+        )
+        .unwrap();
+        let tools = ToolRegistry::new()
+            .register(WeatherToolStub::new("晴"))
+            .unwrap();
+
+        let outcome = provider
+            .chat_with_tools(ToolChatRequest {
+                chat: image_request("mimo:mimo-v2.5-pro"),
+                tools,
+                tool_context: test_tool_context(),
+                max_rounds: 2,
+                progress_sink: None,
+                final_delta_sink: None,
+                run_handle: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.reply, "mimo reply");
+        let state = state.lock().await;
+        assert!(state.requests[0].get("tools").is_some());
+        assert_eq!(
+            state.requests[0]["messages"][0]["content"][1]["type"],
+            "image_url"
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_provider_still_rejects_file_input_before_request() {
+        let (base_url, state) = spawn_mock_chat(StatusCode::OK).await;
+        let provider = OpenAiCompatibleProvider::new(
+            &mimo_config(base_url),
+            "mimo-v2.5".to_owned(),
+            false,
+            90,
+            10 * 1024 * 1024,
+            1200,
+        )
+        .unwrap();
+
+        let error = provider
+            .chat(file_request("mimo:mimo-v2.5-pro"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, "unsupported_input_part");
+        assert!(error.message.contains("文件"));
+        assert!(state.lock().await.requests.is_empty());
     }
 
     #[tokio::test]

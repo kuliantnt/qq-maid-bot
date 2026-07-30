@@ -45,8 +45,8 @@ candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-flash", "mimo:mimo-v2.5"
 [model_routes.aux]
 candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-flash", "mimo:mimo-v2.5", "deepseek:deepseek-chat"]
 
-# 联网搜索统一配置。provider_native 会根据 route 的模型前缀选择 OpenAI Responses
-# 或 Gemini Google Search；也可切换为 tavily / disabled。Tavily API Key 由配置中心保存。
+# 联网搜索统一配置。裸模型兼容为内置 OpenAI；显式 `provider:model` 会严格选择
+# Gemini 或声明为 openai_responses 的自定义 Provider，不按模型名猜测。
 [tools.web_search]
 backend = "provider_native"
 max_results = 5
@@ -64,6 +64,8 @@ model = "gpt-5.6-luna"
 model = "gpt-5.6-luna"
 
 # Gemini 示例：将对应 route 的 model 改为 "gemini:gemini-2.5-flash"。
+# 自定义 Responses 示例：声明 `[providers.xai] kind = "openai_responses"` 后使用
+# `model = "xai:grok-4"`；openai_compatible 不提供 Provider 原生搜索。
 # Tavily 示例：将 backend 改为 "tavily"，并在配置中心设置 TAVILY_API_KEY。
 
 # fast / balanced / deep 是可复用档位；main_route 引用内置或显式声明的模型路线。

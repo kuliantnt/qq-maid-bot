@@ -56,6 +56,15 @@ impl ModelRouteProvider {
                 "no LLM provider is available for model route",
             ));
         }
+        let mut provider_ids = std::collections::HashSet::with_capacity(providers.len());
+        for (provider_id, _) in &providers {
+            if !provider_ids.insert(provider_id) {
+                return Err(LlmError::config(format!(
+                    "provider `{}` is registered more than once",
+                    provider_id.as_str()
+                )));
+            }
+        }
         let model_display = default_route.display();
         Ok(Self {
             name,

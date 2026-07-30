@@ -22,9 +22,6 @@ use super::{
     openai_stream_with_chat_fallback, responses, tool_loop,
 };
 
-const MULTIMODAL_UNSUPPORTED_MESSAGE: &str =
-    "当前配置驱动的 Responses Provider 首版仅支持文本输入。";
-
 /// 使用配置文件连接元数据的 Responses provider。
 pub(crate) struct ConfiguredResponsesProvider {
     id: ModelProvider,
@@ -167,7 +164,6 @@ impl ConfiguredResponsesProvider {
 #[async_trait]
 impl LlmProvider for ConfiguredResponsesProvider {
     async fn chat(&self, req: ChatRequest) -> Result<ChatOutcome, LlmError> {
-        reject_multimodal_if_needed(&req)?;
         let model = self.effective_model(req.model.as_deref())?;
         if self.chat_fallback {
             return openai_chat_with_chat_fallback(self.fallback_request(&req, &model)).await;
@@ -181,7 +177,6 @@ impl LlmProvider for ConfiguredResponsesProvider {
     }
 
     async fn stream_chat(&self, req: ChatRequest) -> Result<LlmStream, LlmError> {
-        reject_multimodal_if_needed(&req)?;
         let model = self.effective_model(req.model.as_deref())?;
         if self.chat_fallback {
             return openai_stream_with_chat_fallback(self.fallback_request(&req, &model)).await;
@@ -200,7 +195,6 @@ impl LlmProvider for ConfiguredResponsesProvider {
         &self,
         req: AgentSessionRequest<'_>,
     ) -> Result<Option<Box<dyn AgentStepSession + Send>>, LlmError> {
-        reject_multimodal_if_needed(req.chat)?;
         let model = self.effective_model(req.chat.model.as_deref())?;
         Ok(Some(Box::new(
             tool_loop::ResponsesAgentSession::new_configured(
@@ -227,8 +221,9 @@ impl LlmProvider for ConfiguredResponsesProvider {
             .map(|_| ToolCallingProtocol::OpenAiResponses)
     }
 
-    fn supports_vision(&self, _model: Option<&str>) -> bool {
-        false
+    fn supports_vision(&self, model: Option<&str>) -> bool {
+        // Responses 的 input_image 编码由公共 payload 负责；不在本地猜测具体模型能力。
+        self.effective_model(model).is_ok()
     }
 
     fn name(&self) -> &str {
@@ -244,17 +239,6 @@ impl LlmProvider for ConfiguredResponsesProvider {
     }
 }
 
-fn reject_multimodal_if_needed(req: &ChatRequest) -> Result<(), LlmError> {
-    if req.has_non_text_parts() {
-        return Err(LlmError::new(
-            "unsupported_input_part",
-            MULTIMODAL_UNSUPPORTED_MESSAGE,
-            "request",
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::{collections::VecDeque, sync::Arc};
@@ -267,6 +251,7 @@ mod tests {
         response::IntoResponse,
         routing::post,
     };
+    use qq_maid_common::input_part::{MessageInputPart, MessageMedia};
     use serde_json::{Value, json};
     use tokio::{net::TcpListener, sync::Mutex};
 
@@ -347,15 +332,82 @@ mod tests {
         (format!("http://{addr}/v1"), state)
     }
 
-    fn provider_config(base_url: String, chat_fallback: bool) -> OpenAiResponsesProviderConfig {
+    fn provider_config_for(
+        id: &str,
+        base_url: String,
+        chat_fallback: bool,
+    ) -> OpenAiResponsesProviderConfig {
         OpenAiResponsesProviderConfig {
-            id: ModelProvider::Custom("opencode_zen".to_owned()),
+            id: ModelProvider::Custom(id.to_owned()),
             base_url,
             api_key_env: "OPENCODE_API_KEY".to_owned(),
             api_key: Some("shared-key".to_owned()),
             auth: HttpAuthConfig::default(),
             request_timeout_seconds: Some(5),
             chat_fallback,
+        }
+    }
+
+    fn provider_config(base_url: String, chat_fallback: bool) -> OpenAiResponsesProviderConfig {
+        provider_config_for("opencode_zen", base_url, chat_fallback)
+    }
+
+    async fn same_model_route_provider(
+        routera_reply: MockReply,
+        routerb_reply: MockReply,
+        stream: bool,
+    ) -> (
+        ModelRouteProvider,
+        Arc<Mutex<MockState>>,
+        Arc<Mutex<MockState>>,
+    ) {
+        let (routera_url, routera_state) = spawn_mock(vec![routera_reply]).await;
+        let (routerb_url, routerb_state) = spawn_mock(vec![routerb_reply]).await;
+        let routera_id = ModelProvider::Custom("routera".to_owned());
+        let routerb_id = ModelProvider::Custom("routerb".to_owned());
+        let routera = Arc::new(
+            ConfiguredResponsesProvider::new(
+                &provider_config_for("routera", routera_url, false),
+                "gpt-5.6-luna".to_owned(),
+                stream,
+                90,
+                1024,
+                1200,
+            )
+            .unwrap(),
+        );
+        let routerb = Arc::new(
+            ConfiguredResponsesProvider::new(
+                &provider_config_for("routerb", routerb_url, false),
+                "gpt-5.6-luna".to_owned(),
+                stream,
+                90,
+                1024,
+                1200,
+            )
+            .unwrap(),
+        );
+        let route =
+            ModelRoute::parse_config("routera:gpt-5.6-luna,routerb:gpt-5.6-luna", "test").unwrap();
+        let provider = ModelRouteProvider::new(
+            "auto",
+            ModelProvider::OpenAi,
+            route,
+            vec![(routera_id, routera), (routerb_id, routerb)],
+        )
+        .unwrap();
+        (provider, routera_state, routerb_state)
+    }
+
+    async fn assert_same_model_requests_once(
+        routera_state: Arc<Mutex<MockState>>,
+        routerb_state: Arc<Mutex<MockState>>,
+    ) {
+        for state in [routera_state, routerb_state] {
+            let state = state.lock().await;
+            assert_eq!(state.requests.len(), 1);
+            assert_eq!(state.requests[0].path, "/v1/responses");
+            assert_eq!(state.requests[0].body["model"], "gpt-5.6-luna");
         }
     }
 
@@ -368,6 +420,37 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             metadata: Default::default(),
+        }
+    }
+
+    fn image_request(model: &str) -> ChatRequest {
+        ChatRequest {
+            messages: vec![ChatMessage::user_with_parts(
+                "看图",
+                vec![
+                    MessageInputPart::text("看图"),
+                    MessageInputPart::image(MessageMedia {
+                        mime_type: Some("image/png".to_owned()),
+                        url: Some("https://example.test/image.png".to_owned()),
+                        ..Default::default()
+                    }),
+                ],
+            )],
+            ..request(model)
+        }
+    }
+
+    fn file_request(model: &str) -> ChatRequest {
+        ChatRequest {
+            messages: vec![ChatMessage::user_with_parts(
+                "读文件",
+                vec![MessageInputPart::file(MessageMedia {
+                    mime_type: Some("application/pdf".to_owned()),
+                    url: Some("https://example.test/document.pdf".to_owned()),
+                    ..Default::default()
+                })],
+            )],
+            ..request(model)
         }
     }
 
@@ -390,12 +473,13 @@ mod tests {
         .unwrap();
 
         let outcome = provider
-            .chat(request("opencode_zen:gpt-test"))
+            .chat(image_request("opencode_zen:gpt-test"))
             .await
             .unwrap();
 
         assert_eq!(outcome.reply, "Zen ok");
         assert_eq!(outcome.metrics.provider, "opencode_zen");
+        assert!(provider.supports_vision(Some("opencode_zen:gpt-test")));
         let state = state.lock().await;
         assert_eq!(state.requests.len(), 1);
         assert_eq!(state.requests[0].path, "/v1/responses");
@@ -404,6 +488,13 @@ mod tests {
             Some("Bearer shared-key")
         );
         assert_eq!(state.requests[0].body["model"], "gpt-test");
+        assert_eq!(
+            state.requests[0].body["input"][0]["content"],
+            json!([
+                {"type": "input_text", "text": "看图"},
+                {"type": "input_image", "image_url": "https://example.test/image.png"}
+            ])
+        );
     }
 
     #[tokio::test]
@@ -430,7 +521,7 @@ mod tests {
         .unwrap();
 
         let stream = provider
-            .stream_chat(request("opencode_zen:gpt-test"))
+            .stream_chat(image_request("opencode_zen:gpt-test"))
             .await
             .unwrap();
         let outcome = collect_llm_stream(stream, "opencode_zen", "gpt-test")
@@ -444,6 +535,10 @@ mod tests {
         assert_eq!(
             state.requests[0].accept.as_deref(),
             Some("text/event-stream")
+        );
+        assert_eq!(
+            state.requests[0].body["input"][0]["content"][1]["type"],
+            "input_image"
         );
     }
 
@@ -552,6 +647,156 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_model_name_falls_back_between_distinct_provider_base_urls() {
+        let (provider, routera_state, routerb_state) = same_model_route_provider(
+            MockReply {
+                status: StatusCode::UNAUTHORIZED,
+                content_type: "application/json",
+                body: json!({"error": {"message": "router A key rejected"}}).to_string(),
+            },
+            MockReply {
+                status: StatusCode::OK,
+                content_type: "application/json",
+                body: json!({"output_text": "router B reply"}).to_string(),
+            },
+            false,
+        )
+        .await;
+
+        let outcome = provider
+            .chat(request("routera:gpt-5.6-luna,routerb:gpt-5.6-luna"))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.reply, "router B reply");
+        assert!(outcome.fallback_used);
+        assert_same_model_requests_once(routera_state, routerb_state).await;
+    }
+
+    #[tokio::test]
+    async fn same_model_stream_falls_back_after_responses_403() {
+        let (provider, routera_state, routerb_state) = same_model_route_provider(
+            MockReply {
+                status: StatusCode::FORBIDDEN,
+                content_type: "application/json",
+                body: json!({"error": {"message": "router A account denied"}}).to_string(),
+            },
+            MockReply {
+                status: StatusCode::OK,
+                content_type: "text/event-stream",
+                body: concat!(
+                    "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"router B stream\"}\n\n",
+                    "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output_text\":\"router B stream\"}}\n\n",
+                )
+                .to_owned(),
+            },
+            true,
+        )
+        .await;
+
+        let stream = provider
+            .stream_chat(request("routera:gpt-5.6-luna,routerb:gpt-5.6-luna"))
+            .await
+            .unwrap();
+        let outcome = collect_llm_stream(stream, "auto", "same-model-route")
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.reply, "router B stream");
+        assert!(outcome.fallback_used);
+        assert_same_model_requests_once(routera_state, routerb_state).await;
+    }
+
+    #[tokio::test]
+    async fn same_model_agent_loop_falls_back_after_responses_401() {
+        let (provider, routera_state, routerb_state) = same_model_route_provider(
+            MockReply {
+                status: StatusCode::UNAUTHORIZED,
+                content_type: "application/json",
+                body: json!({"error": {"message": "router A key rejected"}}).to_string(),
+            },
+            MockReply {
+                status: StatusCode::OK,
+                content_type: "application/json",
+                body: json!({"output_text": "router B agent"}).to_string(),
+            },
+            false,
+        )
+        .await;
+
+        let outcome = provider
+            .chat_with_tools(ToolChatRequest {
+                chat: request("routera:gpt-5.6-luna,routerb:gpt-5.6-luna"),
+                tools: ToolRegistry::new()
+                    .register(WeatherToolStub::new("晴"))
+                    .unwrap(),
+                tool_context: test_tool_context(),
+                max_rounds: 3,
+                progress_sink: None,
+                final_delta_sink: None,
+                run_handle: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.reply, "router B agent");
+        assert!(outcome.fallback_used);
+        assert_eq!(outcome.agent.model_rounds, 2);
+        assert_same_model_requests_once(routera_state, routerb_state).await;
+    }
+
+    #[test]
+    fn configured_responses_missing_api_key_remains_config_error() {
+        let mut config =
+            provider_config_for("routera", "https://routera.example/v1".to_owned(), false);
+        config.api_key = None;
+
+        let error = ConfiguredResponsesProvider::new(
+            &config,
+            "gpt-5.6-luna".to_owned(),
+            false,
+            90,
+            1024,
+            1200,
+        )
+        .err()
+        .expect("missing API key must fail provider initialization");
+
+        assert_eq!(error.code, "config");
+        assert_eq!(error.stage, "config");
+        assert!(error.message.contains("OPENCODE_API_KEY is required"));
+    }
+
+    #[tokio::test]
+    async fn configured_responses_maps_upstream_401_to_provider_unavailable() {
+        let (base_url, state) = spawn_mock(vec![MockReply {
+            status: StatusCode::UNAUTHORIZED,
+            content_type: "application/json",
+            body: json!({"error": {"message": "invalid token"}}).to_string(),
+        }])
+        .await;
+        let provider = ConfiguredResponsesProvider::new(
+            &provider_config_for("routera", base_url, false),
+            "gpt-5.6-luna".to_owned(),
+            false,
+            90,
+            1024,
+            1200,
+        )
+        .unwrap();
+
+        let error = provider
+            .chat(request("routera:gpt-5.6-luna"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, "provider_error");
+        assert_eq!(error.stage, "provider_unavailable");
+        assert!(error.message.contains("HTTP 401"));
+        assert_eq!(state.lock().await.requests.len(), 1);
+    }
+
+    #[tokio::test]
     async fn configured_responses_rejects_wrong_provider_prefix_before_request() {
         let (base_url, state) = spawn_mock(Vec::new()).await;
         let provider = ConfiguredResponsesProvider::new(
@@ -611,7 +856,7 @@ mod tests {
 
         let outcome = provider
             .chat_with_tools(ToolChatRequest {
-                chat: request("opencode_zen:gpt-test"),
+                chat: image_request("opencode_zen:gpt-test"),
                 tools,
                 tool_context: test_tool_context(),
                 max_rounds: 3,
@@ -626,6 +871,10 @@ mod tests {
         let state = state.lock().await;
         assert_eq!(state.requests.len(), 2);
         assert!(state.requests[0].body.get("tools").is_some());
+        assert_eq!(
+            state.requests[0].body["input"][0]["content"][1]["type"],
+            "input_image"
+        );
         assert!(
             state.requests[1].body["input"]
                 .as_array()
@@ -633,5 +882,28 @@ mod tests {
                     item["type"] == "function_call_output" && item["call_id"] == "call-weather"
                 }))
         );
+    }
+
+    #[tokio::test]
+    async fn configured_responses_still_rejects_file_input_before_request() {
+        let (base_url, state) = spawn_mock(Vec::new()).await;
+        let provider = ConfiguredResponsesProvider::new(
+            &provider_config(base_url, false),
+            "gpt-test".to_owned(),
+            false,
+            90,
+            1024,
+            1200,
+        )
+        .unwrap();
+
+        let error = provider
+            .chat(file_request("opencode_zen:gpt-test"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, "unsupported_input_part");
+        assert!(error.message.contains("文件"));
+        assert!(state.lock().await.requests.is_empty());
     }
 }

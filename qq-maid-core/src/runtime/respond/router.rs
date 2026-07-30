@@ -11,8 +11,8 @@ use crate::{
 };
 
 use super::{
-    PlannedRespond, RespondPlan, RespondRequest, RustRespondService,
-    agent_route::{self, AgentRouteContext, RespondRoute},
+    PlannedRespond, RespondRequest, RustRespondService,
+    agent_route::{self, AgentRouteContext},
     common::session_error,
     interaction_state::{
         classify_inbound_with_active, interaction_snapshot, pending_blocks_immediate,
@@ -108,13 +108,6 @@ impl<'a> RespondRouter<'a> {
 
         let policy = self.resolve_agent_policy(req)?;
         let agent_decision = self.route_agent_runtime(req, &policy);
-        let plan = if !req.has_non_text_input_parts()
-            && matches!(agent_decision.route, RespondRoute::AgentRuntime)
-        {
-            RespondPlan::AgentRuntime
-        } else {
-            RespondPlan::StreamingChat
-        };
         // 状态语义在能力路由完成后独立计算，只供展示和 diagnostics 使用。
         // Todo domain 的上下文选择封装在业务状态分类器中，respond 不解释具体 domain。
         let interaction_state = interaction_snapshot(req, route_session);
@@ -126,8 +119,9 @@ impl<'a> RespondRouter<'a> {
                 classify_status_hint(trimmed, &interaction_state)
             }
         };
+        let planned = PlannedRespond::chat(agent_decision, status_hint);
         tracing::debug!(
-            respond_plan = ?plan,
+            respond_plan = ?planned.plan(),
             tool_loop_route = ?agent_decision.route,
             status_subject = ?status_hint.map(|hint| hint.subject.as_str()),
             route_reason = agent_decision.reason,
@@ -139,7 +133,7 @@ impl<'a> RespondRouter<'a> {
             enabled_tools_count = policy.enabled_tools.len(),
             "selected core respond route"
         );
-        Ok(PlannedRespond::chat(agent_decision, status_hint))
+        Ok(planned)
     }
 
     pub(super) fn classify_inbound(

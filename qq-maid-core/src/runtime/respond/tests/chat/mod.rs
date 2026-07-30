@@ -9,6 +9,7 @@ use crate::runtime::respond::{
 };
 
 mod agent_routing;
+mod vision;
 
 use super::{
     super::{

@@ -198,10 +198,6 @@ impl RespondRequest {
         }
     }
 
-    pub fn has_non_text_input_parts(&self) -> bool {
-        self.input_parts.iter().any(MessageInputPart::is_non_text)
-    }
-
     /// 判断是否为"标准"消息（具有 scope_key 或 content）。
     pub fn is_standard_message(&self) -> bool {
         !self.scope_key.trim().is_empty() || !self.content.trim().is_empty()
