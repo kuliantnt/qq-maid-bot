@@ -161,3 +161,53 @@ export interface ConsoleStatus {
   storage: StorageStatus[];
   configuration: ConfigurationStatus;
 }
+
+export type TodoStatus = "pending" | "completed";
+
+export interface TodoTarget {
+  targetRef: string | null;
+  platform: string;
+  scopeType: string;
+  userId: string | null;
+  groupId: string | null;
+  accountId: string | null;
+  reminderSupported: boolean;
+  diagnostic: string | null;
+}
+
+export interface TodoItem {
+  id: string;
+  title: string;
+  detail: string | null;
+  dueDate: string | null;
+  dueAt: string | null;
+  reminderAt: string | null;
+  timePrecision: string;
+  recurrenceKind: string;
+  recurrenceIntervalDays: number;
+  recurrenceInterval: number;
+  recurrenceUnit: string;
+  status: TodoStatus;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  target: TodoTarget;
+}
+
+export interface TodoPage {
+  items: TodoItem[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface TodoTargetOption {
+  targetRef: string;
+  platform: string;
+  accountId: string | null;
+  scopeType: string;
+  userId: string | null;
+  groupId: string | null;
+  reminderSupported: boolean;
+}
