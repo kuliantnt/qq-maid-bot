@@ -19,11 +19,11 @@ qq-maid-common / reqwest / serde / tokio
 ## 当前范围
 
 - OpenAI Responses API 主链路（system/user 用 `input_text`、assistant 用 `output_text`、completed-only 提取、delta/completed/failed/incomplete/error 事件、跨 chunk 与 CRLF 兼容、空流补非流、流式失败后补非流、usage 与 cached token 提取、HTTP 错误正文裁剪、200 但正文为空返回明确错误）。
-- OpenAI Chat Completions 兼容实现（基于 `reqwest`，支持流式与非流式、`[DONE]`、usage 与 cached token 提取、空流补非流、401/403/429/timeout/5xx 与非标准错误正文分类）。
+- OpenAI Chat Completions 兼容实现（基于 `reqwest`，统一编码文字与 `image_url` 图片输入，支持流式与非流式、`[DONE]`、usage 与 cached token 提取、空流补非流、401/403/429/timeout/5xx 与非标准错误正文分类）。
 - DeepSeek 复用 OpenAI 兼容 Chat Completions adapter，只保留 base URL、认证和模型规则差异。
 - 模型候选链路由：按 `agent.toml` 中的候选顺序调用、成功立即停止、临时错误降级、永久错误终止、全部失败返回聚合错误；OpenAI Responses → Chat Completions fallback 规则不变。
 - 通用 SSE frame 解析（聊天 Responses 与 Web Search 共用，处理 CRLF、`event:`/`data:`、`[DONE]`）。
-- OpenAI Responses + `web_search` 工具协议：请求 payload、HTTP transport、SSE 文本增量、answer 提取、sources 提取。
+- Responses + `web_search` 工具协议：内置 OpenAI 与自定义 `openai_responses` Provider 共用请求 payload、HTTP transport、SSE 文本增量、answer 提取和 sources 提取。
 - Function Tool 基础抽象：`Tool` trait、`ToolRegistry`、工具超时、工具结果大小限制和服务端白名单执行入口。
 - OpenAI Responses 原生 Function Tool Loop：解析 `function_call`，执行注册 Tool 后以 `function_call_output` 回传模型；当前只支持串行调用，最大轮数由 core 配置控制。
 - Token usage、`LlmMetrics`、`MetricsRecorder` 和 `UpstreamStatus` / `ObservedProvider` 健康观测。
@@ -72,7 +72,7 @@ qq-maid-llm/src/
 ├── service.rs        # LlmService 统一入口
 ├── sse.rs            # 通用 SSE frame 解析（聊天与 Web Search 共用）
 ├── tool.rs           # Tool trait、ToolRegistry、工具超时和输出大小限制
-├── web_search.rs     # OpenAI Responses + web_search 协议、WebSearchRequest/Outcome/Source
+├── web_search/       # Provider 原生搜索路由、Responses/Gemini/Tavily 执行器与测试
 └── provider/
     ├── mod.rs        # LlmProvider trait、DynLlmProvider、ChatOutcome、ToolChatRequest、候选链路由
     ├── types.rs      # ChatMessage、ChatRole、ChatRequest、ModelId、ModelRoute、ModelProvider、TokenUsage
@@ -104,9 +104,9 @@ qq-maid-llm/src/
 - `bigmodel_api_key`、`bigmodel_base_url`、`bigmodel_model`。
 - `gemini_api_key`、`gemini_base_url`、`gemini_model`。
 - `openai_compatible_providers`：由 `agent.toml [providers.*]` 声明的自定义 Chat Completions provider，例如 `mimo`；实际 API key 由 core 按 `api_key_env` 从环境变量读取。
-- `openai_responses_providers`：配置驱动的 Responses provider；复用内置 OpenAI 的请求、SSE 和 Function Tool Calling，可独立设置 Provider ID、Base URL、认证和超时。Core 的公开 `agent.toml` 暂不允许启用 Chat fallback，避免普通聊天与 Tool Loop 出现不同协议语义。
+- `openai_responses_providers`：配置驱动的 Responses provider；复用内置 OpenAI 的文字 / `input_image` 图片请求、SSE 和 Function Tool Calling，可独立设置 Provider ID、Base URL、认证和超时。Core 的公开 `agent.toml` 暂不允许启用 Chat fallback，避免普通聊天与 Tool Loop 出现不同协议语义。
 - `request_timeout`、`stream`、`max_output_tokens`。
-- `web_search`：统一联网搜索后端及默认参数；`provider_native` 按搜索模型前缀选择 OpenAI Responses web_search 或 Gemini Google Search，`tavily` 调用 Tavily Search，`disabled` 关闭联网搜索。
+- `web_search`：统一联网搜索后端及默认参数；`provider_native` 将裸模型兼容为内置 OpenAI，并严格按显式前缀选择 OpenAI Responses、自定义 `openai_responses` 或 Gemini Google Search；`tavily` 调用 Tavily Search，`disabled` 关闭联网搜索。
 - `tavily_api_key`：Tavily Search 密钥；由 core 从安全配置中心或兼容环境变量 `TAVILY_API_KEY` 注入，不写入 `agent.toml`。
 
 Tool Calling、轮数预算与工具白名单由 core 从 `agent.toml` 的 Profile / Scene 解析；本 crate 只接收已经构造好的 `ToolChatRequest`。Todo、标题、记忆、Compact、翻译等业务路线同样由 core 的 Agent Profile 管理，Provider 凭证和连接参数以 [runtime/config/.env.example](../runtime/config/.env.example) 为准。
@@ -141,7 +141,7 @@ Agent 成功与失败复用 `AgentRunDiagnostics`：成功从 `ChatOutcome.agent
 
 qq-maid-core /查
   -> LlmService::web_search(WebSearchRequest)
-     -> OpenAI Responses + web_search 工具
+     -> 内置或配置驱动的 Responses web_search / Gemini Google Search / Tavily
      -> WebSearchOutcome { answer, sources, ... }
 ```
 

@@ -53,8 +53,12 @@ pub(crate) async fn send_openai_responses_request(
         request = request.header(header::ACCEPT, "text/event-stream");
     }
     let response = request.send().await.map_err(|err| {
-        let context = if stream { "stream request" } else { "request" };
-        LlmError::http(format!("{provider} Responses {context} failed: {err}"))
+        if err.is_timeout() {
+            LlmError::timeout("http")
+        } else {
+            let context = if stream { "stream request" } else { "request" };
+            LlmError::http(format!("{provider} Responses {context} failed: {err}"))
+        }
     })?;
 
     let status = response.status();
@@ -71,17 +75,24 @@ async fn responses_status_error(
 ) -> LlmError {
     let detail = response.text().await.unwrap_or_default();
     let detail = truncate_error_detail(detail.trim(), 500);
-    if detail.is_empty() {
-        return LlmError::http(format!(
-            "{provider} Responses returned HTTP {}",
-            status.as_u16()
-        ));
+    let message = if detail.is_empty() {
+        format!("{provider} Responses returned HTTP {}", status.as_u16())
+    } else {
+        format!(
+            "{provider} Responses returned HTTP {}: {}",
+            status.as_u16(),
+            detail
+        )
+    };
+    match status.as_u16() {
+        // 请求已经通过本地凭证预检并真正到达上游，此时的认证/授权拒绝只说明当前
+        // Provider 不可用。不要再标成 config，否则会阻断跨 Provider 候选降级；
+        // 缺失 API Key 等本地错误仍由 Provider 构造和启动预检返回 config。
+        401 | 403 => LlmError::provider(message, "provider_unavailable"),
+        429 => LlmError::new("rate_limited", message, "http"),
+        500..=599 => LlmError::new("upstream_unavailable", message, "http"),
+        _ => LlmError::http(message),
     }
-    LlmError::http(format!(
-        "{provider} Responses returned HTTP {}: {}",
-        status.as_u16(),
-        detail
-    ))
 }
 
 fn truncate_error_detail(value: &str, limit: usize) -> String {

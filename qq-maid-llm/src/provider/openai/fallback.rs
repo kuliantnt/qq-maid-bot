@@ -22,11 +22,15 @@ pub(crate) fn should_retry_non_stream_after_stream_error(err: &LlmError) -> bool
 }
 
 /// 当 Responses 主链路失败时，是否允许降级到 Chat Completions。
+/// 认证/授权拒绝对同一 Provider 的另一端点同样无效，应直接交给跨 Provider 候选链。
 pub(crate) fn should_fallback_to_chat_after_responses_error(err: &LlmError) -> bool {
     matches!(
         err.code.as_str(),
         "provider_error" | "http_error" | "timeout"
-    ) && err.stage != "stream_after_delta"
+    ) && !matches!(
+        err.stage.as_str(),
+        "stream_after_delta" | "provider_unavailable"
+    )
 }
 
 #[cfg(test)]
@@ -81,6 +85,9 @@ mod tests {
         assert!(!should_retry_non_stream_after_stream_error(
             &LlmError::config("missing api key")
         ));
+        assert!(!should_retry_non_stream_after_stream_error(
+            &LlmError::provider("upstream rejected key", "provider_unavailable")
+        ));
     }
 
     #[test]
@@ -100,6 +107,9 @@ mod tests {
         ));
         assert!(!should_fallback_to_chat_after_responses_error(
             &LlmError::config("OPENAI_API_KEY is required")
+        ));
+        assert!(!should_fallback_to_chat_after_responses_error(
+            &LlmError::provider("upstream rejected key", "provider_unavailable")
         ));
     }
 }

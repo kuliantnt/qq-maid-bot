@@ -193,7 +193,7 @@ Rust HTTP 层只公开外部运维 / 管理能力：
 
 ## Agent Chat 与 Tool 边界
 
-普通纯文本消息在场景、Provider 能力、群聊开关和工具白名单允许时统一进入 Agent Chat。模型可在同一次原生响应中直接回答、请求澄清或发出 Tool Call；关键词分类只能提供状态提示和 diagnostics，不能决定模型是否看到工具。工具域业务判断必须收敛到 `qq-maid-core/src/runtime/tools/`，`runtime/respond/` 不直接理解 Todo、RSS、天气、火车、搜索等业务域的工具结果。
+普通消息（含 Provider 已适配的图片输入）在场景、Provider 能力、群聊开关和工具白名单允许时统一进入 Agent Chat。模型可在同一次原生响应中直接回答、请求澄清或发出 Tool Call；关键词分类只能提供状态提示和 diagnostics，不能决定模型是否看到工具。工具域业务判断必须收敛到 `qq-maid-core/src/runtime/tools/`，`runtime/respond/` 不直接理解 Todo、RSS、天气、火车、搜索等业务域的工具结果。
 
 Agent Runtime 的成功与失败共享同一份 `AgentRunDiagnostics`。成功时由 `ChatOutcome.agent` 返回；超时、取消、最大轮次、Provider 中断或 progress receiver 关闭时由 `LlmError.agent` 返回，调用方仍必须按 `Result::Err` 处理，不能把 diagnostics 当成成功回复。`model_rounds` 的固定语义是“整次请求已发起的模型请求次数”：跨候选累计，首轮为 1，最终超时或取消的在途请求也计入；它不是零基循环序号，也不是工具调用轮数。模型发出的工具、已启动工具和可信工具结果同样跨候选累计；单个候选 attempt 只拥有临时终止态，新候选开始时会清理上一候选的 `Failed` 等状态，请求级 Timeout/Cancelled 不会被后续清理或候选失败覆盖。
 
