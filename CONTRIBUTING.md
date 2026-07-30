@@ -168,6 +168,7 @@ commit message 使用简洁中文，格式为：
 - [@Su5vaR4](https://github.com/Su5vaR4) 协助管理项目
 - [@Dysonnnn](https://github.com/Dysonnnn) 对项目的贡献
 - [@GrainRR](https://github.com/GrainRR) 对项目的赞助
+- [@nimkBob](https://github.com/nimkBob) 提供前端支撑
 
 ## License
 
