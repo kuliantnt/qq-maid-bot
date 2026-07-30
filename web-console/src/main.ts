@@ -17,8 +17,20 @@ import { renderPlatforms } from "./views/platforms.js";
 import { renderStorage } from "./views/storage.js";
 import { initializeConfiguration } from "./views/configuration.js";
 import type { BootstrapStatus } from "./types.js";
+import { createThemeController } from "./theme.js";
+import { bindConsoleNavigation } from "./console-shell.js";
+import { createBackgroundController, installBackgroundConsoleUnlock } from "./background.js";
 
-const refreshButton = requiredElement("refresh-status", HTMLButtonElement);
+let localStorage: Storage | null = null;
+try {
+  localStorage = window.localStorage;
+} catch (cause) {
+  if (!(cause instanceof Error)) throw cause;
+}
+const themeController = createThemeController(localStorage, document.documentElement);
+const backgroundController = createBackgroundController(document.documentElement);
+installBackgroundConsoleUnlock(window, backgroundController);
+
 const statusError = requiredElement("status-error", HTMLElement);
 const authForm = requiredElement("auth-form", HTMLFormElement);
 const logoutButton = requiredElement("logout", HTMLButtonElement);
@@ -26,10 +38,10 @@ let bootstrapStatus: BootstrapStatus | null = null;
 let authMode: "initialize" | "login" | "password-reset" = "login";
 let appBound = false;
 let autoRefreshTimer: number | undefined;
+let refreshInFlight = false;
 
 const AUTO_REFRESH_INTERVAL_MS = 30_000;
 
-refreshButton.addEventListener("click", () => void refreshStatus());
 authForm.addEventListener("submit", (event) => {
   event.preventDefault();
   void submitAuth();
@@ -45,44 +57,27 @@ requiredElement("console-toast", HTMLElement).addEventListener("click", (event) 
   (event.currentTarget as HTMLElement).hidden = true;
 });
 bindAutoRefresh();
+ bindConsoleNavigation(backgroundController);
 void initialize();
 
 function bindAutoRefresh(): void {
   const toggle = requiredElement("auto-refresh", HTMLInputElement);
   toggle.addEventListener("change", () => {
-    window.clearInterval(autoRefreshTimer);
-    autoRefreshTimer = undefined;
-    if (!toggle.checked) return;
-    autoRefreshTimer = window.setInterval(() => {
-      // 页面不可见或手动刷新进行中时跳过，避免叠加请求。
-      if (document.visibilityState === "visible" && !refreshButton.disabled) void refreshStatus();
-    }, AUTO_REFRESH_INTERVAL_MS);
+    toggle.checked ? startAutoRefresh() : stopAutoRefresh();
   });
+}
+
+function startAutoRefresh(): void {
+  window.clearInterval(autoRefreshTimer);
+  autoRefreshTimer = window.setInterval(() => {
+    if (document.visibilityState === "visible") void refreshStatus();
+  }, AUTO_REFRESH_INTERVAL_MS);
 }
 
 function stopAutoRefresh(): void {
   window.clearInterval(autoRefreshTimer);
   autoRefreshTimer = undefined;
   requiredElement("auto-refresh", HTMLInputElement).checked = false;
-}
-
-/** 导航 scrollspy：滚动时高亮当前视口内区块对应的导航项。 */
-function bindNavSpy(): void {
-  const links = [...document.querySelectorAll<HTMLAnchorElement>(".nav a[href^='#']")];
-  if (links.length === 0 || !("IntersectionObserver" in window)) return;
-  const observer = new IntersectionObserver(
-    (entries) => {
-      for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
-        for (const link of links) link.classList.toggle("active", link.hash.slice(1) === entry.target.id);
-      }
-    },
-    { rootMargin: "-30% 0px -60% 0px" },
-  );
-  for (const link of links) {
-    const section = document.getElementById(link.hash.slice(1));
-    if (section) observer.observe(section);
-  }
 }
 
 function clearCredentialInput(inputId: string, revealButtonId: string): void {
@@ -196,9 +191,10 @@ async function showConsole(username: string): Promise<void> {
   requiredElement("auth-shell", HTMLElement).hidden = true;
   for (const item of document.querySelectorAll<HTMLElement>("[data-authenticated]")) item.hidden = false;
   setText("admin-username", username);
+  requiredElement("auto-refresh", HTMLInputElement).checked = true;
+  startAutoRefresh();
   if (!appBound) {
     bindMarkdownPreview();
-    bindNavSpy();
     appBound = true;
   }
   await Promise.all([refreshStatus(), refreshConfiguration()]);
@@ -206,7 +202,7 @@ async function showConsole(username: string): Promise<void> {
 
 async function refreshConfiguration(): Promise<void> {
   try {
-    await initializeConfiguration();
+    await initializeConfiguration(themeController, backgroundController);
   } catch (cause) {
     setText("configuration-result", cause instanceof Error ? cause.message : "配置加载失败");
   }
@@ -225,8 +221,8 @@ async function logout(): Promise<void> {
 }
 
 async function refreshStatus(): Promise<void> {
-  refreshButton.disabled = true;
-  refreshButton.textContent = "刷新中…";
+  if (refreshInFlight) return;
+  refreshInFlight = true;
   statusError.textContent = "";
   try {
     const status = await fetchConsoleStatus();
@@ -237,7 +233,6 @@ async function refreshStatus(): Promise<void> {
   } catch (cause: unknown) {
     statusError.textContent = cause instanceof Error ? cause.message : "状态刷新失败";
   } finally {
-    refreshButton.disabled = false;
-    refreshButton.textContent = "手动刷新";
+    refreshInFlight = false;
   }
 }

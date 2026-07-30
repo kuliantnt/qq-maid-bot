@@ -77,6 +77,16 @@ const CONSOLE_ASSETS: &[(&str, &str, &str)] = &[
         "text/javascript; charset=utf-8",
     ),
     (
+        "theme.js",
+        include_str!("../../../web-console/dist/theme.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "console-shell.js",
+        include_str!("../../../web-console/dist/console-shell.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
         "agent-tools.js",
         include_str!("../../../web-console/dist/agent-tools.js"),
         "text/javascript; charset=utf-8",
@@ -126,6 +136,69 @@ const CONSOLE_ASSETS: &[(&str, &str, &str)] = &[
         include_str!("../../../web-console/dist/views/configuration.js"),
         "text/javascript; charset=utf-8",
     ),
+    (
+        "views/theme-selector.js",
+        include_str!("../../../web-console/dist/views/theme-selector.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "background.js",
+        include_str!("../../../web-console/dist/background.js"),
+        "text/javascript; charset=utf-8",
+    ),
+];
+
+const CONSOLE_BINARY_ASSETS: &[(&str, &[u8], &str)] = &[
+    (
+        "background/default.png",
+        include_bytes!("../../../web-console/dist/background/default.png"),
+        "image/png",
+    ),
+    (
+        "background/01.png",
+        include_bytes!("../../../web-console/dist/background/01.png"),
+        "image/png",
+    ),
+    (
+        "background/02.png",
+        include_bytes!("../../../web-console/dist/background/02.png"),
+        "image/png",
+    ),
+    (
+        "background/03.png",
+        include_bytes!("../../../web-console/dist/background/03.png"),
+        "image/png",
+    ),
+    (
+        "background/04.png",
+        include_bytes!("../../../web-console/dist/background/04.png"),
+        "image/png",
+    ),
+    (
+        "background/05.png",
+        include_bytes!("../../../web-console/dist/background/05.png"),
+        "image/png",
+    ),
+    (
+        "background/06.png",
+        include_bytes!("../../../web-console/dist/background/06.png"),
+        "image/png",
+    ),
+    (
+        "background/07.png",
+        include_bytes!("../../../web-console/dist/background/07.png"),
+        "image/png",
+    ),
+    (
+        "background/08.png",
+        include_bytes!("../../../web-console/dist/background/08.png"),
+        "image/png",
+    ),
+    (
+        "background/09.png",
+        include_bytes!("../../../web-console/dist/background/09.png"),
+        "image/png",
+    ),
 ];
 
 pub(super) async fn console_asset(
@@ -139,12 +212,34 @@ pub(super) async fn console_asset(
         .map(|(_, body, content_type)| (*body, *content_type));
     match found {
         Some((body, content_type)) => static_console_asset(body, content_type, &state, &headers),
-        None => with_console_cors(StatusCode::NOT_FOUND.into_response(), &state, &headers),
+        None => match CONSOLE_BINARY_ASSETS
+            .iter()
+            .find(|(path, _, _)| *path == asset)
+            .map(|(_, body, content_type)| (*body, *content_type))
+        {
+            Some((body, content_type)) => {
+                static_console_binary_asset(body, content_type, &state, &headers)
+            }
+            None => with_console_cors(StatusCode::NOT_FOUND.into_response(), &state, &headers),
+        },
     }
 }
 
 fn static_console_asset(
     body: &'static str,
+    content_type: &'static str,
+    state: &OpsHttpState,
+    headers: &HeaderMap,
+) -> Response {
+    let mut response = with_console_cors(body.into_response(), state, headers);
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response
+}
+
+fn static_console_binary_asset(
+    body: &'static [u8],
     content_type: &'static str,
     state: &OpsHttpState,
     headers: &HeaderMap,
@@ -375,7 +470,7 @@ pub(super) fn allowed_console_origin<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::CONSOLE_ASSETS;
+    use super::{CONSOLE_ASSETS, CONSOLE_BINARY_ASSETS};
     use regex::Regex;
     use std::path::{Path, PathBuf};
 
@@ -432,6 +527,10 @@ mod tests {
                 (*path).to_owned()
             })
             .collect::<Vec<_>>();
+        embedded.extend(CONSOLE_BINARY_ASSETS.iter().map(|(path, body, _)| {
+            assert!(!body.is_empty(), "控制台资源内容不能为空: {path}");
+            (*path).to_owned()
+        }));
         embedded.sort();
 
         assert_eq!(
@@ -442,10 +541,11 @@ mod tests {
 
     #[test]
     fn html_and_javascript_static_imports_are_embedded() {
-        let registered = CONSOLE_ASSETS
+        let mut registered = CONSOLE_ASSETS
             .iter()
             .map(|(path, _, _)| *path)
             .collect::<std::collections::HashSet<_>>();
+        registered.extend(CONSOLE_BINARY_ASSETS.iter().map(|(path, _, _)| *path));
         let html = std::fs::read_to_string(dist_root().join("index.html")).unwrap();
         let html_asset = Regex::new(r#"(?:src|href)=["'](/console/[^"'?#]+)["']"#).unwrap();
         for captures in html_asset.captures_iter(&html) {

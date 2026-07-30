@@ -2,11 +2,26 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  shouldAutosaveOnBlur,
   readAgentWebSearchConfig,
   tavilyCredentialNotice,
   webSearchConfigChange,
   webSearchRouteChanges,
 } from "../dist/views/configuration.js";
+
+test("blur autosave only reports changed supported values", () => {
+  assert.equal(shouldAutosaveOnBlur({ scope: "public", value: "", baseline: null }), false);
+  assert.equal(shouldAutosaveOnBlur({ scope: "public", value: "new", baseline: null }), true);
+  assert.equal(shouldAutosaveOnBlur({ scope: "public", value: "same", baseline: "same" }), false);
+  assert.equal(shouldAutosaveOnBlur({ scope: "secret", value: "", baseline: null, configured: true }), false);
+  assert.equal(shouldAutosaveOnBlur({ scope: "secret", value: "", baseline: null, configured: false, clearRequested: true }), false);
+  assert.equal(shouldAutosaveOnBlur({ scope: "secret", value: "replacement", baseline: null, configured: true }), true);
+  assert.equal(shouldAutosaveOnBlur({ scope: "secret", value: "", baseline: null, configured: true, clearRequested: true }), true);
+  assert.equal(shouldAutosaveOnBlur({ scope: "agent", value: { enabled: true }, baseline: { enabled: true } }), false);
+  assert.equal(shouldAutosaveOnBlur({ scope: "agent", value: { enabled: true }, baseline: { enabled: false } }), true);
+  assert.equal(shouldAutosaveOnBlur({ scope: "agent", value: ["one", "two"], baseline: ["one", "two"] }), false);
+  assert.equal(shouldAutosaveOnBlur({ scope: "agent", value: ["one", "two"], baseline: ["one"] }), true);
+});
 
 const baseConfig = {
   backend: "tavily",
