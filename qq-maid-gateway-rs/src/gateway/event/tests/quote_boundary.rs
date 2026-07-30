@@ -177,9 +177,9 @@ fn missing_ref_msg_idx_keeps_quoted_payload() {
     assert_eq!(reply.input_parts[0].text_content(), Some("引用内容"));
 }
 
-/// 嵌套图文引用：验证递归顺序和媒体归属。
+/// 嵌套图文引用：只保留直接层正文和固定历史摘要，不恢复内层媒体。
 #[test]
-fn nested_text_image_quote_keeps_order_and_does_not_mix_with_current_attachments() {
+fn nested_text_image_quote_stops_before_historical_media() {
     let envelope = GatewayEnvelope {
         op: 0,
         s: None,
@@ -231,25 +231,126 @@ fn nested_text_image_quote_keeps_order_and_does_not_mix_with_current_attachments
             .any(|item| item.filename.as_deref() == Some("current.png"))
     );
 
-    // 引用内容按递归顺序：图前文字 → 图中图片 → 图后文字。
+    // 直接层正文保留，子元素只生成安全摘要；临时 URL 与媒体对象均不恢复。
     assert_eq!(
         reply.content.as_deref(),
-        Some("图前文字\n图中图片\n图后文字")
+        Some("图前文字\n历史引用摘要：该消息还引用了更早的消息，历史内容和媒体未展开。")
     );
     assert_eq!(reply.input_parts[0].text_content(), Some("图前文字"));
-    assert_eq!(reply.input_parts[1].text_content(), Some("图中图片"));
-    assert_eq!(
-        reply.input_parts[2]
-            .media()
-            .and_then(|media| media.filename.as_deref()),
-        Some("quoted.png")
+    assert!(
+        reply.input_parts[1]
+            .text_content()
+            .is_some_and(|text| text.contains("历史引用摘要"))
     );
-    assert_eq!(reply.input_parts[3].text_content(), Some("图后文字"));
+    assert_eq!(reply.input_parts.len(), 2);
+    assert!(reply.media_summaries.is_empty());
+    assert!(
+        !reply
+            .input_parts
+            .iter()
+            .map(MessageInputPart::fallback_text)
+            .any(|text| text.contains("example.test") || text.contains("quoted.png"))
+    );
 
     // 引用附件不会进入当前消息。
     assert!(!reply.input_parts.iter().any(|part| {
         part.media().and_then(|media| media.filename.as_deref()) == Some("current.png")
     }));
+}
+
+/// QQ 的 `[图片]` 占位与 attachments 一一对应；直接层图文必须按占位顺序进入模型。
+#[test]
+fn direct_text_and_multiple_images_keep_placeholder_order() {
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+        id: None,
+        d: json!({
+            "id": "msg-current",
+            "group_openid": "group-1",
+            "author": {"member_openid": "member-1"},
+            "content": "按顺序解释",
+            "message_type": 103,
+            "message_scene": {"ext": ["ref_msg_idx=TMP_quoted"]},
+            "msg_elements": [{
+                "content": "图前[图片]图中[图片]图后",
+                "attachments": [
+                    {
+                        "content_type": "image/png",
+                        "filename": "first.png",
+                        "size": 123,
+                        "url": "https://example.test/1.png",
+                        "fileid": "file-1"
+                    },
+                    {
+                        "content_type": "image/png",
+                        "filename": "second.png",
+                        "size": 123,
+                        "url": "https://example.test/2.png",
+                        "fileid": "file-2"
+                    }
+                ]
+            }]
+        }),
+    };
+
+    let message = parse_group_message(&envelope).unwrap().unwrap();
+    let parts = message.reply.unwrap().input_parts;
+
+    assert_eq!(parts.len(), 5);
+    assert_eq!(parts[0].text_content(), Some("图前"));
+    assert_eq!(
+        parts[1].media().and_then(|media| media.file_id.as_deref()),
+        Some("file-1")
+    );
+    assert_eq!(parts[2].text_content(), Some("图中"));
+    assert_eq!(
+        parts[3].media().and_then(|media| media.file_id.as_deref()),
+        Some("file-2")
+    );
+    assert_eq!(parts[4].text_content(), Some("图后"));
+}
+
+#[test]
+fn direct_quote_media_keeps_existing_normalization_count_limit() {
+    let attachments = (0..34)
+        .map(|index| {
+            json!({
+                "content_type": "image/png",
+                "filename": format!("{index}.png"),
+                "url": format!("https://example.test/{index}.png")
+            })
+        })
+        .collect::<Vec<_>>();
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+        id: None,
+        d: json!({
+            "id": "msg-current",
+            "group_openid": "group-1",
+            "author": {"member_openid": "member-1"},
+            "content": "看看这些图",
+            "message_type": 103,
+            "message_scene": {"ext": ["ref_msg_idx=REFIDX_quoted"]},
+            "msg_elements": [{"attachments": attachments}]
+        }),
+    };
+
+    let message = parse_group_message(&envelope).unwrap().unwrap();
+    let reply = message.reply.unwrap();
+
+    assert_eq!(
+        reply
+            .input_parts
+            .iter()
+            .filter(|part| part.is_non_text())
+            .count(),
+        32
+    );
+    assert_eq!(reply.media_summaries.len(), 32);
 }
 
 /// 引用消息中无文字只有附件时，仍保留媒体摘要。

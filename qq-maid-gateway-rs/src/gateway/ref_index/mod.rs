@@ -386,20 +386,63 @@ fn entry_from_inbound(inbound: &InboundMessage) -> RefIndexEntry {
 }
 
 fn effective_index_parts(inbound: &InboundMessage) -> Vec<MessageInputPart> {
-    if !inbound.input_parts.is_empty() {
-        return sanitize_index_parts(inbound.input_parts.clone());
+    let mut parts = if !inbound.input_parts.is_empty() {
+        inbound.input_parts.clone()
+    } else {
+        let mut parts = Vec::new();
+        if !inbound.text.trim().is_empty() {
+            parts.push(MessageInputPart::text(truncate_summary_text(&inbound.text)));
+        }
+        parts.extend(
+            inbound
+                .attachments
+                .iter()
+                .map(|attachment| attachment.to_input_part(inbound.platform)),
+        );
+        parts
+    };
+    if let Some(summary) = indexed_quote_summary(inbound.quoted.as_ref()) {
+        // 只保存当前消息“曾引用历史”的安全摘要，不把 quoted.input_parts 的媒体树
+        // 复制进当前索引项。后续二次引用依赖会话历史中的首次分析结果。
+        parts.push(MessageInputPart::Text {
+            text: summary,
+            source: Some(qq_maid_common::input_part::TextSource::Quote),
+        });
     }
-    let mut parts = Vec::new();
-    if !inbound.text.trim().is_empty() {
-        parts.push(MessageInputPart::text(truncate_summary_text(&inbound.text)));
+    sanitize_index_parts(
+        parts,
+        matches!(inbound.platform, super::platform::Platform::QqOfficial),
+    )
+}
+
+fn indexed_quote_summary(
+    quoted: Option<&qq_maid_common::input_part::QuotedMessageContext>,
+) -> Option<String> {
+    let quoted = quoted?;
+    if !quoted.lookup_found {
+        return Some("历史引用摘要：该消息引用了更早的消息，但历史引用内容不可用。".to_owned());
     }
-    parts.extend(
-        inbound
-            .attachments
+    let text_present = quoted.input_parts.iter().any(|part| {
+        part.text_content()
+            .is_some_and(|text| !text.trim().is_empty())
+    }) || quoted
+        .text_summary
+        .as_deref()
+        .is_some_and(|text| !text.trim().is_empty());
+    let media_count = if quoted.input_parts.is_empty() {
+        quoted.media_summaries.len()
+    } else {
+        quoted
+            .input_parts
             .iter()
-            .map(|attachment| attachment.to_input_part(inbound.platform)),
-    );
-    sanitize_index_parts(parts)
+            .filter(|part| part.is_non_text())
+            .count()
+    };
+    Some(format!(
+        "历史引用摘要：该消息引用了更早的消息（文字={}，媒体数量={}），历史内容和媒体未展开。",
+        if text_present { "有" } else { "无" },
+        media_count
+    ))
 }
 
 fn key_for(
@@ -550,36 +593,43 @@ fn truncate_summary_text(value: &str) -> String {
     output
 }
 
-fn sanitize_index_parts(parts: Vec<MessageInputPart>) -> Vec<MessageInputPart> {
-    parts.into_iter().map(sanitize_index_part).collect()
+fn sanitize_index_parts(
+    parts: Vec<MessageInputPart>,
+    clear_remote_media_urls: bool,
+) -> Vec<MessageInputPart> {
+    parts
+        .into_iter()
+        .map(|part| sanitize_index_part(part, clear_remote_media_urls))
+        .collect()
 }
 
-fn sanitize_index_part(part: MessageInputPart) -> MessageInputPart {
+fn sanitize_index_part(part: MessageInputPart, clear_remote_media_urls: bool) -> MessageInputPart {
     match part {
         MessageInputPart::Text { text, source } => MessageInputPart::Text {
             text: truncate_summary_text(&text),
             source,
         },
         MessageInputPart::Image { media } => MessageInputPart::Image {
-            media: sanitize_index_media(media),
+            media: sanitize_index_media(media, clear_remote_media_urls),
         },
         MessageInputPart::File { media } => MessageInputPart::File {
-            media: sanitize_index_media(media),
+            media: sanitize_index_media(media, clear_remote_media_urls),
         },
         MessageInputPart::Unknown { media, reason } => MessageInputPart::Unknown {
-            media: sanitize_index_media(media),
+            media: sanitize_index_media(media, clear_remote_media_urls),
             reason,
         },
     }
 }
 
-fn sanitize_index_media(mut media: MessageMedia) -> MessageMedia {
-    // ref_index 只保存轻量引用元信息。data URL 可能携带 base64 内容，不能进入内存索引。
-    if media
+fn sanitize_index_media(mut media: MessageMedia, clear_remote_media_urls: bool) -> MessageMedia {
+    // QQ 临时媒体 URL 可能带 rkey/auth_token；下载完成后只保留本地缓存路径。
+    // 其他平台仍保留普通 http(s) 引用，但 data URL 对所有平台都不得进入内存索引。
+    let is_data_url = media
         .url
         .as_deref()
-        .is_some_and(|value| value.trim_start().to_ascii_lowercase().starts_with("data:"))
-    {
+        .is_some_and(|value| value.trim_start().to_ascii_lowercase().starts_with("data:"));
+    if clear_remote_media_urls || is_data_url {
         media.url = None;
         if media
             .local_path

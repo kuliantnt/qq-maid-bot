@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn quoted_images_with_same_filename_keep_only_first_image() {
+async fn quoted_images_with_same_filename_download_and_send_only_first_image() {
     let app = Router::new()
         .route(
             "/1.png",
@@ -19,7 +19,11 @@ async fn quoted_images_with_same_filename_keep_only_first_image() {
 
     let make_media = |number: u8| MessageMedia {
         mime_type: Some("image/png".to_owned()),
-        filename: Some("same.png".to_owned()),
+        filename: Some(if number == 1 {
+            " Same.PNG ".to_owned()
+        } else {
+            "same.png".to_owned()
+        }),
         size_bytes: Some(3),
         url: Some(format!("http://{addr}/{number}.png")),
         file_id: Some(format!("file-{number}")),
@@ -70,6 +74,183 @@ async fn quoted_images_with_same_filename_keep_only_first_image() {
         b"one"
     );
     assert_eq!(reply.media_summaries.len(), 1);
+}
+
+#[test]
+fn quoted_images_without_filename_are_not_deduplicated() {
+    let mut parts = vec![
+        MessageInputPart::image(MessageMedia {
+            url: Some("https://example.test/first.png".to_owned()),
+            ..Default::default()
+        }),
+        MessageInputPart::image(MessageMedia {
+            url: Some("https://example.test/second.png".to_owned()),
+            ..Default::default()
+        }),
+    ];
+
+    deduplicate_quoted_images_by_filename(&mut parts);
+
+    assert_eq!(parts.len(), 2);
+}
+
+#[tokio::test]
+async fn same_filename_in_different_quoted_payloads_is_not_cross_deduplicated() {
+    let app = Router::new()
+        .route(
+            "/first.png",
+            get(|| async { ([(header::CONTENT_TYPE.as_str(), "image/png")], "first") }),
+        )
+        .route(
+            "/second.png",
+            get(|| async { ([(header::CONTENT_TYPE.as_str(), "image/png")], "second") }),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let make_reply = |message_id: &str, path: &str| MessageReply {
+        message_id: message_id.to_owned(),
+        ref_msg_idx: Some(message_id.to_owned()),
+        content: None,
+        input_parts: vec![MessageInputPart::image(MessageMedia {
+            mime_type: Some("image/png".to_owned()),
+            filename: Some("same.png".to_owned()),
+            url: Some(format!("http://{addr}/{path}.png")),
+            status: MediaStatus::Available,
+            ..Default::default()
+        })],
+        media_summaries: Vec::new(),
+    };
+    let mut first = make_reply("quoted-first", "first");
+    let mut second = make_reply("quoted-second", "second");
+    let context = MediaFetchContext {
+        platform: "qq_official",
+        app_id: "app".to_owned(),
+        peer_id: "peer".to_owned(),
+        root_dir: std::env::temp_dir().join(format!(
+            "qq-maid-quoted-media-scope-test-{}",
+            MEDIA_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        )),
+        timeout: Duration::from_secs(3),
+        max_bytes: 1024,
+    };
+
+    fetch_qq_official_quoted_images(
+        &qq_maid_common::http_client::client(),
+        &context,
+        "msg-first",
+        Some(&mut first),
+    )
+    .await;
+    fetch_qq_official_quoted_images(
+        &qq_maid_common::http_client::client(),
+        &context,
+        "msg-second",
+        Some(&mut second),
+    )
+    .await;
+
+    let first_media = first.input_parts[0].media().unwrap();
+    let second_media = second.input_parts[0].media().unwrap();
+    assert_eq!(
+        std::fs::read(first_media.local_path.as_ref().unwrap()).unwrap(),
+        b"first"
+    );
+    assert_eq!(
+        std::fs::read(second_media.local_path.as_ref().unwrap()).unwrap(),
+        b"second"
+    );
+}
+
+#[tokio::test]
+async fn current_and_quoted_same_filename_are_not_cross_deduplicated() {
+    let app = Router::new()
+        .route(
+            "/current.png",
+            get(|| async { ([(header::CONTENT_TYPE.as_str(), "image/png")], "current") }),
+        )
+        .route(
+            "/quoted.png",
+            get(|| async { ([(header::CONTENT_TYPE.as_str(), "image/png")], "quoted") }),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let current_attachment = Attachment {
+        content_type: Some("image/png".to_owned()),
+        filename: Some("same.png".to_owned()),
+        url: Some(format!("http://{addr}/current.png")),
+        size_bytes: None,
+        media_id: None,
+        file_id: Some("current-file".to_owned()),
+        attachment_id: None,
+        asr_refer_text: None,
+        voice_wav_url: None,
+    };
+    let mut current_parts = vec![MessageInputPart::image(MessageMedia {
+        mime_type: current_attachment.content_type.clone(),
+        filename: current_attachment.filename.clone(),
+        url: current_attachment.url.clone(),
+        file_id: current_attachment.file_id.clone(),
+        status: MediaStatus::Available,
+        ..Default::default()
+    })];
+    let mut quoted = MessageReply {
+        message_id: "quoted".to_owned(),
+        ref_msg_idx: Some("quoted".to_owned()),
+        content: None,
+        input_parts: vec![MessageInputPart::image(MessageMedia {
+            mime_type: Some("image/png".to_owned()),
+            filename: Some("same.png".to_owned()),
+            url: Some(format!("http://{addr}/quoted.png")),
+            file_id: Some("quoted-file".to_owned()),
+            status: MediaStatus::Available,
+            ..Default::default()
+        })],
+        media_summaries: Vec::new(),
+    };
+    let context = MediaFetchContext {
+        platform: "qq_official",
+        app_id: "app".to_owned(),
+        peer_id: "peer".to_owned(),
+        root_dir: std::env::temp_dir().join(format!(
+            "qq-maid-current-quoted-scope-test-{}",
+            MEDIA_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        )),
+        timeout: Duration::from_secs(3),
+        max_bytes: 1024,
+    };
+
+    fetch_qq_official_image_attachments(
+        &qq_maid_common::http_client::client(),
+        &context,
+        "msg-current",
+        &mut current_parts,
+        &[current_attachment],
+    )
+    .await;
+    fetch_qq_official_quoted_images(
+        &qq_maid_common::http_client::client(),
+        &context,
+        "msg-current",
+        Some(&mut quoted),
+    )
+    .await;
+
+    let current_media = current_parts[0].media().unwrap();
+    let quoted_media = quoted.input_parts[0].media().unwrap();
+    assert_eq!(
+        std::fs::read(current_media.local_path.as_ref().unwrap()).unwrap(),
+        b"current"
+    );
+    assert_eq!(
+        std::fs::read(quoted_media.local_path.as_ref().unwrap()).unwrap(),
+        b"quoted"
+    );
 }
 
 #[tokio::test]

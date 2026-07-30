@@ -19,6 +19,7 @@ const MESSAGE_TYPE_ARK: u64 = 3;
 const MESSAGE_TYPE_PARALLEL: u64 = 101;
 const MESSAGE_TYPE_CHAT_HISTORY: u64 = 102;
 const MESSAGE_TYPE_QUOTE: u64 = 103;
+pub(super) const MAX_NORMALIZED_MEDIA_PARTS: usize = 32;
 
 #[derive(Debug, Clone, Copy)]
 struct NormalizerLimits {
@@ -34,7 +35,7 @@ impl Default for NormalizerLimits {
             max_depth: 8,
             max_nodes: 256,
             max_text_chars: 16_000,
-            max_media: 32,
+            max_media: MAX_NORMALIZED_MEDIA_PARTS,
         }
     }
 }

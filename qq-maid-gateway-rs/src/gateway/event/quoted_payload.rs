@@ -1,18 +1,23 @@
-//! QQ 引用消息 msg_elements 递归解析。
+//! QQ 引用消息直接引用层解析。
 //!
 //! 根据 QQ 最新消息结构文档：
 //! - 顶层 `content` 是当前用户本轮发送的正文。
-//! - `message_type = 103` 时的 `msg_elements` 是引用消息的内容元素，可递归嵌套。
+//! - `message_type = 103` 时的顶层 `msg_elements` 是本轮直接引用目标的内容元素。
+//! - 元素内部的 `msg_elements` 属于更早的历史引用，只生成固定摘要，不恢复其中媒体。
 //! - 不再要求元素的 `msg_idx` 必须等于 `ref_msg_idx`（官方事件不保证携带 `msg_idx`）。
 //! - `ref_msg_idx` 仅用于 RefIndex 查询和引用元数据展示。
 
 use qq_maid_common::input_part::{
     MessageInputPart, QuotedMediaSummary, QuotedMessageContext, TextSource,
 };
+use tracing::debug;
 
 use crate::gateway::ref_index::qq::{MSG_TYPE_QUOTE, RawMsgElement};
 
+use super::content_normalizer::MAX_NORMALIZED_MEDIA_PARTS;
 use super::{input_parts_from_content_and_attachments, parse_safe_content_parts};
+
+const NESTED_QUOTE_SUMMARY: &str = "历史引用摘要：该消息还引用了更早的消息，历史内容和媒体未展开。";
 
 /// 使用归一化后的当前正文检测并移除 `QuotedMessageContext` 中被污染的引用文字。
 ///
@@ -69,9 +74,10 @@ pub(crate) fn strip_contaminated_quote_from_context(
     }
 }
 
-/// 当 `message_type == 103` 时，按原始顺序递归解析全部 `msg_elements` 作为引用内容。
+/// 当 `message_type == 103` 时，按原始顺序解析顶层 `msg_elements` 作为直接引用内容。
 ///
-/// 无论元素是否携带 `msg_idx`，所有文字、附件及嵌套子元素均组成引用内容。
+/// 无论元素是否携带 `msg_idx`，该层的文字和全部附件均组成引用内容；子元素只表示
+/// 更早的历史引用，不递归恢复其 URL、Base64 或媒体对象。
 /// `ref_msg_idx` 不参与元素筛选；调用方自行决定是否用于 RefIndex 查询和元数据展示。
 pub(super) fn parse_quoted_message_elements(
     message_type: Option<u64>,
@@ -85,8 +91,9 @@ pub(super) fn parse_quoted_message_elements(
     let mut input_parts = Vec::new();
 
     for element in msg_elements {
-        append_quoted_element_parts(element, &mut content_fragments, &mut input_parts);
+        append_direct_quoted_element_parts(element, &mut content_fragments, &mut input_parts);
     }
+    retain_direct_quoted_media_with_limit(&mut input_parts);
 
     let content = content_fragments.join("\n");
     let media_summaries = input_parts
@@ -101,36 +108,73 @@ pub(super) fn parse_quoted_message_elements(
     }
 }
 
-fn append_quoted_element_parts(
+fn retain_direct_quoted_media_with_limit(input_parts: &mut Vec<MessageInputPart>) {
+    let mut media_count = 0usize;
+    let original_media_count = input_parts.iter().filter(|part| part.is_non_text()).count();
+    input_parts.retain(|part| {
+        if !part.is_non_text() {
+            return true;
+        }
+        if media_count >= MAX_NORMALIZED_MEDIA_PARTS {
+            return false;
+        }
+        media_count += 1;
+        true
+    });
+    if original_media_count > media_count {
+        debug!(
+            media_count,
+            original_media_count,
+            max_media = MAX_NORMALIZED_MEDIA_PARTS,
+            "QQ direct quote media truncated by normalization limit"
+        );
+    }
+}
+
+fn append_direct_quoted_element_parts(
     element: &RawMsgElement,
     content_fragments: &mut Vec<String>,
     input_parts: &mut Vec<MessageInputPart>,
 ) {
     let raw_content = element.content.as_deref().unwrap_or_default();
     let cleaned_content = strip_qq_image_placeholders(raw_content);
-    let parsed = parse_safe_content_parts(&cleaned_content, "qq_official");
-    let element_content = parsed.text.trim().to_owned();
-    if !element_content.is_empty() {
-        content_fragments.push(element_content.clone());
+    let summary_content = parse_safe_content_parts(&cleaned_content, "qq_official")
+        .text
+        .trim()
+        .to_owned();
+    let protocol_content = raw_content.replace("[图片]", "<img>");
+    let parsed = parse_safe_content_parts(&protocol_content, "qq_official");
+    if !summary_content.is_empty() {
+        content_fragments.push(summary_content);
     }
 
     let mut element_parts = input_parts_from_content_and_attachments(
-        &element_content,
+        &parsed.text,
         parsed.input_parts,
         &element.attachments,
         "qq_official",
         TextSource::Quote,
     );
     for part in &mut element_parts {
-        if let MessageInputPart::Text { source, .. } = part {
+        if let MessageInputPart::Text { text, source } = part {
+            // QQ 会在 `[图片]` 占位符两侧注入展示空格；结构化拆分后清理段落边界，
+            // 避免模型看到仅由平台布局产生的前导/尾随空白。
+            *text = text.trim().to_owned();
             *source = Some(TextSource::Quote);
         }
     }
+    element_parts
+        .retain(|part| !matches!(part, MessageInputPart::Text { text, .. } if text.is_empty()));
     input_parts.extend(element_parts);
 
-    // 递归解析嵌套子元素（图文引用可能含多级嵌套）。
-    for child in &element.msg_elements {
-        append_quoted_element_parts(child, content_fragments, input_parts);
+    if !element.msg_elements.is_empty() {
+        // 内层拍平文本可能包含临时下载 URL、rkey 或 auth_token，因此不提取任何
+        // 子元素字段，只提供固定摘要。第一次视觉分析应由会话历史承接。
+        content_fragments.push(NESTED_QUOTE_SUMMARY.to_owned());
+        input_parts.push(MessageInputPart::Text {
+            text: NESTED_QUOTE_SUMMARY.to_owned(),
+            source: Some(TextSource::Quote),
+        });
     }
 }
 
