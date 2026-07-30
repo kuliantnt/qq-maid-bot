@@ -27,6 +27,11 @@ export function createBackgroundController(
   const apply = (): void => {
     root.dataset.background = current;
     root.dataset.backgroundUnlocked = String(unlocked);
+    if (current === "special" && typeof root.querySelectorAll === "function") {
+      for (const image of root.querySelectorAll<HTMLImageElement>("[data-background-src]")) {
+        if (image.getAttribute("src") === null) image.src = image.dataset.backgroundSrc ?? "";
+      }
+    }
   };
   const persistMode = (): void => writeCookie(cookieDocument, BACKGROUND_MODE_COOKIE, current);
   apply();
