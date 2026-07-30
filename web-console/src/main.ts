@@ -19,6 +19,7 @@ import { initializeConfiguration } from "./views/configuration.js";
 import type { BootstrapStatus } from "./types.js";
 import { createThemeController } from "./theme.js";
 import { bindConsoleNavigation } from "./console-shell.js";
+import { initializeTodo } from "./views/todo.js";
 import { createBackgroundController, installBackgroundConsoleUnlock } from "./background.js";
 
 let localStorage: Storage | null = null;
@@ -198,6 +199,7 @@ async function showConsole(username: string): Promise<void> {
     appBound = true;
   }
   await Promise.all([refreshStatus(), refreshConfiguration()]);
+  await initializeTodo();
 }
 
 async function refreshConfiguration(): Promise<void> {

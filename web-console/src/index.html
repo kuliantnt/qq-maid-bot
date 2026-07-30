@@ -13,15 +13,15 @@
     </div>
     <div class="console-background console-background--special" aria-hidden="true">
       <div class="console-background-grid">
-        <img src="/console/background/01.png" alt="" fetchpriority="high">
-        <img src="/console/background/02.png" alt="" fetchpriority="high">
-        <img src="/console/background/03.png" alt="" fetchpriority="high">
-        <img src="/console/background/04.png" alt="" fetchpriority="high">
-        <img src="/console/background/05.png" alt="" fetchpriority="high">
-        <img src="/console/background/06.png" alt="" fetchpriority="high">
-        <img src="/console/background/07.png" alt="" fetchpriority="high">
-        <img src="/console/background/08.png" alt="" fetchpriority="high">
-        <img src="/console/background/09.png" alt="" fetchpriority="high">
+        <img data-background-src="/console/background/01.png" alt="">
+        <img data-background-src="/console/background/02.png" alt="">
+        <img data-background-src="/console/background/03.png" alt="">
+        <img data-background-src="/console/background/04.png" alt="">
+        <img data-background-src="/console/background/05.png" alt="">
+        <img data-background-src="/console/background/06.png" alt="">
+        <img data-background-src="/console/background/07.png" alt="">
+        <img data-background-src="/console/background/08.png" alt="">
+        <img data-background-src="/console/background/09.png" alt="">
       </div>
     </div>
     <div id="console-transition" class="console-transition" aria-hidden="true" hidden>
@@ -192,6 +192,56 @@
         <div class="table-wrap storage-table-wrap"><table><thead><tr><th>资源</th><th>安全路径摘要</th><th>状态</th><th>存在</th><th>可读</th><th>可写</th><th>错误分类</th><th>Schema / migration</th></tr></thead><tbody id="storage-body"></tbody></table></div>
         <p class="hint">检查只执行元数据、只读打开或目录遍历入口验证；不会写入探测，也不会执行 migration。</p>
       </section>
+      </div>
+
+      <div class="console-page" data-console-page="todo" hidden>
+        <header class="product-page-heading">
+          <div>
+            <p class="eyebrow">TODO / TASK CONTROL</p>
+            <h2>Todo 管理</h2>
+            <p class="product-page-lede">查看、创建和更新当前运行目录中的 Todo，目标与提醒状态来自管理 API。</p>
+          </div>
+          <span class="readonly-tag">受控写入</span>
+        </header>
+        <section id="todo-page" class="panel todo-panel" aria-labelledby="todo-heading">
+          <header class="section-heading">
+            <div>
+              <p class="section-kicker">TASK BOARD / LOCAL API</p>
+              <h2 id="todo-heading">任务清单</h2>
+            </div>
+            <button id="todo-refresh" class="secondary" type="button">刷新</button>
+          </header>
+          <div class="todo-toolbar">
+            <label>状态<select id="todo-status-filter"><option value="all">全部</option><option value="pending">待处理</option><option value="completed">已完成</option></select></label>
+            <label class="todo-search">关键词<input id="todo-keyword-filter" type="search" placeholder="搜索标题或内容"></label>
+            <label>时间<select id="todo-time-filter"><option value="all">全部</option><option value="overdue">已逾期</option><option value="no_due_date">无截止日期</option></select></label>
+            <label>重复<select id="todo-recurring-filter"><option value="all">全部</option><option value="true">仅重复</option><option value="false">非重复</option></select></label>
+            <label>目标<select id="todo-target-filter"><option value="">全部目标</option></select></label>
+            <label>平台<input id="todo-platform-filter" placeholder="qq_official"></label>
+            <label>账号<input id="todo-account-filter" placeholder="可选"></label>
+            <label>用户/群组<input id="todo-user-filter" placeholder="可选"></label>
+            <label>范围<select id="todo-scope-filter"><option value="">全部</option><option value="private">私聊</option><option value="group">群聊</option></select></label>
+            <label>日期起<input id="todo-date-start" type="date"></label>
+            <label>日期止<input id="todo-date-end" type="date"></label>
+            <button id="todo-filter-submit" type="button">应用筛选</button>
+          </div>
+          <form id="todo-create-form" class="todo-create-form">
+            <label>标题<input id="todo-create-title" name="title" required maxlength="500" placeholder="例如：整理部署日志"></label>
+            <label>目标<select id="todo-create-target" name="target_ref" required><option value="">加载目标中…</option></select></label>
+            <label>截止日期<input id="todo-create-due-date" name="due_date" type="date"></label>
+            <label>截止时间<input id="todo-create-due-at" name="due_at" placeholder="YYYY-MM-DD HH:MM:SS"></label>
+            <label>提醒时间<input id="todo-create-reminder-at" name="reminder_at" placeholder="YYYY-MM-DD HH:MM:SS"></label>
+            <label>时间精度<select id="todo-create-time-precision"><option value="none">无</option><option value="date">日期</option><option value="date_time">日期时间</option></select></label>
+            <label>重复类型<select id="todo-create-recurrence-kind"><option value="none">不重复</option><option value="interval">间隔重复</option></select></label>
+            <label>重复间隔<input id="todo-create-recurrence-interval" type="number" min="1" placeholder="可选"></label>
+            <label>重复单位<select id="todo-create-recurrence-unit"><option value="day">天</option><option value="week">周</option><option value="month">月</option></select></label>
+            <label class="todo-create-detail">详情<textarea id="todo-create-detail" name="detail" rows="2" placeholder="可选"></textarea></label>
+            <button type="submit">创建 Todo</button>
+          </form>
+          <p id="todo-result" class="status-message" role="status" aria-live="polite"></p>
+          <div id="todo-list" class="todo-list" aria-live="polite"><p class="hint">正在加载 Todo…</p></div>
+          <div id="todo-pagination" class="todo-pagination"></div>
+        </section>
       </div>
 
       <div class="console-page" data-console-page="configuration" hidden>

@@ -57,11 +57,15 @@ pub(super) async fn console_index(
     State(state): State<OpsHttpState>,
     headers: HeaderMap,
 ) -> Response {
-    with_console_csp(with_console_cors(
+    let mut response = with_console_csp(with_console_cors(
         Html(include_str!("../../../web-console/dist/index.html")).into_response(),
         &state,
         &headers,
-    ))
+    ));
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    response
 }
 
 // dist 新增前端模块时必须同步登记；下方测试会校验构建产物与静态 import 均已覆盖。
@@ -139,6 +143,11 @@ const CONSOLE_ASSETS: &[(&str, &str, &str)] = &[
     (
         "views/theme-selector.js",
         include_str!("../../../web-console/dist/views/theme-selector.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/todo.js",
+        include_str!("../../../web-console/dist/views/todo.js"),
         "text/javascript; charset=utf-8",
     ),
     (
@@ -235,6 +244,10 @@ fn static_console_asset(
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
     response
 }
 
@@ -248,6 +261,10 @@ fn static_console_binary_asset(
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
     response
 }
 
