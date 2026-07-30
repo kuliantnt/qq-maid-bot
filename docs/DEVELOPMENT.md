@@ -2,7 +2,7 @@
 
 本文面向项目开发者和维护者，保留仓库级架构边界、开发命令、维护约定和检查规则。运行目录、部署、私有配置和运行数据细节已经分流到 [runtime/README.md](../runtime/README.md)；QQ 官方 gateway 细节见 [qq-maid-gateway-rs/README.md](../qq-maid-gateway-rs/README.md)；Rust Core 模块细节见 [qq-maid-core/README.md](../qq-maid-core/README.md)。
 
-当前稳定版本线为 `22.x`（`v0.22.1`）；发布变更与升级边界见 [CHANGELOG.md](../CHANGELOG.md)。
+当前稳定版本线为 `22.x`（`v0.22.2`）；发布变更与升级边界见 [CHANGELOG.md](../CHANGELOG.md)。
 
 如果只是第一次了解项目，请先阅读 [README.md](../README.md)。
 
@@ -13,7 +13,7 @@
 ## 架构边界
 
 - `qq-maid-gateway-rs/`：QQ 官方 C2C / 群 at、OneBot 11 反向 WebSocket 和可选微信服务号接入层，负责平台事件接收、统一入站转换、`/ping` 诊断、回复发送和主动推送出口；群主动推送的成员提醒在 Gateway 侧转换为平台协议。
-- `qq-maid-core/`：Rust Core / 查询 / 记忆 / session / prompt / 业务 Tool 模块，通过 `CoreService` 提供进程内业务入口；HTTP 层固定公开 `GET /healthz`，启用新版 Web Console 时再公开对应管理路由，新版 Console 逐步替代仓库原有前端入口。
+- `qq-maid-core/`：Rust Core / 查询 / 记忆 / session / prompt / 业务 Tool 模块，通过 `CoreService` 提供进程内业务入口；HTTP 层固定公开 `GET /healthz`，启用新版 Web Console 时再注册认证、配置和受保护的资源管理路由，新版 Console 逐步替代仓库原有前端入口。
 - `qq-maid-llm/`：模型协议、Provider 路由、fallback、SSE、usage、健康观测、OpenAI Web Search 和模型原生 Tool Loop 基础设施。
 - `src/main.rs`：统一 `qq-maid-bot` 程序入口，负责一次性初始化 dotenv / tracing，并按顺序拉起 Core HTTP 与 Gateway。
 - `qq-maid-common/`：两个及以上 crate 共享的无业务状态基础工具，目前承载身份上下文、输入输出结构、Markdown 安全转换、脱敏、时间和通用文本处理。
@@ -39,11 +39,14 @@ QQ、OneBot、微信等入口接入相关能力优先在 gateway 的平台 adapt
 ├── AGENTS.md
 ├── README.md
 ├── docs/
+│   ├── README.md
 │   ├── DEVELOPMENT.md
+│   ├── deployment/
 │   ├── development/
-│   │   └── custom-tools.md
 │   ├── design/
+│   ├── analysis/
 │   └── tasks/
+│       └── archive/
 ├── LICENSE
 ├── scripts/
 │   ├── deploy-remote.sh
@@ -97,6 +100,7 @@ make run
 
 ## 文档分工
 
+- [docs/README.md](./README.md)：仓库文档总导航、目录边界与归档约定。
 - [README.md](../README.md)：项目定位、核心能力、快速开始和用户可见指令示例。
 - [qq-maid-core/README.md](../qq-maid-core/README.md)：Rust Core 模块边界、HTTP facade、指令 flow、配置项和检查方式。
 - [qq-maid-gateway-rs/README.md](../qq-maid-gateway-rs/README.md)：QQ 官方 gateway、事件范围、消息发送、日志、`/ping` 和进程内主动推送。
@@ -104,7 +108,8 @@ make run
 - [runtime/config/.env.example](../runtime/config/.env.example)：环境变量模板和字段说明。
 - [config-center.md](./development/config-center.md)：受管 TOML、外部覆盖、敏感密文与主密钥边界。
 - [custom-tools.md](./development/custom-tools.md)：自定义 Tool 的注册、场景白名单、领域后处理和安全要求。
-- [web-console/README.md](../web-console/README.md)：替代旧前端的 TypeScript Console 源码、可复现构建与增量修改流程。
+- [management-api.md](./development/management-api.md)：管理员资源 API 的通用认证、响应、分页与 Todo 契约。
+- [web-console/README.md](../web-console/README.md)：替代旧前端的 TypeScript Console 源码、可复现构建、嵌入产物与增量修改流程。
 - [response-event-runtime.md](./design/response-event-runtime.md)：统一响应事件流的现状基线、事件模型和分阶段迁移边界。
 
 ## 常用命令
@@ -159,7 +164,7 @@ make clean
 Rust HTTP 层只公开外部运维 / 管理能力：
 
 - 始终公开：`GET /healthz`。
-- 仅在 `WEB_CONSOLE_ENABLED=true` 时公开：`GET /console/`、`GET /console/{asset}`、控制台状态/配置接口、`POST /api/v1/markdown/render`，以及受管理员 Session、同源和 CSRF 保护的全局 Todo 管理 API。管理员 actor 不参与 Todo owner/scope；目标引用、全局分页、提醒 Outbox 原子写入和统一响应约定见 [管理 API 约定](./MANAGEMENT_API.md)。
+- 仅在 `WEB_CONSOLE_ENABLED=true` 时公开：`GET /console/`、`GET /console/{asset}`、控制台认证/状态/配置接口、`POST /api/v1/markdown/render`，以及受管理员 Session、同源和 CSRF 保护的全局 Todo 管理 API。管理员 actor 不参与 Todo owner/scope；目标引用、全局分页、提醒 Outbox 原子写入和统一响应约定见 [管理 API 约定](./development/management-api.md)。
 
 旧 HTTP 路由 `/query`、HTTP `/memory`、`/v1/chat` 和内部 respond 主入口不再公开。查询、记忆、待办、会话和 RSS 都通过 `CoreService::respond` 进程内命令流程承载。
 

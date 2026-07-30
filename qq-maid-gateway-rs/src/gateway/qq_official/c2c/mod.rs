@@ -354,7 +354,7 @@ pub(crate) async fn handle_c2c_message(
 
     let mut inbound = respond.prepare_inbound(platform::qq_official::inbound_from_c2c(&message));
     // C2C 正文无寻址前缀，raw == 归一化正文，但仍在此统一执行污染检测。
-    // RefIndex 命中时会用索引原文覆盖 input_parts，本处只影响 miss 的最终状态。
+    // C2C 只写入完整 RefIndex 记录，命中时仍由索引原文覆盖 input_parts；本处只影响 miss。
     if let Some(ref mut quoted) = inbound.quoted {
         strip_contaminated_quote_from_context(quoted, &inbound.text);
     }

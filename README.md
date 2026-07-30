@@ -17,12 +17,13 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.22.1`，项目处于 `22.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.22.2`，项目处于 `22.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
 ## 22.x 版本线更新
 
+- **Todo 管理 API 与 QQ 引用可靠性**（v0.22.2）：部署管理员可通过受保护的全局 API 管理真实平台 Todo 和发现提醒目标；QQ 官方一级图文引用、Tool Loop 图片预算与被忽略群消息的引用恢复更稳定，群成员详情补全改为默认关闭。
 - **主动推送成员提醒**（v0.22.1）：群聊个人 Todo 提醒会准确 @ 实际归属成员；QQ 官方使用 `<@user_id>` 协议，OneBot 11 使用原生 `at` segment，并对私聊、共享 Todo、无效成员 ID 和 RefIndex 脱敏保持安全边界。
 - **QQ 语音回复与 Provider 扩展**（v0.22.0）：QQ 官方私聊和群聊支持按会话开启千问 TTS 最终回复；Web 控制台补齐全局 TTS 配置卡片，同时新增 OpenCode Zen / Go Provider、未知 Slash 确定性收口和知识库 embedding 内存限制。
 
@@ -155,7 +156,7 @@ v0.20.x 起推荐新部署通过 `/console/` 网页完成配置；v0.21.0 起也
 | `runtime/config/secrets/master.key` | SQLite 敏感密文的独立主密钥；必须持久化、严格限权并单独备份 |
 | `runtime/config/secrets/bootstrap.token` | 首位部署管理员初始化用短时单次令牌；Unix 创建为 `0600`，Windows 依赖安装目录 ACL 且当前未主动收紧（见 [#522](https://github.com/kuliantnt/qq-maid-bot/issues/522)）；不提交；读取该文件完成初始化 |
 
-完整环境变量以 [`.env.example`](./runtime/config/.env.example) 为准，配置中心优先级与安全边界见[配置中心清单](./docs/development/config-center.md)。首次启动从二进制内嵌的同版默认模板生成未跟踪的 `config/agent.toml`；Release 中的 [`agent.example.toml`](./runtime/config/agent.example.toml) 仅用于参考、开发和升级迁移，修改该外部示例不会改变首次生成内容。`/ops` 配置从 [`ops.example.toml`](./runtime/config/ops.example.toml) 复制为未跟踪的 `ops.toml` 后填写，具体步骤见 Wiki [用 `/ops` 在 QQ 里做运维](https://github.com/kuliantnt/qq-maid-bot/wiki/ops运维命令) 与 [用 `/ops codex` 跑长任务](https://github.com/kuliantnt/qq-maid-bot/wiki/ops-codex)。调整模型、工具、场景策略或白名单运维命令时，不需要修改业务代码。
+完整环境变量以 [`.env.example`](./runtime/config/.env.example) 为准，配置中心优先级与安全边界见 [配置中心清单](./docs/development/config-center.md)。首次启动从二进制内嵌的同版默认模板生成未跟踪的 `config/agent.toml`；Release 中的 [`agent.example.toml`](./runtime/config/agent.example.toml) 仅用于参考、开发和升级迁移，修改该外部示例不会改变首次生成内容。`/ops` 配置从 [`ops.example.toml`](./runtime/config/ops.example.toml) 复制为未跟踪的 `ops.toml` 后填写，具体步骤见 Wiki [用 `/ops` 在 QQ 里做运维](https://github.com/kuliantnt/qq-maid-bot/wiki/ops运维命令) 与 [用 `/ops codex` 跑长任务](https://github.com/kuliantnt/qq-maid-bot/wiki/ops-codex)。调整模型、工具、场景策略或白名单运维命令时，不需要修改业务代码。
 
 聊天命令默认使用 `/` 前缀；可在 Web 控制台“命令设置”中通过下拉框改为 `#` 或 `*`，也可设置 `runtime.toml` 的 `command.prefix` / 环境变量 `CHAT_COMMAND_PREFIX`。前缀必须是一个可见非空白字符，修改后重启生效；自定义后旧 `/` 不再触发命令。
 
@@ -247,7 +248,7 @@ flowchart LR
 - 工具执行、Todo 写入和记忆保存都以真实结果为准，模型文案不能代替执行结果。
 - `/ops` 默认关闭，只执行配置中的固定程序与参数规则，不走 Shell，不让模型随意拼命令；私聊需管理员白名单，群聊还需允许群且角色为群主 / 管理员。
 - 日志与诊断默认脱敏，不应输出凭证、完整平台 ID 或聊天正文；私聊 `/ping` 只在当前用户自己查看时展示稳定 `user_id`，便于填写 `/ops` 白名单。
-- 本地管理面板默认关闭，仅适合本机或受控内网，不应直接暴露到公网。
+- 部署管理控制台使用服务端管理员 Session、同源校验和 CSRF 保护，仍只应部署在本机或受控内网，不应将 8787 端口直接暴露到公网。
 
 ## 常见问题
 
@@ -264,7 +265,7 @@ flowchart LR
 
 ## 文档导航
 
-使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)。仓库文档保留实现边界与可 review 的技术细节。
+使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)。仓库内的开发、部署、设计与历史文档已统一收口到 [docs 文档导航](./docs/README.md)。
 
 | 文档 | 适合什么时候看 |
 | --- | --- |
@@ -275,14 +276,11 @@ flowchart LR
 | Wiki [用 `/ops` 在 QQ 里做运维](https://github.com/kuliantnt/qq-maid-bot/wiki/ops运维命令) | 配置管理员、固定程序、botmon 和异步回执 |
 | Wiki [用 `/ops codex` 跑长任务](https://github.com/kuliantnt/qq-maid-bot/wiki/ops-codex) | 配置 Codex、NVM 环境和专项排障 |
 | Wiki [插件开发](https://github.com/kuliantnt/qq-maid-bot/wiki/插件开发) | 自己写一个 Tool / 插件 |
+| [docs 文档导航](./docs/README.md) | 仓库内开发、部署、设计、调研和任务归档的完整索引 |
 | [runtime/README.md](./runtime/README.md) | 运行目录、环境变量、控制脚本和诊断细节 |
 | [Docker 与 Compose 部署](./docs/deployment/docker.md) | GHCR、容器首次启动、持久化、多实例、测试部署和回滚 |
 | [配置迁移、备份恢复与安全升级](./docs/deployment/migration-backup.md) | CLI 预检、旧配置 dry-run、SQLite 一致性备份、恢复和 schema 回滚边界 |
 | [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | 开发环境、架构边界、常用命令和检查要求 |
-| [自定义 Tool 指南](./docs/development/custom-tools.md) | 新增或接入业务工具的技术版 |
-| [OneBot 11 接入文档](./docs/development/onebot11-napcat.md) | NapCat / OneBot 11 技术版 |
-| [`/ops` 白名单运维命令](./docs/development/ops-command.md) | `/ops` 完整安全边界与配置字段 |
-| [`/ops codex` 使用指南](./docs/development/ops-codex.md) | Codex 长任务技术版 |
 | [Gateway README](./qq-maid-gateway-rs/README.md) | 平台事件和消息发送实现 |
 | [Core README](./qq-maid-core/README.md) | 会话、命令和业务编排实现 |
 | [LLM README](./qq-maid-llm/README.md) | Provider、路由、SSE 和 Tool Loop 实现 |

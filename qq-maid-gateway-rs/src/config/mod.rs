@@ -26,8 +26,8 @@ pub const DEFAULT_C2C_VISIBLE_PROGRESS_STATUS_ENABLED: bool = true;
 pub const DEFAULT_AGENT_TYPING_ENABLED: bool = true;
 pub const DEFAULT_AGENT_TYPING_DELAY_MS: u64 = 1000;
 /// 是否在入站时调用 #229 群成员详情接口补全 actor/mention/引用 sender 的展示字段。
-/// 默认开启；拉取失败降级为 source=Event，不阻断主回复。可经环境变量关闭。
-pub const DEFAULT_MEMBER_DETAIL_ENRICH_ENABLED: bool = true;
+/// QQ 当前不再向应用提供该接口，因此默认关闭；仅在确认账号具备权限时显式开启。
+pub const DEFAULT_MEMBER_DETAIL_ENRICH_ENABLED: bool = false;
 /// 普通回复分段软限制默认值（非平台硬上限，仅保守软限制）。
 /// 默认对齐官方非流式长消息分段的 5000 字符基线，尽量减少段数；
 /// 真实 QQ 单条限制仍需真机验证后再校准。

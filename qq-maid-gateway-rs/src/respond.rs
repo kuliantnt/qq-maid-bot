@@ -1508,7 +1508,7 @@ mod tests {
     /// 归一化后正文才能正确匹配 msg_elements 引用文字的混合串。
     ///
     /// 流程：事件解析 → 群聊正文归一化 → 污染检测 → 验证。
-    /// RefIndex 命中时由索引原文覆盖，因此本检测只影响 miss 状态。
+    /// 完整 RefIndex 命中时由索引原文覆盖；被动观察命中时索引正文仍优先于事件文字。
     #[test]
     fn group_addressed_prefix_contamination_detected_after_normalization() {
         let mut message = group_message("@机器人 引用内容查看", Some("member-1"));
