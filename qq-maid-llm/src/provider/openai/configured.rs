@@ -352,6 +352,65 @@ mod tests {
         provider_config_for("opencode_zen", base_url, chat_fallback)
     }
 
+    async fn same_model_route_provider(
+        routera_reply: MockReply,
+        routerb_reply: MockReply,
+        stream: bool,
+    ) -> (
+        ModelRouteProvider,
+        Arc<Mutex<MockState>>,
+        Arc<Mutex<MockState>>,
+    ) {
+        let (routera_url, routera_state) = spawn_mock(vec![routera_reply]).await;
+        let (routerb_url, routerb_state) = spawn_mock(vec![routerb_reply]).await;
+        let routera_id = ModelProvider::Custom("routera".to_owned());
+        let routerb_id = ModelProvider::Custom("routerb".to_owned());
+        let routera = Arc::new(
+            ConfiguredResponsesProvider::new(
+                &provider_config_for("routera", routera_url, false),
+                "gpt-5.6-luna".to_owned(),
+                stream,
+                90,
+                1024,
+                1200,
+            )
+            .unwrap(),
+        );
+        let routerb = Arc::new(
+            ConfiguredResponsesProvider::new(
+                &provider_config_for("routerb", routerb_url, false),
+                "gpt-5.6-luna".to_owned(),
+                stream,
+                90,
+                1024,
+                1200,
+            )
+            .unwrap(),
+        );
+        let route =
+            ModelRoute::parse_config("routera:gpt-5.6-luna,routerb:gpt-5.6-luna", "test").unwrap();
+        let provider = ModelRouteProvider::new(
+            "auto",
+            ModelProvider::OpenAi,
+            route,
+            vec![(routera_id, routera), (routerb_id, routerb)],
+        )
+        .unwrap();
+        (provider, routera_state, routerb_state)
+    }
+
+    async fn assert_same_model_requests_once(
+        routera_state: Arc<Mutex<MockState>>,
+        routerb_state: Arc<Mutex<MockState>>,
+    ) {
+        for state in [routera_state, routerb_state] {
+            let state = state.lock().await;
+            assert_eq!(state.requests.len(), 1);
+            assert_eq!(state.requests[0].path, "/v1/responses");
+            assert_eq!(state.requests[0].body["model"], "gpt-5.6-luna");
+        }
+    }
+
     fn request(model: &str) -> ChatRequest {
         ChatRequest {
             session_id: "test-session".to_owned(),
@@ -589,51 +648,20 @@ mod tests {
 
     #[tokio::test]
     async fn same_model_name_falls_back_between_distinct_provider_base_urls() {
-        let (routera_url, routera_state) = spawn_mock(vec![MockReply {
-            status: StatusCode::BAD_GATEWAY,
-            content_type: "application/json",
-            body: json!({"error": {"message": "router A unavailable"}}).to_string(),
-        }])
-        .await;
-        let (routerb_url, routerb_state) = spawn_mock(vec![MockReply {
-            status: StatusCode::OK,
-            content_type: "application/json",
-            body: json!({"output_text": "router B reply"}).to_string(),
-        }])
-        .await;
-        let routera_id = ModelProvider::Custom("routera".to_owned());
-        let routerb_id = ModelProvider::Custom("routerb".to_owned());
-        let routera = Arc::new(
-            ConfiguredResponsesProvider::new(
-                &provider_config_for("routera", routera_url, false),
-                "gpt-5.6-luna".to_owned(),
-                false,
-                90,
-                1024,
-                1200,
-            )
-            .unwrap(),
-        );
-        let routerb = Arc::new(
-            ConfiguredResponsesProvider::new(
-                &provider_config_for("routerb", routerb_url, false),
-                "gpt-5.6-luna".to_owned(),
-                false,
-                90,
-                1024,
-                1200,
-            )
-            .unwrap(),
-        );
-        let route =
-            ModelRoute::parse_config("routera:gpt-5.6-luna,routerb:gpt-5.6-luna", "test").unwrap();
-        let provider = ModelRouteProvider::new(
-            "auto",
-            ModelProvider::OpenAi,
-            route,
-            vec![(routera_id, routera), (routerb_id, routerb)],
+        let (provider, routera_state, routerb_state) = same_model_route_provider(
+            MockReply {
+                status: StatusCode::UNAUTHORIZED,
+                content_type: "application/json",
+                body: json!({"error": {"message": "router A key rejected"}}).to_string(),
+            },
+            MockReply {
+                status: StatusCode::OK,
+                content_type: "application/json",
+                body: json!({"output_text": "router B reply"}).to_string(),
+            },
+            false,
         )
-        .unwrap();
+        .await;
 
         let outcome = provider
             .chat(request("routera:gpt-5.6-luna,routerb:gpt-5.6-luna"))
@@ -642,12 +670,130 @@ mod tests {
 
         assert_eq!(outcome.reply, "router B reply");
         assert!(outcome.fallback_used);
-        for state in [routera_state, routerb_state] {
-            let state = state.lock().await;
-            assert_eq!(state.requests.len(), 1);
-            assert_eq!(state.requests[0].path, "/v1/responses");
-            assert_eq!(state.requests[0].body["model"], "gpt-5.6-luna");
-        }
+        assert_same_model_requests_once(routera_state, routerb_state).await;
+    }
+
+    #[tokio::test]
+    async fn same_model_stream_falls_back_after_responses_403() {
+        let (provider, routera_state, routerb_state) = same_model_route_provider(
+            MockReply {
+                status: StatusCode::FORBIDDEN,
+                content_type: "application/json",
+                body: json!({"error": {"message": "router A account denied"}}).to_string(),
+            },
+            MockReply {
+                status: StatusCode::OK,
+                content_type: "text/event-stream",
+                body: concat!(
+                    "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"router B stream\"}\n\n",
+                    "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output_text\":\"router B stream\"}}\n\n",
+                )
+                .to_owned(),
+            },
+            true,
+        )
+        .await;
+
+        let stream = provider
+            .stream_chat(request("routera:gpt-5.6-luna,routerb:gpt-5.6-luna"))
+            .await
+            .unwrap();
+        let outcome = collect_llm_stream(stream, "auto", "same-model-route")
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.reply, "router B stream");
+        assert!(outcome.fallback_used);
+        assert_same_model_requests_once(routera_state, routerb_state).await;
+    }
+
+    #[tokio::test]
+    async fn same_model_agent_loop_falls_back_after_responses_401() {
+        let (provider, routera_state, routerb_state) = same_model_route_provider(
+            MockReply {
+                status: StatusCode::UNAUTHORIZED,
+                content_type: "application/json",
+                body: json!({"error": {"message": "router A key rejected"}}).to_string(),
+            },
+            MockReply {
+                status: StatusCode::OK,
+                content_type: "application/json",
+                body: json!({"output_text": "router B agent"}).to_string(),
+            },
+            false,
+        )
+        .await;
+
+        let outcome = provider
+            .chat_with_tools(ToolChatRequest {
+                chat: request("routera:gpt-5.6-luna,routerb:gpt-5.6-luna"),
+                tools: ToolRegistry::new()
+                    .register(WeatherToolStub::new("晴"))
+                    .unwrap(),
+                tool_context: test_tool_context(),
+                max_rounds: 3,
+                progress_sink: None,
+                final_delta_sink: None,
+                run_handle: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.reply, "router B agent");
+        assert!(outcome.fallback_used);
+        assert_eq!(outcome.agent.model_rounds, 2);
+        assert_same_model_requests_once(routera_state, routerb_state).await;
+    }
+
+    #[test]
+    fn configured_responses_missing_api_key_remains_config_error() {
+        let mut config =
+            provider_config_for("routera", "https://routera.example/v1".to_owned(), false);
+        config.api_key = None;
+
+        let error = ConfiguredResponsesProvider::new(
+            &config,
+            "gpt-5.6-luna".to_owned(),
+            false,
+            90,
+            1024,
+            1200,
+        )
+        .err()
+        .expect("missing API key must fail provider initialization");
+
+        assert_eq!(error.code, "config");
+        assert_eq!(error.stage, "config");
+        assert!(error.message.contains("OPENCODE_API_KEY is required"));
+    }
+
+    #[tokio::test]
+    async fn configured_responses_maps_upstream_401_to_provider_unavailable() {
+        let (base_url, state) = spawn_mock(vec![MockReply {
+            status: StatusCode::UNAUTHORIZED,
+            content_type: "application/json",
+            body: json!({"error": {"message": "invalid token"}}).to_string(),
+        }])
+        .await;
+        let provider = ConfiguredResponsesProvider::new(
+            &provider_config_for("routera", base_url, false),
+            "gpt-5.6-luna".to_owned(),
+            false,
+            90,
+            1024,
+            1200,
+        )
+        .unwrap();
+
+        let error = provider
+            .chat(request("routera:gpt-5.6-luna"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, "provider_error");
+        assert_eq!(error.stage, "provider_unavailable");
+        assert!(error.message.contains("HTTP 401"));
+        assert_eq!(state.lock().await.requests.len(), 1);
     }
 
     #[tokio::test]

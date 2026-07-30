@@ -373,6 +373,7 @@ fn provider_native_search_route_keeps_bare_model_as_openai_compatibility_default
 }
 
 mod opencode;
+mod provider_startup;
 
 #[test]
 fn toml_config_rejects_legacy_search_routes_section() {
