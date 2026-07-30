@@ -13,7 +13,7 @@
 ## 架构边界
 
 - `qq-maid-gateway-rs/`：QQ 官方 C2C / 群 at、OneBot 11 反向 WebSocket 和可选微信服务号接入层，负责平台事件接收、统一入站转换、`/ping` 诊断、回复发送和主动推送出口；群主动推送的成员提醒在 Gateway 侧转换为平台协议。
-- `qq-maid-core/`：Rust Core / 查询 / 记忆 / session / prompt / 业务 Tool 模块，通过 `CoreService` 提供进程内业务入口；HTTP 层固定公开 `GET /healthz`，启用只读控制台时再公开对应管理路由。
+- `qq-maid-core/`：Rust Core / 查询 / 记忆 / session / prompt / 业务 Tool 模块，通过 `CoreService` 提供进程内业务入口；HTTP 层固定公开 `GET /healthz`，启用新版 Web Console 时再公开对应管理路由，新版 Console 逐步替代仓库原有前端入口。
 - `qq-maid-llm/`：模型协议、Provider 路由、fallback、SSE、usage、健康观测、OpenAI Web Search 和模型原生 Tool Loop 基础设施。
 - `src/main.rs`：统一 `qq-maid-bot` 程序入口，负责一次性初始化 dotenv / tracing，并按顺序拉起 Core HTTP 与 Gateway。
 - `qq-maid-common/`：两个及以上 crate 共享的无业务状态基础工具，目前承载身份上下文、输入输出结构、Markdown 安全转换、脱敏、时间和通用文本处理。
@@ -104,7 +104,7 @@ make run
 - [runtime/config/.env.example](../runtime/config/.env.example)：环境变量模板和字段说明。
 - [config-center.md](./development/config-center.md)：受管 TOML、外部覆盖、敏感密文与主密钥边界。
 - [custom-tools.md](./development/custom-tools.md)：自定义 Tool 的注册、场景白名单、领域后处理和安全要求。
-- [web-console/README.md](../web-console/README.md)：只读管理面板的 TypeScript 源码、可复现构建与嵌入产物约定。
+- [web-console/README.md](../web-console/README.md)：替代旧前端的 TypeScript Console 源码、可复现构建与增量修改流程。
 - [response-event-runtime.md](./design/response-event-runtime.md)：统一响应事件流的现状基线、事件模型和分阶段迁移边界。
 
 ## 常用命令
