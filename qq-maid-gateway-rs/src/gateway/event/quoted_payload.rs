@@ -16,7 +16,10 @@ use tracing::debug;
 use crate::gateway::ref_index::qq::{MSG_TYPE_QUOTE, RawMsgElement};
 
 use super::content_normalizer::MAX_NORMALIZED_MEDIA_PARTS;
-use super::{input_parts_from_content_and_attachments, parse_safe_content_parts};
+use super::{
+    AttachmentKind, attachment_kind, input_parts_from_content_and_attachments,
+    parse_safe_content_parts,
+};
 
 /// 使用归一化后的当前正文检测并移除 `QuotedMessageContext` 中被污染的引用文字。
 ///
@@ -137,35 +140,47 @@ fn append_direct_quoted_element_parts(
     input_parts: &mut Vec<MessageInputPart>,
 ) {
     let raw_content = element.content.as_deref().unwrap_or_default();
-    // 只有同层确实携带结构化附件时，`[图片]` 才作为附件顺序占位符处理。
-    // 拍平引用展示文本没有结构化附件，必须整体按普通文本保留，不能据此恢复媒体。
-    let has_structured_attachments = !element.attachments.is_empty();
-    let cleaned_content = if has_structured_attachments {
-        strip_qq_image_placeholders(raw_content)
+    // 只有同层确实携带结构化图片附件时，`[图片]` 才作为附件顺序占位符处理。
+    // 文件或音频不能打开媒体标记解析，否则拍平文本中的 `[图片]` / `<img>` 会伪造图片。
+    let has_structured_image_attachment = element.attachments.iter().any(|attachment| {
+        attachment_kind(
+            attachment.content_type.as_deref(),
+            attachment.filename.as_deref(),
+        ) == AttachmentKind::Image
+    });
+    let (summary_content, mut element_parts) = if has_structured_image_attachment {
+        let cleaned_content = strip_qq_image_placeholders(raw_content);
+        let summary_content = parse_safe_content_parts(&cleaned_content, "qq_official")
+            .text
+            .trim()
+            .to_owned();
+        let protocol_content = raw_content.replace("[图片]", "<img>");
+        let parsed = parse_safe_content_parts(&protocol_content, "qq_official");
+        let element_parts = input_parts_from_content_and_attachments(
+            &parsed.text,
+            parsed.input_parts,
+            &element.attachments,
+            "qq_official",
+            TextSource::Quote,
+        );
+        (summary_content, element_parts)
     } else {
-        raw_content.trim().to_owned()
+        // 无同层结构化图片时完全绕过 `<img>` 解析器；正文仅做既有的边界空白清理，
+        // 文件、音频等附件仍由统一附件转换逻辑追加为原有类型。
+        let plain_content = raw_content.trim().to_owned();
+        let element_parts = input_parts_from_content_and_attachments(
+            &plain_content,
+            Vec::new(),
+            &element.attachments,
+            "qq_official",
+            TextSource::Quote,
+        );
+        (plain_content, element_parts)
     };
-    let summary_content = parse_safe_content_parts(&cleaned_content, "qq_official")
-        .text
-        .trim()
-        .to_owned();
-    let protocol_content = if has_structured_attachments {
-        raw_content.replace("[图片]", "<img>")
-    } else {
-        raw_content.to_owned()
-    };
-    let parsed = parse_safe_content_parts(&protocol_content, "qq_official");
     if !summary_content.is_empty() {
         content_fragments.push(summary_content);
     }
 
-    let mut element_parts = input_parts_from_content_and_attachments(
-        &parsed.text,
-        parsed.input_parts,
-        &element.attachments,
-        "qq_official",
-        TextSource::Quote,
-    );
     for part in &mut element_parts {
         if let MessageInputPart::Text { text, source } = part {
             // QQ 会在 `[图片]` 占位符两侧注入展示空格；结构化拆分后清理段落边界，

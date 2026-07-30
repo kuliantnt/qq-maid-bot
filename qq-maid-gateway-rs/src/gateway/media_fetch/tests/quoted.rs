@@ -104,6 +104,92 @@ URL:http://{addr}/history.png?rkey=rkey_redacted"
 }
 
 #[tokio::test]
+async fn flattened_quote_img_tag_stays_text_without_media_download_or_data_url() {
+    use crate::gateway::event::{EVENT_GROUP_MESSAGE_CREATE, GatewayEnvelope, parse_group_message};
+
+    let download_count = Arc::new(AtomicUsize::new(0));
+    let handler_count = Arc::clone(&download_count);
+    let app = Router::new().route(
+        "/history.png",
+        get(move || {
+            let handler_count = Arc::clone(&handler_count);
+            async move {
+                handler_count.fetch_add(1, Ordering::Relaxed);
+                ([(header::CONTENT_TYPE.as_str(), "image/png")], "history")
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let flattened = format!(
+        "拍平历史图片：<img src=\"http://{addr}/history.png\">\n\
+[附件1] filename: history.png file_id: file-redacted rkey: rkey-redacted"
+    );
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+        id: Some("event-redacted".to_owned()),
+        d: serde_json::json!({
+            "id": "message-redacted",
+            "group_openid": "group-redacted",
+            "author": {"member_openid": "member-redacted"},
+            "content": "继续分析",
+            "message_type": 103,
+            "message_scene": {"ext": ["ref_msg_idx=REFIDX_quote_redacted"]},
+            "msg_elements": [{"content": flattened}]
+        }),
+    };
+
+    let mut message = parse_group_message(&envelope).unwrap().unwrap();
+    let reply = message.reply.as_mut().expect("quoted payload");
+    assert_eq!(reply.content.as_deref(), Some(flattened.as_str()));
+    assert_eq!(reply.input_parts.len(), 1);
+    assert_eq!(
+        reply.input_parts[0].text_content(),
+        Some(flattened.as_str())
+    );
+    assert_eq!(
+        reply
+            .input_parts
+            .iter()
+            .filter(|part| matches!(part, MessageInputPart::Image { .. }))
+            .count(),
+        0
+    );
+
+    let root_dir = std::env::temp_dir().join(format!(
+        "qq-maid-flattened-img-tag-test-{}",
+        MEDIA_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let context = MediaFetchContext {
+        platform: "qq_official",
+        app_id: "app-redacted".to_owned(),
+        peer_id: "peer-redacted".to_owned(),
+        root_dir: root_dir.clone(),
+        timeout: Duration::from_secs(1),
+        max_bytes: 1024,
+    };
+    fetch_qq_official_quoted_images(
+        &qq_maid_common::http_client::client(),
+        &context,
+        "message-redacted",
+        Some(reply),
+    )
+    .await;
+
+    assert_eq!(download_count.load(Ordering::Relaxed), 0);
+    assert_eq!(media_file_count(&root_dir), 0);
+    let serialized = serde_json::to_string(&reply.input_parts).unwrap();
+    assert!(serialized.contains("<img src="));
+    assert!(!serialized.contains("data:image"));
+}
+
+#[tokio::test]
 async fn quoted_images_with_same_filename_download_and_send_only_first_image() {
     let app = Router::new()
         .route(

@@ -304,6 +304,99 @@ fn direct_text_and_multiple_images_keep_placeholder_order() {
     assert_eq!(parts[4].text_content(), Some("图后"));
 }
 
+/// 单张结构化图片同样启用占位顺序解析，避免收紧条件后退化为尾部附件。
+#[test]
+fn direct_text_and_single_image_keeps_placeholder_order() {
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+        id: None,
+        d: json!({
+            "id": "msg-current",
+            "group_openid": "group-1",
+            "author": {"member_openid": "member-1"},
+            "content": "解释图片",
+            "message_type": 103,
+            "message_scene": {"ext": ["ref_msg_idx=TMP_quoted"]},
+            "msg_elements": [{
+                "content": "图前[图片]图后",
+                "attachments": [{
+                    "content_type": "image/png",
+                    "filename": "quoted.png",
+                    "url": "https://example.test/quoted.png",
+                    "fileid": "file-quoted"
+                }]
+            }]
+        }),
+    };
+
+    let message = parse_group_message(&envelope).unwrap().unwrap();
+    let parts = message.reply.unwrap().input_parts;
+
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0].text_content(), Some("图前"));
+    assert_eq!(
+        parts[1].media().and_then(|media| media.file_id.as_deref()),
+        Some("file-quoted")
+    );
+    assert_eq!(parts[2].text_content(), Some("图后"));
+}
+
+/// 文件或音频附件不代表正文中的 `[图片]` 有对应结构化图片，必须按普通文本保留。
+#[test]
+fn non_image_attachments_do_not_enable_image_placeholder_parsing() {
+    let envelope = GatewayEnvelope {
+        op: 0,
+        s: None,
+        t: Some(EVENT_GROUP_MESSAGE_CREATE.to_owned()),
+        id: None,
+        d: json!({
+            "id": "msg-current",
+            "group_openid": "group-1",
+            "author": {"member_openid": "member-1"},
+            "content": "检查附件",
+            "message_type": 103,
+            "message_scene": {"ext": ["ref_msg_idx=TMP_quoted"]},
+            "msg_elements": [{
+                "content": "原文[图片]结尾",
+                "attachments": [
+                    {
+                        "content_type": "application/pdf",
+                        "filename": "document.pdf",
+                        "url": "https://example.test/document.pdf"
+                    },
+                    {
+                        "content_type": "audio/ogg",
+                        "filename": "voice.ogg",
+                        "url": "https://example.test/voice.ogg"
+                    }
+                ]
+            }]
+        }),
+    };
+
+    let message = parse_group_message(&envelope).unwrap().unwrap();
+    let reply = message.reply.unwrap();
+
+    assert_eq!(reply.content.as_deref(), Some("原文[图片]结尾"));
+    assert_eq!(reply.input_parts[0].text_content(), Some("原文[图片]结尾"));
+    assert_eq!(
+        reply
+            .input_parts
+            .iter()
+            .filter(|part| matches!(part, MessageInputPart::File { .. }))
+            .count(),
+        2
+    );
+    assert!(
+        !reply
+            .input_parts
+            .iter()
+            .any(|part| matches!(part, MessageInputPart::Image { .. }))
+    );
+}
+
 #[test]
 fn direct_quote_media_keeps_existing_normalization_count_limit() {
     let attachments = (0..34)
