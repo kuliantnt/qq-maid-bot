@@ -148,3 +148,40 @@ fn tool_loop_budget_ignores_transport_only_payload_fields() {
     )
     .unwrap();
 }
+
+#[test]
+fn responses_tool_loop_budget_keeps_large_structured_image_payload() {
+    let data_url = format!("data:image/png;base64,{}", "a".repeat(100_000));
+    let input = vec![json!({
+        "type": "message",
+        "role": "user",
+        "content": [
+            {"type": "input_text", "text": "帮我看看这个"},
+            {"type": "input_image", "image_url": data_url}
+        ],
+    })];
+    let tools = vec![json!({
+        "type": "function",
+        "name": "inspect",
+        "parameters": {"type": "object", "properties": {}},
+    })];
+    let payload = openai_tool_loop_payload(&input, &tools, "gpt-test", 1200, None, true, false);
+
+    let (fitted, disabled) = enforce_tool_loop_budget(
+        Some(ContextBudgetConfig {
+            context_window_chars: 2_500,
+            output_reserve_chars: 200,
+            protected_recent_turns: 0,
+        }),
+        &payload,
+    )
+    .unwrap();
+
+    assert!(!disabled);
+    assert_eq!(fitted, payload);
+    assert!(
+        fitted["input"][0]["content"][1]["image_url"]
+            .as_str()
+            .is_some_and(|url| url.len() > 100_000)
+    );
+}

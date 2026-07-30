@@ -809,7 +809,7 @@ fn msg_elements_are_all_treated_as_quote_content() {
 }
 
 #[test]
-fn nested_quoted_elements_from_single_root_keep_text_and_media_order() {
+fn nested_quoted_elements_from_single_root_only_keep_direct_layer() {
     let envelope = GatewayEnvelope {
         op: 0,
         s: None,
@@ -859,15 +859,10 @@ fn nested_quoted_elements_from_single_root_keep_text_and_media_order() {
             .iter()
             .any(|item| item.filename.as_deref() == Some("current.png"))
     );
-    assert_eq!(reply.content.as_deref(), Some("引用第一段\n引用第二段"));
+    assert_eq!(reply.content.as_deref(), Some("引用第一段"));
     assert_eq!(reply.input_parts[0].text_content(), Some("引用第一段"));
-    assert_eq!(reply.input_parts[1].text_content(), Some("引用第二段"));
-    assert_eq!(
-        reply.input_parts[2]
-            .media()
-            .and_then(|media| media.filename.as_deref()),
-        Some("quoted.png")
-    );
+    assert_eq!(reply.input_parts.len(), 1);
+    assert!(reply.media_summaries.is_empty());
     assert!(!reply.input_parts.iter().any(|part| {
         part.media().and_then(|media| media.filename.as_deref()) == Some("current.png")
     }));
@@ -893,21 +888,21 @@ fn quoted_images_keep_original_order() {
                 "attachments": [
                     {
                         "content_type": "image/png",
-                        "filename": "same.png",
+                        "filename": "first.png",
                         "size": 123,
                         "url": "https://example.test/1.png",
                         "fileid": "file-1"
                     },
                     {
                         "content_type": "image/png",
-                        "filename": "same.png",
+                        "filename": "second.png",
                         "size": 123,
                         "url": "https://example.test/2.png",
                         "fileid": "file-2"
                     },
                     {
                         "content_type": "image/png",
-                        "filename": "same.png",
+                        "filename": "third.png",
                         "size": 123,
                         "url": "https://example.test/3.png",
                         "fileid": "file-3"
@@ -921,6 +916,26 @@ fn quoted_images_keep_original_order() {
     let reply = message.reply.unwrap();
 
     assert_eq!(reply.content.as_deref(), Some("结构化正文"));
+    assert_eq!(reply.input_parts.len(), 4);
+    assert_eq!(
+        reply.input_parts[0]
+            .media()
+            .and_then(|media| media.file_id.as_deref()),
+        Some("file-1")
+    );
+    assert_eq!(
+        reply.input_parts[1]
+            .media()
+            .and_then(|media| media.file_id.as_deref()),
+        Some("file-2")
+    );
+    assert_eq!(
+        reply.input_parts[2]
+            .media()
+            .and_then(|media| media.file_id.as_deref()),
+        Some("file-3")
+    );
+    assert_eq!(reply.input_parts[3].text_content(), Some("结构化正文"));
     let images = reply
         .input_parts
         .iter()

@@ -542,6 +542,46 @@ fn tool_loop_budget_ignores_transport_only_payload_fields() {
 }
 
 #[test]
+fn chat_tool_loop_budget_keeps_large_structured_image_payload() {
+    let messages = vec![json!({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "帮我看看这个"},
+            {"type": "image_url", "image_url": {
+                "url": format!("data:image/jpeg;base64,{}", "a".repeat(100_000))
+            }}
+        ]
+    })];
+    let tools = vec![json!({
+        "type": "function",
+        "function": {
+            "name": "inspect",
+            "parameters": {"type": "object", "properties": {}}
+        },
+    })];
+    let payload =
+        chat_completions_tool_loop_payload(&messages, &tools, "test-model", 1200, true, false);
+
+    let (fitted, disabled) = enforce_tool_loop_budget(
+        Some(ContextBudgetConfig {
+            context_window_chars: 2_500,
+            output_reserve_chars: 200,
+            protected_recent_turns: 0,
+        }),
+        &payload,
+    )
+    .unwrap();
+
+    assert!(!disabled);
+    assert_eq!(fitted, payload);
+    assert!(
+        fitted["messages"][0]["content"][1]["image_url"]["url"]
+            .as_str()
+            .is_some_and(|url| url.len() > 100_000)
+    );
+}
+
+#[test]
 fn payload_disables_tool_calls_explicitly() {
     let payload = chat_completions_tool_loop_payload(
         &[json!({"role": "user", "content": "总结已有结果"})],
