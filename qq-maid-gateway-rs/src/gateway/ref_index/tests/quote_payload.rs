@@ -77,6 +77,127 @@ fn qq_quote_hit_uses_ref_index_text_over_payload_fallback() {
 }
 
 #[test]
+fn passive_observation_merges_reliable_text_with_readable_event_media() {
+    let mut observed = group_inbound("gm-observed", Some("REFIDX_passive_media"), "索引可靠原文");
+    observed.timestamp = Some("2026-07-30T16:00:00+08:00".to_owned());
+    observed.input_parts = vec![
+        MessageInputPart::text("索引可靠原文"),
+        MessageInputPart::image(MessageMedia {
+            filename: Some("same.png".to_owned()),
+            url: Some("https://qq.test/same.png?rkey=secret&auth_token=secret".to_owned()),
+            status: MediaStatus::Available,
+            ..Default::default()
+        }),
+    ];
+    let mut store = RefIndex::default();
+    store.insert_passive_observation(&observed);
+
+    let mut current = group_inbound("gm-current", Some("REFIDX_current"), "查看引用");
+    current.quoted = Some(QuotedMessageContext {
+        ref_msg_idx: Some("REFIDX_passive_media".to_owned()),
+        text_summary: Some("payload 展示文字".to_owned()),
+        input_parts: vec![
+            MessageInputPart::text("payload 展示文字"),
+            MessageInputPart::image(MessageMedia {
+                filename: Some("event-only.png".to_owned()),
+                local_path: Some("/tmp/event-only.png".to_owned()),
+                status: MediaStatus::Available,
+                ..Default::default()
+            }),
+            MessageInputPart::image(MessageMedia {
+                filename: Some("same.png".to_owned()),
+                local_path: Some("/tmp/downloaded-same.png".to_owned()),
+                status: MediaStatus::Available,
+                ..Default::default()
+            }),
+            MessageInputPart::file(MessageMedia {
+                filename: Some("event-only.pdf".to_owned()),
+                local_path: Some("/tmp/event-only.pdf".to_owned()),
+                status: MediaStatus::Available,
+                ..Default::default()
+            }),
+        ],
+        ..Default::default()
+    });
+
+    store.enrich_inbound(&mut current);
+
+    let quoted = current.quoted.as_ref().unwrap();
+    assert_eq!(quoted.text_summary.as_deref(), Some("索引可靠原文"));
+    assert_eq!(
+        quoted.timestamp.as_deref(),
+        Some("2026-07-30T16:00:00+08:00")
+    );
+    assert_eq!(quoted.input_parts.len(), 4);
+    assert_eq!(quoted.input_parts[0].text_content(), Some("索引可靠原文"));
+    let event_only_image = quoted.input_parts[1].media().unwrap();
+    assert_eq!(event_only_image.filename.as_deref(), Some("event-only.png"));
+    let image = quoted.input_parts[2].media().unwrap();
+    assert_eq!(
+        image.local_path.as_deref(),
+        Some("/tmp/downloaded-same.png")
+    );
+    assert_eq!(image.status, MediaStatus::Available);
+    assert_eq!(image.url, None);
+    let file = quoted.input_parts[3].media().unwrap();
+    assert_eq!(file.filename.as_deref(), Some("event-only.pdf"));
+    assert_eq!(quoted.media_summaries.len(), 3);
+}
+
+#[test]
+fn processed_entry_still_overrides_unreliable_event_payload_with_complete_media() {
+    let mut original = group_inbound(
+        "gm-processed",
+        Some("REFIDX_processed_media"),
+        "完整索引原文",
+    );
+    original.input_parts = vec![
+        MessageInputPart::text("完整索引原文"),
+        MessageInputPart::image(MessageMedia {
+            filename: Some("complete.png".to_owned()),
+            url: Some("https://qq.test/complete.png?rkey=secret".to_owned()),
+            local_path: Some("/tmp/complete.png".to_owned()),
+            status: MediaStatus::Available,
+            ..Default::default()
+        }),
+    ];
+    let mut store = RefIndex::default();
+    store.insert_inbound(&original);
+    let mut passive_downgrade = original.clone();
+    passive_downgrade.text = "被动观察不应覆盖".to_owned();
+    passive_downgrade.input_parts = vec![MessageInputPart::text("被动观察不应覆盖")];
+    store.insert_passive_observation(&passive_downgrade);
+
+    let mut current = group_inbound("gm-current", Some("REFIDX_current"), "查看引用");
+    current.quoted = Some(QuotedMessageContext {
+        ref_msg_idx: Some("REFIDX_processed_media".to_owned()),
+        text_summary: Some("被污染的 payload".to_owned()),
+        input_parts: vec![
+            MessageInputPart::text("被污染的 payload"),
+            MessageInputPart::image(MessageMedia {
+                filename: Some("payload.png".to_owned()),
+                local_path: Some("/tmp/payload.png".to_owned()),
+                status: MediaStatus::Available,
+                ..Default::default()
+            }),
+        ],
+        ..Default::default()
+    });
+
+    store.enrich_inbound(&mut current);
+
+    let quoted = current.quoted.as_ref().unwrap();
+    assert_eq!(quoted.text_summary.as_deref(), Some("完整索引原文"));
+    assert_eq!(quoted.input_parts.len(), 2);
+    assert_eq!(quoted.input_parts[0].text_content(), Some("完整索引原文"));
+    let media = quoted.input_parts[1].media().unwrap();
+    assert_eq!(media.filename.as_deref(), Some("complete.png"));
+    assert_eq!(media.local_path.as_deref(), Some("/tmp/complete.png"));
+    assert_eq!(media.status, MediaStatus::Available);
+    assert_eq!(media.url, None);
+}
+
+#[test]
 fn qq_quote_miss_with_payload_fallback_keeps_event_content() {
     // RefIndex miss 但事件携带 msg_elements payload 时，使用 payload 内容。
     let mut store = RefIndex::default();

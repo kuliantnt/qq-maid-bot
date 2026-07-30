@@ -80,7 +80,7 @@ use crate::{
     markdown::MarkdownPayload,
 };
 use axum::{Router, body::Bytes, routing::get};
-use qq_maid_common::input_part::{MessageInputPart, MessageMedia};
+use qq_maid_common::input_part::{MediaStatus, MessageInputPart, MessageMedia};
 use qq_maid_core::service::{
     CoreError, CoreFailureKind, CoreHealthSnapshot, CoreInboundClassification, CoreOutputPolicy,
     CoreRequest, CoreRespondOutput, CoreService, UpstreamStatusSnapshot,

@@ -89,6 +89,9 @@ pub struct QuotedMessageContext {
     /// 与 `from_bot` 并存：`from_bot` 仅区分 bot/user/unknown，`sender` 携带稳定 ID 等更多信息。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender: Option<MessageActorContext>,
+    /// 被引用消息的原始平台时间戳；RefIndex 命中时从已观察消息回填。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<String>,
 }
@@ -297,6 +300,14 @@ impl QuotedMessageContext {
         if let Some(summary) = sender_summary {
             lines.push(format!("引用发送者：{summary}"));
         }
+        if let Some(timestamp) = self
+            .timestamp
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            lines.push(format!("引用时间：{timestamp}"));
+        }
         lines
     }
 
@@ -435,6 +446,7 @@ mod tests {
             reference_id: Some("REFIDX_1".to_owned()),
             lookup_found: true,
             text_summary: Some("OK".to_owned()),
+            timestamp: Some("2026-07-30T16:00:00+08:00".to_owned()),
             media_summaries: vec![QuotedMediaSummary {
                 kind: QuotedMediaKind::Image,
                 summary: "[图片 image/png: a.png]".to_owned(),
@@ -445,6 +457,7 @@ mod tests {
 
         let metadata = quoted.metadata_text();
         assert!(metadata.contains("reference=REFIDX_1"));
+        assert!(metadata.contains("引用时间：2026-07-30T16:00:00+08:00"));
         assert!(!metadata.contains("OK"));
         assert!(!metadata.contains("a.png"));
 

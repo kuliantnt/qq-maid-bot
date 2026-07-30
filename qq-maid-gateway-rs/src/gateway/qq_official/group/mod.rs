@@ -267,6 +267,7 @@ pub(crate) async fn handle_group_message(
         bot_identity,
         group_outbound_cache,
     ) {
+        observe_mode_ignored_group_message_ref_index(&message, config, respond, ref_index);
         let active_keyword_count = config.group_active_keywords.len();
         debug!(
             message_id = %message.message_id,
@@ -368,7 +369,7 @@ pub(crate) async fn handle_group_message(
         ));
     // 在群聊归一化正文后、RefIndex enrich 前检测引用文字污染。
     // 归一化已移除 @机器人/唤醒词/分隔符，此时当前正文与 Core 最终一致。
-    // RefIndex 命中时会用索引原文覆盖 input_parts，因此本处只影响 miss 的最终状态。
+    // 完整 RefIndex 命中会覆盖 input_parts；被动观察命中则用索引正文与事件媒体合并。
     if let Some(ref mut quoted) = inbound.quoted {
         strip_contaminated_quote_from_context(quoted, &inbound.text);
     }
@@ -378,7 +379,7 @@ pub(crate) async fn handle_group_message(
     }
     // 成员详情补全（#319）：best-effort 调用 #229 补全 actor / mention / 引用 sender
     // 的展示字段，失败降级 source=Event，不阻断主回复流程。补全后再 insert_inbound，
-    // 让索引里存的是补全后的 sender。配置开关默认开启，可经环境变量关闭。
+    // 让索引里存的是补全后的 sender。接口当前默认关闭，仅可经环境变量显式开启。
     if config.member_detail_enrich_enabled {
         platform::member_enrich::enrich_inbound_member_details(api, &mut inbound).await;
     }
@@ -614,6 +615,38 @@ async fn send_group_respond_response(
         }
     }
     Ok(())
+}
+
+/// 对策略忽略但未来仍可能被引用的群消息做轻量观察。
+///
+/// 这里只保存事件已携带的标准化正文和轻量媒体引用，不下载媒体、不补全成员信息、
+/// 不调用 Core。正常处理的消息不会经过此分支，避免同一消息以不同阶段内容重复写入。
+fn observe_mode_ignored_group_message_ref_index(
+    message: &GroupMessage,
+    config: &AppConfig,
+    respond: &RespondClient,
+    ref_index: &SharedRefIndex,
+) {
+    let has_current_ref_id = message
+        .current_msg_idx
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    if !has_current_ref_id {
+        return;
+    }
+    let inbound = respond.prepare_inbound(crate::respond::normalized_group_inbound_with_prefix(
+        message,
+        &config.group_active_keywords,
+        config.command_prefix,
+    ));
+    match ref_index.lock() {
+        Ok(mut index) => index.insert_passive_observation(&inbound),
+        Err(_) => warn!(
+            message_id = %message.message_id,
+            group = %mask_openid(&message.group_openid),
+            "mode-ignored group inbound ref_index observation skipped because index lock is poisoned"
+        ),
+    }
 }
 
 fn record_group_bot_outbound_send(
