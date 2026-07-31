@@ -189,49 +189,9 @@ const CONSOLE_BINARY_ASSETS: &[(&str, &[u8], &str)] = &[
         "image/png",
     ),
     (
-        "background/01.png",
-        include_bytes!("../../../web-console/dist/background/01.png"),
-        "image/png",
-    ),
-    (
-        "background/02.png",
-        include_bytes!("../../../web-console/dist/background/02.png"),
-        "image/png",
-    ),
-    (
-        "background/03.png",
-        include_bytes!("../../../web-console/dist/background/03.png"),
-        "image/png",
-    ),
-    (
-        "background/04.png",
-        include_bytes!("../../../web-console/dist/background/04.png"),
-        "image/png",
-    ),
-    (
-        "background/05.png",
-        include_bytes!("../../../web-console/dist/background/05.png"),
-        "image/png",
-    ),
-    (
-        "background/06.png",
-        include_bytes!("../../../web-console/dist/background/06.png"),
-        "image/png",
-    ),
-    (
-        "background/07.png",
-        include_bytes!("../../../web-console/dist/background/07.png"),
-        "image/png",
-    ),
-    (
-        "background/08.png",
-        include_bytes!("../../../web-console/dist/background/08.png"),
-        "image/png",
-    ),
-    (
-        "background/09.png",
-        include_bytes!("../../../web-console/dist/background/09.png"),
-        "image/png",
+        "background/special.webp",
+        include_bytes!("../../../web-console/dist/background/special.webp"),
+        "image/webp",
     ),
 ];
 

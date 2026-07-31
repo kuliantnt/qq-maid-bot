@@ -33,9 +33,9 @@
 |---|---|---|
 | 方形几何 | `--console-radius` | 统一保持 0 圆角的框体语言 |
 | 轻层次 | `--console-shadow` | 仅用于浮动导航、认证门和 toast，不用于普通业务行 |
-| 背景网格 | `.console-background-grid` | 由 9 张固定顺序的装饰图片组成的 3×3 全屏背景 |
+| 背景网格 | `.console-background-grid` | 由单张 `special.webp` 拼图按 3×3 切片组成的全屏背景 |
 | 透明玻璃 | `--console-glass` / `--console-glass-raised` / `--console-glass-muted` | 页面组件的半透明填充，让背景图透出但保留文字对比度 |
-| 普通背景 | `.console-background--default` | 默认单张背景和 favicon；无需解锁 |
+| 无背景（默认） | — | 未选择任何背景时只呈现主题底色，不显示背景图；favicon 使用压缩后的 `default.png` |
 | 特殊背景 | `.console-background--special` | 通过浏览器控制台输入 `kuliantnt` 解锁的九宫格背景 |
 
 ### 规则
@@ -112,13 +112,13 @@
 - 不能为非交互元素添加无意义动画。
 
 页面进入使用一次 8px 的 `transform` + `opacity` + 极轻 `filter` 渐入；业务行、指标和主题选择只在 hover/focus 时以 transform 表达可操作或可扫描性。动画不改变布局，不使用背景装饰性循环动画。
-导航切换使用一次性中心扩散过渡：从 300px 中心图开始，以主题浅色玻璃模糊遮蔽内容区，遮蔽完成后切换页面并淡出；普通模式使用默认背景图，特殊模式按 01 到 09 循环中心图。初次加载不播放，减少认知噪音。
+导航切换使用一次性中心扩散过渡：从 300px 中心图开始，以主题浅色玻璃模糊遮蔽内容区，遮蔽完成后切换页面并淡出；默认（无背景）模式不显示中心图，特殊模式按 `special.webp` 拼图的 9 个切片循环中心图。初次加载不播放，减少认知噪音。
 
 文案规则：主视觉只保留标签、值、状态和下一步操作；安全保证不删除，改用短标签、`hint`、`aria` 或 `details` 保留在 DOM 中。认证、secret、CSRF、网络探测和本地主题范围的提示必须继续可发现。
 
 ## 7. Depth & Surface
 
-采用液态玻璃和双线框体的混合策略：半透明深色填充、背景模糊、轻微饱和度、上方内高光、下方内暗线。页面底层默认使用 `757576FFCEA8D39E6665C762DF3D24FC.png`；特殊模式使用 `.console-background-grid` 以固定的左上到右下顺序铺设 9 张正方形装饰图片。特殊模式由浏览器控制台输入 `kuliantnt` 解锁；认证后背景的权威状态来自服务端用户偏好（`background_file_ids`、`active_background_file_id`、`kuliantnt`），旧 Cookie 只允许在首次认证成功时一次性迁移后清理，不再作为持久化状态。背景层不可交互、不承载信息，内容组件通过 `--console-glass*` token 透出背景。输入框、编辑器、状态按钮和危险操作可以使用更高不透明度以维持可读性。组件不使用圆角，不用重阴影制造层次。边框结构固定为 1px 外线、1px 空隙、1px 内线。
+采用液态玻璃和双线框体的混合策略：半透明深色填充、背景模糊、轻微饱和度、上方内高光、下方内暗线。页面底层默认不显示背景图，只呈现主题底色；特殊模式使用 `.console-background-grid` 以固定的左上到右下顺序铺设单张 `special.webp` 拼图的 3×3 切片（原 9 张独立图合并压缩，减少包体积）。特殊模式由浏览器控制台输入 `kuliantnt` 解锁；认证后背景的权威状态来自服务端用户偏好（`background_file_ids`、`active_background_file_id`、`kuliantnt`），旧 Cookie 只允许在首次认证成功时一次性迁移后清理，不再作为持久化状态。背景层不可交互、不承载信息，内容组件通过 `--console-glass*` token 透出背景。输入框、编辑器、状态按钮和危险操作可以使用更高不透明度以维持可读性。组件不使用圆角，不用重阴影制造层次。边框结构固定为 1px 外线、1px 空隙、1px 内线。
 
 ## 8. Accessibility Constraints & Accepted Debt
 

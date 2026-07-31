@@ -8,26 +8,24 @@
     <link rel="icon" type="image/png" href="/console/background/default.png">
   </head>
   <body>
-    <div class="console-background console-background--default" aria-hidden="true">
-      <img class="console-background-default" src="/console/background/default.png" alt="" fetchpriority="high">
-    </div>
     <div class="console-background console-background--special" aria-hidden="true">
       <div class="console-background-grid">
-        <img data-background-src="/console/background/01.png" alt="">
-        <img data-background-src="/console/background/02.png" alt="">
-        <img data-background-src="/console/background/03.png" alt="">
-        <img data-background-src="/console/background/04.png" alt="">
-        <img data-background-src="/console/background/05.png" alt="">
-        <img data-background-src="/console/background/06.png" alt="">
-        <img data-background-src="/console/background/07.png" alt="">
-        <img data-background-src="/console/background/08.png" alt="">
-        <img data-background-src="/console/background/09.png" alt="">
+        <!-- 9 宫格使用同一张拼图，单元格通过 CSS background-position 显示对应切片 -->
+        <div class="console-background-grid-cell"></div>
+        <div class="console-background-grid-cell"></div>
+        <div class="console-background-grid-cell"></div>
+        <div class="console-background-grid-cell"></div>
+        <div class="console-background-grid-cell"></div>
+        <div class="console-background-grid-cell"></div>
+        <div class="console-background-grid-cell"></div>
+        <div class="console-background-grid-cell"></div>
+        <div class="console-background-grid-cell"></div>
       </div>
     </div>
     <div class="console-background console-background--custom" aria-hidden="true"></div>
     <div id="console-transition" class="console-transition" aria-hidden="true" hidden>
       <div class="console-transition-wash"></div>
-      <img id="console-transition-image" class="console-transition-image" src="/console/background/default.png" alt="">
+      <div id="console-transition-image" class="console-transition-image"></div>
     </div>
     <div id="console-toast" class="console-toast" role="status" aria-live="polite" hidden></div>
     <section id="auth-shell" class="auth-shell">

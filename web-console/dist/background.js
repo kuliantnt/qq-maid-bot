@@ -29,14 +29,8 @@ export function createBackgroundController(root, cookieDocument = typeof documen
     const apply = () => {
         root.dataset.background = current.activeFileId ? "custom" : current.mode;
         root.dataset.backgroundUnlocked = String(unlocked);
-        if (current.mode === "special" && typeof root.querySelectorAll === "function") {
-            for (const image of root.querySelectorAll("[data-background-src]")) {
-                if (image.getAttribute("src") === null)
-                    image.src = image.dataset.backgroundSrc ?? "";
-            }
-        }
-        // 自定义背景图通过 object URL 应用到独立的 custom 背景层；default 层在
-        // data-background="custom" 时由 CSS 隐藏，避免盖住用户上传的图片。
+        // 特殊九宫格由 CSS 从单张拼图切片渲染，无需 JS 设置图片源。
+        // 自定义背景图通过 object URL 应用到独立的 custom 背景层；非 custom 状态下由 CSS 隐藏。
         if (typeof root.querySelector === "function") {
             const customLayer = root.querySelector(".console-background--custom");
             if (customLayer)
@@ -121,7 +115,7 @@ export function createBackgroundController(root, cookieDocument = typeof documen
                 }
             }
             catch (cause) {
-                // 背景内容读取失败时回退默认背景；不清除旧 cookie，等待下次成功迁移。
+                // 背景内容读取失败时回退到默认（无背景）状态；不清除旧 cookie，等待下次成功迁移。
                 fallbackToDefault();
             }
         },
@@ -133,12 +127,16 @@ export function createBackgroundController(root, cookieDocument = typeof documen
             }
             clearLegacyBackgroundCookies(cookieDocument);
         },
+        // 默认（无背景）模式不提供过渡中心图，只保留主题清洗过渡；
+        // 特殊模式按 3×3 拼图（special.webp）的 9 个切片循环中心图。
+        // default.png 已压缩为 64×64，仅保留给 favicon。
         nextTransitionImage: () => {
             if (current.mode === "default" && current.activeFileId === null)
-                return "/console/background/default.png";
-            const image = `/console/background/${String(transitionIndex + 1).padStart(2, "0")}.png`;
+                return null;
+            const column = transitionIndex % 3;
+            const row = Math.floor(transitionIndex / 3);
             transitionIndex = (transitionIndex + 1) % 9;
-            return image;
+            return { url: "/console/background/special.webp", position: `${column * 50}% ${row * 50}%` };
         },
     };
     return controller;

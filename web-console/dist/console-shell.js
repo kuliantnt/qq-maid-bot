@@ -98,7 +98,17 @@ export function createConsoleNavigationShell(environment) {
         const needsSwitch = currentPageId !== page.id;
         const animated = needsSwitch && animate && !prefersReducedMotion() && transition !== null && image !== null;
         if (animated) {
-            image.src = backgroundController.nextTransitionImage();
+            // 默认（无背景）模式返回 null：只播主题清洗过渡、不显示中心图；
+            // 特殊模式返回拼图 URL + 切片位置，通过 CSS background 显示对应切片。
+            const transitionImage = backgroundController.nextTransitionImage();
+            if (transitionImage === null) {
+                image.style.backgroundImage = "none";
+                image.style.backgroundPosition = "";
+            }
+            else {
+                image.style.backgroundImage = `url("${transitionImage.url}")`;
+                image.style.backgroundPosition = transitionImage.position;
+            }
             transition.hidden = false;
             transition.classList.remove("is-running");
             void transition.offsetWidth;

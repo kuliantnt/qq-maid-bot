@@ -98,12 +98,12 @@ export function renderThemeSelector(target, controller, backgroundController, us
             input.checked = selected;
             input.closest("label")?.classList.toggle("console-theme-choice--selected", selected);
         }
-        backgroundStatus.textContent = backgroundController.isUnlocked()
-            ? mode === "special" ? "当前背景：特殊九宫格" : "当前背景：普通背景"
-            : "当前背景：普通背景；特殊背景需先解锁";
+        backgroundStatus.textContent = mode === "special"
+            ? backgroundController.isUnlocked() ? "当前背景：特殊九宫格" : "当前背景：特殊九宫格（未解锁）"
+            : "当前背景：无背景";
     };
     for (const option of [
-        { mode: "default", name: "普通背景", description: "默认单张背景图" },
+        { mode: "default", name: "无背景", description: "不显示背景，仅使用主题底色" },
         { mode: "special", name: "特殊九宫格", description: "需控制台解锁" },
     ]) {
         const label = document.createElement("label");

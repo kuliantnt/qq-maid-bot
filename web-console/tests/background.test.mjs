@@ -60,7 +60,7 @@ test("控制台解锁切换特殊背景并触发持久化 hook，不再写 cooki
   assert.equal(cookies.read(), "");
 });
 
-test("解锁后可以切回普通背景；服务端偏好 hydrate 恢复解锁状态", async () => {
+test("解锁后可以切回默认（无背景）；服务端偏好 hydrate 恢复解锁状态", async () => {
   const controller = createBackgroundController({ dataset: {} }, cookieDocument());
 
   controller.unlock();
@@ -75,15 +75,21 @@ test("解锁后可以切回普通背景；服务端偏好 hydrate 恢复解锁�
   assert.equal(refreshed.select("special"), "special");
 });
 
-test("普通背景过渡固定使用默认图，特殊背景按九张图片循环", () => {
+test("默认（无背景）模式不提供过渡中心图，特殊背景按拼图切片循环", () => {
   const cookies = cookieDocument(`${BACKGROUND_UNLOCK_COOKIE}=1; ${BACKGROUND_MODE_COOKIE}=special`);
   const root = { dataset: {} };
   const controller = createBackgroundController(root, cookies);
 
-  assert.equal(controller.nextTransitionImage(), "/console/background/01.png");
-  assert.equal(controller.nextTransitionImage(), "/console/background/02.png");
+  assert.deepEqual(controller.nextTransitionImage(), {
+    url: "/console/background/special.webp",
+    position: "0% 0%",
+  });
+  assert.deepEqual(controller.nextTransitionImage(), {
+    url: "/console/background/special.webp",
+    position: "50% 0%",
+  });
   controller.select("default");
-  assert.equal(controller.nextTransitionImage(), "/console/background/default.png");
+  assert.equal(controller.nextTransitionImage(), null);
 });
 
 test("自定义背景替换 object URL 时撤销旧 URL，读取失败不改变当前 URL", async () => {
@@ -186,9 +192,12 @@ test("认证后选择、解锁、过渡与自定义背景不再写入任何 cook
     assert.equal(cookies.read(), "");
 
     controller.unlock();
-    assert.equal(controller.nextTransitionImage(), "/console/background/01.png");
+    assert.deepEqual(controller.nextTransitionImage(), {
+      url: "/console/background/special.webp",
+      position: "0% 0%",
+    });
     controller.select("default");
-    assert.equal(controller.nextTransitionImage(), "/console/background/default.png");
+    assert.equal(controller.nextTransitionImage(), null);
     await controller.selectFile({ fileId: "custom", filename: "custom.png", url: "/custom" });
     assert.equal(cookies.read(), "");
   } finally {
@@ -197,7 +206,7 @@ test("认证后选择、解锁、过渡与自定义背景不再写入任何 cook
   }
 });
 
-test("hydrate 读取背景内容失败时回退默认背景、撤销 object URL 且不清理 cookie", async () => {
+test("hydrate 读取背景内容失败时回退默认（无背景）状态、撤销 object URL 且不清理 cookie", async () => {
   const cookies = cookieDocument(`${BACKGROUND_UNLOCK_COOKIE}=1`);
   const customLayer = { style: {} };
   const root = {

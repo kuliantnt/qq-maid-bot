@@ -17,6 +17,7 @@ function fakeElement() {
     href: "",
     className: "",
     textContent: "",
+    style: {},
     offsetWidth: 0,
     scrollTop: 0,
     classList: {
@@ -49,7 +50,11 @@ function fakeElement() {
   };
 }
 
-function createFakeShell({ hash = "", reducedMotion = false, nextImage = () => "/console/background/01.png" } = {}) {
+function createFakeShell({
+  hash = "",
+  reducedMotion = false,
+  nextImage = () => ({ url: "/console/background/special.webp", position: "0% 0%" }),
+} = {}) {
   const containers = CONSOLE_PAGES.map((page) => {
     const container = fakeElement();
     container.dataset.consolePage = page.id;
@@ -123,6 +128,7 @@ function createFakeShell({ hash = "", reducedMotion = false, nextImage = () => "
     containers,
     state,
     transition: byId.get("console-transition"),
+    image: byId.get("console-transition-image"),
     fireHashchange: () => {
       for (const listener of [...hashListeners]) listener();
     },
@@ -182,6 +188,19 @@ test("点击导航链接立即更新哈希，并在转换完成后设置 aria-cu
   assertPageShown(fake, "tools");
 });
 
+test("默认（无背景）模式过渡只播放清洗，不设置拼图中心图", async () => {
+  const fake = createFakeShell({ hash: "", nextImage: () => null });
+  const shell = createConsoleNavigationShell(fake.environment);
+  await shell.initialNavigation;
+
+  clickLink(fake, "tools");
+  await flushOne(fake);
+  await flushOne(fake);
+
+  assert.equal(fake.image.style.backgroundImage, "none", "无背景模式下不应设置中心图");
+  assertPageShown(fake, "tools");
+});
+
 test("转换期间连续导航只执行最后一次请求（合并快速点击）", async () => {
   const fake = createFakeShell({ hash: "" });
   const shell = createConsoleNavigationShell(fake.environment);
@@ -224,7 +243,7 @@ test("转换失败时释放转换锁，后续导航仍可执行", async () => {
     hash: "",
     nextImage: () => {
       if (failImage) throw new Error("转换图片加载失败");
-      return "/console/background/01.png";
+      return { url: "/console/background/special.webp", position: "0% 0%" };
     },
   });
   const shell = createConsoleNavigationShell(fake.environment);

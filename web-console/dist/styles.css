@@ -76,20 +76,29 @@
 html { scroll-behavior: smooth; }
 body { min-width: 320px; margin: 0; background: var(--paper); }
 .console-background { position: fixed; inset: 0; z-index: 0; overflow: hidden; background: linear-gradient(color-mix(in srgb, var(--console-dark) 20%, transparent), color-mix(in srgb, var(--console-dark) 20%, transparent)); pointer-events: none; }
-.console-background--default { display: grid; place-items: center; }
-.console-background-default { display: block; width: 900px; height: 900px; max-width: calc(100vw - 2rem); max-height: calc(100vh - 2rem); object-fit: contain; opacity: .72; filter: saturate(.82) contrast(.92); }
+/* 默认（未选择背景）不渲染任何背景图层，页面只呈现主题底色；
+   背景功能仅在用户显式选择特殊九宫格或上传自定义图片时启用。 */
 .console-background--special { display: none; }
 .console-background--custom { display: none; background-position: center; background-size: cover; }
 .console-background-grid { display: grid; width: 100%; height: 100%; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(0, 1fr)); opacity: .72; filter: saturate(.82) contrast(.92); }
-.console-background-grid img { display: block; width: 100%; height: 100%; min-width: 0; min-height: 0; object-fit: cover; }
-:root[data-background="special"] .console-background--default { display: none; }
+/* 9 宫格共用一张 special.webp 拼图：background-size 300% 让每个切片恰好占满一格，
+   nth-child 按 3×3 顺序定位对应区域（0% / 50% / 100%），减少包体只保留一张图。 */
+.console-background-grid-cell { display: block; width: 100%; height: 100%; min-width: 0; min-height: 0; background-image: url("/console/background/special.webp"); background-size: 300% 300%; background-repeat: no-repeat; }
+.console-background-grid-cell:nth-child(1) { background-position: 0% 0%; }
+.console-background-grid-cell:nth-child(2) { background-position: 50% 0%; }
+.console-background-grid-cell:nth-child(3) { background-position: 100% 0%; }
+.console-background-grid-cell:nth-child(4) { background-position: 0% 50%; }
+.console-background-grid-cell:nth-child(5) { background-position: 50% 50%; }
+.console-background-grid-cell:nth-child(6) { background-position: 100% 50%; }
+.console-background-grid-cell:nth-child(7) { background-position: 0% 100%; }
+.console-background-grid-cell:nth-child(8) { background-position: 50% 100%; }
+.console-background-grid-cell:nth-child(9) { background-position: 100% 100%; }
 :root[data-background="special"] .console-background--special { display: block; }
-:root[data-background="custom"] .console-background--default { display: none; }
 :root[data-background="custom"] .console-background--custom { display: block; }
 .console-transition { position: fixed; inset: 0; z-index: 35; overflow: hidden; pointer-events: none; }
 .console-transition[hidden] { display: none; }
 .console-transition-wash { position: absolute; inset: 0; background: color-mix(in srgb, var(--console-light) 72%, transparent); backdrop-filter: blur(22px) saturate(1.18); opacity: 0; clip-path: circle(150px at 50% 50%); }
-.console-transition-image { position: absolute; top: 50%; left: 50%; width: 300px; height: 300px; object-fit: contain; opacity: 0; transform: translate(-50%, -50%) scale(.88); filter: saturate(.88) contrast(.96); }
+.console-transition-image { position: absolute; top: 50%; left: 50%; width: 300px; height: 300px; background-image: url("/console/background/special.webp"); background-size: 300% 300%; background-repeat: no-repeat; opacity: 0; transform: translate(-50%, -50%) scale(.88); filter: saturate(.88) contrast(.96); }
 .console-transition.is-running .console-transition-wash { animation: console-transition-cover .768s cubic-bezier(.65, 0, .35, 1) forwards, console-transition-wash-out .896s ease-in .768s forwards; }
 .console-transition.is-running .console-transition-image { animation: console-transition-image-in .192s ease-out .096s forwards, console-transition-image-out .896s ease-in .768s forwards; }
 @keyframes console-transition-cover { from { opacity: 0; clip-path: circle(150px at 50% 50%); } 24% { opacity: 1; } to { opacity: 1; clip-path: circle(150vmax at 50% 50%); } }
