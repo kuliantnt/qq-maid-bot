@@ -67,6 +67,7 @@
 
 配置相关复合组件的行为契约见 `docs/INTERACTION_CONTRACTS.md`：
 
+- `BusinessConfigNav`：只负责业务域定位；runtime、Secret 与 Agent 保存来源在同一业务域内组合，不生成重复字段入口。
 - `SaveBar`：按配置域展示 dirty 数量、保存中、成功、待重启和错误。
 - `DirtyIndicator`：用文本和状态图标说明存在未保存修改。
 - `SecretField`：只处理当前内存输入；空白不修改，显式清除才发送 clear，成功后清空原文。

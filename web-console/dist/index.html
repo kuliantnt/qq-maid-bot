@@ -259,55 +259,26 @@
       </header>
 
       <section id="configuration" class="panel configuration-panel">
-        <section class="configuration-operation configuration-operation--connection" aria-labelledby="connection-test-heading">
-          <div class="configuration-operation-heading">
-            <div>
-              <p class="section-kicker">PROVIDER / READ-ONLY TEST</p>
-              <h3 id="connection-test-heading">Provider 连接测试</h3>
-            </div>
-            <span class="section-meta">不修改配置</span>
-          </div>
-          <div class="connection-test-row">
-            <label for="connection-provider">选择 Provider</label>
-            <select id="connection-provider">
-              <option value="openai">OpenAI</option>
-              <option value="deepseek">DeepSeek</option>
-              <option value="bigmodel">BigModel</option>
-              <option value="gemini">Gemini</option>
-              <option value="mimo">MiMo</option>
-              <option value="opencode">OpenCode 官方模型目录（Zen + Go）</option>
-            </select>
-            <button id="test-provider-connection" class="secondary" type="button">受控测试</button>
-          </div>
-          <p class="hint">连接测试只请求公网 HTTPS 模型列表，不发送聊天内容、不修改配置；OpenCode 固定分别探测 Zen 与 Go 官方匿名目录，不验证卡片中的自定义 Base URL 或 API Key。自定义兼容地址会拒绝内网目标并固定到本次已校验的 DNS 地址。</p>
-          <p id="connection-test-result" class="status-message" role="status"></p>
-        </section>
-
-        <div id="configuration-primary-tabs" class="configuration-primary-tabs" role="tablist" aria-label="配置主选项"></div>
-        <div id="configuration-secondary-tabs" class="configuration-secondary-tabs" role="tablist" aria-label="配置次选项"></div>
-        <div id="configuration-tab-panels">
-          <section id="configuration-panel-runtime" class="configuration-tabpanel" role="tabpanel" aria-labelledby="configuration-primary-runtime">
-            <p class="hint">普通值写入受管 runtime.toml。已登记的 .env 值可作为首次启动配置，WebUI 保存后由受管值优先；所有保存均以 API 返回的 revision 和持久化结果为准。</p>
-            <div id="public-config-fields" class="grouped-config-grid"></div>
-            <button id="save-public-config" type="button">保存普通配置</button>
-          </section>
-          <section id="configuration-panel-secrets" class="configuration-tabpanel" role="tabpanel" aria-labelledby="configuration-primary-secrets" hidden>
-            <p class="hint">加载时不回传原文；留空表示不修改。QQ 等关联凭据应在同一次保存中完整填写。显式清除会影响依赖该凭据的功能。</p>
-            <div id="secret-config-fields" class="grouped-config-grid"></div>
-            <button id="save-secret-config" class="configuration-danger-action" type="button">保存敏感配置</button>
-          </section>
-          <section id="configuration-panel-agent" class="configuration-tabpanel" role="tabpanel" aria-labelledby="configuration-primary-agent" hidden>
-            <p class="hint">结构化修改现有 agent.toml；OpenCode/Tavily Key 只保存在安全配置中心。候选模型用英文逗号分隔，保存前执行与正式启动一致的 schema、引用和 Provider 预检。</p>
-            <div id="agent-config-fields" class="config-grid"></div>
-            <button id="save-agent-config" type="button">保存 Agent 策略</button>
-          </section>
-          <section id="configuration-panel-interface" class="configuration-tabpanel" role="tabpanel" aria-labelledby="configuration-primary-interface" hidden>
-            <p class="hint">主题预设保留在当前浏览器；登录后自定义颜色与背景会保存到当前管理员的用户偏好。</p>
-            <div class="configuration-content-group" data-configuration-group="theme" data-configuration-primary="interface">
+        <nav id="configuration-business-tabs" class="configuration-business-tabs" role="tablist" aria-label="配置业务分组"></nav>
+        <p id="configuration-business-description" class="configuration-business-description"></p>
+        <div id="configuration-business-content" class="configuration-business-content" role="tabpanel">
+          <div id="public-config-fields" class="configuration-source-fragment grouped-config-grid"></div>
+          <div id="secret-config-fields" class="configuration-source-fragment grouped-config-grid"></div>
+          <div id="agent-config-fields" class="configuration-source-fragment config-grid"></div>
+          <section class="configuration-content-group" data-configuration-group="system-security" data-configuration-source="interface">
+            <section class="config-field-group">
+              <h3>控制台界面</h3>
+              <p class="config-field-group-hint">主题预设保留在当前浏览器；登录后自定义颜色与背景会保存到当前管理员的用户偏好。</p>
               <div id="console-theme-selector" class="grouped-config-grid"></div>
-            </div>
+            </section>
           </section>
         </div>
+        <div class="configuration-save-actions" aria-label="配置保存操作">
+          <button id="save-public-config" type="button">保存普通配置</button>
+          <button id="save-secret-config" class="configuration-danger-action" type="button">保存敏感配置</button>
+          <button id="save-agent-config" type="button">保存 Agent 策略</button>
+        </div>
+        <p class="hint configuration-save-hint">普通字段失焦后自动保存；Secret 留空不修改、清除必须显式选择。所有写入继续使用服务端 revision，冲突不会自动覆盖。</p>
         <p id="configuration-result" class="status-message" role="status"></p>
       </section>
       </div>

@@ -64,10 +64,9 @@ saved + pending_restart -> pending_restart
 
 Agent 使用 `PATCH /api/v1/console/configuration/agent`，所有变更共享 agent revision。
 
-- Provider、知识检索、联网搜索、模型路线和 scene/tool whitelist 分组展示。
+- Provider、知识检索、联网搜索、模型路线和 scene/tool whitelist 按用户业务场景分组展示。
 - 默认保存整个 Agent 草稿，但只生成有变化的结构化 action。
 - 私聊和群聊工具白名单可以独立保存；独立保存成功后只更新该 scene 的 baseline。
-- Provider 连接测试不是保存动作；它读取当前解析环境并独立显示结果。
 - Agent 保存成功后，如果 agent snapshot 标记 pending restart，显示待重启数量和受影响分组。
 
 ## 4. 密钥添加、替换和清除
@@ -121,7 +120,7 @@ Agent 使用 `PATCH /api/v1/console/configuration/agent`，所有变更共享 ag
 
 `配置已被其他操作修改，未覆盖服务器版本。请比较本地修改和服务器当前值。`
 
-## 6. 校验、连接测试和重启
+## 6. 校验和重启
 
 ### 配置校验
 
@@ -133,17 +132,6 @@ Agent 使用 `PATCH /api/v1/console/configuration/agent`，所有变更共享 ag
 - 失败时定位到字段或配置组。
 
 文案：`配置校验通过，未执行外部网络请求` 或 `配置未通过启动预检，未保存任何变更`。
-
-### Provider 连接测试
-
-`POST /configuration/test-connection` 是独立动作：
-
-- 只测试受控 HTTPS `/models` 探测。
-- 不修改配置。
-- 不代表聊天请求、模型生成或所有凭据均可用。
-- OpenCode 结果只表示官方匿名目录可达。
-
-测试期间按钮显示 `测试中…`，结果同时显示分类和安全说明。
 
 ### 服务重启
 

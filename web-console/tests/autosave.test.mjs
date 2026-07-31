@@ -44,6 +44,8 @@ function defaultFields() {
   return [
     makeField({ key: "delivery.tts.qwen_model", savedValue: "model-a" }),
     makeField({ key: "bootstrap.listen_host", savedValue: "0.0.0.0" }),
+    makeField({ key: "platform.qq_official.enabled", valueType: "boolean", savedValue: true }),
+    makeField({ key: "features.todo.daily_reminder_enabled", valueType: "boolean", savedValue: false }),
     makeField({
       key: "provider.openai.api_key",
       sensitivity: "secret",
@@ -57,6 +59,37 @@ function defaultFields() {
   ];
 }
 
+function agentDocument() {
+  return {
+    providers: {},
+    knowledge: { mode: "preflight", embedding: { enabled: false, cache_dir: "cache/knowledge-embedding" } },
+    model_routes: {
+      private_main: { candidates: ["openai:gpt-test"] },
+      group_main: { candidates: ["openai:gpt-test"] },
+      aux: { candidates: ["openai:gpt-test"] },
+    },
+    tools: {
+      web_search: {
+        backend: "provider_native",
+        max_results: 5,
+        search_depth: "basic",
+        topic: "general",
+        connect_timeout_seconds: 10,
+        first_response_timeout_seconds: 30,
+        total_timeout_seconds: 60,
+        routes: {
+          private_search: { model: "openai:gpt-test" },
+          group_search: { model: "openai:gpt-test" },
+        },
+      },
+    },
+    scenes: {
+      private: { tool_calling_enabled: true, enabled_tools: [] },
+      group: { tool_calling_enabled: false, enabled_tools: [] },
+    },
+  };
+}
+
 function setupEnvironment({ slowRuntime = false, slowSecrets = false } = {}) {
   const fake = createFakeDom();
   installDomGlobals(fake);
@@ -65,18 +98,17 @@ function setupEnvironment({ slowRuntime = false, slowSecrets = false } = {}) {
 
   const configuration = document.registerStaticId("configuration", "section");
   const summary = document.registerStaticId("configuration-summary", "div");
-  const panels = {
-    runtime: document.registerStaticId("configuration-panel-runtime", "section"),
-    secrets: document.registerStaticId("configuration-panel-secrets", "section"),
-    agent: document.registerStaticId("configuration-panel-agent", "section"),
-    interface: document.registerStaticId("configuration-panel-interface", "section"),
-  };
+  const businessTabs = document.registerStaticId("configuration-business-tabs", "nav");
+  const businessDescription = document.registerStaticId("configuration-business-description", "p");
+  const businessContent = document.registerStaticId("configuration-business-content", "div");
   const publicFields = document.registerStaticId("public-config-fields", "div");
   const secretFields = document.registerStaticId("secret-config-fields", "div");
   const agentFields = document.registerStaticId("agent-config-fields", "div");
   const themeSelector = document.registerStaticId("console-theme-selector", "div");
-  const primaryTabs = document.registerStaticId("configuration-primary-tabs", "div");
-  const secondaryTabs = document.registerStaticId("configuration-secondary-tabs", "div");
+  const interfaceGroup = document.createElement("section");
+  interfaceGroup.dataset.configurationGroup = "system-security";
+  interfaceGroup.dataset.configurationSource = "interface";
+  interfaceGroup.append(themeSelector);
   const result = document.registerStaticId("configuration-result", "p");
   const toast = document.registerStaticId("console-toast", "div");
   const savePublic = document.registerStaticId("save-public-config", "button");
@@ -84,15 +116,10 @@ function setupEnvironment({ slowRuntime = false, slowSecrets = false } = {}) {
   const saveAgent = document.registerStaticId("save-agent-config", "button");
   const restart = document.registerStaticId("restart-service", "button");
   const validate = document.registerStaticId("validate-config", "button");
-  const testProvider = document.registerStaticId("test-provider-connection", "button");
-  const connectionProvider = document.registerStaticId("connection-provider", "select");
 
-  configuration.append(summary, panels.runtime, panels.secrets, panels.agent, panels.interface);
-  configuration.append(result, toast, restart, validate, testProvider, connectionProvider);
-  panels.runtime.append(publicFields, savePublic);
-  panels.secrets.append(secretFields, saveSecret);
-  panels.agent.append(agentFields, saveAgent);
-  panels.interface.append(themeSelector);
+  businessContent.append(publicFields, secretFields, agentFields, interfaceGroup);
+  configuration.append(summary, businessTabs, businessDescription, businessContent);
+  configuration.append(savePublic, saveSecret, saveAgent, result, toast, restart, validate);
 
   const state = {
     revision: "rev-1",
@@ -118,7 +145,16 @@ function setupEnvironment({ slowRuntime = false, slowSecrets = false } = {}) {
     configuration: {
       revision: state.revision,
       file_exists: true,
-      agent: {},
+      agent: {
+        revision: "agent-1",
+        file_exists: true,
+        source: "agent_toml",
+        editable: true,
+        read_only: false,
+        pending_restart: false,
+        saved_value: agentDocument(),
+        running_value: agentDocument(),
+      },
       fields: state.fields,
     },
     registered_tools: [],
@@ -243,6 +279,29 @@ function runtimePatches(requests) {
 function secretPatches(requests) {
   return requests.filter((request) => request.method === "PATCH" && request.url.endsWith("/secrets"));
 }
+
+test("配置中心按八个业务场景渲染导航，默认展示模型与供应商", async () => {
+  const env = setupEnvironment();
+  try {
+    await env.initialize();
+    const tabs = env.document.getElementById("configuration-business-tabs").children;
+    assert.deepEqual(tabs.map((tab) => tab.textContent), [
+      "模型与供应商",
+      "模型路由",
+      "联网与工具",
+      "记忆与知识库",
+      "回复与语音",
+      "平台接入",
+      "待办与通知",
+      "系统与安全",
+    ]);
+    assert.equal(tabs[0].getAttribute("aria-selected"), "true");
+    assert.equal(env.document.getElementById("config-provider-openai-api_key").value, "");
+    assert.equal(env.document.getElementById("config-delivery-tts-qwen_model").value, "model-a");
+  } finally {
+    env.dispose();
+  }
+});
 
 test("慢速保存字段 A 时，字段 B 的未保存输入在 A 保存完成后仍然存在并可继续保存", async () => {
   const env = setupEnvironment({ slowRuntime: true });
@@ -459,6 +518,81 @@ test("自动保存队列按 revision 顺序串行执行，慢保存后的新修�
     assert.deepEqual(patches[1].body.changes, [
       { action: "set", key: "delivery.tts.qwen_model", value: "v2" },
     ]);
+  } finally {
+    env.dispose();
+  }
+});
+
+test("显式清除 Secret 使用字段 revision，成功后不回填原文", async () => {
+  const env = setupEnvironment();
+  try {
+    await env.initialize();
+    const clear = env.document.querySelector('input[data-clear-key="provider.openai.api_key"]');
+    clear.checked = true;
+    env.fireFocusOut(clear);
+    await waitFor(() => env.savedCounter.count === 1, "Secret 清除应完成");
+    await flushMicrotasks();
+
+    assert.deepEqual(secretPatches(env.requests)[0].body.changes, [{
+      action: "clear",
+      key: "provider.openai.api_key",
+      expected_revision: "sec-1",
+    }]);
+    assert.equal(env.document.getElementById("config-provider-openai-api_key").value, "");
+    assert.equal(
+      env.state.fields.find((field) => field.key === "provider.openai.api_key").configured,
+      false,
+    );
+  } finally {
+    env.dispose();
+  }
+});
+
+test("revision 冲突不自动重试，保留用户输入并展示冲突状态", async () => {
+  const env = setupEnvironment();
+  try {
+    await env.initialize();
+    const input = env.document.getElementById("config-delivery-tts-qwen_model");
+    input.value = "conflicting-model";
+    env.state.revision = "rev-2";
+    env.fireFocusOut(input);
+    await waitFor(() => runtimePatches(env.requests).length === 1, "冲突请求应已发出");
+    await flushMicrotasks();
+
+    assert.equal(env.savedCounter.count, 0);
+    assert.equal(runtimePatches(env.requests).length, 1, "冲突不能自动重试");
+    assert.equal(input.value, "conflicting-model", "失败时保留当前输入");
+    assert.match(env.document.getElementById("configuration-result").textContent, /配置文件已被其他操作修改/);
+  } finally {
+    env.dispose();
+  }
+});
+
+test("切换业务分组只改变可见性，保存当前字段不会清空隐藏字段", async () => {
+  const env = setupEnvironment();
+  try {
+    await env.initialize();
+    const platformTab = env.document.getElementById("configuration-business-platforms");
+    const click = platformTab.listeners.get("click")[0];
+    click({});
+    const ttsGroup = env.document.getElementById("config-delivery-tts-qwen_model").closest("[data-configuration-group]");
+    assert.equal(ttsGroup.hidden, true);
+
+    const platform = env.document.getElementById("config-platform-qq_official-enabled");
+    platform.checked = false;
+    env.fireFocusOut(platform);
+    await waitFor(() => env.savedCounter.count === 1, "平台字段保存应完成");
+    await flushMicrotasks();
+
+    assert.deepEqual(runtimePatches(env.requests)[0].body.changes, [{
+      action: "set",
+      key: "platform.qq_official.enabled",
+      value: false,
+    }]);
+    assert.equal(
+      env.state.fields.find((field) => field.key === "delivery.tts.qwen_model").saved_value,
+      "model-a",
+    );
   } finally {
     env.dispose();
   }

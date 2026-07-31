@@ -70,4 +70,4 @@ git diff --exit-code -- web-console/dist
 | [INTERACTION_CONTRACTS.md](docs/INTERACTION_CONTRACTS.md) | 配置保存、修改、冲突、密钥和重启交互协议 |
 | [ADDING_A_PAGE.md](ADDING_A_PAGE.md) | 新增页面、组件、主题和 API 消费者的步骤 |
 
-当前目标信息架构包含 Overview、Platforms、Agent、Configuration、Storage、Tools 六个产品领域。现有生产源码仍是单页分区，Agent 和 Tools 在迁移完成前分别作为配置策略和工具区块，不创建假导航页面。
+当前顶层信息架构包含 Overview、Platforms、Todo、Configuration、Storage、Tools。Configuration 在原页面内按模型与供应商、模型路由、联网与工具、记忆与知识库、回复与语音、平台接入、待办与通知、系统与安全组织；runtime、Secret 和 Agent 只是保存边界，不再作为用户的主导航结构。

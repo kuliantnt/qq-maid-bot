@@ -99,7 +99,7 @@
 - **Overview signal board**：`StatusCard` 作为唯一视觉焦点；`MetricCard` 组成紧凑指标 rail；Provider 与 upstream 作为 edge readout。数据模块可 hover 提升 2px，表示可扫描的交互层次。
 - **Platform identity / capability matrix**：平台状态使用动态 table body 保持 API 兼容，桌面端以身份行呈现，窄屏转为逐行 card；能力矩阵保留方向与能力语义，但视觉上与平台状态分离。
 - **Storage resource list**：`#storage-body` 保持 table renderer 和移动 card fallback；路径使用 mono metadata，状态与 schema/migration 作为同一资源行的健康信号。
-- **Configuration workbench**：顶部为校验、摘要和重启后的控制 strip；连接测试紧随其后；普通、敏感、Agent、Interface 四区使用主选项和动态次选项组成的 tab workbench，单次只显示选中的配置块。安全提示仍在 DOM 中，只减少其对主流程的占屏。
+- **Configuration workbench**：顶部为校验、摘要和重启后的控制 strip；主体按模型与供应商、模型路由、联网与工具、记忆与知识库、回复与语音、平台接入、待办与通知、系统与安全切换。runtime、Secret、Agent 与 Interface 仍是内部保存来源，但不作为用户主导航；单次只显示当前业务域的配置卡片。
 - **MarkdownEditor**：左侧编辑、右侧后端清理预览。安全预览标签与“后端清理结果”始终可见，编辑器获得主导宽度。
 
 新页面只组合已有组件。新组件只有在至少两个页面需要相同结构时才进入 registry。
@@ -115,7 +115,7 @@
 页面进入使用一次 8px 的 `transform` + `opacity` + 极轻 `filter` 渐入；业务行、指标和主题选择只在 hover/focus 时以 transform 表达可操作或可扫描性。动画不改变布局，不使用背景装饰性循环动画。
 导航切换使用一次性中心扩散过渡：从 300px 中心图开始，以主题浅色玻璃模糊遮蔽内容区，遮蔽完成后切换页面并淡出；默认（无背景）模式不显示中心图，特殊模式按 `special.webp` 拼图的 9 个切片循环中心图。初次加载不播放，减少认知噪音。
 
-文案规则：主视觉只保留标签、值、状态和下一步操作；安全保证不删除，改用短标签、`hint`、`aria` 或 `details` 保留在 DOM 中。认证、secret、CSRF、网络探测和本地主题范围的提示必须继续可发现。
+文案规则：主视觉只保留标签、值、状态和下一步操作；安全保证不删除，改用短标签、`hint`、`aria` 或 `details` 保留在 DOM 中。认证、secret、CSRF、本地预检和本地主题范围的提示必须继续可发现。
 
 ## 7. Depth & Surface
 
@@ -126,7 +126,7 @@
 - 目标 WCAG 2.2 AA。
 - 所有底部导航项可键盘访问并暴露 `aria-current`。
 - 主题选择使用按钮或 radio-like 控件，并暴露当前选择。
-- Configuration workbench 的主、次选项使用真实按钮、`tablist`/`tab`/`tabpanel` 语义、`aria-selected`、`tabindex` 与左右/Home/End/Enter/Space 键盘行为；重新渲染后恢复仍然可用的选择。
+- Configuration workbench 的业务选项使用真实按钮、`tablist`/`tab`/`tabpanel` 语义、`aria-selected`、`tabindex` 与左右/Home/End/Enter/Space 键盘行为；重新渲染后恢复仍然可用的选择。
 - 表格在窄屏必须提供可读的替代布局，不能让主任务依赖横向滚动。
 - 异步请求必须有加载、成功、空态和错误状态。
 - secret、session、CSRF 和主题以外的用户数据不得写入 localStorage。

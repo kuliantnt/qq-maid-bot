@@ -250,27 +250,21 @@ tbody tr:hover { transform: translateX(3px); filter: brightness(1.08); }
 .configuration-page-actions button { padding-block: .52rem; }
 .configuration-page-note { grid-column: 1; margin: 0; font-size: .7rem; }
 .configuration-panel { padding: var(--console-space-4); }
-.configuration-operation { margin-top: 0; padding: var(--console-space-3) var(--console-space-4); border: 1px solid var(--line); background: var(--console-glass-raised); }
-.configuration-operation--connection { border-left: 3px solid var(--console-accent); }
-.configuration-operation-heading { display: flex; align-items: baseline; justify-content: space-between; gap: var(--console-space-4); }
-.connection-test-row { display: grid; grid-template-columns: auto minmax(12rem, 19rem) auto; align-items: center; gap: .6rem; margin-top: .65rem; }
-.connection-test-row label { margin: 0; color: var(--ink); font-size: .75rem; font-weight: 700; }
-.configuration-operation .hint { max-width: 68rem; margin-top: .55rem; font-size: .69rem; }
-.configuration-operation .status-message { margin: .3rem 0 0; }
-.configuration-primary-tabs, .configuration-secondary-tabs { display: flex; gap: .35rem; margin-top: var(--console-space-4); overflow-x: auto; scrollbar-width: thin; }
-.configuration-secondary-tabs { margin-top: .35rem; padding-bottom: .15rem; }
+.configuration-business-tabs { display: grid; grid-template-columns: repeat(4, minmax(9rem, 1fr)); gap: .4rem; overflow-x: auto; scrollbar-width: thin; }
 .configuration-tab { position: relative; flex: 0 0 auto; min-height: 2.75rem; padding: .55rem .8rem; border: 1px solid var(--line); border-bottom-color: var(--console-line-inner); background: var(--console-glass-muted); color: var(--muted); text-align: left; white-space: nowrap; transition: transform .16s ease, opacity .16s ease, background .2s ease, border-color .2s ease, color .2s ease; }
-.configuration-primary-tabs .configuration-tab { min-width: 8rem; color: var(--ink); font-weight: 750; }
-.configuration-secondary-tabs .configuration-tab { min-height: 2.35rem; padding-block: .4rem; font-size: .72rem; }
+.configuration-business-tabs .configuration-tab { min-width: 9rem; color: var(--ink); font-weight: 750; }
 .configuration-tab:hover { background: var(--console-accent-soft); color: var(--ink); }
 .configuration-tab[aria-selected="true"] { border-color: var(--console-accent-strong); background: var(--console-accent-soft); color: var(--accent-strong); }
 .configuration-tab[aria-selected="true"]::after { content: ""; position: absolute; right: .55rem; bottom: -.15rem; left: .55rem; height: 2px; background: var(--accent); }
-.configuration-tabpanel { min-width: 0; margin-top: var(--console-space-4); padding: var(--console-space-4) .7rem .7rem; border: 1px solid var(--line); background: var(--console-glass-raised); overflow: hidden; transition: transform .24s ease, opacity .24s ease; }
-.configuration-tabpanel[hidden] { display: none; }
-.configuration-content-group { min-width: 0; }
-.configuration-tabpanel > .hint { max-width: 50rem; margin: 0 0 .6rem; font-size: .69rem; }
-.configuration-tabpanel > button { margin: 0; }
-.config-grid, .grouped-config-grid { display: grid; gap: .55rem; padding: .65rem 0; }
+.configuration-business-description { min-height: 1.3rem; margin: .65rem .1rem 0; color: var(--muted); font-size: .72rem; }
+.configuration-business-content { display: grid; min-width: 0; gap: .8rem; margin-top: .45rem; padding: var(--console-space-4) .7rem; border: 1px solid var(--line); background: var(--console-glass-raised); overflow: hidden; }
+.configuration-source-fragment { display: contents; }
+.configuration-content-group { display: grid; min-width: 0; gap: .7rem; }
+.configuration-content-group[hidden] { display: none; }
+.configuration-save-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .75rem; }
+.configuration-save-actions button[hidden] { display: none; }
+.configuration-save-hint { max-width: 58rem; margin: .55rem 0 0; font-size: .69rem; }
+.config-grid, .grouped-config-grid { display: grid; gap: .55rem; padding: 0; }
 .config-field-group { display: grid; min-width: 0; gap: .45rem; }
 .config-field-group h3 { padding: 0 .1rem; color: var(--muted); font-size: .7rem; letter-spacing: .06em; }
 .config-field-group-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; }
@@ -301,6 +295,9 @@ tbody tr:hover { transform: translateX(3px); filter: brightness(1.08); }
 .provider-card details summary { padding: .5rem .6rem; color: var(--muted); font-size: .68rem; }
 .provider-card details .provider-field { padding: 0 .6rem; }
 .provider-card-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .7rem; }
+.preserved-provider-list { margin-top: .7rem; padding: .7rem; border: 1px dashed var(--line); background: var(--console-glass-muted); }
+.preserved-provider-list .hint { margin: .25rem 0 .45rem; }
+.preserved-provider-list ul { display: grid; gap: .3rem; margin: 0; padding-left: 1.15rem; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .68rem; overflow-wrap: anywhere; }
 .route-example-list { display: grid; gap: .5rem; }
 .route-example-list > div { display: grid; grid-template-columns: minmax(12rem, 1fr) auto; align-items: center; gap: .5rem; padding: .6rem; border: 1px solid var(--line); background: var(--console-glass-raised); }
 .route-example-list code { overflow-wrap: anywhere; color: var(--console-accent-strong); font-size: .68rem; }
@@ -447,8 +444,9 @@ textarea { width: 100%; min-height: 25rem; flex: 1; resize: vertical; padding: v
   .configuration-page-actions button { width: 100%; }
   .configuration-page-note { grid-column: auto; }
   .configuration-panel { padding: var(--console-space-3); }
-  .connection-test-row { grid-template-columns: 1fr; align-items: stretch; }
-  .connection-test-row select, .connection-test-row button { width: 100%; }
+  .configuration-business-tabs { display: flex; }
+  .configuration-business-content { padding: var(--console-space-3); }
+  .configuration-save-actions button { width: 100%; }
   .config-row { grid-template-columns: 1fr; }
   .route-example-list > div { grid-template-columns: 1fr; }
   .markdown-editor, .markdown-preview { min-height: 0; padding: var(--console-space-3); }

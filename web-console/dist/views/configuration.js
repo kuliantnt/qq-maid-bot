@@ -1,4 +1,4 @@
-import { ConsoleApiError, fetchConfiguration, requestRestart, testProviderConnection, updateAgentConfiguration, updateRuntimeConfiguration, updateSecretConfiguration, validateConfiguration, } from "../api.js";
+import { ConsoleApiError, fetchConfiguration, requestRestart, updateAgentConfiguration, updateRuntimeConfiguration, updateSecretConfiguration, validateConfiguration, } from "../api.js";
 import { agentToolOptions, selectedAgentToolNames } from "../agent-tools.js";
 import { togglePasswordReveal } from "../dom.js";
 import { openCodeProviderChange, readOpenCodeProviders, renderOpenCodeProviders, renderOpenCodeRouteHints, } from "../opencode-providers.js";
@@ -63,22 +63,36 @@ const FIELD_LABELS = {
     "bootstrap.agent_config_file": "Agent 配置文件",
     "bootstrap.ops_config_file": "运维配置文件",
 };
-const FIELD_GROUPS = [
-    { label: "命令设置", prefix: "command." },
+const BUSINESS_GROUPS = [
+    { id: "models-providers", label: "模型与供应商", description: "配置内置模型服务、自定义 Provider 及对应凭据。" },
+    { id: "model-routing", label: "模型路由", description: "为私聊、群聊、辅助任务和搜索场景设置候选模型链。" },
+    { id: "online-tools", label: "联网与工具", description: "管理联网搜索、天气服务、Tool Calling 与场景白名单。" },
+    { id: "memory-knowledge", label: "记忆与知识库", description: "管理记忆整理、Session Dream 和本地知识检索策略。" },
+    { id: "replies-voice", label: "回复与语音", description: "设置聊天命令入口和最终回复的语音能力。" },
+    { id: "platforms", label: "平台接入", description: "配置 QQ 官方、OneBot 11 与微信服务号入口。" },
+    { id: "tasks-notifications", label: "待办与通知", description: "管理 Todo 每日提醒、RSS 订阅和翻译开关。" },
+    { id: "system-security", label: "系统与安全", description: "查看控制台、安全边界、只读启动参数和界面偏好。" },
+    { id: "advanced", label: "高级兼容配置", description: "保留当前版本尚未归类的受管字段，不会在其他字段保存时删除。" },
+];
+const FIELD_SECTIONS = [
+    { business: "replies-voice", label: "命令交互", prefix: "command." },
     {
+        business: "replies-voice",
         label: "语音回复",
         prefix: "delivery.tts.",
         description: "修改后需要重启。Web 控制台只配置全局 TTS 能力；Provider 关闭或千问 API Key 未配置时，/语音 开启会被拒绝。私聊或群聊是否启用仍通过 /语音 开启、/语音 关闭管理。关闭 Provider 不会清除已保存的千问配置，也可以提前填写。",
     },
-    { label: "模型服务", prefix: "provider." },
-    { label: "QQ 官方入口", prefix: "platform.qq_official." },
-    { label: "OneBot 11 入口", prefix: "platform.onebot11." },
-    { label: "微信服务号入口", prefix: "platform.wechat_service." },
-    { label: "功能开关", prefix: "features." },
-    { label: "联网搜索", prefix: "tools.web_search." },
-    { label: "天气服务", prefix: "weather." },
-    { label: "Web 控制台", prefix: "console." },
-    { label: "基础运行", prefix: "bootstrap." },
+    { business: "models-providers", label: "内置模型服务", prefix: "provider." },
+    { business: "platforms", label: "QQ 官方入口", prefix: "platform.qq_official." },
+    { business: "platforms", label: "OneBot 11 入口", prefix: "platform.onebot11." },
+    { business: "platforms", label: "微信服务号入口", prefix: "platform.wechat_service." },
+    { business: "tasks-notifications", label: "RSS 订阅", prefix: "features.rss." },
+    { business: "memory-knowledge", label: "记忆策略", prefix: "features.memory." },
+    { business: "tasks-notifications", label: "Todo 提醒", prefix: "features.todo." },
+    { business: "online-tools", label: "联网搜索凭据", prefix: "tools.web_search." },
+    { business: "online-tools", label: "天气服务", prefix: "weather." },
+    { business: "system-security", label: "Web 控制台", prefix: "console." },
+    { business: "system-security", label: "基础运行（只读）", prefix: "bootstrap." },
 ];
 const TTS_PROVIDER_OPTIONS = [
     ["disabled", "关闭"],
@@ -92,7 +106,12 @@ export function configFieldLabel(key) {
     return FIELD_LABELS[key] ?? key;
 }
 export function configFieldGroupLabel(key) {
-    return FIELD_GROUPS.find((group) => key.startsWith(group.prefix))?.label ?? "其他配置";
+    const business = configurationBusinessGroup(key);
+    return BUSINESS_GROUPS.find((group) => group.id === business)?.label ?? "高级兼容配置";
+}
+/** 配置键只在一个业务域出现；未知或后续新增字段进入高级兼容区，不会被静默遗漏。 */
+export function configurationBusinessGroup(key) {
+    return FIELD_SECTIONS.find((section) => key.startsWith(section.prefix))?.business ?? "advanced";
 }
 /** 未识别的历史 Provider 必须原样保留，避免页面加载或保存时静默改成受支持值。 */
 export function ttsProviderOptions(currentValue) {
@@ -124,24 +143,10 @@ const AGENT_ROUTE_LABELS = {
     private_search: "私聊搜索路线",
     group_search: "群聊搜索路线",
 };
-const PRIMARY_NAVIGATION = [
-    { id: "runtime", label: "普通配置", description: "runtime.toml" },
-    { id: "secrets", label: "敏感凭据", description: "高风险" },
-    { id: "agent", label: "Agent 策略", description: "可能需重启" },
-    { id: "interface", label: "Interface / Theme", description: "local-only" },
-];
-const SECONDARY_LABELS = {
-    knowledge: "知识检索",
-    "web-search": "联网搜索",
-    providers: "模型 Provider",
-    routes: "模型路线",
-    "private-scene": "私聊场景",
-    "group-scene": "群聊场景",
-    theme: "主题",
-};
 /** 仅测试使用：重置自动保存绑定与保存队列等模块级状态，避免多个测试文档互相泄漏。 */
 export function resetConfigurationStateForTests() {
     current = null;
+    selectedBusinessGroup = "models-providers";
     autosaveBound = false;
     queuedFocusRestoreId = null;
     secretSavedStates.clear();
@@ -223,7 +228,7 @@ export function webSearchConfigChange(config) {
 }
 export function tavilyCredentialNotice(backend, configured) {
     return backend === "tavily" && !configured
-        ? "已选择 Tavily，但 Tavily API Key 尚未配置。请先在“敏感凭据”中保存 Key，重启后搜索才可用。"
+        ? "已选择 Tavily，但 Tavily API Key 尚未配置。请先在“联网与工具”中保存 Key，重启后搜索才可用。"
         : "";
 }
 export function webSearchRouteChanges(savedRoutes, formRoutes) {
@@ -242,7 +247,7 @@ let currentThemeController = null;
 let currentBackgroundController = null;
 let currentUserDataController = null;
 let toastTimer;
-let configurationNavigation = { primary: "runtime", secondary: {} };
+let selectedBusinessGroup = "models-providers";
 let autosaveBound = false;
 let queuedFocusRestoreId = null;
 let saveQueue = Promise.resolve(null);
@@ -270,7 +275,6 @@ function render(snapshot, themeController, backgroundController, userData = null
     renderConfigurationNavigation();
     bindRestart(snapshot);
     bindValidation();
-    bindConnectionTest();
 }
 function renderSummary(snapshot) {
     const target = element("configuration-summary");
@@ -361,7 +365,7 @@ function renderAgent(snapshot) {
     const embedding = record(knowledge.embedding);
     const runningKnowledge = record(record(agent.runningValue).knowledge);
     const runningEmbedding = record(runningKnowledge.embedding);
-    target.append(configurationGroup("agent", "knowledge", fieldGroup("知识检索", [
+    target.append(configurationGroup("memory-knowledge", "agent", fieldGroup("知识检索", [
         selectField("知识检索模式", "agent-knowledge-mode", string(knowledge.mode) || "preflight", [
             ["preflight", "preflight（高相关时条件注入）"],
             ["tool", "tool（完全由 Agent 检索）"],
@@ -377,7 +381,7 @@ function renderAgent(snapshot) {
     const backendPendingRestart = savedWebSearch.backend !== runningWebSearch.backend;
     const credentialStatus = statusField("Tavily 凭据", "");
     credentialStatus.id = "agent-web-search-credential-status";
-    target.append(configurationGroup("agent", "web-search", fieldGroup("联网搜索", [
+    target.append(configurationGroup("online-tools", "agent", fieldGroup("联网搜索", [
         statusField(`当前生效后端：${webSearchBackendLabel(runningWebSearch.backend)}`, `已保存后端：${webSearchBackendLabel(savedWebSearch.backend)} · ${backendPendingRestart ? "等待重启" : "当前已生效"}`),
         selectField("搜索后端", "agent-web-search-backend", savedWebSearch.backend, [
             ["provider_native", "Provider 原生搜索"],
@@ -412,7 +416,7 @@ function renderAgent(snapshot) {
     };
     backendSelect.addEventListener("change", refreshCredentialStatus);
     refreshCredentialStatus();
-    target.append(configurationGroup("agent", "providers", renderOpenCodeProviders(snapshot, async (form) => {
+    target.append(configurationGroup("models-providers", "agent", renderOpenCodeProviders(snapshot, async (form) => {
         let change;
         try {
             change = openCodeProviderChange(form);
@@ -439,8 +443,7 @@ function renderAgent(snapshot) {
         ...["private_search", "group_search"].map((routeName) => textField(AGENT_ROUTE_LABELS[routeName] ?? routeName, `agent-search-${routeName}`, savedWebSearch.routes[routeName] ?? "", !agent.editable, "agent")),
     ]));
     routes.append(renderOpenCodeRouteHints(!agent.editable, readOpenCodeProviders(documentValue).filter((provider) => provider.enabled).map((provider) => provider.id), openCodeKeyConfigured));
-    target.append(configurationGroup("agent", "routes", routes));
-    const scenesGroup = document.createElement("div");
+    target.append(configurationGroup("model-routing", "agent", routes));
     const scenes = record(documentValue.scenes);
     for (const sceneName of ["private", "group"]) {
         const scene = record(scenes[sceneName]);
@@ -488,31 +491,40 @@ function renderAgent(snapshot) {
         saveScene.onclick = () => void saveAgentScene(sceneName);
         tools.append(saveScene);
         sceneGroup.append(tools);
-        scenesGroup.append(configurationGroup("agent", `${sceneName}-scene`, sceneGroup));
+        target.append(configurationGroup("online-tools", "agent", sceneGroup));
     }
-    target.append(scenesGroup);
     const save = element("save-agent-config", HTMLButtonElement);
     save.disabled = !agent.editable;
     save.onclick = () => void saveAgent();
 }
-function appendGroupedFields(target, fields, row, primary) {
+function appendGroupedFields(target, fields, row, source) {
     const remaining = new Set(fields);
-    for (const group of FIELD_GROUPS) {
-        const grouped = fields.filter((field) => field.key.startsWith(group.prefix));
-        if (grouped.length === 0)
+    for (const business of BUSINESS_GROUPS) {
+        if (business.id === "advanced")
             continue;
-        target.append(configurationGroup(primary, group.prefix, fieldGroup(group.label, grouped.map(row))));
-        grouped.forEach((field) => remaining.delete(field));
+        const sections = [];
+        for (const definition of FIELD_SECTIONS.filter((section) => section.business === business.id)) {
+            const grouped = fields.filter((field) => field.key.startsWith(definition.prefix));
+            if (grouped.length === 0)
+                continue;
+            const label = source === "secrets" ? `${definition.label} · 敏感凭据` : definition.label;
+            sections.push(fieldGroup(label, grouped.map(row), source === "runtime" ? definition.description : undefined));
+            grouped.forEach((field) => remaining.delete(field));
+        }
+        if (sections.length > 0)
+            target.append(configurationGroup(business.id, source, sections));
     }
-    if (remaining.size > 0)
-        target.append(configurationGroup(primary, "other", fieldGroup("其他配置", [...remaining].map(row))));
+    if (remaining.size > 0) {
+        const label = source === "secrets" ? "未归类敏感凭据" : "未归类受管字段";
+        target.append(configurationGroup("advanced", source, fieldGroup(label, [...remaining].map(row), "当前前端尚未识别这些已登记字段；它们仍使用原配置键和原保存协议。")));
+    }
 }
-function configurationGroup(primary, group, content) {
+function configurationGroup(group, source, content) {
     const wrapper = document.createElement("section");
     wrapper.className = "configuration-content-group";
     wrapper.dataset.configurationGroup = group;
-    wrapper.dataset.configurationPrimary = primary;
-    wrapper.append(content);
+    wrapper.dataset.configurationSource = source;
+    wrapper.append(...(Array.isArray(content) ? content : [content]));
     return wrapper;
 }
 function fieldGroup(label, rows, description) {
@@ -534,67 +546,51 @@ function fieldGroup(label, rows, description) {
     return section;
 }
 function renderConfigurationNavigation() {
-    const primaryTabs = element("configuration-primary-tabs");
-    const secondaryTabs = element("configuration-secondary-tabs");
-    primaryTabs.replaceChildren();
-    secondaryTabs.replaceChildren();
-    const availableGroups = new Map();
-    for (const primary of PRIMARY_NAVIGATION.map((item) => item.id)) {
-        const panel = element(`configuration-panel-${primary}`);
-        const groups = [...panel.querySelectorAll("[data-configuration-group]")]
-            .map((group) => group.dataset.configurationGroup)
-            .filter((group) => typeof group === "string");
-        availableGroups.set(primary, primary === "interface" ? ["theme"] : groups);
-    }
-    if (!availableGroups.get(configurationNavigation.primary)?.length)
-        configurationNavigation.primary = "runtime";
-    const secondary = availableGroups.get(configurationNavigation.primary) ?? [];
-    const selectedSecondary = configurationNavigation.secondary[configurationNavigation.primary];
-    if (!selectedSecondary || !secondary.includes(selectedSecondary)) {
-        const firstSecondary = secondary[0];
-        if (firstSecondary)
-            configurationNavigation.secondary[configurationNavigation.primary] = firstSecondary;
-    }
-    for (const [index, item] of PRIMARY_NAVIGATION.entries()) {
-        const tab = configurationTab(`configuration-primary-${item.id}`, item.label, item.description);
-        tab.dataset.configurationPrimary = item.id;
-        tab.setAttribute("aria-selected", String(item.id === configurationNavigation.primary));
-        tab.tabIndex = item.id === configurationNavigation.primary ? 0 : -1;
+    const tabs = element("configuration-business-tabs");
+    const content = element("configuration-business-content");
+    const description = element("configuration-business-description");
+    tabs.replaceChildren();
+    const groups = [...content.querySelectorAll("[data-configuration-group]")];
+    const availableIds = new Set(groups
+        .map((group) => group.dataset.configurationGroup)
+        .filter((group) => isBusinessGroup(group)));
+    const available = BUSINESS_GROUPS.filter((item) => availableIds.has(item.id));
+    if (!availableIds.has(selectedBusinessGroup))
+        selectedBusinessGroup = available[0]?.id ?? "system-security";
+    for (const [index, item] of available.entries()) {
+        const tab = configurationTab(`configuration-business-${item.id}`, item.label, item.description);
+        tab.dataset.configurationGroup = item.id;
+        tab.setAttribute("aria-selected", String(item.id === selectedBusinessGroup));
+        tab.tabIndex = item.id === selectedBusinessGroup ? 0 : -1;
         tab.addEventListener("click", () => {
-            configurationNavigation.primary = item.id;
+            selectedBusinessGroup = item.id;
             renderConfigurationNavigation();
         });
-        bindTabKeyboard(tab, primaryTabs, index, PRIMARY_NAVIGATION.length, () => {
-            configurationNavigation.primary = item.id;
+        bindTabKeyboard(tab, tabs, index, available.length, () => {
+            selectedBusinessGroup = item.id;
             renderConfigurationNavigation();
         });
-        primaryTabs.append(tab);
+        tabs.append(tab);
     }
-    for (const [index, group] of secondary.entries()) {
-        const tab = configurationTab(`configuration-secondary-${configurationNavigation.primary}-${group.replaceAll(".", "-")}`, secondaryLabel(configurationNavigation.primary, group), "配置分组");
-        tab.dataset.configurationGroup = group;
-        tab.setAttribute("aria-selected", String(group === configurationNavigation.secondary[configurationNavigation.primary]));
-        tab.tabIndex = group === configurationNavigation.secondary[configurationNavigation.primary] ? 0 : -1;
-        tab.addEventListener("click", () => {
-            configurationNavigation.secondary[configurationNavigation.primary] = group;
-            renderConfigurationNavigation();
-        });
-        bindTabKeyboard(tab, secondaryTabs, index, secondary.length, () => {
-            configurationNavigation.secondary[configurationNavigation.primary] = group;
-            renderConfigurationNavigation();
-        });
-        secondaryTabs.append(tab);
-    }
-    for (const item of PRIMARY_NAVIGATION) {
-        const panel = element(`configuration-panel-${item.id}`);
-        const isPrimary = item.id === configurationNavigation.primary;
-        panel.hidden = !isPrimary;
-        if (!isPrimary)
-            continue;
-        for (const group of panel.querySelectorAll("[data-configuration-group]")) {
-            group.hidden = group.dataset.configurationGroup !== configurationNavigation.secondary[item.id];
-        }
-    }
+    for (const group of groups)
+        group.hidden = group.dataset.configurationGroup !== selectedBusinessGroup;
+    const selected = BUSINESS_GROUPS.find((item) => item.id === selectedBusinessGroup);
+    description.textContent = selected?.description ?? "";
+    const visibleSources = new Set(groups
+        .filter((group) => !group.hidden)
+        .map((group) => group.dataset.configurationSource));
+    element("save-public-config", HTMLButtonElement).hidden = !visibleSources.has("runtime");
+    element("save-secret-config", HTMLButtonElement).hidden = !visibleSources.has("secrets");
+    element("save-agent-config", HTMLButtonElement).hidden = !visibleSources.has("agent");
+    content.setAttribute("aria-labelledby", `configuration-business-${selectedBusinessGroup}`);
+}
+function isBusinessGroup(value) {
+    return BUSINESS_GROUPS.some((group) => group.id === value);
+}
+/** 测试与页面共用同一份顺序，避免导航展示与字段归类出现两套事实来源。 */
+export function configurationBusinessGroups(keys) {
+    const available = new Set(keys.map(configurationBusinessGroup));
+    return BUSINESS_GROUPS.map((group) => group.id).filter((group) => available.has(group));
 }
 function configurationTab(id, label, description) {
     const tab = document.createElement("button");
@@ -602,10 +598,7 @@ function configurationTab(id, label, description) {
     tab.type = "button";
     tab.className = "configuration-tab";
     tab.setAttribute("role", "tab");
-    const panelId = id.includes("-secondary-")
-        ? `configuration-panel-${id.split("-secondary-")[1]?.split("-")[0] ?? "runtime"}`
-        : id.replace("-primary-", "-panel-");
-    tab.setAttribute("aria-controls", panelId);
+    tab.setAttribute("aria-controls", "configuration-business-content");
     tab.title = description;
     tab.textContent = label;
     return tab;
@@ -632,12 +625,6 @@ function bindTabKeyboard(tab, tablist, index, count, activate) {
             activate();
         }
     });
-}
-function secondaryLabel(primary, group) {
-    if (primary === "runtime" || primary === "secrets") {
-        return FIELD_GROUPS.find((item) => item.prefix === group)?.label ?? "其他配置";
-    }
-    return SECONDARY_LABELS[group] ?? group;
 }
 export function publicConfigurationChanges(fields, values) {
     const changes = [];
@@ -1039,24 +1026,6 @@ function bindValidation() {
         }
     };
 }
-function bindConnectionTest() {
-    const button = element("test-provider-connection", HTMLButtonElement);
-    button.onclick = async () => {
-        const target = element("connection-provider", HTMLSelectElement).value;
-        button.disabled = true;
-        showConnectionTestResult("正在连接 Provider，请稍候……", false);
-        try {
-            const result = await testProviderConnection(target);
-            showConnectionTestResult(`${result.message}（${result.classification}）`, !result.success);
-        }
-        catch (cause) {
-            showConnectionTestResult(errorMessage(cause), true);
-        }
-        finally {
-            button.disabled = false;
-        }
-    };
-}
 async function runSave(action, excludeKeys = EMPTY_EXCLUDED_KEYS) {
     const save = async () => {
         setButtonsDisabled(true);
@@ -1362,7 +1331,7 @@ function updateTavilyCredentialStatus(backend, configured) {
     summary.textContent = configured ? "Tavily API Key：已配置" : "Tavily API Key：未配置";
     detail.textContent = notice || (configured
         ? "密钥保存在安全配置中心，不会写入 agent.toml 或回传浏览器。"
-        : "可在“敏感凭据”中配置；未选择 Tavily 时不影响其他搜索后端。");
+        : "可在“联网与工具”中配置；未选择 Tavily 时不影响其他搜索后端。");
     row.classList.toggle("config-row-warning", notice.length > 0);
 }
 function badge(text, kind) {
@@ -1395,12 +1364,6 @@ function showResult(message, error) {
     target.className = error ? "error" : "success";
     showToast(message, error);
 }
-function showConnectionTestResult(message, error) {
-    const target = element("connection-test-result");
-    target.textContent = message;
-    target.className = error ? "error" : "success";
-    showToast(message, error);
-}
 /** 右上角浮层提醒；进行中的消息不设置自动隐藏，避免转圈提示被提前关掉。 */
 function showToast(message, error) {
     const toast = element("console-toast");
@@ -1418,7 +1381,7 @@ function showToast(message, error) {
 }
 function errorMessage(cause) { return cause instanceof Error ? cause.message : "配置操作失败"; }
 function setButtonsDisabled(disabled) {
-    for (const id of ["save-public-config", "save-secret-config", "save-agent-config", "validate-config", "test-provider-connection"]) {
+    for (const id of ["save-public-config", "save-secret-config", "save-agent-config", "validate-config"]) {
         element(id, HTMLButtonElement).disabled = disabled;
     }
     for (const button of document.querySelectorAll(".tool-whitelist-save")) {

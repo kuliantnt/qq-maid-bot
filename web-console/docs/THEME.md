@@ -56,7 +56,7 @@ value: {"preset":"console-dark","version":2}
 
 主题控制器从 `CONSOLE_THEMES` 将完整预设写入 root。CSS 可以从基础 token 派生焦点环、弱强调背景和透明背景叠加层，但不能在页面或组件选择器里新增主题专属颜色。
 
-主题选择入口位于 `Configuration -> Interface -> 主题`。预览色块固定展示背景、卡片和强调色。
+主题选择入口位于 `Configuration -> 系统与安全 -> 控制台界面`。预览色块固定展示背景、卡片和强调色。
 
 ## Adding A Preset
 

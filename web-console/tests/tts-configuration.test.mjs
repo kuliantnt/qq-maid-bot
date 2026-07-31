@@ -41,9 +41,9 @@ function field(key, savedValue, sensitivity = "public") {
   };
 }
 
-test("全部 TTS 字段进入语音回复分组并使用专用标签", () => {
+test("全部 TTS 字段进入回复与语音业务分组并使用专用标签", () => {
   for (const key of TTS_KEYS) {
-    assert.equal(configFieldGroupLabel(key), "语音回复");
+    assert.equal(configFieldGroupLabel(key), "回复与语音");
     assert.notEqual(configFieldLabel(key), key);
   }
 });

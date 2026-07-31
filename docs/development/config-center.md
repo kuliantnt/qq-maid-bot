@@ -49,7 +49,7 @@ runtime 或 secret 保存前会构造候选最终环境视图：未修改的当�
 | OneBot 11 | enabled、bind host/port、WebSocket path | Access Token |
 | 微信服务号 | enabled、encryption mode、bind host/port、callback path | Token、AppID、AppSecret、EncodingAESKey |
 
-配置页按命令、模型服务、各平台入口、功能开关、天气、控制台和基础运行分组展示；字段标签使用中文，底层稳定 key 不变。`command.prefix` 必须是一个可见非空白字符，自定义后仅新前缀可触发命令，旧 `/`、消息中段前缀和重复前缀按普通文本处理。
+配置页按模型与供应商、模型路由、联网与工具、记忆与知识库、回复与语音、平台接入、待办与通知、系统与安全等业务场景分组；runtime 普通值、加密 Secret 与 Agent 策略仍分别使用原有写入协议和 revision。字段标签使用中文，底层稳定 key 不变。`command.prefix` 必须是一个可见非空白字符，自定义后仅新前缀可触发命令，旧 `/`、消息中段前缀和重复前缀按普通文本处理。
 
 `provider.main_model`、Provider 默认模型、私聊/群聊 Tool Calling 开关等 Agent 策略不登记到 `runtime.toml`；route/profile/scene 的结构化接口统一修改 `agent.toml`。监听地址/端口、数据库路径、受管文件路径、主密钥路径、Agent/ops 文件路径和 `/ops` 执行规则属于 Bootstrap 或高风险部署项，只允许通过明确的文件/环境配置管理。
 
@@ -65,4 +65,4 @@ runtime 或 secret 保存前会构造候选最终环境视图：未修改的当�
 
 启用控制台后，`GET /api/v1/console/configuration` 返回 runtime 与 agent 两个配置域的安全快照，但必须先通过独立部署管理员会话。HTTP 写接口分别接受 runtime 普通值 set/remove、agent 结构化变更和带 expected revision 的 secret replace/clear/批量修改，不能把脱敏占位符当作真实 secret 保存。所有认证与配置写操作要求同源 Origin、HttpOnly 服务端会话、轮换 CSRF、权限和脱敏审计；现有跨域 allowlist 只保留给只读状态与 Markdown 兼容接口，不授予管理 API 跨域凭据能力。
 
-`setup_required` 降级态允许按向导分步保存“字段自身合法、整体启动候选尚缺其他域”的配置，以支持首次配置中断后继续；此放宽不跳过字段类型/语义、Agent schema、revision 冲突、文件权限、原子写入或 secret CAS。正常运行态仍要求每次变更通过完整启动预检。配置页将本地正式启动预检与外部连接测试分开：连接测试必须由管理员显式触发，只访问 HTTPS 模型列表端点，使用 8 秒超时、禁止重定向，不发送聊天内容，也不覆盖现有配置。OpenCode 测试固定分别访问 Zen `https://opencode.ai/zen/v1/models` 与 Go `https://opencode.ai/zen/go/v1/models` 官方目录并分别报告结果；目录允许匿名访问，因此成功只证明相应官方模型目录可达，不证明 Key 有效，也不验证卡片中修改的自定义 Base URL。其他自定义兼容地址会先解析并拒绝环回、私网、链路本地和其他非公网目标，再把本次请求固定到已校验地址，避免管理接口成为内网探测入口。
+`setup_required` 降级态允许按向导分步保存“字段自身合法、整体启动候选尚缺其他域”的配置，以支持首次配置中断后继续；此放宽不跳过字段类型/语义、Agent schema、revision 冲突、文件权限、原子写入或 secret CAS。正常运行态仍要求每次变更通过完整启动预检。配置页的安全校验只执行与正式启动一致的本地预检，不发起外部网络请求，也不修改现有配置。
