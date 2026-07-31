@@ -69,7 +69,7 @@ test("解锁后可以切回默认（无背景）；服务端偏好 hydrate 恢�
   assert.equal(controller.select("special"), "special");
 
   const refreshed = createBackgroundController({ dataset: {} }, cookieDocument());
-  await refreshed.hydrate({ fileIds: [], activeFileId: null, kuliantnt: true }, []);
+  await refreshed.hydrate({ fileIds: [], activeFileId: null, mode: "default", kuliantnt: true }, []);
   assert.equal(refreshed.isUnlocked(), true);
   assert.equal(refreshed.current(), "default");
   assert.equal(refreshed.select("special"), "special");
@@ -144,7 +144,7 @@ test("一次性迁移把旧解锁 cookie 写入服务端偏好并清理全部旧
   const controller = createBackgroundController(root, cookies);
   let persisted = false;
 
-  await controller.migrateFromLegacy({ kuliantnt: false }, async () => { persisted = true; });
+  await controller.migrateFromLegacy({ kuliantnt: false, backgroundMode: "default" }, async () => { persisted = true; });
 
   assert.equal(persisted, true);
   assert.equal(controller.isUnlocked(), true);
@@ -157,7 +157,7 @@ test("服务端已解锁时迁移不再持久化，仅清理旧 cookie", async (
   const controller = createBackgroundController(root, cookies);
   let persisted = false;
 
-  await controller.migrateFromLegacy({ kuliantnt: true }, async () => { persisted = true; });
+  await controller.migrateFromLegacy({ kuliantnt: true, backgroundMode: "special" }, async () => { persisted = true; });
 
   assert.equal(persisted, false);
   assert.equal(controller.isUnlocked(), true);
@@ -170,7 +170,7 @@ test("迁移持久化失败时向外抛出且保留旧 cookie", async () => {
   const controller = createBackgroundController(root, cookies);
 
   await assert.rejects(
-    () => controller.migrateFromLegacy({ kuliantnt: false }, async () => { throw new Error("persist failed"); }),
+    () => controller.migrateFromLegacy({ kuliantnt: false, backgroundMode: "default" }, async () => { throw new Error("persist failed"); }),
     /persist failed/,
   );
   assert.match(cookies.read(), new RegExp(`${BACKGROUND_UNLOCK_COOKIE}=1`));
@@ -187,8 +187,8 @@ test("认证后选择、解锁、过渡与自定义背景不再写入任何 cook
   URL.revokeObjectURL = () => undefined;
   try {
     const controller = createBackgroundController(root, cookies, async (file) => new Blob([file.fileId]));
-    await controller.hydrate({ fileIds: [], activeFileId: null, kuliantnt: true }, []);
-    await controller.migrateFromLegacy({ kuliantnt: true }, async () => {});
+    await controller.hydrate({ fileIds: [], activeFileId: null, mode: "default", kuliantnt: true }, []);
+    await controller.migrateFromLegacy({ kuliantnt: true, backgroundMode: "default" }, async () => {});
     assert.equal(cookies.read(), "");
 
     controller.unlock();
@@ -227,6 +227,7 @@ test("hydrate 读取背景内容失败时回退默认（无背景）状态、撤
     await controller.hydrate({
       fileIds: ["a"],
       activeFileId: "a",
+      mode: "default",
       kuliantnt: false,
     }, [{ fileId: "a", filename: "a.png", url: "/a" }]);
     assert.equal(customLayer.style.backgroundImage, 'url("blob:created")');
@@ -234,6 +235,7 @@ test("hydrate 读取背景内容失败时回退默认（无背景）状态、撤
     await controller.hydrate({
       fileIds: ["a", "bad"],
       activeFileId: "bad",
+      mode: "default",
       kuliantnt: false,
     }, [
       { fileId: "a", filename: "a.png", url: "/a" },
@@ -278,6 +280,7 @@ test("selectFile 把 forceRefresh 透传给读取器，hydrate 调用时不传",
     await controller.hydrate({
       fileIds: ["a", "b"],
       activeFileId: "a",
+      mode: "default",
       kuliantnt: false,
     }, [
       { fileId: "a", filename: "a.png", url: "/a" },
@@ -309,6 +312,7 @@ test("删除非激活文件保持当前背景，删除激活文件后重置为�
     await controller.hydrate({
       fileIds: ["a", "b"],
       activeFileId: "a",
+      mode: "default",
       kuliantnt: false,
     }, [
       { fileId: "a", filename: "a.png", url: "/a" },
@@ -328,5 +332,127 @@ test("删除非激活文件保持当前背景，删除激活文件后重置为�
   } finally {
     URL.createObjectURL = previousCreate;
     URL.revokeObjectURL = previousRevoke;
+  }
+});
+
+test("服务端 special 模式 hydrate 后刷新仍为 special（而不是 default）", async () => {
+  const controller = createBackgroundController({ dataset: {} }, cookieDocument());
+  await controller.hydrate({
+    fileIds: [],
+    activeFileId: null,
+    mode: "special",
+    kuliantnt: true,
+  }, []);
+
+  assert.equal(controller.current(), "special");
+  assert.equal(controller.selection().activeFileId, null);
+
+  // 新会话再次用服务端偏好 hydrate（模拟刷新）后仍然一致。
+  const refreshed = createBackgroundController({ dataset: {} }, cookieDocument());
+  await refreshed.hydrate({
+    fileIds: [],
+    activeFileId: null,
+    mode: "special",
+    kuliantnt: true,
+  }, []);
+  assert.equal(refreshed.current(), "special");
+  assert.equal(refreshed.lastError(), null);
+});
+
+test("选择无背景后服务端 default 模式 hydrate 刷新仍为 default", async () => {
+  const controller = createBackgroundController({ dataset: {} }, cookieDocument());
+  controller.unlock();
+  controller.select("special");
+  assert.equal(controller.current(), "special");
+
+  controller.select("default");
+  assert.equal(controller.current(), "default");
+
+  const refreshed = createBackgroundController({ dataset: {} }, cookieDocument());
+  await refreshed.hydrate({
+    fileIds: [],
+    activeFileId: null,
+    mode: "default",
+    kuliantnt: true,
+  }, []);
+  assert.equal(refreshed.current(), "default");
+  assert.equal(refreshed.selection().activeFileId, null);
+});
+
+test("旧 special Cookie 一次性迁移：解锁状态与背景模式一起写入服务端成功后清理 Cookie", async () => {
+  const cookies = cookieDocument(
+    `${BACKGROUND_UNLOCK_COOKIE}=1; ${BACKGROUND_MODE_COOKIE}=special`,
+  );
+  const controller = createBackgroundController({ dataset: {} }, cookies);
+  const persistedPatches = [];
+
+  await controller.migrateFromLegacy({
+    kuliantnt: false,
+    backgroundMode: "default",
+  }, async (patch) => {
+    persistedPatches.push(patch);
+  });
+
+  assert.deepEqual(persistedPatches, [{ kuliantnt: true, backgroundMode: "special" }]);
+  assert.equal(controller.isUnlocked(), true);
+  assert.equal(cookies.read(), "");
+});
+
+test("服务端已是 special 模式时迁移不再写入模式字段，仅清理 Cookie", async () => {
+  const cookies = cookieDocument(
+    `${BACKGROUND_UNLOCK_COOKIE}=1; ${BACKGROUND_MODE_COOKIE}=special`,
+  );
+  const controller = createBackgroundController({ dataset: {} }, cookies);
+  const persistedPatches = [];
+
+  await controller.migrateFromLegacy({
+    kuliantnt: true,
+    backgroundMode: "special",
+  }, async (patch) => {
+    persistedPatches.push(patch);
+  });
+
+  assert.deepEqual(persistedPatches, []);
+  assert.equal(cookies.read(), "");
+});
+
+test("旧特殊模式迁移写入失败时保留 Cookie 并向外抛出", async () => {
+  const cookies = cookieDocument(`${BACKGROUND_MODE_COOKIE}=special`);
+  const controller = createBackgroundController({ dataset: {} }, cookies);
+
+  await assert.rejects(
+    () => controller.migrateFromLegacy({
+      kuliantnt: false,
+      backgroundMode: "default",
+    }, async () => {
+      throw new Error("mode persist failed");
+    }),
+    /mode persist failed/,
+  );
+  assert.match(cookies.read(), new RegExp(`${BACKGROUND_MODE_COOKIE}=special`));
+});
+
+test("自定义背景模式由 active 文件表达：hydrate 后模式字段恒为 default 并激活文件", async () => {
+  const customLayer = { style: {} };
+  const root = {
+    dataset: {},
+    style: {},
+    querySelector: (selector) => selector === ".console-background--custom" ? customLayer : null,
+  };
+  const previousCreate = URL.createObjectURL;
+  URL.createObjectURL = () => "blob:custom";
+  try {
+    const controller = createBackgroundController(root, cookieDocument(), async (file) => new Blob([file.fileId]));
+    await controller.hydrate({
+      fileIds: ["a"],
+      activeFileId: "a",
+      mode: "default",
+      kuliantnt: false,
+    }, [{ fileId: "a", filename: "a.png", url: "/a" }]);
+    assert.equal(controller.selection().activeFileId, "a");
+    assert.equal(controller.current(), "default");
+    assert.equal(customLayer.style.backgroundImage, 'url("blob:custom")');
+  } finally {
+    URL.createObjectURL = previousCreate;
   }
 });

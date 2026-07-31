@@ -2,7 +2,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 
 use crate::{
     http::api::common::{ApiError, PaginationRequest, ValidatedPagination},
-    management::{PreferenceValuePatch, UserFile, UserPreferencesPatch},
+    management::{BackgroundMode, PreferenceValuePatch, UserFile, UserPreferencesPatch},
 };
 
 #[derive(Debug, Deserialize)]
@@ -36,6 +36,8 @@ pub(super) struct UpdatePreferencesRequest {
     #[serde(default)]
     active_background_file_id: PatchField<String>,
     #[serde(default)]
+    background_mode: PatchField<BackgroundMode>,
+    #[serde(default)]
     kuliantnt: PatchField<bool>,
 }
 
@@ -49,6 +51,7 @@ impl UpdatePreferencesRequest {
                 PatchField::Null => PreferenceValuePatch::Clear,
                 PatchField::Value(value) => PreferenceValuePatch::Set(value),
             },
+            background_mode: required_patch(self.background_mode, "background_mode")?,
             kuliantnt: required_patch(self.kuliantnt, "kuliantnt")?,
         })
     }

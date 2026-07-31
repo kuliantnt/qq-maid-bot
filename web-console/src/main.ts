@@ -247,6 +247,7 @@ async function hydrateUserData(): Promise<void> {
     await backgroundController.hydrate({
       fileIds: preferences.backgroundFileIds,
       activeFileId: preferences.activeBackgroundFileId,
+      mode: preferences.backgroundMode,
       kuliantnt: preferences.kuliantnt,
     }, files);
     let currentPreferences = preferences;
@@ -274,8 +275,11 @@ async function hydrateUserData(): Promise<void> {
     userDataController = dataController;
     try {
       // 认证成功后服务端偏好是唯一权威：把旧 cookie 一次性迁移进服务端偏好并清理。
-      await backgroundController.migrateFromLegacy({ kuliantnt: preferences.kuliantnt }, async () => {
-        currentPreferences = await dataController.updatePreferences({ kuliantnt: true });
+      await backgroundController.migrateFromLegacy({
+        kuliantnt: preferences.kuliantnt,
+        backgroundMode: preferences.backgroundMode,
+      }, async (patch) => {
+        currentPreferences = await dataController.updatePreferences(patch);
       });
     } catch (cause) {
       setText("configuration-result", cause instanceof Error ? cause.message : "背景解锁状态迁移失败");

@@ -327,6 +327,7 @@ async fn preferences_return_defaults_and_support_ordered_partial_updates() {
             "custom_colors": [],
             "background_file_ids": [],
             "active_background_file_id": null,
+            "background_mode": "default",
             "kuliantnt": false,
         })
     );
@@ -360,6 +361,83 @@ async fn preferences_return_defaults_and_support_ordered_partial_updates() {
     );
     assert_eq!(other["custom_colors"], json!([]));
     assert_eq!(other["kuliantnt"], false);
+}
+
+#[tokio::test]
+async fn background_mode_persists_independently_and_keeps_invariants() {
+    let api = TestApi::new();
+    let file = upload_id(&api, "mode.webp", b"mode").await;
+
+    // 选择特殊九宫格：模式持久化，且不残留活动背景文件。
+    let special = data(
+        &api.post(
+            "/api/v1/console/user-preferences/update",
+            json!({"background_mode": "special"}),
+        )
+        .await,
+    );
+    assert_eq!(special["background_mode"], "special");
+    assert_eq!(special["active_background_file_id"], Value::Null);
+    assert_eq!(special["kuliantnt"], false);
+
+    // 选择无背景：模式回到 default，活动背景清空。
+    let default_background = data(
+        &api.post(
+            "/api/v1/console/user-preferences/update",
+            json!({"background_mode": "default", "active_background_file_id": null}),
+        )
+        .await,
+    );
+    assert_eq!(default_background["background_mode"], "default");
+    assert_eq!(default_background["active_background_file_id"], Value::Null);
+
+    // 激活自定义背景：active_background_file_id 表达自定义背景，模式字段只能是 default。
+    let custom = data(
+        &api.post(
+            "/api/v1/console/user-preferences/update",
+            json!({
+                "background_file_ids": [&file],
+                "active_background_file_id": &file,
+            }),
+        )
+        .await,
+    );
+    assert_eq!(custom["background_mode"], "default");
+    assert_eq!(custom["active_background_file_id"], file);
+
+    // 切回特殊背景时服务端主动清空活动背景，避免模式和文件同时存在。
+    let back_to_special = data(
+        &api.post(
+            "/api/v1/console/user-preferences/update",
+            json!({"background_mode": "special"}),
+        )
+        .await,
+    );
+    assert_eq!(back_to_special["background_mode"], "special");
+    assert_eq!(back_to_special["active_background_file_id"], Value::Null);
+
+    // 新模式字段通过读取接口原样返回，刷新后仍然一致。
+    let reread = data(
+        &api.post("/api/v1/console/user-preferences/get", json!({}))
+            .await,
+    );
+    assert_eq!(reread["background_mode"], "special");
+    assert_eq!(reread["active_background_file_id"], Value::Null);
+    assert_eq!(reread["background_file_ids"], json!([file]));
+
+    // 非法模式值返回 422/400 级校验错误，不写入。
+    let invalid = api
+        .post(
+            "/api/v1/console/user-preferences/update",
+            json!({"background_mode": "unknown"}),
+        )
+        .await;
+    assert_ne!(invalid.status, StatusCode::OK);
+    let still_special = data(
+        &api.post("/api/v1/console/user-preferences/get", json!({}))
+            .await,
+    );
+    assert_eq!(still_special["background_mode"], "special");
 }
 
 #[tokio::test]
@@ -617,6 +695,7 @@ async fn preferences_and_files_survive_service_reconstruction() {
     );
     assert_eq!(preferences["custom_colors"], json!(["first", "second"]));
     assert_eq!(preferences["active_background_file_id"], file_id);
+    assert_eq!(preferences["background_mode"], "default");
     assert_eq!(preferences["kuliantnt"], true);
     let listed = data(&api.post("/api/v1/console/files/list", json!({})).await);
     assert_eq!(listed["items"][0]["file_id"], file_id);

@@ -38,6 +38,8 @@ pub const CONSOLE_USER_DATA_SCHEMA_V1: SqliteMigration = SqliteMigration {
             custom_colors_json TEXT NOT NULL,
             background_file_ids_json TEXT NOT NULL,
             active_background_file_id TEXT,
+            background_mode TEXT NOT NULL DEFAULT 'default'
+              CHECK(background_mode IN ('default', 'special')),
             kuliantnt INTEGER NOT NULL DEFAULT 0 CHECK(kuliantnt IN (0, 1)),
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -45,11 +47,46 @@ pub const CONSOLE_USER_DATA_SCHEMA_V1: SqliteMigration = SqliteMigration {
           );",
 };
 
+/// 背景模式：`default` 表示无背景或由 `active_background_file_id` 指定的自定义背景；
+/// `special` 表示特殊九宫格（不引用文件）。该字段与 `kuliantnt`（仅表示是否解锁）语义分离，
+/// 避免用单个布尔值同时承担“解锁”和“当前选择”两个状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundMode {
+    #[default]
+    Default,
+    Special,
+}
+
+impl BackgroundMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Special => "special",
+        }
+    }
+}
+
+impl std::str::FromStr for BackgroundMode {
+    type Err = ConsoleUserDataError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "default" => Ok(Self::Default),
+            "special" => Ok(Self::Special),
+            _ => Err(ConsoleUserDataError::invalid(
+                "background_mode must be one of: default, special",
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct UserPreferences {
     pub custom_colors: Vec<String>,
     pub background_file_ids: Vec<String>,
     pub active_background_file_id: Option<String>,
+    pub background_mode: BackgroundMode,
     pub kuliantnt: bool,
 }
 
@@ -66,6 +103,7 @@ pub struct UserPreferencesPatch {
     pub custom_colors: Option<Vec<String>>,
     pub background_file_ids: Option<Vec<String>>,
     pub active_background_file_id: PreferenceValuePatch<String>,
+    pub background_mode: Option<BackgroundMode>,
     pub kuliantnt: Option<bool>,
 }
 
@@ -74,6 +112,7 @@ impl UserPreferencesPatch {
         self.custom_colors.is_none()
             && self.background_file_ids.is_none()
             && self.active_background_file_id == PreferenceValuePatch::Unchanged
+            && self.background_mode.is_none()
             && self.kuliantnt.is_none()
     }
 }

@@ -3,9 +3,9 @@ use std::collections::HashSet;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use super::{
-    ConsoleUserDataError, ConsoleUserDataService, MAX_BACKGROUND_FILES, MAX_CUSTOM_COLOR_CHARS,
-    MAX_CUSTOM_COLORS, PreferenceValuePatch, UserPreferences, UserPreferencesPatch, now_rfc3339,
-    validate_file_id,
+    BackgroundMode, ConsoleUserDataError, ConsoleUserDataService, MAX_BACKGROUND_FILES,
+    MAX_CUSTOM_COLOR_CHARS, MAX_CUSTOM_COLORS, PreferenceValuePatch, UserPreferences,
+    UserPreferencesPatch, now_rfc3339, validate_file_id,
 };
 
 impl ConsoleUserDataService {
@@ -66,6 +66,17 @@ impl ConsoleUserDataService {
                 ));
             }
         }
+        if let Some(background_mode) = patch.background_mode {
+            // 特殊九宫格不引用自定义文件：切换后清空活动背景，避免服务端状态分裂。
+            if background_mode == BackgroundMode::Special {
+                preferences.active_background_file_id = None;
+            }
+            preferences.background_mode = background_mode;
+        }
+        // 一致性约束：活动自定义背景由 active_background_file_id 表达，模式字段只能是 default。
+        if preferences.active_background_file_id.is_some() {
+            preferences.background_mode = BackgroundMode::Default;
+        }
         if let Some(kuliantnt) = patch.kuliantnt {
             preferences.kuliantnt = kuliantnt;
         }
@@ -83,7 +94,7 @@ pub(super) fn read_preferences(
     let row = connection
         .query_row(
             "SELECT custom_colors_json, background_file_ids_json,
-                    active_background_file_id, kuliantnt
+                    active_background_file_id, background_mode, kuliantnt
              FROM console_user_preferences WHERE admin_id = ?1",
             [admin_id],
             |row| {
@@ -91,20 +102,31 @@ pub(super) fn read_preferences(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
-                    row.get::<_, bool>(3)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, bool>(4)?,
                 ))
             },
         )
         .optional()
         .map_err(storage_error)?;
-    let Some((custom_colors, background_file_ids, active_background_file_id, kuliantnt)) = row
+    let Some((
+        custom_colors,
+        background_file_ids,
+        active_background_file_id,
+        background_mode,
+        kuliantnt,
+    )) = row
     else {
         return Ok(None);
     };
+    let background_mode = background_mode
+        .parse::<BackgroundMode>()
+        .map_err(storage_error)?;
     Ok(Some(UserPreferences {
         custom_colors: serde_json::from_str(&custom_colors).map_err(storage_error)?,
         background_file_ids: serde_json::from_str(&background_file_ids).map_err(storage_error)?,
         active_background_file_id,
+        background_mode,
         kuliantnt,
     }))
 }
@@ -142,12 +164,13 @@ fn upsert_preferences(
         .execute(
             "INSERT INTO console_user_preferences
              (admin_id, custom_colors_json, background_file_ids_json,
-              active_background_file_id, kuliantnt, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+              active_background_file_id, background_mode, kuliantnt, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
              ON CONFLICT(admin_id) DO UPDATE SET
                custom_colors_json = excluded.custom_colors_json,
                background_file_ids_json = excluded.background_file_ids_json,
                active_background_file_id = excluded.active_background_file_id,
+               background_mode = excluded.background_mode,
                kuliantnt = excluded.kuliantnt,
                updated_at = excluded.updated_at",
             params![
@@ -155,6 +178,7 @@ fn upsert_preferences(
                 serde_json::to_string(&preferences.custom_colors).map_err(storage_error)?,
                 serde_json::to_string(&preferences.background_file_ids).map_err(storage_error)?,
                 preferences.active_background_file_id.as_deref(),
+                preferences.background_mode.as_str(),
                 preferences.kuliantnt,
                 now,
             ],

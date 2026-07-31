@@ -35,6 +35,7 @@
   "custom_colors": [],
   "background_file_ids": [],
   "active_background_file_id": null,
+  "background_mode": "default",
   "kuliantnt": false
 }
 ```
@@ -60,16 +61,22 @@
     "2d637334-11ea-48ea-88ba-1ac31e9a5651",
     "a919885c-1208-4b18-a76f-d54764789b9a"
   ],
-  "active_background_file_id": "2d637334-11ea-48ea-88ba-1ac31e9a5651"
+  "active_background_file_id": "2d637334-11ea-48ea-88ba-1ac31e9a5651",
+  "background_mode": "default"
 }
 ```
 
 - `custom_colors` 最多 32 项，每项最多 64 个字符；仅做字符串、数量和长度限制，不解析颜色格式，保存时保持原顺序。
 - `background_file_ids` 最多 64 项，不能重复；每项必须是当前用户已经上传的服务端规范 UUID，保存时保持原顺序。
-- `active_background_file_id` 非空时必须在最终的 `background_file_ids` 中；传 `null` 表示恢复默认背景。
+- `active_background_file_id` 非空时必须在最终的 `background_file_ids` 中；传 `null` 表示清空当前
+  活动背景（`background_mode` 保持不变；要显式切换模式请同时提交 `background_mode`）。
+- `background_mode` 是 `"default" | "special"` 字符串：`default` 表示无背景或由
+  `active_background_file_id` 指定的自定义背景；`special` 表示特殊九宫格（不引用文件）。
+  选择 `special` 时服务端自动清空 `active_background_file_id`；激活自定义背景时模式字段
+  只能保持 `default`。该字段只表达“当前背景模式”，与 `kuliantnt`（仅表示是否解锁）语义分离。
 - 整体替换背景列表且移除了原当前背景、又未显式提交新的当前背景时，后端自动把当前背景清空。
-- `kuliantnt` 是普通布尔字段。
-- 列表字段和 `kuliantnt` 不能传 `null`；省略表示不修改。未知字段返回 400。
+- `kuliantnt` 是普通布尔字段，只表示特殊背景是否解锁，不表达当前是否选择特殊背景。
+- 列表字段、`background_mode` 和 `kuliantnt` 不能传 `null`；省略表示不修改。未知字段返回 400。
 
 成功时 `data` 返回更新后的完整偏好。
 

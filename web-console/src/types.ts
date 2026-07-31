@@ -34,6 +34,7 @@ export interface UserPreferences {
   readonly customColors: readonly string[];
   readonly backgroundFileIds: readonly string[];
   readonly activeBackgroundFileId: string | null;
+  readonly backgroundMode: "default" | "special";
   readonly kuliantnt: boolean;
 }
 

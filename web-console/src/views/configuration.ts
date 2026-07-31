@@ -210,10 +210,20 @@ export interface UserDataController {
     readonly customColors?: readonly string[];
     readonly backgroundFileIds?: readonly string[];
     readonly activeBackgroundFileId?: string | null;
+    readonly backgroundMode?: "default" | "special";
     readonly kuliantnt?: boolean;
   }) => Promise<UserPreferences>;
   readonly uploadFile?: (file: File) => Promise<UserFile>;
   readonly deleteFile?: (file: UserFile) => Promise<void>;
+}
+
+/** 仅测试使用：重置自动保存绑定与保存队列等模块级状态，避免多个测试文档互相泄漏。 */
+export function resetConfigurationStateForTests(): void {
+  current = null;
+  autosaveBound = false;
+  queuedFocusRestoreId = null;
+  secretSavedStates.clear();
+  saveQueue = Promise.resolve(null);
 }
 
 export function shouldAutosaveOnBlur(input: AutosaveBlurInput): boolean {
@@ -323,7 +333,17 @@ let toastTimer: number | undefined;
 let configurationNavigation: ConfigurationNavigation = { primary: "runtime", secondary: {} };
 let autosaveBound = false;
 let queuedFocusRestoreId: string | null = null;
-let saveQueue: Promise<void> = Promise.resolve();
+let saveQueue: Promise<ConfigurationSnapshot | null> = Promise.resolve(null);
+
+/** Secret 的“最后成功保存状态”。服务端不回传 secret 明文，前端只能靠本地记录判断脏状态，
+ *  避免连续修改多个 Secret 时重复提交已经成功替换的旧 revision。 */
+interface SecretSavedState {
+  readonly value: string;
+  readonly clear: boolean;
+  readonly revision: string | null;
+}
+const secretSavedStates = new Map<string, SecretSavedState>();
+const EMPTY_EXCLUDED_KEYS: ReadonlySet<string> = new Set();
 
 export async function initializeConfiguration(
   themeController: ThemeController,
@@ -540,10 +560,12 @@ function renderAgent(snapshot: ConfigurationSnapshot): void {
       }
       await runSave(async () => updateAgentConfiguration(current!.agent!.revision, [change]));
     },
-    async (id) => runSave(async () => updateAgentConfiguration(current!.agent!.revision, [{
-      action: "remove_provider",
-      id,
-     }])),
+    async (id) => {
+      await runSave(async () => updateAgentConfiguration(current!.agent!.revision, [{
+        action: "remove_provider",
+        id,
+      }]));
+    },
   )));
   const openCodeKeyConfigured = snapshot.fields.some(
     (field) => field.key === "provider.opencode.api_key" && field.configured,
@@ -826,16 +848,24 @@ async function savePublicFields(): Promise<void> {
 
 async function removePublicField(key: string): Promise<void> {
   if (!current) return;
-  await runSave(async () => updateRuntimeConfiguration(current!.revision, [{ action: "remove", key }]));
+  // 用户点击“恢复未保存值”即明确放弃该字段的页面输入：重建后该字段应显示服务端默认值，
+  // 因此把该输入排除在恢复集合之外。
+  await runSave(
+    async () => updateRuntimeConfiguration(current!.revision, [{ action: "remove", key }]),
+    new Set([`id:${inputId(key)}`]),
+  );
 }
 
 export function secretConfigurationChanges(
   fields: ConfigFieldSnapshot[],
   values: ReadonlyMap<string, string>,
   clearKeys: ReadonlySet<string>,
+  dirtyKeys: ReadonlySet<string>,
 ): Array<Record<string, unknown>> {
   const changes: Array<Record<string, unknown>> = [];
   for (const field of fields.filter((value) => value.sensitivity === "secret" && value.editable)) {
+    // 只提交真正发生变化的 Secret：已成功保存的 Secret 输入仍留在页面，但不能重复提交旧 revision。
+    if (!dirtyKeys.has(field.key)) continue;
     if (clearKeys.has(field.key)) {
       changes.push({ action: "clear", key: field.key, expected_revision: field.revision ?? "missing" });
     } else {
@@ -852,14 +882,56 @@ async function saveSecrets(): Promise<void> {
   if (!current) return;
   const values = new Map<string, string>();
   const clearKeys = new Set<string>();
+  const dirtyKeys = new Set<string>();
   for (const field of current.fields.filter((value) => value.sensitivity === "secret" && value.editable)) {
-    values.set(field.key, element(inputId(field.key), HTMLInputElement).value);
+    const value = element(inputId(field.key), HTMLInputElement).value;
     const clear = document.querySelector<HTMLInputElement>(`input[data-clear-key="${field.key}"]`);
-    if (clear?.checked) clearKeys.add(field.key);
+    const clearChecked = clear?.checked === true;
+    values.set(field.key, value);
+    if (secretIsDirty(field, value, clearChecked)) {
+      dirtyKeys.add(field.key);
+      if (clearChecked) clearKeys.add(field.key);
+    }
   }
-  const changes = secretConfigurationChanges(current.fields, values, clearKeys);
+  const changes = secretConfigurationChanges(current.fields, values, clearKeys, dirtyKeys);
   if (changes.length === 0) return showResult("留空不会清除 secret；当前没有显式变更。", false);
-  await runSave(async () => updateSecretConfiguration(changes));
+  // 显式清除成功后，输入框和“显式清除”勾选都应复位到服务端状态，不能通过重建后的恢复保留旧值。
+  const excluded = new Set<string>();
+  for (const key of clearKeys) {
+    excluded.add(`clear:${key}`);
+    excluded.add(`id:${inputId(key)}`);
+  }
+  const snapshot = await runSave(async () => updateSecretConfiguration(changes), excluded);
+  if (snapshot) rememberSecretSavedStates(snapshot, dirtyKeys, values, clearKeys);
+}
+
+function secretIsDirty(field: ConfigFieldSnapshot, value: string, clearChecked: boolean): boolean {
+  const saved = secretSavedStates.get(field.key);
+  if (saved) {
+    if (clearChecked !== saved.clear) return true;
+    return !clearChecked && value.length > 0 && value !== saved.value;
+  }
+  // 首次交互沿用既有语义：显式清除只在已配置时生效；非空输入视为新值；留空表示不修改。
+  if (clearChecked) return field.configured;
+  return value.length > 0;
+}
+
+/** 保存成功后按提交结果记录每个 Secret 的最新已保存状态，供后续脏判断使用。 */
+function rememberSecretSavedStates(
+  snapshot: ConfigurationSnapshot,
+  dirtyKeys: ReadonlySet<string>,
+  values: ReadonlyMap<string, string>,
+  clearKeys: ReadonlySet<string>,
+): void {
+  for (const key of dirtyKeys) {
+    const field = snapshot.fields.find((candidate) => candidate.key === key);
+    if (!field) continue;
+    secretSavedStates.set(key, {
+      value: clearKeys.has(key) ? "" : values.get(key) ?? "",
+      clear: clearKeys.has(key),
+      revision: field.revision ?? null,
+    });
+  }
 }
 
 async function saveAgent(): Promise<void> {
@@ -994,13 +1066,7 @@ async function autosaveBlur(target: HTMLInputElement | HTMLSelectElement): Promi
     if (!field || !field.editable) return;
     if (field.sensitivity === "secret") {
       const clear = document.querySelector<HTMLInputElement>(`input[data-clear-key="${field.key}"]`);
-      if (!shouldAutosaveOnBlur({
-        scope: "secret",
-        value: target.value,
-        baseline: field.savedValue,
-        configured: field.configured,
-        ...(clear?.checked === undefined ? {} : { clearRequested: clear.checked }),
-      })) return;
+      if (!secretIsDirty(field, target.value, clear?.checked === true)) return;
       await saveSecrets();
       return;
     }
@@ -1012,7 +1078,7 @@ async function autosaveBlur(target: HTMLInputElement | HTMLSelectElement): Promi
   if (target.dataset.clearKey) {
     const field = current.fields.find((value) => value.key === target.dataset.clearKey);
     if (!(target instanceof HTMLInputElement) || !field || !field.editable || !target.checked) return;
-    if (!shouldAutosaveOnBlur({ scope: "secret", value: "", baseline: field.savedValue, configured: field.configured, clearRequested: true })) return;
+    if (!secretIsDirty(field, element(inputId(field.key), HTMLInputElement).value, true)) return;
     await saveSecrets();
     return;
   }
@@ -1145,29 +1211,91 @@ function bindConnectionTest(): void {
   };
 }
 
-async function runSave(action: () => Promise<ConfigurationSnapshot>): Promise<void> {
-  const save = async (): Promise<void> => {
+async function runSave(
+  action: () => Promise<ConfigurationSnapshot>,
+  excludeKeys: ReadonlySet<string> = EMPTY_EXCLUDED_KEYS,
+): Promise<ConfigurationSnapshot | null> {
+  const save = async (): Promise<ConfigurationSnapshot | null> => {
     setButtonsDisabled(true);
     try {
       const snapshot = await action();
       if (!currentThemeController || !currentBackgroundController) throw new Error("界面控制器尚未初始化");
       const restoreId = queuedFocusRestoreId;
       queuedFocusRestoreId = null;
+      // 保存完成后会重建配置 DOM；重建前先完整收集所有 input/select 的当前值
+      // （含 checkbox、select 与 Secret 输入），重建后恢复，避免覆盖其他字段未保存的输入。
+      const captured = captureConfigurationInputState();
       render(snapshot, currentThemeController, currentBackgroundController, currentUserDataController);
+      restoreConfigurationInputState(captured, excludeKeys);
       if (restoreId) document.getElementById(restoreId)?.focus();
       showResult("配置已真实持久化；标记为“重启后生效”的项需按部署方式重启服务。", false);
+      return snapshot;
     } catch (cause) {
       if (cause instanceof ConsoleApiError && cause.code === "config_conflict") {
         showResult("配置文件已被其他操作修改。请刷新后重新合并，旧 revision 未覆盖新文件。", true);
       } else {
         showResult(errorMessage(cause), true);
       }
+      return null;
     } finally {
       setButtonsDisabled(false);
     }
   };
   saveQueue = saveQueue.then(save, save);
-  await saveQueue;
+  return saveQueue;
+}
+
+const CONFIGURATION_ROOT_ID = "configuration";
+
+/** 在重建配置 DOM 前收集所有用户可编辑输入的当前状态，键由 `inputCaptureKey` 稳定生成。 */
+function captureConfigurationInputState(): Map<string, string | boolean> {
+  const captured = new Map<string, string | boolean>();
+  const root = document.getElementById(CONFIGURATION_ROOT_ID);
+  if (!root) return captured;
+  for (const input of root.querySelectorAll<HTMLInputElement | HTMLSelectElement>("input, select")) {
+    if (input instanceof HTMLInputElement && input.type === "file") continue;
+    const key = inputCaptureKey(input);
+    if (!key) continue;
+    captured.set(key, input instanceof HTMLSelectElement || input.type !== "checkbox" ? input.value : input.checked);
+  }
+  return captured;
+}
+
+function inputCaptureKey(input: HTMLInputElement | HTMLSelectElement): string | null {
+  if (input.id) return `id:${input.id}`;
+  if (input.dataset.clearKey) return `clear:${input.dataset.clearKey}`;
+  if (input instanceof HTMLInputElement && input.type === "checkbox") {
+    if (input.dataset.agentTool) return `tool:${input.dataset.agentTool}:${input.value}`;
+    const name = input.getAttribute("name");
+    if (name === "console-theme" || name === "console-background") return `${name}:${input.value}`;
+  }
+  return null;
+}
+
+/**
+ * 重建后恢复输入状态。`excludeKeys` 中的键保持重建后的服务端快照值（例如显式清除的
+ * Secret、用户主动“恢复未保存值”的字段），避免把用户已决定丢弃的旧值再写回页面。
+ */
+function restoreConfigurationInputState(
+  captured: ReadonlyMap<string, string | boolean>,
+  excludeKeys: ReadonlySet<string>,
+): void {
+  const root = document.getElementById(CONFIGURATION_ROOT_ID);
+  if (!root) return;
+  for (const input of root.querySelectorAll<HTMLInputElement | HTMLSelectElement>("input, select")) {
+    if (input instanceof HTMLInputElement && input.type === "file") continue;
+    const key = inputCaptureKey(input);
+    if (!key || excludeKeys.has(key) || !captured.has(key)) continue;
+    const value = captured.get(key);
+    if (value === undefined) continue;
+    if (input instanceof HTMLSelectElement || input.type !== "checkbox") {
+      // select 只恢复仍然存在的选项；选项列表随数据变化时以重建后的快照为准。
+      if (input instanceof HTMLSelectElement && ![...input.options].some((option) => option.value === value)) continue;
+      input.value = String(value);
+    } else {
+      input.checked = value === true;
+    }
+  }
 }
 
 function fieldInput(field: ConfigFieldSnapshot): HTMLInputElement | HTMLSelectElement {

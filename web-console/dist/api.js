@@ -76,13 +76,39 @@ export async function updateUserPreferences(patch) {
         ...(patch.customColors === undefined ? {} : { custom_colors: patch.customColors }),
         ...(patch.backgroundFileIds === undefined ? {} : { background_file_ids: patch.backgroundFileIds }),
         ...(patch.activeBackgroundFileId === undefined ? {} : { active_background_file_id: patch.activeBackgroundFileId }),
+        ...(patch.backgroundMode === undefined ? {} : { background_mode: patch.backgroundMode }),
         ...(patch.kuliantnt === undefined ? {} : { kuliantnt: patch.kuliantnt }),
     }));
     return parseUserPreferences(payload.data);
 }
+/** 按文件列表分页元数据完整收集全部用户文件，避免假设用户文件最多一页（100 条）。 */
+export async function collectAllUserFiles(fetchPage) {
+    const collected = [];
+    let page = 1;
+    while (true) {
+        const current = await fetchPage(page);
+        collected.push(...current.items);
+        const totalPages = Math.max(current.totalPages, Math.ceil(current.total / Math.max(current.pageSize, 1)));
+        if (page >= totalPages)
+            return collected;
+        page += 1;
+    }
+}
 export async function listUserFiles() {
-    const payload = record(await mutatingJson("/api/v1/console/files/list", "POST", { page: 1, page_size: 100 }));
-    return array(record(payload.data).items).map(parseUserFile);
+    return collectAllUserFiles(async (page) => {
+        const payload = record(await mutatingJson("/api/v1/console/files/list", "POST", {
+            page,
+            page_size: 100,
+        }));
+        const data = record(payload.data);
+        return {
+            items: array(data.items).map(parseUserFile),
+            page: finiteNumber(data.page) ?? 1,
+            pageSize: finiteNumber(data.page_size) ?? 100,
+            total: finiteNumber(data.total) ?? 0,
+            totalPages: finiteNumber(data.total_pages) ?? 1,
+        };
+    });
 }
 export async function uploadUserFile(file) {
     const response = await fetch("/api/v1/console/files/upload", {
@@ -220,6 +246,7 @@ function parseUserPreferences(value) {
         customColors: array(item.custom_colors).filter((entry) => typeof entry === "string"),
         backgroundFileIds: array(item.background_file_ids).filter((entry) => typeof entry === "string"),
         activeBackgroundFileId: nullableString(item.active_background_file_id),
+        backgroundMode: item.background_mode === "special" ? "special" : "default",
         kuliantnt: item.kuliantnt === true,
     };
 }

@@ -118,7 +118,7 @@
 
 ## 7. Depth & Surface
 
-采用液态玻璃和双线框体的混合策略：半透明深色填充、背景模糊、轻微饱和度、上方内高光、下方内暗线。页面底层默认不显示背景图，只呈现主题底色；特殊模式使用 `.console-background-grid` 以固定的左上到右下顺序铺设单张 `special.webp` 拼图的 3×3 切片（原 9 张独立图合并压缩，减少包体积）。特殊模式由浏览器控制台输入 `kuliantnt` 解锁；认证后背景的权威状态来自服务端用户偏好（`background_file_ids`、`active_background_file_id`、`kuliantnt`），旧 Cookie 只允许在首次认证成功时一次性迁移后清理，不再作为持久化状态。背景层不可交互、不承载信息，内容组件通过 `--console-glass*` token 透出背景。输入框、编辑器、状态按钮和危险操作可以使用更高不透明度以维持可读性。组件不使用圆角，不用重阴影制造层次。边框结构固定为 1px 外线、1px 空隙、1px 内线。
+采用液态玻璃和双线框体的混合策略：半透明深色填充、背景模糊、轻微饱和度、上方内高光、下方内暗线。页面底层默认不显示背景图，只呈现主题底色；特殊模式使用 `.console-background-grid` 以固定的左上到右下顺序铺设单张 `special.webp` 拼图的 3×3 切片（原 9 张独立图合并压缩，减少包体积）。特殊模式由浏览器控制台输入 `kuliantnt` 解锁；认证后背景的权威状态来自服务端用户偏好（`background_file_ids`、`active_background_file_id`、`background_mode`、`kuliantnt`），`background_mode` 表达当前模式（`default` 无背景 / `special` 特殊九宫格），自定义背景继续由 `active_background_file_id` 表达，`kuliantnt` 只表示是否解锁。旧 Cookie 只允许在首次认证成功时一次性迁移（解锁状态与旧背景模式一起写入服务端成功后才清理），不再作为持久化状态。背景层不可交互、不承载信息，内容组件通过 `--console-glass*` token 透出背景。输入框、编辑器、状态按钮和危险操作可以使用更高不透明度以维持可读性。组件不使用圆角，不用重阴影制造层次。边框结构固定为 1px 外线、1px 空隙、1px 内线。
 
 ## 8. Accessibility Constraints & Accepted Debt
 

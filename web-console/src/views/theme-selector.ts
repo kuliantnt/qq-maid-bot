@@ -5,8 +5,58 @@ import {
   type ConsoleThemePreset,
   type ThemeController,
 } from "../theme.js";
-import type { BackgroundController, BackgroundMode } from "../background.js";
+import type { BackgroundController, BackgroundFile, BackgroundMode } from "../background.js";
 import type { UserDataController } from "./configuration.js";
+
+export interface BackgroundActivationDeps {
+  readonly userData: NonNullable<UserDataController>;
+  readonly controller: BackgroundController;
+  readonly setStatus: (text: string) => void;
+}
+
+/**
+ * 统一的自定义背景激活流程（已有文件与新上传文件共用）：
+ * 1. 先读取 Blob——失败时保留原浏览器背景、不提交服务端、不产生未处理 rejection；
+ * 2. 服务端先写入活动背景——写入失败时本地不激活，页面与服务端都保持原状态；
+ * 3. 服务端提交成功后再应用本地背景——object URL 创建失败时回滚服务端活动背景，
+ *    回滚请求失败也如实显示错误，不静默丢弃。
+ */
+export async function activateBackgroundFile(
+  deps: BackgroundActivationDeps,
+  file: BackgroundFile,
+  forceRefresh: boolean,
+): Promise<void> {
+  const { userData, controller, setStatus } = deps;
+  setStatus("正在激活背景……");
+  let blob: Blob;
+  try {
+    blob = await controller.readFileBlob(file, forceRefresh);
+  } catch (cause) {
+    setStatus(`背景读取失败，已保留原背景：${errorText(cause)}`);
+    return;
+  }
+  try {
+    await userData.updatePreferences({
+      backgroundFileIds: [...new Set([...userData.preferences.backgroundFileIds, file.fileId])],
+      activeBackgroundFileId: file.fileId,
+    });
+    try {
+      await controller.selectFile(file, forceRefresh, blob);
+      setStatus("背景已保存。");
+    } catch (applyCause) {
+      const applyMessage = errorText(applyCause);
+      setStatus(`背景应用失败（${applyMessage}），正在回滚活动背景……`);
+      try {
+        await userData.updatePreferences({ activeBackgroundFileId: null });
+        setStatus(`背景应用失败，已回滚活动背景：${applyMessage}`);
+      } catch (rollbackCause) {
+        setStatus(`背景应用失败（${applyMessage}），且回滚活动背景也失败：${errorText(rollbackCause)}`);
+      }
+    }
+  } catch (cause) {
+    setStatus(`背景保存失败，已保留原背景：${errorText(cause)}`);
+  }
+}
 
 export function renderThemeSelector(
   target: HTMLElement,
@@ -116,15 +166,20 @@ export function renderThemeSelector(
   backgroundStatus.className = "field-meta";
   backgroundStatus.setAttribute("aria-live", "polite");
 
-  const syncBackground = (mode: BackgroundMode): void => {
+  const syncBackgroundMode = (mode: BackgroundMode): void => {
     for (const input of backgroundChoices.querySelectorAll<HTMLInputElement>("input[type=radio]")) {
       const selected = input.value === mode;
       input.checked = selected;
       input.closest("label")?.classList.toggle("console-theme-choice--selected", selected);
     }
-    backgroundStatus.textContent = mode === "special"
+  };
+
+  const syncBackground = (mode: BackgroundMode): void => {
+    syncBackgroundMode(mode);
+    const lastError = backgroundController.lastError();
+    backgroundStatus.textContent = lastError ?? (mode === "special"
       ? backgroundController.isUnlocked() ? "当前背景：特殊九宫格" : "当前背景：特殊九宫格（未解锁）"
-      : "当前背景：无背景";
+      : "当前背景：无背景");
   };
 
   for (const option of [
@@ -141,7 +196,10 @@ export function renderThemeSelector(
     input.disabled = option.mode === "special" && !backgroundController.isUnlocked();
     input.addEventListener("change", () => {
       const mode = input.value as BackgroundMode;
-       void savePreference({ activeBackgroundFileId: null }, "背景已保存。", "背景保存失败", () => {
+       void savePreference({
+         backgroundMode: mode,
+         activeBackgroundFileId: null,
+       }, "背景已保存。", "背景保存失败", () => {
          backgroundController.select(mode);
          syncBackground(backgroundController.current());
        });
@@ -168,6 +226,7 @@ export function renderThemeSelector(
     label.textContent = "自定义颜色（深色、浅色、强调色）";
     const input = document.createElement("input");
     input.type = "text";
+    input.id = "custom-colors-input";
     input.value = userData.preferences.customColors.join(", ");
     input.placeholder = "#07130F, #E9F4E7, #78E3AD";
     const save = document.createElement("button");
@@ -204,6 +263,23 @@ export function renderThemeSelector(
       fileStatus.setAttribute("aria-live", "polite");
       const fileList = document.createElement("div");
       fileList.className = "console-background-file-list";
+      // 已有文件与新上传文件复用同一个激活流程：先读取 Blob，再写服务端，
+      // 最后应用本地背景；任一步失败都保留原浏览器背景并给出明确错误。
+      const activateFile = async (file: BackgroundFile, forceRefresh: boolean): Promise<void> => {
+        if (saveInFlight) return;
+        saveInFlight = true;
+        try {
+          await activateBackgroundFile({
+            userData,
+            controller: backgroundController,
+            setStatus: (text: string) => {
+              backgroundStatus.textContent = text;
+            },
+          }, file, forceRefresh);
+        } finally {
+          saveInFlight = false;
+        }
+      };
       for (const file of userData.files) {
         const row = document.createElement("div");
         row.className = "console-background-file-row";
@@ -214,15 +290,7 @@ export function renderThemeSelector(
         activate.className = "secondary";
         activate.textContent = "使用";
         activate.addEventListener("click", () => {
-          void savePreference({
-            backgroundFileIds: [...new Set([...userData.preferences.backgroundFileIds, file.fileId])],
-            activeBackgroundFileId: file.fileId,
-          }, "背景已保存。", "背景保存失败", () => {
-            void backgroundController.selectFile(file, true).catch(() => {
-              backgroundStatus.textContent = "背景读取失败，已保留原背景。";
-              void userData.updatePreferences({ activeBackgroundFileId: null });
-            });
-          });
+          void activateFile(file, true);
         });
         const remove = document.createElement("button");
         remove.type = "button";
@@ -251,10 +319,7 @@ export function renderThemeSelector(
           activate.className = "secondary";
           activate.textContent = "使用";
           activate.addEventListener("click", () => {
-            void savePreference({
-              backgroundFileIds: [...new Set([...userData.preferences.backgroundFileIds, uploaded.fileId])],
-              activeBackgroundFileId: uploaded.fileId,
-            }, "背景已保存。", "背景保存失败", () => { void backgroundController.selectFile(uploaded, true); });
+            void activateFile(uploaded, true);
           });
           const row = document.createElement("div");
           row.className = "console-background-file-row";
@@ -266,4 +331,8 @@ export function renderThemeSelector(
       backgroundFieldset.append(filesSection);
     }
   }
+}
+
+function errorText(cause: unknown): string {
+  return cause instanceof Error ? cause.message : "未知错误";
 }

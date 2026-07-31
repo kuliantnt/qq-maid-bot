@@ -17,23 +17,34 @@ export type TransitionImage = { readonly url: string; readonly position: string 
 export type BackgroundServerState = {
   readonly fileIds: readonly string[];
   readonly activeFileId: string | null;
+  readonly mode: BackgroundMode;
   readonly kuliantnt: boolean;
 };
 export type BackgroundFileReader = (file: BackgroundFile, forceRefresh?: boolean) => Promise<Blob>;
 export type BackgroundUnlockHandler = () => void | Promise<void>;
+export type BackgroundPersistPatch = {
+  readonly kuliantnt?: boolean;
+  readonly backgroundMode?: BackgroundMode;
+};
 
 export type BackgroundController = {
   readonly current: () => BackgroundMode;
   readonly selection: () => BackgroundSelection;
   readonly isUnlocked: () => boolean;
+  readonly lastError: () => string | null;
   readonly select: (mode: BackgroundMode) => BackgroundMode;
-  readonly selectFile: (file: BackgroundFile, forceRefresh?: boolean) => Promise<BackgroundSelection>;
+  readonly readFileBlob: (file: BackgroundFile, forceRefresh?: boolean) => Promise<Blob>;
+  readonly selectFile: (
+    file: BackgroundFile,
+    forceRefresh?: boolean,
+    blob?: Blob,
+  ) => Promise<BackgroundSelection>;
   readonly deleteFile: (fileId: string) => void;
   readonly dispose: () => void;
   readonly hydrate: (selection: BackgroundServerState, files: readonly BackgroundFile[]) => Promise<void>;
   readonly migrateFromLegacy: (
-    selection: { readonly kuliantnt: boolean },
-    persistKuliantnt: () => Promise<void>,
+    selection: { readonly kuliantnt: boolean; readonly backgroundMode: BackgroundMode },
+    persist: (patch: BackgroundPersistPatch) => Promise<void>,
   ) => Promise<void>;
   readonly unlock: () => BackgroundMode;
   readonly nextTransitionImage: () => TransitionImage;
@@ -62,6 +73,7 @@ export function createBackgroundController(
   let activeObjectUrl: string | null = null;
   let files: readonly BackgroundFile[] = [];
   let transitionIndex = readTransitionIndex(cookieDocument);
+  let lastError: string | null = null;
   if (current.mode === "special" && !unlocked) current = { mode: "default", activeFileId: null };
 
   const apply = (): void => {
@@ -95,10 +107,12 @@ export function createBackgroundController(
     current: () => current.mode,
     selection: () => current,
     isUnlocked: () => unlocked,
+    lastError: () => lastError,
     select: (mode) => {
       if (mode === "special" && !unlocked) return current.mode;
       current = { mode, activeFileId: null };
       releaseActiveUrl();
+      lastError = null;
       apply();
       return current.mode;
     },
@@ -106,24 +120,31 @@ export function createBackgroundController(
       unlocked = true;
       current = { mode: "special", activeFileId: null };
       releaseActiveUrl();
+      lastError = null;
       apply();
       void onUnlock();
       return current.mode;
     },
-    selectFile: async (file, forceRefresh) => {
-      const nextUrl = URL.createObjectURL(await readFile(file, forceRefresh));
+    readFileBlob: async (file, forceRefresh) => {
+      return readFile(file, forceRefresh);
+    },
+    selectFile: async (file, forceRefresh, blob) => {
+      const nextBlob = blob ?? await readFile(file, forceRefresh);
+      const nextUrl = URL.createObjectURL(nextBlob);
       if (!files.some((candidate) => candidate.fileId === file.fileId)) {
         files = [...files, file];
       }
       releaseActiveUrl();
       activeObjectUrl = nextUrl;
       current = { mode: "default", activeFileId: file.fileId };
+      lastError = null;
       apply();
       return current;
     },
     deleteFile: (fileId) => {
       files = files.filter((file) => file.fileId !== fileId);
       if (current.activeFileId === fileId) fallbackToDefault();
+      lastError = null;
     },
     dispose: () => {
       releaseActiveUrl();
@@ -132,29 +153,48 @@ export function createBackgroundController(
     },
     hydrate: async (selection, nextFiles) => {
       files = nextFiles.filter((file) => selection.fileIds.includes(file.fileId));
-      // 服务端偏好是权威；启动时的解锁状态保留到迁移完成，保证旧 cookie 用户不闪断。
+      // 服务端偏好是权威：解锁状态保留启动时的便利值，模式以服务端为准。
       unlocked = unlocked || selection.kuliantnt;
-      try {
-        if (selection.activeFileId) {
-          const file = files.find((candidate) => candidate.fileId === selection.activeFileId);
-          if (file) {
-            if (current.activeFileId !== file.fileId) await controller.selectFile(file);
-          } else {
-            clearActiveBackground();
-          }
-        } else {
-          clearActiveBackground();
+      // 自定义背景由 active_background_file_id 表达，此时模式字段恒为 default；
+      // 无活动文件时按模式字段恢复（special/default），不能静默改写为默认值。
+      const serverMode: BackgroundMode = selection.activeFileId ? "default" : selection.mode;
+      releaseActiveUrl();
+      current = { mode: serverMode, activeFileId: null };
+      if (selection.activeFileId) {
+        const file = files.find((candidate) => candidate.fileId === selection.activeFileId);
+        if (!file) {
+          // 活动背景文件缺失（已被删除或列表未覆盖）：保留服务端模式并给出明确错误。
+          lastError = "活动背景文件未找到，已保留背景模式；请重新选择背景。";
+          apply();
+          return;
         }
-      } catch (cause) {
-        // 背景内容读取失败时回退到默认（无背景）状态；不清除旧 cookie，等待下次成功迁移。
-        fallbackToDefault();
+        try {
+          await controller.selectFile(file);
+        } catch (cause) {
+          // 读取失败时保留服务端模式与旧 object URL 之外的干净状态，并记录明确错误；
+          // 旧 cookie 保留，等待下次成功迁移。
+          lastError = `背景内容读取失败：${cause instanceof Error ? cause.message : "未知错误"}`;
+          current = { mode: serverMode, activeFileId: null };
+          apply();
+        }
+        return;
       }
+      lastError = null;
+      apply();
     },
-    migrateFromLegacy: async (selection, persistKuliantnt) => {
+    migrateFromLegacy: async (selection, persist) => {
       const legacyUnlocked = readCookie(cookieDocument, BACKGROUND_UNLOCK_COOKIE) === "1";
-      if (legacyUnlocked && !selection.kuliantnt) {
-        await persistKuliantnt();
-        unlocked = true;
+      const legacyMode = readMode(cookieDocument);
+      const needsUnlockWrite = legacyUnlocked && !selection.kuliantnt;
+      const needsModeWrite = legacyMode === "special" && selection.backgroundMode !== "special";
+      if (needsUnlockWrite || needsModeWrite) {
+        // 解锁状态与旧背景模式在服务端同一次写入成功后才清理旧 Cookie；
+        // 写入失败时向外抛出，Cookie 保留以便下次重试。
+        await persist({
+          ...(needsUnlockWrite ? { kuliantnt: true } : {}),
+          ...(needsModeWrite ? { backgroundMode: "special" } : {}),
+        });
+        if (legacyUnlocked) unlocked = true;
       }
       clearLegacyBackgroundCookies(cookieDocument);
     },
