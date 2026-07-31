@@ -5,7 +5,7 @@
 //! retention policy 的预算项，本模块只负责按策略保留、淘汰和生成统一日志。
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracing::{debug, warn};
 
 use crate::error::LlmError;
@@ -16,6 +16,13 @@ use crate::error::LlmError;
 /// 已由 provider 的 `media_max_bytes` 单独限制。这里仍为每张图片保留固定成本，使图片数量
 /// 会进入预算，同时避免把数百 KB 的编码正文误当作用户文本。
 const STRUCTURED_IMAGE_ESTIMATED_CHARS: usize = 1024;
+
+/// Tool Loop 大上下文告警阈值（估算字符数）。
+///
+/// Issue #361 建议 `estimated_request_chars > 100_000` 时输出 warn；这里在
+/// 请求发送前按同一语义告警，便于定位是哪一类输入（工具结果、历史、知识证据）
+/// 把上下文推大。只输出尺寸与计数，不输出正文。
+const LARGE_TOOL_LOOP_WARN_CHARS: usize = 100_000;
 
 /// 上下文预算配置。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -317,6 +324,21 @@ pub fn fit_tool_loop_payload(
         tool_loop_budget_estimate(value, stage).map(|estimate| estimate.budgeted_chars)
     };
     let initial_estimate = tool_loop_budget_estimate(&payload, stage)?;
+    if initial_estimate.budgeted_chars > LARGE_TOOL_LOOP_WARN_CHARS {
+        let input_item_count = match payload.get("input").or_else(|| payload.get("messages")) {
+            Some(Value::Array(items)) => items.len(),
+            _ => 0,
+        };
+        warn!(
+            stage,
+            estimated_request_chars = initial_estimate.budgeted_chars,
+            tool_schema_chars = initial_estimate.tool_schema_chars,
+            text_and_protocol_chars = initial_estimate.text_and_protocol_chars,
+            structured_image_count = initial_estimate.structured_image_count,
+            input_item_count,
+            "large tool loop input detected"
+        );
+    }
     debug!(
         stage,
         raw_model_context_chars = initial_estimate.raw_chars,
@@ -396,27 +418,38 @@ fn tool_loop_budget_estimate(
     stage: &'static str,
 ) -> Result<ToolLoopBudgetEstimate, LlmError> {
     // 只估算真正进入模型上下文的字段；model、stream、max token 等传输控制字段不计入。
-    let model_context = if payload.get("input").is_some() {
-        json!({"input": payload.get("input"), "tools": payload.get("tools")})
+    // 直接序列化 input/messages 与 tools 两个借用字段，避免为估算再构造一份
+    // model_context 副本和一份掩码后的 budget_view 副本（Issue #361 内存放大点）。
+    let input_slot = if payload.get("input").is_some() {
+        payload.get("input")
     } else {
-        json!({"messages": payload.get("messages"), "tools": payload.get("tools")})
+        payload.get("messages")
     };
-    let raw_chars = estimated_json_chars(&model_context, stage)?;
+    let input_chars = input_slot
+        .map(|value| estimated_json_chars(value, stage))
+        .transpose()?
+        .unwrap_or(0);
     let tool_schema_chars = payload
         .get("tools")
         .map(|tools| estimated_json_chars(tools, stage))
         .transpose()?
         .unwrap_or(0);
-    let mut budget_view = model_context;
+    let raw_chars = input_chars.saturating_add(tool_schema_chars);
     let mut media = StructuredImageBudget::default();
-    mask_structured_image_data_urls(&mut budget_view, &mut media);
-    let budgeted_chars = estimated_json_chars(&budget_view, stage)?;
+    if let Some(input) = input_slot {
+        count_structured_image_data_urls(input, &mut media);
+    }
+    if let Some(tools) = payload.get("tools") {
+        count_structured_image_data_urls(tools, &mut media);
+    }
     let structured_image_budget_chars =
         media.count.saturating_mul(STRUCTURED_IMAGE_ESTIMATED_CHARS);
 
     Ok(ToolLoopBudgetEstimate {
         raw_chars,
-        budgeted_chars,
+        budgeted_chars: raw_chars
+            .saturating_sub(media.data_url_chars)
+            .saturating_add(structured_image_budget_chars),
         structured_image_count: media.count,
         structured_image_data_chars: media.data_url_chars,
         structured_image_budget_chars,
@@ -434,50 +467,53 @@ struct StructuredImageBudget {
     data_url_chars: usize,
 }
 
-fn mask_structured_image_data_urls(value: &mut Value, budget: &mut StructuredImageBudget) {
+/// 只统计 base64 图片 data URL 的字符数，不复制或修改 payload。
+///
+/// 预算视图无需真的替换字符串：`budgeted = raw - data_url_chars + count * 1024`
+/// 与旧实现“掩码后重新序列化”的结果一致，且不会为每轮请求多保留两份大对象。
+fn count_structured_image_data_urls(value: &Value, budget: &mut StructuredImageBudget) {
     match value {
         Value::Object(object) => {
             match object.get("type").and_then(Value::as_str) {
                 // OpenAI Responses：{"type":"input_image","image_url":"data:image/..."}
                 Some("input_image") => {
-                    if let Some(url) = object.get_mut("image_url") {
-                        mask_image_data_url(url, budget);
+                    if let Some(url) = object.get("image_url").and_then(Value::as_str) {
+                        count_image_data_url(url, budget);
                     }
                 }
                 // Chat Completions：
                 // {"type":"image_url","image_url":{"url":"data:image/..."}}
                 Some("image_url") => {
                     if let Some(url) = object
-                        .get_mut("image_url")
-                        .and_then(Value::as_object_mut)
-                        .and_then(|image_url| image_url.get_mut("url"))
+                        .get("image_url")
+                        .and_then(Value::as_object)
+                        .and_then(|image_url| image_url.get("url"))
+                        .and_then(Value::as_str)
                     {
-                        mask_image_data_url(url, budget);
+                        count_image_data_url(url, budget);
                     }
                 }
                 _ => {}
             }
-            for child in object.values_mut() {
-                mask_structured_image_data_urls(child, budget);
+            for child in object.values() {
+                count_structured_image_data_urls(child, budget);
             }
         }
         Value::Array(items) => {
             for child in items {
-                mask_structured_image_data_urls(child, budget);
+                count_structured_image_data_urls(child, budget);
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
     }
 }
 
-fn mask_image_data_url(value: &mut Value, budget: &mut StructuredImageBudget) {
-    let Some(url) = value.as_str().filter(|url| is_base64_image_data_url(url)) else {
+fn count_image_data_url(url: &str, budget: &mut StructuredImageBudget) {
+    if !is_base64_image_data_url(url) {
         return;
-    };
+    }
     budget.count += 1;
     budget.data_url_chars = budget.data_url_chars.saturating_add(url.chars().count());
-    // 预算视图只替换估算副本；返回给 provider 的原始 payload 不会被修改。
-    *value = Value::String("i".repeat(STRUCTURED_IMAGE_ESTIMATED_CHARS));
 }
 
 fn is_base64_image_data_url(value: &str) -> bool {
@@ -575,7 +611,7 @@ pub fn context_budget_exceeded(report: &BudgetReport, stage: &'static str) -> Ll
 }
 
 /// 估算 JSON 序列化后的字符数；失败时必须显式返回错误，不能按 0 字符放行请求。
-pub fn estimated_json_chars<T: Serialize>(
+pub fn estimated_json_chars<T: Serialize + ?Sized>(
     value: &T,
     stage: &'static str,
 ) -> Result<usize, LlmError> {
@@ -630,6 +666,7 @@ pub fn log_budget_report(scope: &'static str, report: &BudgetReport) {
 mod tests {
     use super::*;
     use serde::Serializer;
+    use serde_json::json;
 
     fn config(limit: usize) -> ContextBudgetConfig {
         ContextBudgetConfig {
@@ -835,6 +872,88 @@ mod tests {
         assert!(estimate.structured_image_data_chars > 160_000);
         assert_eq!(estimate.structured_image_budget_chars, 2_048);
         assert!(estimate.budgeted_chars < 4_000);
+    }
+
+    #[test]
+    fn large_tool_loop_input_exceeds_warning_threshold() {
+        // 工具结果把上下文推到告警阈值（100_000 字符）以上时，估算必须如实上报，
+        // 供 `fit_tool_loop_payload` 输出大上下文 warn；同时请求仍可在窗口内完成。
+        let payload = json!({
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "请完成"}]},
+                {"type": "function_call", "call_id": "call-1", "name": "knowledge_search", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call-1", "output": "长证据".repeat(40_000)}
+            ],
+            "tools": [{"type": "function", "name": "knowledge_search"}]
+        });
+        let config = ContextBudgetConfig {
+            context_window_chars: 200_000,
+            output_reserve_chars: 1_000,
+            protected_recent_turns: 0,
+        };
+
+        let estimate = tool_loop_budget_estimate(&payload, "tool_loop").unwrap();
+        assert!(
+            estimate.budgeted_chars > LARGE_TOOL_LOOP_WARN_CHARS,
+            "estimate {} must exceed warning threshold {}",
+            estimate.budgeted_chars,
+            LARGE_TOOL_LOOP_WARN_CHARS
+        );
+        let (fitted, disabled) =
+            fit_tool_loop_payload(config, payload.clone(), "tool_loop").unwrap();
+        assert!(
+            !disabled,
+            "large but in-window input must not force finalization"
+        );
+        assert_eq!(fitted, payload);
+    }
+
+    #[test]
+    fn multi_round_tool_loop_input_stays_within_budget() {
+        // Tool Loop 多轮推进时，每轮追加 function_call + function_call_output；
+        // 预算层必须在任何一轮都把可发送输入压回 `window - reserve` 以内，
+        // 防止会话 input 无限增长把请求内存推高（Issue #361）。
+        let config = ContextBudgetConfig {
+            context_window_chars: 8_000,
+            output_reserve_chars: 500,
+            protected_recent_turns: 0,
+        };
+        let max_input_chars = config.effective_input_limit();
+        let mut input = vec![json!({
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "查询并完成"}],
+        })];
+
+        for round in 0..5usize {
+            input.push(json!({
+                "type": "function_call",
+                "call_id": format!("call-{round}"),
+                "name": "complete_todos",
+                "arguments": "{}",
+            }));
+            input.push(json!({
+                "type": "function_call_output",
+                "call_id": format!("call-{round}"),
+                "output": "数据".repeat(2_000),
+            }));
+            let payload = json!({"input": input, "tools": [
+                {"type": "function", "name": "complete_todos", "parameters": {"type": "object"}}
+            ]});
+            let (fitted, disabled) = fit_tool_loop_payload(config, payload, "tool_loop").unwrap();
+            let estimate = tool_loop_budget_estimate(&fitted, "tool_loop").unwrap();
+            assert!(
+                estimate.budgeted_chars <= max_input_chars,
+                "round {round}: sent input {} chars must stay within {max_input_chars}",
+                estimate.budgeted_chars
+            );
+            if round >= 2 {
+                assert!(
+                    disabled,
+                    "round {round}: oversized input must enter forced finalization"
+                );
+            }
+        }
     }
 
     #[test]

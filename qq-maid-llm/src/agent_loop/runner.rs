@@ -156,12 +156,19 @@ pub(super) async fn run_agent_loop_with_timeouts(
             || (run_handle.has_completed_tool_result_since(attempt_baseline.tool_results)
                 && run_handle.should_preserve_finalization_budget());
         let allow_tool_calls = round < max_rounds && !preserve_finalization_budget;
+        // Issue #361 诊断：每轮开始采样会话输入尺寸与进程内存，观察 Tool Loop
+        // 多轮输入是否有界；只输出计数与尺寸，不输出正文。
+        let round_input = session.input_size_estimate();
         debug!(
             provider = provider.as_str(),
             model = %model,
             round,
             allow_tool_calls,
             preserve_finalization_budget,
+            input_item_count = round_input.item_count,
+            input_estimated_chars = round_input.estimated_chars,
+            input_tool_result_chars = round_input.tool_result_chars,
+            rss_kb = qq_maid_common::process_mem::process_memory_sample().rss_kb,
             remaining_budget_ms = run_handle.remaining_budget().map(|value| value.as_millis()),
             "starting agent model round"
         );
@@ -220,7 +227,21 @@ pub(super) async fn run_agent_loop_with_timeouts(
                 output_parts,
                 usage: step_usage,
             } => {
+                let step_input_tokens = step_usage.as_ref().and_then(|item| item.input_tokens);
                 usage = merge_usage(usage, step_usage);
+                let final_input = session.input_size_estimate();
+                tracing::info!(
+                    provider = provider.as_str(),
+                    model = %model,
+                    tool_loop_used = true,
+                    model_rounds = run_handle.snapshot().model_rounds,
+                    input_tokens = step_input_tokens,
+                    input_item_count = final_input.item_count,
+                    input_estimated_chars = final_input.estimated_chars,
+                    input_tool_result_chars = final_input.tool_result_chars,
+                    rss_kb = qq_maid_common::process_mem::process_memory_sample().rss_kb,
+                    "agent_loop_request_end"
+                );
                 debug!(
                     provider = provider.as_str(),
                     model = %model,
@@ -247,7 +268,16 @@ pub(super) async fn run_agent_loop_with_timeouts(
                 calls,
                 usage: step_usage,
             } => {
+                let step_input_tokens = step_usage.as_ref().and_then(|item| item.input_tokens);
                 usage = merge_usage(usage, step_usage);
+                tracing::debug!(
+                    provider = provider.as_str(),
+                    model = %model,
+                    round,
+                    tool_call_count = calls.len(),
+                    input_tokens = step_input_tokens,
+                    "agent_loop_after_model_round"
+                );
                 emitted_tools.extend(calls.iter().map(|call| call.name.clone()));
                 run_handle.update(|diagnostics| {
                     diagnostics
@@ -349,6 +379,24 @@ pub(super) async fn run_agent_loop_with_timeouts(
                 results = batch.results;
                 force_finalization_without_tools |= batch.skipped_for_finalization;
                 sync_diagnostics(&run_handle, &executor, &emitted_tools, attempt_baseline);
+                // after_tool_result：记录本轮工具结果体积与追加后的会话输入尺寸。
+                let tool_result_chars = results
+                    .iter()
+                    .map(|result| result.output.to_string().chars().count())
+                    .sum::<usize>();
+                let after_tool_input = session.input_size_estimate();
+                tracing::debug!(
+                    provider = provider.as_str(),
+                    model = %model,
+                    round,
+                    tool_result_count = results.len(),
+                    tool_result_chars,
+                    input_item_count = after_tool_input.item_count,
+                    input_estimated_chars = after_tool_input.estimated_chars,
+                    input_tool_result_chars = after_tool_input.tool_result_chars,
+                    rss_kb = qq_maid_common::process_mem::process_memory_sample().rss_kb,
+                    "after_tool_result"
+                );
                 // 工具启动时预算可能充足，但执行完成后已经进入最终回答预留区。
                 // 此时必须基于刚同步的真实结果重新判断，不能沿用批次启动前的状态。
                 let preserve_after_batch = run_handle.should_preserve_finalization_budget();

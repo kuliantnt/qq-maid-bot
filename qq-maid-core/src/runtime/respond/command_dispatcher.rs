@@ -372,6 +372,23 @@ impl<'a> CommandDispatcher<'a> {
 
         // 兜底：进入普通 LLM 聊天流程。共享历史 actor 快照已在上方准备；这里把
         // 同一快照的 actor_ref 注入当前 MessageContext，供模型可靠映射当前发言人。
+        // Issue #361：确定性 Todo 操作（完成/恢复）在私聊 + 可见快照存在 +
+        // 目标唯一时直接在服务端解析真实 ID 执行，不再携带完整聊天历史进入
+        // LLM Tool Loop；歧义、缺快照、权限不足或需确认时返回 None 保持现有流程。
+        if force_tool_loop
+            && let Some(response) = self
+                .service
+                .try_deterministic_todo_confirm(
+                    &req,
+                    &user_text,
+                    &meta,
+                    &mut session,
+                    active_interaction_session.as_ref(),
+                )
+                .await?
+        {
+            return Ok(DispatchOutcome::Respond(Box::new(response)));
+        }
         prepare_message_context_for_model(
             &self.service.display_name_store,
             &meta,

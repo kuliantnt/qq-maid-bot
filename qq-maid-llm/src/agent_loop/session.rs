@@ -29,6 +29,17 @@ pub struct AgentStreamingDiagnostics {
     pub active_function_call_count: usize,
 }
 
+/// 会话持有的协议形态上下文的尺寸估算；只用于 Issue #361 诊断，不参与预算。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AgentInputSizeEstimate {
+    /// 协议形态条目数（Responses `input` / Chat Completions `messages` 条数）。
+    pub item_count: usize,
+    /// 条目 JSON 序列化估算字符数；DEBUG 未开启时可为 0，避免诊断成本。
+    pub estimated_chars: usize,
+    /// 已追加的工具结果输出字符数。
+    pub tool_result_chars: usize,
+}
+
 /// Provider 侧单步会话：把各自协议的一次模型请求转换为统一 `AgentStep`。
 #[async_trait::async_trait]
 pub trait AgentStepSession: Send {
@@ -44,6 +55,10 @@ pub trait AgentStepSession: Send {
     /// runner 用它区分“首包超时”和“已经开始传输但尚未完成”。
     fn streaming_activity_counter(&self) -> Option<Arc<AtomicUsize>> {
         None
+    }
+    /// 返回当前会话上下文的尺寸估算；只用于诊断日志，默认实现返回空值。
+    fn input_size_estimate(&self) -> AgentInputSizeEstimate {
+        AgentInputSizeEstimate::default()
     }
     /// 用上一轮工具执行结果推进一步。
     ///

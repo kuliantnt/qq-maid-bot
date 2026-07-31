@@ -536,7 +536,7 @@ fn tool_loop_budget_ignores_transport_only_payload_fields() {
             output_reserve_chars: 20,
             protected_recent_turns: 0,
         }),
-        &payload,
+        payload,
     )
     .unwrap();
 }
@@ -568,7 +568,7 @@ fn chat_tool_loop_budget_keeps_large_structured_image_payload() {
             output_reserve_chars: 200,
             protected_recent_turns: 0,
         }),
-        &payload,
+        payload.clone(),
     )
     .unwrap();
 

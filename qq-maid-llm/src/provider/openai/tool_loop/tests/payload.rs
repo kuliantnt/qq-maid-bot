@@ -1,4 +1,22 @@
 use super::*;
+use crate::provider::openai::tool_loop::payload::responses_input_size_estimate;
+
+#[test]
+fn input_size_estimate_counts_items_and_tool_result_chars() {
+    let input = vec![
+        json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "完成"}]}),
+        json!({"type": "function_call", "call_id": "call-1", "name": "complete_todos", "arguments": "{}"}),
+        json!({"type": "function_call_output", "call_id": "call-1", "output": "结果正文".repeat(10)}),
+    ];
+
+    let estimate = responses_input_size_estimate(&input);
+
+    assert_eq!(estimate.item_count, 3);
+    assert_eq!(
+        estimate.tool_result_chars,
+        "结果正文".repeat(10).chars().count()
+    );
+}
 
 #[test]
 fn payload_disables_parallel_tool_calls() {
@@ -144,7 +162,7 @@ fn tool_loop_budget_ignores_transport_only_payload_fields() {
             output_reserve_chars: 20,
             protected_recent_turns: 0,
         }),
-        &payload,
+        payload,
     )
     .unwrap();
 }
@@ -173,7 +191,7 @@ fn responses_tool_loop_budget_keeps_large_structured_image_payload() {
             output_reserve_chars: 200,
             protected_recent_turns: 0,
         }),
-        &payload,
+        payload.clone(),
     )
     .unwrap();
 

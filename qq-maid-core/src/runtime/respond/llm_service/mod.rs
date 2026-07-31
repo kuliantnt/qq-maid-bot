@@ -4,12 +4,10 @@
 //! 调用 `LlmProvider` 获取 LLM 回复，并对原始输出做必要后处理。
 //!
 use async_trait::async_trait;
-use uuid::Uuid;
 
 use futures::StreamExt;
 use qq_maid_common::output_part::OutputPart;
 use qq_maid_common::{
-    identity_context::{ConversationKind, ExecutionActorContext, ExecutionConversationContext},
     input_part::MessageInputPart,
     markdown::escape_unclosed_backticks,
     time_context::{RequestTimeContext, request_time_context},
@@ -24,7 +22,7 @@ use qq_maid_llm::{
         AgentRunDiagnostics, ChatOutcome, DynLlmProvider, LlmStreamEvent, ToolChatRequest,
         types::{ChatMessage, ChatRequest, ChatRole, TokenUsage},
     },
-    tool::{ToolContext, ToolRegistry},
+    tool::ToolRegistry,
 };
 
 use crate::{
@@ -33,15 +31,18 @@ use crate::{
 };
 use qq_maid_common::markdown::to_chat_text;
 
+use super::common::tool_context_from_request;
 use super::{RespondPurpose, RespondRequest, RespondResponse};
 
 mod cache_diagnostics;
 mod compact_messages;
+pub(crate) mod context_diagnostics;
 mod message_parts;
 mod trace;
 
 use cache_diagnostics::{PromptCacheDiagnostics, prompt_cache_diagnostics};
 use compact_messages::build_compact_messages;
+use context_diagnostics::{log_request_stage, warn_large_request_context};
 use message_parts::current_user_parts_for_model;
 #[cfg(test)]
 use trace::{CHAT_TRACE_TEXT_LIMIT, trace_text};
@@ -233,12 +234,16 @@ impl LlmChatService {
         req: &RespondRequest,
     ) -> Result<Vec<ChatMessage>, LlmError> {
         let supports_vision = self.provider.supports_vision(req.model.as_deref());
-        match (req.purpose.clone(), self.context_budget) {
+        log_request_stage("before_build_llm_messages", req);
+        let messages = match (req.purpose.clone(), self.context_budget) {
             (RespondPurpose::Chat, Some(config)) => {
                 budget_chat_messages(req, config, supports_vision)
             }
             _ => Ok(build_respond_messages_for_model(req, supports_vision)),
-        }
+        }?;
+        log_request_stage("after_build_llm_messages", req);
+        warn_large_request_context("after_build_llm_messages", req);
+        Ok(messages)
     }
 
     fn chat_request(&self, req: &RespondRequest, messages: Vec<ChatMessage>) -> ChatRequest {
@@ -252,95 +257,6 @@ impl LlmChatService {
             metadata: req.metadata.clone(),
         }
     }
-}
-
-fn tool_context_from_request(req: &RespondRequest) -> ToolContext {
-    // ToolContext 只从服务端请求上下文生成，禁止模型通过工具参数提供用户或 scope。
-    //
-    // 已知局限：task_id 当前复用入站 message_id，仅在单条消息作用域内唯一。
-    // 多轮多工具场景下同一 message_id 会被多个工具调用共享，无法区分单次工具调用的
-    // 生命周期；后续若需要按调用粒度追踪，应引入独立 task_id 生成与管理
-    // （参见 docs/tasks/stream-tool-delivery-audit.md 中期行动项）。
-    let (kind, target_id) = tool_conversation_from_request(req);
-    let interaction_scope_id = if req.interaction_scope_key.trim().is_empty() {
-        req.scope_key.clone()
-    } else {
-        req.interaction_scope_key.clone()
-    };
-    ToolContext {
-        task_id: req
-            .message_id
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| Uuid::new_v4().to_string()),
-        actor: ExecutionActorContext {
-            user_id: req.user_id.clone(),
-            group_member_role: req.group_member_role.clone(),
-        },
-        conversation: ExecutionConversationContext {
-            platform: req.platform.clone(),
-            account_id: req.account_id.clone(),
-            kind,
-            target_id,
-            scope_id: req.scope_key.clone(),
-            interaction_scope_id,
-        },
-        tool_call_id: None,
-        tool_round: None,
-        retry_of: None,
-        execution_deadline: None,
-    }
-}
-
-fn tool_conversation_from_request(req: &RespondRequest) -> (ConversationKind, Option<String>) {
-    let kind = match req.conversation_kind {
-        ConversationKind::Unknown
-            if req
-                .group_id
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty()) =>
-        {
-            ConversationKind::Group
-        }
-        ConversationKind::Unknown
-            if req
-                .channel_id
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty()) =>
-        {
-            ConversationKind::Channel
-        }
-        // 仅兼容 Core 已归一化的稳定事件类型；actor 存在不能证明当前是私聊。
-        ConversationKind::Unknown => match req.event_type.trim() {
-            "c2c_message" => ConversationKind::Private,
-            "group_message" => ConversationKind::Group,
-            "service_account_message" => ConversationKind::ServiceAccount,
-            _ => ConversationKind::Unknown,
-        },
-        kind => kind,
-    };
-    let target_id = match kind {
-        ConversationKind::Group => {
-            non_empty_owned(&req.conversation_id).or_else(|| non_empty_owned(&req.group_id))
-        }
-        ConversationKind::Channel => {
-            non_empty_owned(&req.conversation_id).or_else(|| non_empty_owned(&req.channel_id))
-        }
-        ConversationKind::Private | ConversationKind::ServiceAccount => {
-            non_empty_owned(&req.conversation_id).or_else(|| non_empty_owned(&req.user_id))
-        }
-        ConversationKind::Unknown => non_empty_owned(&req.conversation_id),
-    };
-    (kind, target_id)
-}
-
-fn non_empty_owned(value: &Option<String>) -> Option<String> {
-    value
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
 }
 
 #[async_trait]
@@ -415,6 +331,37 @@ fn log_llm_request_completed(
     cache: &PromptCacheDiagnostics,
 ) {
     let usage = outcome.usage.as_ref();
+    let estimated_request_chars = context_diagnostics::estimated_request_chars(req);
+    let entered_tool_loop = !outcome.agent.executed_tools.is_empty()
+        || outcome.agent.tool_execution_attempted
+        || !outcome.agent.emitted_tools.is_empty();
+    let input_tokens = usage.and_then(|item| item.input_tokens);
+    // 大上下文告警：Tool / Agent Loop 输入明显异常时输出 warn，定位分项来源。
+    // 只输出尺寸与计数，不输出任何正文内容。
+    if (entered_tool_loop && input_tokens.is_some_and(|tokens| tokens > 8_000))
+        || estimated_request_chars > context_diagnostics::LARGE_CONTEXT_WARN_CHARS
+    {
+        tracing::warn!(
+            entered_tool_loop,
+            tool_name = outcome
+                .agent
+                .executed_tools
+                .last()
+                .map(String::as_str)
+                .unwrap_or(""),
+            input_tokens,
+            estimated_request_chars,
+            scope_hash = %context_diagnostics::scope_key_hash(&req.scope_key),
+            message_count = req.history_messages.len(),
+            history_chars = cache.history.chars,
+            system_chars = cache.stable_system.chars,
+            knowledge_evidence_chars = cache.knowledge.chars,
+            memory_chars = cache.memory.chars,
+            session_chars = cache.session.chars,
+            user_chars = cache.current_message_chars,
+            "large tool or agent loop context detected"
+        );
+    }
     let cache_ratio = usage.and_then(|item| match (item.input_tokens, item.cached_input_tokens) {
         (Some(input), Some(cached)) if input > 0 => Some(cached as f64 / input as f64),
         _ => None,

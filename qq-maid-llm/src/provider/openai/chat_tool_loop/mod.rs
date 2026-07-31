@@ -5,25 +5,20 @@
 //! 工具执行和退出条件由 `qq_maid_llm::agent_loop::run_agent_loop` 统一控制；
 //! 本模块不再维护自己的循环，避免 provider 侧重复维护同一套退出逻辑。
 
-use std::borrow::Borrow;
-
 use serde_json::{Value, json};
 
 use crate::{
     agent_loop::{
-        AgentSessionRequest, AgentStep, AgentStepSession, AgentTextDeltaSink, AgentToolCall,
-        AgentToolResult,
+        AgentInputSizeEstimate, AgentSessionRequest, AgentStep, AgentStepSession,
+        AgentTextDeltaSink, AgentToolCall, AgentToolResult,
     },
-    context_budget::{ContextBudgetConfig, fit_tool_loop_payload},
+    context_budget::{ContextBudgetConfig, estimated_json_chars, fit_tool_loop_payload},
     error::LlmError,
     metrics::MetricsRecorder,
     provider::types::{ChatMessage, TokenUsage},
     sse::{parse_sse_frame, take_sse_frame},
     tool::{ToolMetadata, ToolRegistry},
 };
-
-#[cfg(test)]
-use crate::context_budget::estimated_json_chars;
 
 use super::chat::{
     ChatCompletionsClient, chat_completions_messages, extract_chat_completion_text,
@@ -83,6 +78,28 @@ impl AgentStepSession for ChatCompletionsAgentSession {
 
     fn model(&self) -> &str {
         &self.model
+    }
+
+    fn input_size_estimate(&self) -> AgentInputSizeEstimate {
+        let mut estimate = AgentInputSizeEstimate {
+            item_count: self.messages.len(),
+            ..Default::default()
+        };
+        for message in &self.messages {
+            if message.get("role").and_then(Value::as_str) == Some("tool")
+                && let Some(content) = message.get("content").and_then(Value::as_str)
+            {
+                estimate.tool_result_chars = estimate
+                    .tool_result_chars
+                    .saturating_add(content.chars().count());
+            }
+        }
+        if tracing::enabled!(tracing::Level::DEBUG)
+            && let Ok(chars) = estimated_json_chars(&self.messages, "tool_loop_diagnostics")
+        {
+            estimate.estimated_chars = chars;
+        }
+        estimate
     }
 
     async fn advance(
@@ -222,11 +239,13 @@ where
         .map(|_| crate::provider::ToolCallingProtocol::ChatCompletionsToolCalls)
 }
 
-fn enforce_tool_loop_budget<P: Borrow<Value>>(
+/// 对 Chat Completions Tool Loop payload 应用上下文预算。
+///
+/// 直接按值接收 payload 并原地裁剪，避免请求期同时存在两份完整 messages 副本。
+fn enforce_tool_loop_budget(
     context_budget: Option<ContextBudgetConfig>,
-    payload: P,
+    payload: Value,
 ) -> Result<(Value, bool), LlmError> {
-    let payload = payload.borrow().clone();
     let Some(config) = context_budget else {
         return Ok((payload, false));
     };

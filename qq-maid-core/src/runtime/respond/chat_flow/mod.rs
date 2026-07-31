@@ -631,6 +631,13 @@ impl RustRespondService {
         if mode == KnowledgeRetrievalMode::Tool {
             return Ok(KnowledgeContextOutcome::skipped());
         }
+        // Issue #361 诊断：知识检索阶段只输出尺寸/计数，不输出证据正文。
+        tracing::debug!(
+            knowledge_mode = %mode.as_str(),
+            user_text_chars = user_text.trim().chars().count(),
+            rss_kb = qq_maid_common::process_mem::process_memory_sample().rss_kb,
+            "before_knowledge_search"
+        );
         let evidence = match mode {
             KnowledgeRetrievalMode::Preflight => {
                 self.knowledge_index.search_preflight_evidence(user_text)
@@ -676,6 +683,18 @@ impl RustRespondService {
             });
         }
         let hit_count = evidence.diagnostics.returned_chunk_count;
+        tracing::debug!(
+            knowledge_mode = %mode.as_str(),
+            candidate_count,
+            hit_count,
+            evidence_chars = evidence
+                .items
+                .iter()
+                .map(|item| item.body_excerpt.chars().count())
+                .sum::<usize>(),
+            rss_kb = qq_maid_common::process_mem::process_memory_sample().rss_kb,
+            "after_knowledge_search"
+        );
         Ok(KnowledgeContextOutcome {
             context: crate::runtime::tools::knowledge::render_context(&evidence),
             hit_count,

@@ -410,6 +410,14 @@ impl Tool for WebSearchTool {
             self.backend_override,
             self.model_override.clone(),
         )?;
+        // Issue #361 诊断：联网查询前后只记录尺寸/计数与内存，不记录查询正文。
+        tracing::debug!(
+            tool = WEB_SEARCH_TOOL_NAME,
+            query_chars = request.query.chars().count(),
+            max_results = request.max_results,
+            rss_kb = qq_maid_common::process_mem::process_memory_sample().rss_kb,
+            "before_web_search"
+        );
         let outcome = self
             // Agent 最终回复仍由模型统一生成，但搜索上游必须复用 `/查` 的 SSE 路径，
             // 不能因进入 Tool Loop 退化成完整非流请求。
@@ -867,6 +875,7 @@ fn log_web_search_execution(
             .and_then(|value| value.as_bool())
             .unwrap_or(false),
         execution_succeeded,
+        rss_kb = qq_maid_common::process_mem::process_memory_sample().rss_kb,
         error_code = output
             .get("error")
             .and_then(|error| error.get("code"))

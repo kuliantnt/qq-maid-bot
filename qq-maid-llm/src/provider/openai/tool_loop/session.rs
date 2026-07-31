@@ -9,8 +9,8 @@ use serde_json::Value;
 
 use crate::{
     agent_loop::{
-        AgentStep, AgentStepSession, AgentStreamingDiagnostics, AgentTextDeltaSink, AgentToolCall,
-        AgentToolResult,
+        AgentInputSizeEstimate, AgentStep, AgentStepSession, AgentStreamingDiagnostics,
+        AgentTextDeltaSink, AgentToolCall, AgentToolResult,
     },
     config::HttpAuthConfig,
     context_budget::ContextBudgetConfig,
@@ -23,7 +23,7 @@ use super::{
     diagnostics::{classify_responses_stream_failure, replace_streaming_diagnostics},
     payload::{
         enforce_tool_loop_budget, openai_tool_defs, openai_tool_loop_input,
-        openai_tool_loop_payload,
+        openai_tool_loop_payload, responses_input_size_estimate,
     },
     response::{append_response_output_items, append_tool_results, extract_function_calls},
     streaming::collect_responses_tool_loop_stream,
@@ -181,6 +181,10 @@ impl AgentStepSession for ResponsesAgentSession {
 
     fn streaming_activity_counter(&self) -> Option<Arc<AtomicUsize>> {
         Some(self.streaming_activity_counter.clone())
+    }
+
+    fn input_size_estimate(&self) -> AgentInputSizeEstimate {
+        responses_input_size_estimate(&self.input)
     }
 
     async fn advance(
