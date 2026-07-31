@@ -27,7 +27,7 @@ pub(crate) struct ToolLoopExecutor<'a> {
     execution_attempted: bool,
     rejected_call: bool,
     completed_read_only_calls: HashMap<String, String>,
-    /// 参数、配置、认证等确定性失败在同一请求内不会因模型再次调用而重复执行。
+    /// 工具显式声明可缓存的确定性失败，在同一请求内不会因模型再次调用而重复执行。
     terminal_read_only_failures: HashMap<String, String>,
     execution_counts: HashMap<String, usize>,
     last_batch: Vec<BatchAttempt>,
@@ -182,12 +182,19 @@ impl<'a> ToolLoopExecutor<'a> {
             prepared.context.tool_round = Some(round);
             prepared.context.retry_of = retry_of;
         }
+        let cache_terminal_failures = self.tools.caches_terminal_failures(&requested_tool_name);
         let terminal_failure_key = match prepared.as_ref() {
-            Ok(prepared) if prepared.effect == ToolEffect::ReadOnly => prepared
-                .deduplication_key
-                .as_ref()
-                .map(|key| format!("{}:{key}", prepared.name)),
-            Err(_) => Some(format!("{requested_tool_name}:raw:{raw_arguments}")),
+            Ok(prepared)
+                if prepared.effect == ToolEffect::ReadOnly && prepared.cache_terminal_failures =>
+            {
+                prepared
+                    .deduplication_key
+                    .as_ref()
+                    .map(|key| format!("{}:{key}", prepared.name))
+            }
+            Err(_) if cache_terminal_failures => {
+                Some(format!("{requested_tool_name}:raw:{raw_arguments}"))
+            }
             _ => None,
         };
         let (tool_name, output, domain_succeeded, execution_succeeded, progress_disposition) =

@@ -297,6 +297,19 @@ struct CountingTool {
     dependency: ToolCallDependency,
 }
 
+/// 显式声明确定性失败可缓存的只读工具，仅用于验证终结失败去重协议。
+struct TerminalFailureCachingTool;
+
+/// 读取可由同一 Agent 请求内写工具改变的状态，用于防止通用只读失败被误缓存。
+struct MutableStateReadTool {
+    state: Arc<StdMutex<bool>>,
+    calls: Arc<StdMutex<usize>>,
+}
+
+struct MutableStateWriteTool {
+    state: Arc<StdMutex<bool>>,
+}
+
 struct SlowReadOnlyTool {
     calls: Arc<StdMutex<usize>>,
     delay: std::time::Duration,
@@ -590,6 +603,80 @@ impl crate::tool::Tool for CountingTool {
     }
 }
 
+#[async_trait]
+impl crate::tool::Tool for TerminalFailureCachingTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "cacheable_read".to_owned(),
+            description: "terminal failure caching test tool".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    fn cache_terminal_failures(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, _ctx: ToolContext, _arguments: Value) -> Result<ToolOutput, LlmError> {
+        unreachable!("invalid JSON must fail before executing the test tool")
+    }
+}
+
+#[async_trait]
+impl crate::tool::Tool for MutableStateReadTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "state_read".to_owned(),
+            description: "mutable state read test tool".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    async fn execute(&self, _ctx: ToolContext, _arguments: Value) -> Result<ToolOutput, LlmError> {
+        *self.calls.lock().unwrap() += 1;
+        if !*self.state.lock().unwrap() {
+            return Err(LlmError::new("tool_failed", "state is not ready", "tool"));
+        }
+        Ok(ToolOutput::json(json!({"ok": true, "ready": true})))
+    }
+}
+
+#[async_trait]
+impl crate::tool::Tool for MutableStateWriteTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "state_write".to_owned(),
+            description: "mutable state write test tool".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, _ctx: ToolContext, _arguments: Value) -> Result<ToolOutput, LlmError> {
+        *self.state.lock().unwrap() = true;
+        Ok(ToolOutput::json(json!({"ok": true})))
+    }
+}
+
 /// 记录 prepare/execute 顺序的工具，验证同轮 prepare-before-execute。
 struct OrderTool {
     name: &'static str,
@@ -658,6 +745,7 @@ mod cancel;
 mod fallback;
 mod streaming;
 mod tool_execution;
+mod tool_validation;
 
 #[allow(dead_code)]
 fn _ensure_value_imported(_: Value) {}

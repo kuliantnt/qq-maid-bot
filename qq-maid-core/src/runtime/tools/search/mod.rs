@@ -386,6 +386,12 @@ impl Tool for WebSearchTool {
         ToolEffect::ReadOnly
     }
 
+    fn cache_terminal_failures(&self) -> bool {
+        // 搜索工具已在内部耗尽有限瞬时重试；其余参数、配置、认证等失败在同一
+        // 请求内不会被业务写工具修复，允许阻止模型重复发起相同上游请求。
+        true
+    }
+
     fn deduplication_key(&self, arguments: &Value) -> Option<String> {
         if let Ok(Some(targets)) = ops::parse_research_targets(arguments.get("research_targets")) {
             return serde_json::to_string(&json!({
