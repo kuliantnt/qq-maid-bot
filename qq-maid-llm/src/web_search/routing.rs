@@ -86,7 +86,12 @@ fn unsupported_provider_error(provider: &str) -> LlmError {
 impl WebSearchExecutor for RoutedWebSearchExecutor {
     async fn query(&self, req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
         let (executor, routed_req) = self.route_request(req)?;
-        executor.query(routed_req).await
+        let provider = executor.provider_name();
+        let model = routed_req.model_override.clone().unwrap_or_default();
+        executor
+            .query(routed_req)
+            .await
+            .map_err(|err| err.with_upstream_context(provider, model))
     }
 
     async fn query_stream(
@@ -95,7 +100,12 @@ impl WebSearchExecutor for RoutedWebSearchExecutor {
         delta_tx: mpsc::Sender<String>,
     ) -> Result<WebSearchOutcome, LlmError> {
         let (executor, routed_req) = self.route_request(req)?;
-        executor.query_stream(routed_req, delta_tx).await
+        let provider = executor.provider_name();
+        let model = routed_req.model_override.clone().unwrap_or_default();
+        executor
+            .query_stream(routed_req, delta_tx)
+            .await
+            .map_err(|err| err.with_upstream_context(provider, model))
     }
 
     fn provider_name(&self) -> &'static str {

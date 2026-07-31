@@ -1,11 +1,10 @@
 //! Responses Tool Loop 的 input、工具定义、请求 payload 与上下文预算。
 
-use std::borrow::Borrow;
-
 use serde_json::{Value, json};
 
 use crate::{
-    context_budget::{ContextBudgetConfig, fit_tool_loop_payload},
+    agent_loop::AgentInputSizeEstimate,
+    context_budget::{ContextBudgetConfig, estimated_json_chars_counting, fit_tool_loop_payload},
     error::LlmError,
     provider::types::{ChatMessage, ReasoningEffort},
     tool::ToolMetadata,
@@ -13,11 +12,14 @@ use crate::{
 
 use crate::provider::openai::payload::{openai_model_supports_reasoning, openai_responses_message};
 
-pub(super) fn enforce_tool_loop_budget<P: Borrow<Value>>(
+/// 对 Tool Loop payload 应用上下文预算。
+///
+/// 直接按值接收 payload 并在预算校验时原地裁剪，避免 `fit_tool_loop_payload`
+/// 之外再保留一份完整 payload 副本（Issue #361 请求期内存放大点）。
+pub(super) fn enforce_tool_loop_budget(
     context_budget: Option<ContextBudgetConfig>,
-    payload: P,
+    payload: Value,
 ) -> Result<(Value, bool), LlmError> {
-    let payload = payload.borrow().clone();
     let Some(config) = context_budget else {
         return Ok((payload, false));
     };
@@ -41,6 +43,33 @@ pub(super) fn openai_tool_loop_input(
         ));
     }
     Ok(input)
+}
+
+/// 估算 Responses 会话 `input` 的尺寸；只用于 Issue #361 诊断，不参与预算。
+///
+/// `estimated_chars` 只在 DEBUG 级别开启时计算，避免每轮为诊断额外序列化
+/// 整个上下文；序列化估算走不保留正文的 counting writer，不会在堆上生成
+/// 完整 String 副本。`tool_result_chars` 只统计 `function_call_output` 的输出字符数。
+pub(super) fn responses_input_size_estimate(input: &[Value]) -> AgentInputSizeEstimate {
+    let mut estimate = AgentInputSizeEstimate {
+        item_count: input.len(),
+        ..Default::default()
+    };
+    for item in input {
+        if item.get("type").and_then(Value::as_str) == Some("function_call_output")
+            && let Some(output) = item.get("output").and_then(Value::as_str)
+        {
+            estimate.tool_result_chars = estimate
+                .tool_result_chars
+                .saturating_add(output.chars().count());
+        }
+    }
+    if tracing::enabled!(tracing::Level::DEBUG)
+        && let Ok(chars) = estimated_json_chars_counting(input, "tool_loop_diagnostics")
+    {
+        estimate.estimated_chars = chars;
+    }
+    estimate
 }
 
 pub(super) fn openai_tool_defs(metadata: Vec<ToolMetadata>) -> Vec<Value> {

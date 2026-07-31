@@ -84,15 +84,17 @@ async fn responses_status_error(
             detail
         )
     };
-    match status.as_u16() {
+    let error = match status.as_u16() {
         // 请求已经通过本地凭证预检并真正到达上游，此时的认证/授权拒绝只说明当前
         // Provider 不可用。不要再标成 config，否则会阻断跨 Provider 候选降级；
         // 缺失 API Key 等本地错误仍由 Provider 构造和启动预检返回 config。
+        400 => LlmError::http(message),
         401 | 403 => LlmError::provider(message, "provider_unavailable"),
         429 => LlmError::new("rate_limited", message, "http"),
         500..=599 => LlmError::new("upstream_unavailable", message, "http"),
         _ => LlmError::http(message),
-    }
+    };
+    error.with_upstream_status(status.as_u16())
 }
 
 fn truncate_error_detail(value: &str, limit: usize) -> String {

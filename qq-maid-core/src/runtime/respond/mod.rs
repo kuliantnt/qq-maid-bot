@@ -44,7 +44,8 @@ pub(crate) mod command_render;
 pub(crate) mod common;
 mod conversation_session;
 mod help;
-mod interaction_state;
+// pub(crate)：tools 域的确定性 Todo 短路需要复用同一 interaction scope 派生。
+pub(crate) mod interaction_state;
 pub(crate) mod llm_service;
 mod memory_flow;
 mod ops_flow;
@@ -74,6 +75,9 @@ use common::session_error;
 use interaction_state::{
     command_bypasses_pending, prepare_message_context_for_model, respond_interaction_meta,
     respond_meta, session_pending_visible_to_user, shared_session_turn_actor,
+};
+use llm_service::context_diagnostics::{
+    log_request_stage_snapshot, request_stage_snapshot, warn_large_request_context_snapshot,
 };
 
 /// `RustRespondService` 需要的持久化存储集合。
@@ -455,9 +459,15 @@ impl RustRespondService {
         final_delta_sink: Option<qq_maid_llm::agent_loop::AgentTextDeltaSink>,
         run_handle: Option<qq_maid_llm::agent_loop::AgentRunHandle>,
     ) -> Result<RespondResponse, LlmError> {
-        match CommandDispatcher::new(self).dispatch(req, planned).await? {
-            DispatchOutcome::Respond(response) => Ok(*response),
-            DispatchOutcome::Chat(chat) => {
+        // Issue #361 诊断：请求入口与退出阶段各采样一次上下文尺寸与进程内存，
+        // 用于区分暖机高水位、有界增长与请求级大对象滞留。
+        let stage_snapshot = request_stage_snapshot(&req);
+        log_request_stage_snapshot("before_route", &stage_snapshot);
+        warn_large_request_context_snapshot("before_route", &stage_snapshot);
+        let outcome = CommandDispatcher::new(self).dispatch(req, planned).await;
+        let result = match outcome {
+            Ok(DispatchOutcome::Respond(response)) => Ok(*response),
+            Ok(DispatchOutcome::Chat(chat)) => {
                 self.handle_chat(
                     *chat,
                     ChatFlowSinks {
@@ -468,7 +478,12 @@ impl RustRespondService {
                 )
                 .await
             }
-        }
+            Err(err) => Err(err),
+        };
+        // Issue #361 诊断：请求结束阶段在成功与错误路径都采样一次，便于区分
+        // 有界增长与请求级大对象滞留（错误路径也不能漏采样）。
+        log_request_stage_snapshot("request_end", &stage_snapshot);
+        result
     }
 
     /// 仅供 Core 进程内 stream 边界使用的真流式入口。

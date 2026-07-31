@@ -2,6 +2,34 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.23.1] - 2026-07-31
+
+### Release Focus
+
+* **Tool Loop 上下文收敛与联网搜索韧性**：为 Tool / Agent Loop 增加分阶段上下文尺寸与内存诊断，收敛确定性 Todo 操作携带的完整聊天上下文并约束多轮输入；联网搜索保留上游状态、支持有限重试，避免不可重试的确定性失败重复请求。
+
+### Added
+
+* **上下文尺寸与内存诊断**（PR #621）：新增 `/proc` 内存采样（VmSize / VmRSS 始终可采样，PSS / PrivateDirty 仅 `QQ_MAID_MEMORY_DIAGNOSTICS=1` 时采样）与 `RequestSizeStats` 分项字符统计，按阶段输出上下文尺寸、计数与内存读数；明细默认 DEBUG 门控，日志不输出聊天、知识、搜索正文或凭据。
+* **大上下文告警**（PR #621）：预算层与请求完成日志在估算字符或 input tokens 超过阈值时输出带分项定位字段的告警。
+
+### Changed
+
+* **确定性 Todo 短路**（PR #621）：仅明确解析为 Private / ServiceAccount 的会话，且文本为单一确认动作（完成 / 恢复）+ 严格可解析的显式编号 + 请求级可见快照新鲜且编号全部落在范围内时，直接从快照解析真实 todo_id 执行工具而不进入 LLM；歧义、缺快照、权限不足或需确认场景保持原 Tool Loop 流程。编号到真实 todo_id 的映射、去重、pending 与成功验真全部复用既有领域实现，不暴露内部 ID。
+* **Tool Loop 多轮输入有界**（PR #621）：预算层每轮将可发送输入压回 `window - reserve` 以内，并消除每轮 payload 全量 clone 与预算估算构造的中间副本。
+* **联网搜索失败诊断与有限重试**（PR #622）：为 Web Search 保留上游 HTTP 状态、Provider 与模型身份并归一化错误分类；仅对 429、502 / 503 / 504、超时和网络瞬断按固定预算补发一次；同一 Agent 请求内不再重复执行相同的不可重试只读失败；Agent Tool 与 Web Search 失败日志补齐调用 ID、尝试次数、耗时、错误类型、可重试性、后端、上游状态、Provider 和模型等结构化字段，不记录查询正文、凭据或上游错误正文。
+
+### Fixed
+
+* **DeepSeek 流式 Tool Call 参数合并**（PR #622）：修正流式 Tool Call 参数合并边界，并配套 HTTP 状态分类、重试预算、结果回填与日志脱敏测试。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.23.1`；内部 crate 版本不统一提升。
+* 内存诊断不改变请求 payload、Provider 路由与既有对话行为；PSS / PrivateDirty 与阶段明细需 DEBUG 日志和 `QQ_MAID_MEMORY_DIAGNOSTICS=1`。
+* 确定性 Todo 短路仅影响明确 Private / ServiceAccount 会话中的单一确认动作，群聊、slash 命令、pending 确认等路径与既有语义保持一致。
+* PR #621 的 19 MB 部署环境复现与对比数据仍需在真实部署环境按文档步骤验证（本地环境无法复现 2C2G + 知识库 / 联网组合的增长）；本次发布前的本地检查结果以最终发布报告为准。
+
 ## [v0.23.0] - 2026-07-31
 
 ### Release Focus

@@ -142,6 +142,13 @@ pub trait Tool: Send + Sync {
             .then(|| serde_json::to_string(arguments).ok())
             .flatten()
     }
+    /// 是否允许在同一 Agent 请求内缓存相同参数的不可重试失败。
+    ///
+    /// 默认关闭：普通只读查询也可能因前序写操作或外部状态变化而由失败转为成功。
+    /// 只有能保证该失败在本次请求内保持确定性的工具才应显式开启。
+    fn cache_terminal_failures(&self) -> bool {
+        false
+    }
     /// 同一 Agent 请求内允许真实执行的最大次数；只读缓存命中不消耗该额度，默认不限制。
     fn max_calls_per_request(&self) -> Option<usize> {
         None
@@ -179,6 +186,8 @@ pub struct PreparedToolCall {
     pub effect: ToolEffect,
     /// 同一 Agent 请求内的只读调用去重键。
     pub deduplication_key: Option<String>,
+    /// 是否允许缓存相同参数的不可重试失败。
+    pub cache_terminal_failures: bool,
     /// 请求级真实执行上限，供统一 Tool Loop 执行器计数；缓存命中不计入。
     pub max_calls_per_request: Option<usize>,
     /// 与同轮前一项调用的依赖关系。
@@ -292,6 +301,16 @@ impl ToolRegistry {
         items
     }
 
+    /// 返回工具是否显式声明其不可重试失败可在本次请求内缓存。
+    ///
+    /// 该查询需要覆盖 JSON 解析和 Tool prepare 之前的失败，因此不能只依赖
+    /// [`PreparedToolCall`] 上的字段。
+    pub(crate) fn caches_terminal_failures(&self, name: &str) -> bool {
+        self.tools.get(name).is_some_and(|tool| {
+            tool.effect() == ToolEffect::ReadOnly && tool.cache_terminal_failures()
+        })
+    }
+
     /// 返回与注册顺序和 JSON 对象插入顺序无关的工具 schema 字节。
     pub fn stable_schema_json(&self) -> Result<String, LlmError> {
         let schema = self
@@ -350,6 +369,7 @@ impl ToolRegistry {
         Ok(PreparedToolCall {
             effect,
             deduplication_key,
+            cache_terminal_failures: tool.cache_terminal_failures(),
             max_calls_per_request: tool.max_calls_per_request(),
             tool,
             name: name.to_owned(),

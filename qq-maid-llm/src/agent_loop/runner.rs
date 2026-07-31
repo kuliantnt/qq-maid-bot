@@ -22,7 +22,7 @@ use tracing::{debug, warn};
 use crate::{
     agent_loop::{
         AgentRunDiagnostics, AgentRunHandle, AgentStopReason, AgentTextDeltaFuture,
-        AgentTextDeltaSink, ToolLoopProgressSink,
+        AgentTextDeltaSink, ToolLoopProgressSink, tool_result_chars,
     },
     error::LlmError,
     metrics::MetricsRecorder,
@@ -156,12 +156,33 @@ pub(super) async fn run_agent_loop_with_timeouts(
             || (run_handle.has_completed_tool_result_since(attempt_baseline.tool_results)
                 && run_handle.should_preserve_finalization_budget());
         let allow_tool_calls = round < max_rounds && !preserve_finalization_budget;
+        // Issue #361 诊断：每轮开始采样会话输入尺寸与进程内存，观察 Tool Loop
+        // 多轮输入是否有界；只输出计数与尺寸，不输出正文。采样全部放进 DEBUG
+        // 门控，默认级别不触碰会话上下文与 /proc 读取。
+        let round_size = if tracing::enabled!(tracing::Level::DEBUG) {
+            let estimate = session.input_size_estimate();
+            let mem = qq_maid_common::process_mem::process_memory_sample();
+            Some((estimate, mem))
+        } else {
+            None
+        };
         debug!(
             provider = provider.as_str(),
             model = %model,
             round,
             allow_tool_calls,
             preserve_finalization_budget,
+            input_item_count = round_size.as_ref().map(|(estimate, _)| estimate.item_count),
+            input_estimated_chars = round_size
+                .as_ref()
+                .map(|(estimate, _)| estimate.estimated_chars),
+            input_tool_result_chars = round_size
+                .as_ref()
+                .map(|(estimate, _)| estimate.tool_result_chars),
+            rss_kb = round_size.as_ref().and_then(|(_, mem)| mem.rss_kb),
+            vm_size_kb = round_size.as_ref().and_then(|(_, mem)| mem.vm_size_kb),
+            pss_kb = round_size.as_ref().and_then(|(_, mem)| mem.pss_kb),
+            private_dirty_kb = round_size.as_ref().and_then(|(_, mem)| mem.private_dirty_kb),
             remaining_budget_ms = run_handle.remaining_budget().map(|value| value.as_millis()),
             "starting agent model round"
         );
@@ -220,7 +241,37 @@ pub(super) async fn run_agent_loop_with_timeouts(
                 output_parts,
                 usage: step_usage,
             } => {
+                let step_input_tokens = step_usage.as_ref().and_then(|item| item.input_tokens);
                 usage = merge_usage(usage, step_usage);
+                // Issue #361 诊断：最终输入尺寸与进程内存只在 DEBUG 开启时采样，
+                // 默认级别不触碰会话上下文与 /proc 读取；DEBUG 关闭时这些字段
+                // 记录为空，避免 INFO 日志出现无意义的估算值。
+                let final_size = if tracing::enabled!(tracing::Level::DEBUG) {
+                    let estimate = session.input_size_estimate();
+                    let mem = qq_maid_common::process_mem::process_memory_sample();
+                    Some((estimate, mem))
+                } else {
+                    None
+                };
+                tracing::info!(
+                    provider = provider.as_str(),
+                    model = %model,
+                    tool_loop_used = true,
+                    model_rounds = run_handle.snapshot().model_rounds,
+                    input_tokens = step_input_tokens,
+                    input_item_count = final_size.as_ref().map(|(estimate, _)| estimate.item_count),
+                    input_estimated_chars = final_size
+                        .as_ref()
+                        .map(|(estimate, _)| estimate.estimated_chars),
+                    input_tool_result_chars = final_size
+                        .as_ref()
+                        .map(|(estimate, _)| estimate.tool_result_chars),
+                    rss_kb = final_size.as_ref().and_then(|(_, mem)| mem.rss_kb),
+                    vm_size_kb = final_size.as_ref().and_then(|(_, mem)| mem.vm_size_kb),
+                    pss_kb = final_size.as_ref().and_then(|(_, mem)| mem.pss_kb),
+                    private_dirty_kb = final_size.as_ref().and_then(|(_, mem)| mem.private_dirty_kb),
+                    "agent_loop_request_end"
+                );
                 debug!(
                     provider = provider.as_str(),
                     model = %model,
@@ -247,7 +298,16 @@ pub(super) async fn run_agent_loop_with_timeouts(
                 calls,
                 usage: step_usage,
             } => {
+                let step_input_tokens = step_usage.as_ref().and_then(|item| item.input_tokens);
                 usage = merge_usage(usage, step_usage);
+                tracing::debug!(
+                    provider = provider.as_str(),
+                    model = %model,
+                    round,
+                    tool_call_count = calls.len(),
+                    input_tokens = step_input_tokens,
+                    "agent_loop_after_model_round"
+                );
                 emitted_tools.extend(calls.iter().map(|call| call.name.clone()));
                 run_handle.update(|diagnostics| {
                     diagnostics
@@ -339,16 +399,44 @@ pub(super) async fn run_agent_loop_with_timeouts(
                     ));
                 }
                 force_finalization_without_tools |= batch_budget_reserved;
-                let batch =
-                    execute_tool_batch(&calls, round, &mut executor, &run_handle, attempt_baseline)
-                        .await
-                        .map_err(|err| {
-                            let reason = stop_reason_for_error(&err);
-                            agent_error(err, &run_handle, &executor, reason, attempt_baseline)
-                        })?;
+                let batch = execute_tool_batch(
+                    &calls,
+                    round,
+                    &provider,
+                    &model,
+                    &mut executor,
+                    &run_handle,
+                    attempt_baseline,
+                )
+                .await
+                .map_err(|err| {
+                    let reason = stop_reason_for_error(&err);
+                    agent_error(err, &run_handle, &executor, reason, attempt_baseline)
+                })?;
                 results = batch.results;
                 force_finalization_without_tools |= batch.skipped_for_finalization;
                 sync_diagnostics(&run_handle, &executor, &emitted_tools, attempt_baseline);
+                // after_tool_result：只记录本轮结果的独立体积（不 clone、不序列化）。
+                // 本批结果尚未由 Provider 追加到会话 input，会话真实输入尺寸在
+                // Provider `advance` 的 append 之后、payload 构造之前单独记录
+                // （agent_loop_input_after_append），避免把“未追加”误标为“追加后”。
+                // 整段诊断计算放在 DEBUG 门控内：默认级别不触碰大型 Tool Result。
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    let result_chars = tool_result_chars(&results);
+                    let result_mem = qq_maid_common::process_mem::process_memory_sample();
+                    tracing::debug!(
+                        provider = provider.as_str(),
+                        model = %model,
+                        round,
+                        tool_result_count = results.len(),
+                        tool_result_chars = result_chars,
+                        rss_kb = result_mem.rss_kb,
+                        vm_size_kb = result_mem.vm_size_kb,
+                        pss_kb = result_mem.pss_kb,
+                        private_dirty_kb = result_mem.private_dirty_kb,
+                        "after_tool_result"
+                    );
+                }
                 // 工具启动时预算可能充足，但执行完成后已经进入最终回答预留区。
                 // 此时必须基于刚同步的真实结果重新判断，不能沿用批次启动前的状态。
                 let preserve_after_batch = run_handle.should_preserve_finalization_budget();
@@ -733,6 +821,8 @@ fn track_visible_delta_sink(
 async fn execute_tool_batch(
     calls: &[AgentToolCall],
     round: usize,
+    provider: &str,
+    model: &str,
     executor: &mut ToolLoopExecutor<'_>,
     run_handle: &AgentRunHandle,
     baseline: AgentAttemptBaseline,
@@ -793,10 +883,11 @@ async fn execute_tool_batch(
                 |result| run_handle.record_tool_result(result),
             )
             .await;
+        let tool_duration_ms = tool_started_at.elapsed().as_millis();
         debug!(
             tool = call.name,
             round,
-            tool_elapsed_ms = tool_started_at.elapsed().as_millis(),
+            tool_elapsed_ms = tool_duration_ms,
             tool_succeeded = output.is_ok(),
             remaining_budget_ms = run_handle.remaining_budget().map(|value| value.as_millis()),
             "agent tool call completed"
@@ -805,6 +896,14 @@ async fn execute_tool_batch(
         let emitted_tools = snapshot.emitted_tools[baseline.emitted_tools..].to_vec();
         sync_diagnostics(run_handle, executor, &emitted_tools, baseline);
         let output = output?;
+        log_structured_tool_failure(
+            call,
+            round,
+            provider,
+            model,
+            tool_duration_ms,
+            &output.output,
+        );
         skipped_for_finalization |= output.skipped_for_finalization;
         stop_remaining_batch |= output.stop_remaining_batch;
         results.push(AgentToolResult {
@@ -817,6 +916,58 @@ async fn execute_tool_batch(
         results,
         skipped_for_finalization,
     })
+}
+
+fn log_structured_tool_failure(
+    call: &AgentToolCall,
+    round: usize,
+    agent_provider: &str,
+    agent_model: &str,
+    duration_ms: u128,
+    output: &str,
+) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
+        return;
+    };
+    if value.get("ok").and_then(serde_json::Value::as_bool) != Some(false) {
+        return;
+    }
+    let error = value.get("error").unwrap_or(&serde_json::Value::Null);
+    warn!(
+        tool_name = call.name.as_str(),
+        tool_call_id = call.call_id.as_str(),
+        attempt = value
+            .get("attempts")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(round as u64 + 1),
+        duration_ms = duration_ms.min(u128::from(u64::MAX)) as u64,
+        error_kind = error
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("internal_error"),
+        retriable = error
+            .get("retriable")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        backend = value
+            .get("backend")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown"),
+        upstream_status = ?error.get("upstream_status").and_then(serde_json::Value::as_u64),
+        provider = value
+            .get("provider")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(agent_provider),
+        model = value
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(agent_model),
+        failure_layer = error
+            .get("stage")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("tool_loop"),
+        "agent tool call failed"
+    );
 }
 
 struct ToolBatchOutcome {

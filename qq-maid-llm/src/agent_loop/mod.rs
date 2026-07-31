@@ -35,13 +35,16 @@
 //! | [`types`] | 协议无关的 `AgentStep` / `AgentToolCall` / `AgentToolResult` / `AgentSessionRequest` |
 //! | [`session`] | `AgentStepSession` trait（Provider 单步适配契约） |
 //! | [`runner`] | `run_agent_loop` 统一循环控制 + usage 合并 |
+//! | [`diagnostics`] | 尺寸诊断纯逻辑与 DEBUG 门控日志（Issue #361） |
 
+mod diagnostics;
 pub mod runner;
 pub mod session;
 pub mod types;
 
+pub(crate) use diagnostics::{log_input_size_after_append, tool_result_chars};
 pub use runner::{run_agent_loop, run_agent_loop_with_handle};
-pub use session::{AgentStepSession, AgentStreamingDiagnostics};
+pub use session::{AgentInputSizeEstimate, AgentStepSession, AgentStreamingDiagnostics};
 pub use types::{
     AgentRunDiagnostics, AgentRunHandle, AgentSessionRequest, AgentStep, AgentStopReason,
     AgentTextDeltaFuture, AgentTextDeltaSink, AgentToolCall, AgentToolResult, ToolExecutionAttempt,

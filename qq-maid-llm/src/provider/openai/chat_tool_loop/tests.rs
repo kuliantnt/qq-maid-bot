@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent_loop::{AgentTextDeltaFuture, run_agent_loop};
+use crate::context_budget::estimated_json_chars;
 use crate::provider::test_support::{WeatherToolStub, test_tool_context};
 use crate::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
 use async_trait::async_trait;
@@ -23,6 +24,43 @@ fn recording_delta_sink(deltas: Arc<StdMutex<Vec<String>>>) -> AgentTextDeltaSin
             Ok(())
         }) as AgentTextDeltaFuture
     })
+}
+
+#[test]
+fn deepseek_streaming_tool_call_merges_name_id_and_all_argument_fragments() {
+    let mut calls = Vec::new();
+    merge_streaming_tool_calls(
+        &mut calls,
+        &[json!({
+            "index": 0,
+            "id": "call_search_1",
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "arguments": "{\"query\":\"2026 "
+            }
+        })],
+    )
+    .unwrap();
+    merge_streaming_tool_calls(
+        &mut calls,
+        &[json!({
+            "index": 0,
+            "function": {
+                "arguments": "AI news\",\"raw_question\":null}"
+            }
+        })],
+    )
+    .unwrap();
+
+    let calls = streaming_tool_calls_to_function_calls(calls).unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "web_search");
+    assert_eq!(calls[0].call_id, "call_search_1");
+    assert_eq!(
+        serde_json::from_str::<Value>(&calls[0].arguments).unwrap(),
+        json!({"query": "2026 AI news", "raw_question": null})
+    );
 }
 
 #[tokio::test]
@@ -536,7 +574,7 @@ fn tool_loop_budget_ignores_transport_only_payload_fields() {
             output_reserve_chars: 20,
             protected_recent_turns: 0,
         }),
-        &payload,
+        payload,
     )
     .unwrap();
 }
@@ -568,7 +606,7 @@ fn chat_tool_loop_budget_keeps_large_structured_image_payload() {
             output_reserve_chars: 200,
             protected_recent_turns: 0,
         }),
-        &payload,
+        payload.clone(),
     )
     .unwrap();
 
