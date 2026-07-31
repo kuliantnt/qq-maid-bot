@@ -2,6 +2,41 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.23.2] - 2026-07-31
+
+### Release Focus
+
+* **控制台合并阻塞收口与主题语义化**：将控制台背景状态统一为服务端权威并补全 Todo 管理页面，控制台默认不再展示背景图并大幅压缩嵌入资源；配色由三色预设重构为语义化主题 token，同时修复静态资源缓存、导航状态机、自动保存丢输入与 Secret 并发保存等问题。
+
+### Added
+
+* **Todo 管理控制台页面**（PR #623）：前端接入受保护的 Todo 管理 API，新增 Todo 页面；目标发现接口保留分页元数据，创建 / 筛选目标共用分页器（超过 100 个目标可继续选择），筛选重置、删除末项回退与编辑初始化失败展示边界补齐。
+* **背景模式服务端权威**（PR #623）：新增 `background_mode` 服务端字段（`default` / `special`）与 `console_user_data_background_mode_v2` SQLite migration，通过 `ALTER TABLE` 为旧库补齐列（默认 `default`）；旧 Cookie 一次性迁移解锁状态与旧背景模式，写入成功后才清理，不再作为持久化状态。
+* **语义化主题 token 预设**（PR #625）：控制台主题由三色预设（night-shift / ember-grid / tide-signal，v1）重构为完整语义 token 预设（console-dark / night-green / light，v2），覆盖背景、面板、卡片、输入、边框、文字、强调、成功、警告与错误等语义 token；旧 v1 主题自动迁移到 v2。
+* **控制台开关内存优化**（PR #623）：`WEB_CONSOLE_ENABLED=false` 时不注册控制台路由、不初始化控制台专属服务（用户偏好 / Todo 管理 / 工具元数据），也不生成 bootstrap token，进程不加载 web 前端，节省常驻内存。
+
+### Changed
+
+* **背景资源精简**（PR #623）：九宫格由 9 张独立图（约 12.7 MB）合并为单张 3×3 `special.webp` 拼图（约 484 KB），前端用 CSS `background-position` 切片渲染；favicon 压缩为 64×64；嵌入背景资源合计约 14.4 MB → 0.5 MB。
+* **静态资源缓存策略**（PR #623）：固定名 JS / CSS / 图片不再返回一年 immutable，统一 `public, max-age=0, must-revalidate`；`index.html` 保持 `no-cache`；CSP `img-src` 放行 `blob:` 以支持自定义背景。
+* **控制台导航状态机**（PR #623）：默认入口激活总览并标记 `aria-current`；动画期间连续导航合并为最后一次请求；`pushState` + `hashchange` 支持前进 / 后退；`finally` 释放转换锁并完整同步 `prefers-reduced-motion`。
+* **控制台默认无背景**（PR #623）：未选择任何背景时只显示主题底色，不再显示内置默认图；设置页“普通背景”改为“无背景”，导航过渡在默认模式下不显示中心背景图。
+* **清理 demo 实验代码**（PR #625）：删除 `src/demo`、dist-demo、build-demo 脚本与 `tsconfig.demo.json`，移除 package.json 中对应脚本及相关文档引用。
+
+### Fixed
+
+* **Secret 并发自动保存**（PR #623）：脏状态、changes 与 expected_revision 改为保存队列真正执行时按前一次保存完成后的最新 snapshot 与 secret revision 重新计算，连续失焦两个 Secret 只提交第二个、不再出现 `config_conflict`；重新登录 / 刷新时清空跨会话残留的保存状态。
+* **自动保存丢输入**（PR #623）：重建配置 DOM 前完整收集并恢复所有 input / select 值，保存队列保持 revision 顺序串行执行，避免覆盖其他字段未保存的输入。
+* **自定义背景激活回滚**（PR #623）：激活前记录原 `active_background_file_id` 与 `background_mode`；本地 object URL 应用失败时恢复原服务端状态（原背景恢复原背景、原 special 恢复 special），不再统一清空为 null；回滚失败如实显示错误，浏览器始终保留原背景。
+* **kuliantnt 解锁持久化**（PR #623）：解锁与切换特殊背景一次提交 `kuliantnt: true`、`background_mode: special`、`active_background_file_id: null`，刷新后仍为特殊背景且原自定义背景不再出现；持久化失败自动回滚本地状态。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.23.2`；本次同步提升内部 crate 版本：`qq-maid-common` 0.1.4、`qq-maid-llm` 0.1.9、`qq-maid-core` 0.1.18、`qq-maid-gateway-rs` 0.1.13。
+* 新增 `console_user_data_background_mode_v2` SQLite migration：为已有 `APP_DB_FILE` 的 `console_user_preferences` 表补齐 `background_mode` 列（默认 `default`），历史偏好行升级后不丢数据，重复启动不重复执行；无必需手工配置迁移。
+* 服务端偏好（`background_file_ids` / `active_background_file_id` / `background_mode` / `kuliantnt`）成为背景唯一权威来源；`kuliantnt` 仅表示是否解锁，不表达当前是否选择特殊背景。
+* 控制台默认不再展示内置背景图，固定名静态资源改为可重新验证缓存；这些变化只影响 `/console/` 前端行为，聊天、Todo、记忆、RSS 与既有配置接口语义保持不变。
+
 ## [v0.23.1] - 2026-07-31
 
 ### Release Focus
