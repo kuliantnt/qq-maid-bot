@@ -17,12 +17,13 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.23.0`，项目处于 `23.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.23.1`，项目处于 `23.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
 ## 23.x 版本线更新
 
+- **上下文诊断与联网搜索韧性**（v0.23.1）：Tool Loop 增加分阶段上下文尺寸与内存诊断，私聊中的确定性 Todo 完成 / 恢复收敛为短上下文执行；联网搜索保留上游状态并按固定预算有限重试，避免不可重试失败重复请求。
 - **控制台用户数据与 Provider 路由扩展**（v0.23.0）：部署管理员可通过受保护 API 管理自己的控制台偏好和通用文件；自定义 Provider 复用统一图片请求、保留完整 `provider:model` 候选身份，并支持按 Provider 路由原生 Responses 搜索与认证失败后的候选切换。
 
 ### 更早版本（22.x）
