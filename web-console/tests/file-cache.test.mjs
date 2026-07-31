@@ -10,9 +10,9 @@ import {
   readCachedFileBlob,
 } from "../dist/file-cache.js";
 
-test("fileCacheRequest 构造 POST 请求作为 Cache API 的匹配键", () => {
+test("fileCacheRequest 构造 Cache API 支持的 GET 匹配键", () => {
   const request = fileCacheRequest("https://console.example/files/a.png");
-  assert.equal(request.method, "POST");
+  assert.equal(request.method, "GET");
   assert.equal(request.url, "https://console.example/files/a.png");
 });
 
@@ -29,7 +29,7 @@ test("没有 caches API 时全部降级为网络回退", async () => {
   }
 });
 
-test("有 caches API 时写入、读取、删除与清空走 POST 请求键", async () => {
+test("有 caches API 时写入、读取、删除与清空走 GET 请求键", async () => {
   const entries = new Map();
   const putRequests = [];
   const deleteRequests = [];
@@ -61,7 +61,7 @@ test("有 caches API 时写入、读取、删除与清空走 POST 请求键", as
     const blob = new Blob(["hello"], { type: "image/png" });
     assert.equal(await cacheFileBlob("https://console.example/files/a.png", blob), true);
     assert.equal(putRequests.length, 1);
-    assert.equal(putRequests[0].method, "POST");
+    assert.equal(putRequests[0].method, "GET");
     assert.equal(putRequests[0].url, "https://console.example/files/a.png");
 
     const cached = await readCachedFileBlob("https://console.example/files/a.png");
@@ -70,7 +70,7 @@ test("有 caches API 时写入、读取、删除与清空走 POST 请求键", as
 
     assert.equal(await deleteCachedFileBlob("https://console.example/files/a.png"), true);
     assert.equal(deleteRequests.length, 1);
-    assert.equal(deleteRequests[0].method, "POST");
+    assert.equal(deleteRequests[0].method, "GET");
     assert.equal(await readCachedFileBlob("https://console.example/files/a.png"), null);
 
     // 条目不存在时删除同样视为成功，仅 Cache API 失败才返回 false。

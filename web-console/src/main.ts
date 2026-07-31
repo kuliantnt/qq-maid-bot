@@ -239,7 +239,11 @@ async function showConsole(username: string): Promise<void> {
 async function hydrateUserData(): Promise<void> {
   try {
     const [preferences, files] = await Promise.all([fetchUserPreferences(), listUserFiles()]);
-    themeController.hydrate({ customColors: preferences.customColors });
+    // 服务端仅保存自定义色；主题预设继续沿用认证前从 localStorage 恢复的选择。
+    themeController.hydrate({
+      preset: themeController.current().preset,
+      customColors: preferences.customColors,
+    });
     await backgroundController.hydrate({
       fileIds: preferences.backgroundFileIds,
       activeFileId: preferences.activeBackgroundFileId,

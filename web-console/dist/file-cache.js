@@ -1,7 +1,7 @@
 export const CACHE_NAME = "console-user-files-v1";
-/** 自定义背景文件的读取走 POST；Cache API 匹配时使用相同方法，避免与 GET 语义混淆。 */
+/** Cache Storage 只接受 GET 键；实际文件下载仍由 API 层使用鉴权 POST。 */
 export function fileCacheRequest(url) {
-    return new Request(url, { method: "POST" });
+    return new Request(url);
 }
 export async function cacheFileBlob(url, blob) {
     if (typeof caches === "undefined")

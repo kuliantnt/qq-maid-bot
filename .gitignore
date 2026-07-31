@@ -2,6 +2,7 @@ target/
 dist/
 # Web 控制台产物由 Rust 编译期直接嵌入，必须提交；仅忽略本地依赖。
 web-console/node_modules/
+web-console/dist-demo/
 !web-console/dist/
 !web-console/dist/**
 __pycache__/

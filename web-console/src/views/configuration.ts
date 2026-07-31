@@ -318,6 +318,7 @@ export function webSearchRouteChanges(
 let current: ConfigurationSnapshot | null = null;
 let currentThemeController: ThemeController | null = null;
 let currentBackgroundController: BackgroundController | null = null;
+let currentUserDataController: UserDataController | null = null;
 let toastTimer: number | undefined;
 let configurationNavigation: ConfigurationNavigation = { primary: "runtime", secondary: {} };
 let autosaveBound = false;
@@ -331,6 +332,7 @@ export async function initializeConfiguration(
 ): Promise<void> {
   currentThemeController = themeController;
   currentBackgroundController = backgroundController;
+  currentUserDataController = userData;
   current = await fetchConfiguration();
   bindAutosave();
   render(current, themeController, backgroundController, userData);
@@ -911,7 +913,8 @@ async function saveOpenCodeProvider(id: string): Promise<void> {
   const baseUrl = element(`${id}-base-url`, HTMLInputElement);
   const timeout = element(`${id}-timeout`, HTMLInputElement);
   const saved = readOpenCodeProviders(current.agent.savedValue).find((provider) => provider.id === id);
-  if (!saved) return;
+  // 未添加的预设只能通过“添加 Provider”显式启用，浏览默认字段不能改变配置。
+  if (!saved?.enabled) return;
   const form = {
     ...saved,
     baseUrl: baseUrl.value,
@@ -965,8 +968,22 @@ function bindAutosave(): void {
     if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLSelectElement)) return;
     const related = event.relatedTarget;
     queuedFocusRestoreId = related instanceof HTMLElement && related.id ? related.id : null;
+    // 点击显式保存按钮会先触发输入框 blur；此时由按钮提交，避免同一 revision 入队两次。
+    if (related instanceof HTMLElement && shouldDeferAutosaveToButton(target, related)) return;
     void autosaveBlur(target);
   });
+}
+
+function shouldDeferAutosaveToButton(
+  target: HTMLInputElement | HTMLSelectElement,
+  related: HTMLElement,
+): boolean {
+  if (related.id === "save-secret-config") {
+    return target.dataset.autosaveScope === "secret" || target.dataset.clearKey !== undefined;
+  }
+  if (related.id === "save-public-config") return target.dataset.autosaveScope === "public";
+  if (related.id === "save-agent-config") return target.dataset.autosaveScope === "agent";
+  return target.dataset.autosaveProvider !== undefined && related.matches(".provider-action");
 }
 
 async function autosaveBlur(target: HTMLInputElement | HTMLSelectElement): Promise<void> {
@@ -1136,7 +1153,7 @@ async function runSave(action: () => Promise<ConfigurationSnapshot>): Promise<vo
       if (!currentThemeController || !currentBackgroundController) throw new Error("界面控制器尚未初始化");
       const restoreId = queuedFocusRestoreId;
       queuedFocusRestoreId = null;
-      render(snapshot, currentThemeController, currentBackgroundController);
+      render(snapshot, currentThemeController, currentBackgroundController, currentUserDataController);
       if (restoreId) document.getElementById(restoreId)?.focus();
       showResult("配置已真实持久化；标记为“重启后生效”的项需按部署方式重启服务。", false);
     } catch (cause) {

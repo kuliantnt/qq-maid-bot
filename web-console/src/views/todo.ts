@@ -74,6 +74,9 @@ async function refreshTodos(trigger: TodoRefreshTrigger = "refresh"): Promise<vo
 async function submitTodo(form: HTMLFormElement): Promise<void> {
   const title = valueOf("todo-create-title").trim();
   const targetRef = valueOf("todo-create-target");
+  const recurrenceSelection = valueOf("todo-create-recurrence-kind");
+  const recurrenceUnit = valueOf("todo-create-recurrence-unit");
+  const recurrenceKind = todoRecurrenceKind(recurrenceSelection, recurrenceUnit);
   if (!title || !targetRef) return showResult("标题和目标不能为空", true);
   const button = form.querySelector<HTMLButtonElement>("button[type=submit]");
   if (button) button.disabled = true;
@@ -86,9 +89,10 @@ async function submitTodo(form: HTMLFormElement): Promise<void> {
       due_at: valueOf("todo-create-due-at") || null,
       reminder_at: valueOf("todo-create-reminder-at") || null,
       time_precision: valueOf("todo-create-time-precision"),
-      recurrence_kind: valueOf("todo-create-recurrence-kind"),
-      recurrence_interval: numberValue("todo-create-recurrence-interval"),
-      recurrence_unit: valueOf("todo-create-recurrence-unit"),
+      recurrence_kind: recurrenceKind,
+      // “不重复”必须同时丢弃可能残留的间隔，避免后端按 interval/unit 推导出重复规则。
+      recurrence_interval: recurrenceKind === "none" ? null : numberValue("todo-create-recurrence-interval"),
+      recurrence_unit: recurrenceUnit,
     });
     form.reset();
     await refreshTodos("refresh");
@@ -97,6 +101,19 @@ async function submitTodo(form: HTMLFormElement): Promise<void> {
     showResult(cause instanceof Error ? cause.message : "Todo 创建失败", true);
   } finally {
     if (button) button.disabled = false;
+  }
+}
+
+/** 页面用统一的“间隔重复”入口，提交前按单位转换为后端支持的枚举。 */
+export function todoRecurrenceKind(selection: string, unit: string): string {
+  if (selection === "none") return "none";
+  switch (unit) {
+    case "minute": return "every_n_minutes";
+    case "hour": return "every_n_hours";
+    case "week": return "every_n_weeks";
+    case "month": return "every_n_months";
+    case "year": return "every_n_years";
+    default: return "every_n_days";
   }
 }
 
@@ -238,7 +255,10 @@ async function openEditor(todo: TodoItem): Promise<void> {
   if (reminderAt === null) return;
   const timePrecision = window.prompt("时间精度：none/date/date_time", latest.timePrecision);
   if (timePrecision === null) return;
-  const recurrenceKind = window.prompt("重复类型：none/interval", latest.recurrenceKind);
+  const recurrenceKind = window.prompt(
+    "重复类型：none/daily/every_n_days/weekly/every_n_weeks/monthly/every_n_months/yearly/every_n_years/every_n_minutes/every_n_hours",
+    latest.recurrenceKind,
+  );
   if (recurrenceKind === null) return;
   const recurrenceInterval = window.prompt("重复间隔", String(latest.recurrenceInterval || ""));
   if (recurrenceInterval === null) return;
