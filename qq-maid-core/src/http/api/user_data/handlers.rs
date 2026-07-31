@@ -158,7 +158,7 @@ pub(super) async fn get_file(
     Path(file_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let context = match ApiRequestContext::authenticate(&state, &headers) {
+    let context = match ApiRequestContext::authenticate_read_only(&state, &headers) {
         Ok(context) => context,
         Err(error) => return respond_error(&state, &headers, error),
     };

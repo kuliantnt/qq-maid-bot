@@ -52,6 +52,21 @@ impl ApiRequestContext {
             })
             .map_err(|error| error.with_request_id(request_id))
     }
+
+    /// 文件字节读取仍要求管理员 Session、同源和 CSRF，但不占用配置修改、删除等
+    /// 管理动作的额度。资源归属继续由文件领域服务按管理员 ID 校验。
+    pub(crate) fn authenticate_read_only(
+        state: &OpsHttpState,
+        headers: &HeaderMap,
+    ) -> Result<Self, ApiError> {
+        let request_id = ApiRequestId::from_headers(headers);
+        authenticate_admin_request_inner(state, headers, true, false)
+            .map(|authenticated| Self {
+                actor: authenticated.actor,
+                request_id: request_id.clone(),
+            })
+            .map_err(|error| error.with_request_id(request_id))
+    }
 }
 
 /// 配置管理与资源管理 API 共用的完整管理员认证结果。
@@ -96,6 +111,15 @@ pub(crate) fn authenticate_admin_request(
     headers: &HeaderMap,
     require_csrf: bool,
 ) -> Result<AuthenticatedAdminRequest, ApiError> {
+    authenticate_admin_request_inner(state, headers, require_csrf, require_csrf)
+}
+
+fn authenticate_admin_request_inner(
+    state: &OpsHttpState,
+    headers: &HeaderMap,
+    require_csrf: bool,
+    consume_management_quota: bool,
+) -> Result<AuthenticatedAdminRequest, ApiError> {
     if !origin_allowed(headers) {
         return Err(ApiError::forbidden(
             "origin_denied",
@@ -120,7 +144,7 @@ pub(crate) fn authenticate_admin_request(
             require_csrf.then_some(csrf.as_deref().unwrap_or_default()),
         )
         .map_err(ApiError::from_admin_auth)?;
-    if require_csrf {
+    if consume_management_quota {
         auth.check_management_rate_limit(admin_id)
             .map_err(ApiError::from_admin_auth)?;
     }

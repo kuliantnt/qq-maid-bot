@@ -19,7 +19,10 @@ use tower::ServiceExt;
 use crate::{
     error::LlmError,
     http::routes::{OpsHttpConfig, OpsHttpState, build_router},
-    management::{AdminAuth, ConsoleUserDataService, SESSION_COOKIE_NAME},
+    management::{
+        AdminAuth, ConsoleUserDataService, PreferenceValuePatch, SESSION_COOKIE_NAME,
+        UserPreferencesPatch,
+    },
     storage::{APP_MIGRATIONS, database::SqliteDatabase},
     util::metrics::LlmMetrics,
 };
@@ -83,6 +86,7 @@ struct TestApi {
     csrf: String,
     other_cookie: String,
     other_csrf: String,
+    admin_id: i64,
     database: SqliteDatabase,
     directory: PathBuf,
 }
@@ -129,6 +133,9 @@ impl TestApi {
                 "correct horse battery staple",
             )
             .unwrap();
+        let (admin_id, _) = auth
+            .authorize_admin(&issued.cookie_value, Some(&issued.session.csrf_token))
+            .unwrap();
 
         let upstream = UpstreamStatus::default();
         let mut state = OpsHttpState::from_parts(
@@ -149,6 +156,7 @@ impl TestApi {
             csrf: issued.session.csrf_token,
             other_cookie: other_issued.cookie_value,
             other_csrf: other_issued.session.csrf_token,
+            admin_id,
             database,
             directory,
         }
@@ -387,6 +395,8 @@ async fn files_upload_list_read_delete_and_isolate_users() {
     assert_eq!(read.bytes.as_ref(), file_bytes);
     assert_eq!(read.headers["content-type"], "image/webp");
     assert_eq!(read.headers["content-length"], file_bytes.len().to_string());
+    assert_eq!(read.headers["x-content-type-options"], "nosniff");
+    assert_eq!(read.headers["x-frame-options"], "DENY");
 
     let other_list = data(
         &api.post_as_other("/api/v1/console/files/list", json!({}))
@@ -557,6 +567,18 @@ async fn resources_reject_missing_auth_csrf_and_unsafe_file_ids() {
         .await;
     assert_eq!(upload_missing_csrf.status, StatusCode::FORBIDDEN);
 
+    let file_id = upload_id(&api, "protected.webp", b"protected").await;
+    let read_missing_csrf = request_builder(
+        &format!("/api/v1/console/files/get/{file_id}"),
+        Some((&api.cookie, None)),
+    )
+    .body(Body::empty())
+    .unwrap();
+    assert_eq!(
+        api.request(read_missing_csrf).await.status,
+        StatusCode::FORBIDDEN
+    );
+
     let invalid = api.get_file("not-a-uuid").await;
     assert_eq!(invalid.status, StatusCode::UNPROCESSABLE_ENTITY);
     let traversal = api.get_file("%2E%2E").await;
@@ -599,4 +621,87 @@ async fn preferences_and_files_survive_service_reconstruction() {
     let listed = data(&api.post("/api/v1/console/files/list", json!({})).await);
     assert_eq!(listed["items"][0]["file_id"], file_id);
     assert_eq!(api.get_file(&file_id).await.bytes, b"persistent-file"[..]);
+}
+
+#[tokio::test]
+async fn reading_all_allowed_backgrounds_does_not_consume_management_quota() {
+    const MAX_BACKGROUNDS: usize = 64;
+
+    let api = TestApi::new();
+    let service = ConsoleUserDataService::new(api.database.clone());
+    let mut file_ids = Vec::with_capacity(MAX_BACKGROUNDS);
+    for index in 0..MAX_BACKGROUNDS {
+        let file = service
+            .create_file(
+                api.admin_id,
+                format!("background-{index}.webp"),
+                "image/webp".to_owned(),
+                vec![u8::try_from(index).unwrap()],
+            )
+            .unwrap();
+        file_ids.push(file.file_id);
+    }
+    service
+        .update_preferences(
+            api.admin_id,
+            UserPreferencesPatch {
+                background_file_ids: Some(file_ids.clone()),
+                active_background_file_id: PreferenceValuePatch::Set(file_ids[0].clone()),
+                ..UserPreferencesPatch::default()
+            },
+        )
+        .unwrap();
+
+    for (index, file_id) in file_ids.iter().enumerate() {
+        let response = api.get_file(file_id).await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.bytes.as_ref(), &[u8::try_from(index).unwrap()]);
+    }
+
+    // 只读文件认证使用独立路径，64 次读取后完整的 60 次管理动作额度仍然可用。
+    for _ in 0..60 {
+        assert_eq!(
+            api.post("/api/v1/console/user-preferences/get", json!({}))
+                .await
+                .status,
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        api.post("/api/v1/console/user-preferences/get", json!({}))
+            .await
+            .status,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn multipart_body_limit_is_scoped_to_upload_route() {
+    let api = TestApi::new();
+    let upload = api
+        .upload(
+            "larger-than-json-limit.webp",
+            "image/webp",
+            &vec![7_u8; 70 * 1024],
+        )
+        .await;
+    assert_eq!(upload.status, StatusCode::OK, "{}", upload.json());
+
+    let oversized_json = format!(r#"{{"padding":"{}"}}"#, "x".repeat(70 * 1024));
+    for path in [
+        "/api/v1/console/user-preferences/get",
+        "/api/v1/console/user-preferences/update",
+        "/api/v1/console/files/list",
+        "/api/v1/console/files/delete",
+    ] {
+        let request = request_builder(path, Some((&api.cookie, Some(&api.csrf))))
+            .header("content-type", "application/json")
+            .body(Body::from(oversized_json.clone()))
+            .unwrap();
+        assert_eq!(
+            api.request(request).await.status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{path} must retain a small JSON body limit"
+        );
+    }
 }

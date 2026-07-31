@@ -83,6 +83,9 @@
 
 请求使用 `multipart/form-data`，必须且只能包含一个名为 `file` 的文件字段。服务端忽略任何客户端路径语义，原始文件名只保存为元数据。
 
+约 11 MiB 的请求 Body Limit（10 MiB 文件加 multipart 开销）只挂在该上传路由。偏好读取、偏好
+更新、文件列表和文件删除等 JSON 路由保持 64 KiB 上限，不继承上传额度。
+
 成功响应的 `data`：
 
 ```json
@@ -123,6 +126,10 @@
 - 与文件字节一致的 `Content-Length`；
 - `Cache-Control: private, no-store`；
 - 公共 `x-request-id` 和控制台安全响应头。
+
+该端点复用管理员 Session、同源与 CSRF 校验，并继续按管理员 ID 检查文件归属；它使用独立的
+只读认证路径，不消耗每分钟 60 次的配置修改、文件删除、Todo 等管理动作额度。接口不公开文件
+系统路径，也没有取消访问控制。
 
 由于接口统一使用 `POST`，`url` 不能直接作为 `<img src>`。前端应先以带凭据和 CSRF 的 `POST` 获取 Blob，再创建页面生命周期内的 object URL，例如：
 

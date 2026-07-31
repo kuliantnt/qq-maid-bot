@@ -3,7 +3,7 @@
 use axum::{
     Json,
     extract::rejection::JsonRejection,
-    http::{HeaderMap, HeaderValue},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -24,7 +24,16 @@ pub(crate) fn json_payload<T: DeserializeOwned>(
     context: &ApiRequestContext,
 ) -> Result<T, ApiError> {
     payload.map(|Json(value)| value).map_err(|error| {
-        ApiError::invalid_json(error.body_text()).with_request_id(context.request_id.clone())
+        let error = if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                error.body_text(),
+            )
+        } else {
+            ApiError::invalid_json(error.body_text())
+        };
+        error.with_request_id(context.request_id.clone())
     })
 }
 
