@@ -181,4 +181,8 @@ const objectUrl = URL.createObjectURL(await response.blob());
 - `console_user_preferences`：每个 `console_admins.id` 最多一行；
 - `console_user_files`：按管理员 ID 保存文件 ID、原始文件名、Content-Type、大小、服务端文件名和创建时间。
 
+`background_mode` 列由 migration `console_user_data_background_mode_v2` 通过
+`ALTER TABLE` 补齐（默认值 `default`），旧库升级时历史偏好行自动获得默认背景模式，
+不需要手工改写数据。
+
 文件内容保存在 `APP_DB_FILE` 父目录下的 `console-files/`。例如默认数据库是 `data/storage/app.db` 时，文件目录是 `data/storage/console-files/`。文件 ID 与磁盘文件名均使用服务端生成的 UUID；磁盘文件名追加 `.blob`，不保存 Base64，也不允许客户端指定服务器路径。

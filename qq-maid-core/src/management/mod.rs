@@ -12,7 +12,7 @@ pub use auth::{
     SESSION_COOKIE_NAME,
 };
 pub use user_data::{
-    BackgroundMode, CONSOLE_USER_DATA_SCHEMA_V1, ConsoleUserDataError, ConsoleUserDataService,
-    MAX_CONSOLE_FILE_BYTES, PreferenceValuePatch, UserFile, UserFileContent, UserFilePage,
-    UserPreferences, UserPreferencesPatch,
+    BackgroundMode, CONSOLE_USER_DATA_SCHEMA_V1, CONSOLE_USER_DATA_SCHEMA_V2, ConsoleUserDataError,
+    ConsoleUserDataService, MAX_CONSOLE_FILE_BYTES, PreferenceValuePatch, UserFile,
+    UserFileContent, UserFilePage, UserPreferences, UserPreferencesPatch,
 };

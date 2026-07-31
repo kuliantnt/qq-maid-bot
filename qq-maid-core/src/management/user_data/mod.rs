@@ -38,13 +38,21 @@ pub const CONSOLE_USER_DATA_SCHEMA_V1: SqliteMigration = SqliteMigration {
             custom_colors_json TEXT NOT NULL,
             background_file_ids_json TEXT NOT NULL,
             active_background_file_id TEXT,
-            background_mode TEXT NOT NULL DEFAULT 'default'
-              CHECK(background_mode IN ('default', 'special')),
             kuliantnt INTEGER NOT NULL DEFAULT 0 CHECK(kuliantnt IN (0, 1)),
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY(admin_id) REFERENCES console_admins(id) ON DELETE CASCADE
           );",
+};
+
+/// 背景模式字段独立于自定义背景文件与解锁状态：`default` 表示无背景或由
+/// `active_background_file_id` 指定的自定义背景；`special` 表示特殊九宫格（不引用文件）。
+/// 通过独立 migration 在旧库上补列，保证已有 `APP_DB_FILE` 历史数据兼容。
+pub const CONSOLE_USER_DATA_SCHEMA_V2: SqliteMigration = SqliteMigration {
+    name: "console_user_data_background_mode_v2",
+    sql: "ALTER TABLE console_user_preferences
+            ADD COLUMN background_mode TEXT NOT NULL DEFAULT 'default'
+            CHECK(background_mode IN ('default', 'special'));",
 };
 
 /// 背景模式：`default` 表示无背景或由 `active_background_file_id` 指定的自定义背景；
