@@ -24,8 +24,10 @@ function makeUserData({ failPersist = false, failRollback = false } = {}) {
     updateCalls: [],
     updatePreferences: async (patch) => {
       userData.updateCalls.push(patch);
-      if (patch.activeBackgroundFileId === null && failRollback) throw new Error("rollback failed");
-      if (patch.activeBackgroundFileId !== null && failPersist) throw new Error("persist failed");
+      // 回滚补丁只包含 activeBackgroundFileId 与 backgroundMode，不含 backgroundFileIds。
+      const isRollback = patch.activeBackgroundFileId !== undefined && patch.backgroundFileIds === undefined;
+      if (isRollback && failRollback) throw new Error("rollback failed");
+      if (!isRollback && failPersist) throw new Error("persist failed");
       userData.preferences = { ...userData.preferences, ...patch };
       return userData.preferences;
     },
@@ -155,11 +157,11 @@ test("本地应用失败时回滚服务端活动背景；回滚失败也如实�
 
     const finalStatus = statuses.at(-1);
     assert.match(finalStatus, /背景应用失败（object url failed）/);
-    assert.match(finalStatus, /回滚活动背景也失败：rollback failed/);
+    assert.match(finalStatus, /恢复原背景也失败：rollback failed/);
     // 服务端先提交了活动背景，随后回滚请求失败；本地没有激活任何文件。
     assert.deepEqual(userData.updateCalls, [
       { backgroundFileIds: ["a"], activeBackgroundFileId: "a" },
-      { activeBackgroundFileId: null },
+      { activeBackgroundFileId: null, backgroundMode: "default" },
     ]);
     assert.equal(controller.selection().activeFileId, null);
   } finally {
@@ -183,8 +185,113 @@ test("本地应用失败但回滚成功时恢复服务端活动背景并显示�
       setStatus: (text) => statuses.push(text),
     }, { fileId: "a", filename: "a.png", url: "/a" }, true);
 
-    assert.equal(statuses.at(-1), "背景应用失败，已回滚活动背景：object url failed");
+    assert.equal(statuses.at(-1), "背景应用失败，已恢复原背景：object url failed");
     assert.equal(controller.selection().activeFileId, null);
+  } finally {
+    URL.createObjectURL = previousCreate;
+  }
+});
+
+test("原背景 A 激活 B 本地应用失败：服务端恢复 A，浏览器始终保留 A", async () => {
+  const customLayer = { style: {} };
+  const controller = createBackgroundController(fakeRoot(customLayer), null, async (file) => new Blob([file.fileId]));
+  const userData = makeUserData();
+  userData.preferences = {
+    ...userData.preferences,
+    backgroundFileIds: ["a"],
+    activeBackgroundFileId: "a",
+    backgroundMode: "default",
+  };
+  const statuses = [];
+  const previousCreate = URL.createObjectURL;
+  URL.createObjectURL = () => "blob:a";
+  try {
+    await controller.selectFile({ fileId: "a", filename: "a.png", url: "/a" }, false, new Blob(["a"]));
+    const kept = customLayer.style.backgroundImage;
+    URL.createObjectURL = () => {
+      throw new Error("object url failed");
+    };
+    await activateBackgroundFile({
+      userData,
+      controller,
+      setStatus: (text) => statuses.push(text),
+    }, { fileId: "b", filename: "b.png", url: "/b" }, true);
+
+    // 回滚到原活动背景 A 而不是清空为 null。
+    assert.deepEqual(userData.updateCalls, [
+      { backgroundFileIds: ["a", "b"], activeBackgroundFileId: "b" },
+      { activeBackgroundFileId: "a", backgroundMode: "default" },
+    ]);
+    assert.equal(controller.selection().activeFileId, "a", "本地仍保留原背景 A");
+    assert.equal(customLayer.style.backgroundImage, kept, "浏览器始终保留原背景 A");
+    assert.equal(statuses.at(-1), "背景应用失败，已恢复原背景：object url failed");
+  } finally {
+    URL.createObjectURL = previousCreate;
+  }
+});
+
+test("原 special 激活 B 本地应用失败：服务端恢复 special 而不是重置为 default", async () => {
+  const customLayer = { style: {} };
+  const controller = createBackgroundController(fakeRoot(customLayer), null, async (file) => new Blob([file.fileId]));
+  const userData = makeUserData();
+  userData.preferences = {
+    ...userData.preferences,
+    backgroundFileIds: [],
+    activeBackgroundFileId: null,
+    backgroundMode: "special",
+    kuliantnt: true,
+  };
+  const statuses = [];
+  const previousCreate = URL.createObjectURL;
+  URL.createObjectURL = () => {
+    throw new Error("object url failed");
+  };
+  try {
+    await activateBackgroundFile({
+      userData,
+      controller,
+      setStatus: (text) => statuses.push(text),
+    }, { fileId: "b", filename: "b.png", url: "/b" }, true);
+
+    assert.deepEqual(userData.updateCalls, [
+      { backgroundFileIds: ["b"], activeBackgroundFileId: "b" },
+      { activeBackgroundFileId: null, backgroundMode: "special" },
+    ]);
+    assert.equal(controller.selection().activeFileId, null);
+    assert.equal(statuses.at(-1), "背景应用失败，已恢复原背景：object url failed");
+  } finally {
+    URL.createObjectURL = previousCreate;
+  }
+});
+
+test("原背景 A 激活 B、本地应用与回滚都失败：如实显示回滚失败且本地保留 A", async () => {
+  const customLayer = { style: {} };
+  const controller = createBackgroundController(fakeRoot(customLayer), null, async (file) => new Blob([file.fileId]));
+  const userData = makeUserData({ failRollback: true });
+  userData.preferences = {
+    ...userData.preferences,
+    backgroundFileIds: ["a"],
+    activeBackgroundFileId: "a",
+    backgroundMode: "default",
+  };
+  const statuses = [];
+  const previousCreate = URL.createObjectURL;
+  URL.createObjectURL = () => "blob:a";
+  try {
+    await controller.selectFile({ fileId: "a", filename: "a.png", url: "/a" }, false, new Blob(["a"]));
+    URL.createObjectURL = () => {
+      throw new Error("object url failed");
+    };
+    await activateBackgroundFile({
+      userData,
+      controller,
+      setStatus: (text) => statuses.push(text),
+    }, { fileId: "b", filename: "b.png", url: "/b" }, true);
+
+    const finalStatus = statuses.at(-1);
+    assert.match(finalStatus, /背景应用失败（object url failed）/);
+    assert.match(finalStatus, /且恢复原背景也失败：rollback failed/);
+    assert.equal(controller.selection().activeFileId, "a", "本地不因回滚失败而丢失原背景");
   } finally {
     URL.createObjectURL = previousCreate;
   }

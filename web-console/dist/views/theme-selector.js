@@ -17,6 +17,12 @@ export async function activateBackgroundFile(deps, file, forceRefresh) {
         setStatus(`背景读取失败，已保留原背景：${errorText(cause)}`);
         return;
     }
+    // 记录激活前的服务端背景状态（活动文件与模式）；本地应用失败时按原状态回滚，
+    // 而不是统一清空为 null，避免把原自定义背景或 special 模式错误地重置。
+    const previous = {
+        activeBackgroundFileId: userData.preferences.activeBackgroundFileId,
+        backgroundMode: userData.preferences.backgroundMode,
+    };
     try {
         await userData.updatePreferences({
             backgroundFileIds: [...new Set([...userData.preferences.backgroundFileIds, file.fileId])],
@@ -28,13 +34,17 @@ export async function activateBackgroundFile(deps, file, forceRefresh) {
         }
         catch (applyCause) {
             const applyMessage = errorText(applyCause);
-            setStatus(`背景应用失败（${applyMessage}），正在回滚活动背景……`);
+            setStatus(`背景应用失败（${applyMessage}），正在恢复原背景……`);
             try {
-                await userData.updatePreferences({ activeBackgroundFileId: null });
-                setStatus(`背景应用失败，已回滚活动背景：${applyMessage}`);
+                await userData.updatePreferences({
+                    activeBackgroundFileId: previous.activeBackgroundFileId,
+                    backgroundMode: previous.backgroundMode,
+                });
+                // 本地应用失败发生在 object URL 应用到页面之前，浏览器仍保留原背景，无需额外恢复。
+                setStatus(`背景应用失败，已恢复原背景：${applyMessage}`);
             }
             catch (rollbackCause) {
-                setStatus(`背景应用失败（${applyMessage}），且回滚活动背景也失败：${errorText(rollbackCause)}`);
+                setStatus(`背景应用失败（${applyMessage}），且恢复原背景也失败：${errorText(rollbackCause)}`);
             }
         }
     }

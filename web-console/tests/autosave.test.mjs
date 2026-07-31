@@ -57,7 +57,7 @@ function defaultFields() {
   ];
 }
 
-function setupEnvironment({ slowRuntime = false } = {}) {
+function setupEnvironment({ slowRuntime = false, slowSecrets = false } = {}) {
   const fake = createFakeDom();
   installDomGlobals(fake);
   resetConfigurationStateForTests();
@@ -104,7 +104,7 @@ function setupEnvironment({ slowRuntime = false } = {}) {
     promise: Promise.resolve(),
     resolve: () => undefined,
   };
-  if (slowRuntime) {
+  if (slowRuntime || slowSecrets) {
     let release;
     slow.promise = new Promise((resolve) => {
       release = resolve;
@@ -167,6 +167,7 @@ function setupEnvironment({ slowRuntime = false } = {}) {
       return jsonResponse(configurationPayload());
     }
     if (url.endsWith("/api/v1/console/configuration/secrets") && method === "PATCH") {
+      await slow.promise;
       for (const change of body.changes) {
         const field = state.fields.find((entry) => entry.key === change.key);
         if (!field) continue;
@@ -318,6 +319,90 @@ test("连续修改两个 Secret：不重复提交已保存的旧 revision，后�
     const firstSubmissions = secretPatches(env.requests)
       .filter((request) => request.body.changes.some((change) => change.key === "provider.openai.api_key"));
     assert.equal(firstSubmissions.length, 1, "第一个 Secret 不能被重复提交");
+  } finally {
+    env.dispose();
+  }
+});
+
+test("Secret 并发保存：第一个请求未完成时填写并失焦第二个 Secret，两个请求都成功且第二个只提交自身", async () => {
+  const env = setupEnvironment({ slowSecrets: true });
+  try {
+    await env.initialize();
+    const first = env.document.getElementById("config-provider-openai-api_key");
+
+    first.value = "sk-first";
+    env.fireFocusOut(first);
+    await waitFor(() => secretPatches(env.requests).length === 1, "第一个 Secret 请求应已发出");
+
+    // 第一个请求完成前填写并失焦第二个 Secret：此时必须排队，不能立即用旧 revision 计算。
+    const second = env.document.getElementById("config-provider-deepseek-api_key");
+    second.value = "sk-second";
+    env.fireFocusOut(second);
+
+    env.slow.resolve();
+    await waitFor(() => env.savedCounter.count === 2, "两个 Secret 保存都应完成");
+    await flushMicrotasks();
+
+    const patches = secretPatches(env.requests);
+    assert.equal(patches.length, 2, "两个 Secret 各自只提交一次");
+    assert.deepEqual(patches[0].body.changes, [{
+      action: "replace",
+      key: "provider.openai.api_key",
+      value: "sk-first",
+      expected_revision: "sec-1",
+    }]);
+    // 第二个请求只能包含第二个 Secret，且 expected_revision 来自第一个保存完成后的最新 snapshot。
+    assert.deepEqual(patches[1].body.changes, [{
+      action: "replace",
+      key: "provider.deepseek.api_key",
+      value: "sk-second",
+      expected_revision: "sec-1",
+    }]);
+    // 两个 Secret 都成功保存（revision 前进），不出现 config_conflict。
+    assert.equal(
+      env.state.fields.find((field) => field.key === "provider.openai.api_key").revision,
+      "sec-2",
+    );
+    assert.equal(
+      env.state.fields.find((field) => field.key === "provider.deepseek.api_key").revision,
+      "sec-2",
+    );
+    const firstSubmissions = secretPatches(env.requests)
+      .filter((request) => request.body.changes.some((change) => change.key === "provider.openai.api_key"));
+    assert.equal(firstSubmissions.length, 1, "第一个 Secret 不能被重复提交");
+    const conflicts = secretPatches(env.requests)
+      .filter((request) => request.body.changes.some((change) => change.key === "provider.deepseek.api_key"));
+    assert.equal(conflicts.length, 1, "第二个 Secret 恰好提交一次且未被冲突拦截");
+  } finally {
+    env.dispose();
+  }
+});
+
+test("重新初始化（重新登录/刷新）后清空跨会话 Secret 已保存状态，同值输入再次按新值保存", async () => {
+  const env = setupEnvironment();
+  try {
+    await env.initialize();
+    const first = env.document.getElementById("config-provider-openai-api_key");
+    first.value = "sk-first";
+    env.fireFocusOut(first);
+    await waitFor(() => env.savedCounter.count === 1, "第一次 Secret 保存应完成");
+    await flushMicrotasks();
+
+    // 模拟重新登录/刷新：再次初始化会清空旧会话的 secretSavedStates。
+    await env.initialize();
+    const rebuilt = env.document.getElementById("config-provider-openai-api_key");
+    rebuilt.value = "sk-first";
+    env.fireFocusOut(rebuilt);
+    await waitFor(() => env.savedCounter.count === 2, "重新初始化后同值输入应再次保存");
+    await flushMicrotasks();
+
+    assert.equal(secretPatches(env.requests).length, 2, "残留状态被清空后同值输入不能再被误判为未变更");
+    assert.deepEqual(secretPatches(env.requests)[1].body.changes, [{
+      action: "replace",
+      key: "provider.openai.api_key",
+      value: "sk-first",
+      expected_revision: "sec-2",
+    }]);
   } finally {
     env.dispose();
   }

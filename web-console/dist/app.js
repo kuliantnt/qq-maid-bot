@@ -8,7 +8,7 @@ import { initializeConfiguration } from "./views/configuration.js";
 import { createThemeController } from "./theme.js";
 import { bindConsoleNavigation } from "./console-shell.js";
 import { initializeTodo } from "./views/todo.js";
-import { createBackgroundController, installBackgroundConsoleUnlock } from "./background.js";
+import { createBackgroundController, installBackgroundConsoleUnlock, unlockPreferencePatch } from "./background.js";
 import { cacheFileBlob, clearFileBlobCache, deleteCachedFileBlob, readCachedFileBlob } from "./file-cache.js";
 let localStorage = null;
 try {
@@ -23,10 +23,14 @@ const backgroundController = createBackgroundController(document.documentElement
     if (!userDataController)
         return;
     try {
-        await userDataController.updatePreferences({ kuliantnt: true });
+        // 解锁与切换特殊背景一次提交：kuliantnt、backgroundMode、activeBackgroundFileId 三个字段
+        // 同一次写入，避免刷新后只保留解锁标记而背景仍是旧的自定义背景。
+        await userDataController.updatePreferences(unlockPreferencePatch());
     }
     catch (cause) {
         setText("configuration-result", cause instanceof Error ? cause.message : "特殊背景解锁状态保存失败");
+        // 持久化失败必须回滚本地 special，控制器据此恢复解锁前的背景，避免服务端与本地分裂。
+        throw cause;
     }
 });
 installBackgroundConsoleUnlock(window, backgroundController);

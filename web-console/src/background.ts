@@ -27,6 +27,19 @@ export type BackgroundPersistPatch = {
   readonly backgroundMode?: BackgroundMode;
 };
 
+/**
+ * 解锁并切换特殊背景的一次性持久化补丁。三个字段必须同一次提交：只写 kuliantnt 会让
+ * 刷新后服务端只保留解锁标记而背景仍是旧的自定义背景；同时写入 backgroundMode 与
+ * activeBackgroundFileId 才能让服务端切换到 special 并清空活动自定义背景。
+ */
+export function unlockPreferencePatch(): {
+  readonly kuliantnt: true;
+  readonly backgroundMode: "special";
+  readonly activeBackgroundFileId: null;
+} {
+  return { kuliantnt: true, backgroundMode: "special", activeBackgroundFileId: null };
+}
+
 export type BackgroundController = {
   readonly current: () => BackgroundMode;
   readonly selection: () => BackgroundSelection;
@@ -74,6 +87,10 @@ export function createBackgroundController(
   let files: readonly BackgroundFile[] = [];
   let transitionIndex = readTransitionIndex(cookieDocument);
   let lastError: string | null = null;
+  // 解锁前的完整选择与解锁状态；解锁持久化失败时用于回滚，避免“本地 special、
+  // 服务端旧状态”的分裂。
+  let preUnlockSelection: BackgroundSelection = current;
+  let preUnlockState = unlocked;
   if (current.mode === "special" && !unlocked) current = { mode: "default", activeFileId: null };
 
   const apply = (): void => {
@@ -100,6 +117,30 @@ export function createBackgroundController(
     releaseActiveUrl();
     apply();
   };
+  /** 解锁持久化失败时恢复解锁前的选择与解锁状态（含原自定义背景的 object URL）。 */
+  const rollbackUnlock = async (cause: unknown): Promise<void> => {
+    unlocked = preUnlockState;
+    current = preUnlockSelection;
+    lastError = `特殊背景解锁状态保存失败：${cause instanceof Error ? cause.message : "未知错误"}`;
+    if (preUnlockSelection.activeFileId) {
+      const file = files.find((candidate) => candidate.fileId === preUnlockSelection.activeFileId);
+      if (file) {
+        try {
+          const blob = await readFile(file);
+          releaseActiveUrl();
+          activeObjectUrl = URL.createObjectURL(blob);
+        } catch (restoreCause) {
+          releaseActiveUrl();
+          lastError = `特殊背景解锁状态保存失败，且原背景恢复失败：${restoreCause instanceof Error ? restoreCause.message : "未知错误"}`;
+        }
+      } else {
+        releaseActiveUrl();
+      }
+    } else {
+      releaseActiveUrl();
+    }
+    apply();
+  };
   apply();
 
   let controller: BackgroundController;
@@ -117,12 +158,17 @@ export function createBackgroundController(
       return current.mode;
     },
     unlock: () => {
+      preUnlockSelection = current;
+      preUnlockState = unlocked;
       unlocked = true;
       current = { mode: "special", activeFileId: null };
       releaseActiveUrl();
       lastError = null;
       apply();
-      void onUnlock();
+      // 先本地切换（控制台即时反馈），再异步持久化；失败时回滚本地，保证与服务端一致。
+      void Promise.resolve(onUnlock()).catch((cause: unknown) => {
+        void rollbackUnlock(cause);
+      });
       return current.mode;
     },
     readFileBlob: async (file, forceRefresh) => {

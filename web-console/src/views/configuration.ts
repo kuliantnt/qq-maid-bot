@@ -353,6 +353,9 @@ export async function initializeConfiguration(
   currentThemeController = themeController;
   currentBackgroundController = backgroundController;
   currentUserDataController = userData;
+  // 每次（重新）初始化都清空跨登录会话残留的 Secret 已保存状态：服务端不回传明文，
+  // 旧会话记录的 value/revision 可能与新会话的实际配置不一致，残留会导致脏判断失真。
+  secretSavedStates.clear();
   current = await fetchConfiguration();
   bindAutosave();
   render(current, themeController, backgroundController, userData);
@@ -880,29 +883,42 @@ export function secretConfigurationChanges(
 
 async function saveSecrets(): Promise<void> {
   if (!current) return;
-  const values = new Map<string, string>();
-  const clearKeys = new Set<string>();
-  const dirtyKeys = new Set<string>();
-  for (const field of current.fields.filter((value) => value.sensitivity === "secret" && value.editable)) {
-    const value = element(inputId(field.key), HTMLInputElement).value;
-    const clear = document.querySelector<HTMLInputElement>(`input[data-clear-key="${field.key}"]`);
-    const clearChecked = clear?.checked === true;
-    values.set(field.key, value);
-    if (secretIsDirty(field, value, clearChecked)) {
-      dirtyKeys.add(field.key);
-      if (clearChecked) clearKeys.add(field.key);
+  // Secret 的脏状态、changes 与 expected_revision 必须在保存队列真正执行时重新计算：
+  // 前一个保存完成会更新 current snapshot 与 secretSavedStates，只有执行时才能拿到最新
+  // revision；若在入队前就计算，两个 Secret 连续失焦时第二个请求会重复携带第一个 Secret
+  // 的旧 revision，触发 config_conflict 并阻止第二个 Secret 保存。
+  let excluded: ReadonlySet<string> = EMPTY_EXCLUDED_KEYS;
+  await runSave(async () => {
+    const fields = current?.fields ?? [];
+    const values = new Map<string, string>();
+    const clearKeys = new Set<string>();
+    const dirtyKeys = new Set<string>();
+    for (const field of fields.filter((value) => value.sensitivity === "secret" && value.editable)) {
+      const value = element(inputId(field.key), HTMLInputElement).value;
+      const clear = document.querySelector<HTMLInputElement>(`input[data-clear-key="${field.key}"]`);
+      const clearChecked = clear?.checked === true;
+      values.set(field.key, value);
+      if (secretIsDirty(field, value, clearChecked)) {
+        dirtyKeys.add(field.key);
+        if (clearChecked) clearKeys.add(field.key);
+      }
     }
-  }
-  const changes = secretConfigurationChanges(current.fields, values, clearKeys, dirtyKeys);
-  if (changes.length === 0) return showResult("留空不会清除 secret；当前没有显式变更。", false);
-  // 显式清除成功后，输入框和“显式清除”勾选都应复位到服务端状态，不能通过重建后的恢复保留旧值。
-  const excluded = new Set<string>();
-  for (const key of clearKeys) {
-    excluded.add(`clear:${key}`);
-    excluded.add(`id:${inputId(key)}`);
-  }
-  const snapshot = await runSave(async () => updateSecretConfiguration(changes), excluded);
-  if (snapshot) rememberSecretSavedStates(snapshot, dirtyKeys, values, clearKeys);
+    const changes = secretConfigurationChanges(fields, values, clearKeys, dirtyKeys);
+    if (changes.length === 0) {
+      showResult("留空不会清除 secret；当前没有显式变更。", false);
+      return null;
+    }
+    // 显式清除成功后，输入框和“显式清除”勾选都应复位到服务端状态，不能通过重建后的恢复保留旧值。
+    const nextExcluded = new Set<string>();
+    for (const key of clearKeys) {
+      nextExcluded.add(`clear:${key}`);
+      nextExcluded.add(`id:${inputId(key)}`);
+    }
+    excluded = nextExcluded;
+    const snapshot = await updateSecretConfiguration(changes);
+    rememberSecretSavedStates(snapshot, dirtyKeys, values, clearKeys);
+    return snapshot;
+  }, () => excluded);
 }
 
 function secretIsDirty(field: ConfigFieldSnapshot, value: string, clearChecked: boolean): boolean {
@@ -1212,13 +1228,14 @@ function bindConnectionTest(): void {
 }
 
 async function runSave(
-  action: () => Promise<ConfigurationSnapshot>,
-  excludeKeys: ReadonlySet<string> = EMPTY_EXCLUDED_KEYS,
+  action: () => Promise<ConfigurationSnapshot | null>,
+  excludeKeys: ReadonlySet<string> | (() => ReadonlySet<string>) = EMPTY_EXCLUDED_KEYS,
 ): Promise<ConfigurationSnapshot | null> {
   const save = async (): Promise<ConfigurationSnapshot | null> => {
     setButtonsDisabled(true);
     try {
       const snapshot = await action();
+      if (!snapshot) return null;
       if (!currentThemeController || !currentBackgroundController) throw new Error("界面控制器尚未初始化");
       const restoreId = queuedFocusRestoreId;
       queuedFocusRestoreId = null;
@@ -1226,7 +1243,8 @@ async function runSave(
       // （含 checkbox、select 与 Secret 输入），重建后恢复，避免覆盖其他字段未保存的输入。
       const captured = captureConfigurationInputState();
       render(snapshot, currentThemeController, currentBackgroundController, currentUserDataController);
-      restoreConfigurationInputState(captured, excludeKeys);
+      const restoredExcluded = typeof excludeKeys === "function" ? excludeKeys() : excludeKeys;
+      restoreConfigurationInputState(captured, restoredExcluded);
       if (restoreId) document.getElementById(restoreId)?.focus();
       showResult("配置已真实持久化；标记为“重启后生效”的项需按部署方式重启服务。", false);
       return snapshot;

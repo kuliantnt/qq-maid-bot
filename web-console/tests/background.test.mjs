@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { waitFor } from "./helpers/fake-dom.mjs";
 import {
   BACKGROUND_MODE_COOKIE,
   BACKGROUND_UNLOCK_COOKIE,
   BACKGROUND_TRANSITION_INDEX_COOKIE,
   createBackgroundController,
   installBackgroundConsoleUnlock,
+  unlockPreferencePatch,
 } from "../dist/background.js";
 
 function cookieDocument(initial = "") {
@@ -134,6 +136,71 @@ test("特殊背景解锁调用 typed persistence hook", () => {
   installBackgroundConsoleUnlock(target, controller);
   assert.equal(target.kuliantnt, "特殊背景已解锁");
   assert.deepEqual(calls, [true]);
+});
+
+test("解锁持久化补丁一次提交 kuliantnt、backgroundMode 与 activeBackgroundFileId", () => {
+  assert.deepEqual(unlockPreferencePatch(), {
+    kuliantnt: true,
+    backgroundMode: "special",
+    activeBackgroundFileId: null,
+  });
+});
+
+test("解锁成功持久化：本地切到特殊背景，刷新（hydrate）后仍为特殊背景且不残留自定义背景", async () => {
+  const root = { dataset: {}, style: {} };
+  const persisted = [];
+  const controller = createBackgroundController(root, cookieDocument(), async (file) => new Blob([file.fileId]), async () => {
+    persisted.push(unlockPreferencePatch());
+  });
+
+  controller.unlock();
+  await waitFor(() => controller.current() === "special", "解锁后本地应为特殊背景");
+  assert.equal(controller.isUnlocked(), true);
+  assert.deepEqual(persisted, [{ kuliantnt: true, backgroundMode: "special", activeBackgroundFileId: null }]);
+
+  // 用服务端实际保存的结果刷新（hydrate）：special 保持、自定义背景不重新出现。
+  const refreshed = createBackgroundController({ dataset: {}, style: {} }, cookieDocument());
+  await refreshed.hydrate({
+    fileIds: ["a"],
+    activeFileId: null,
+    mode: "special",
+    kuliantnt: true,
+  }, [{ fileId: "a", filename: "a.png", url: "/a" }]);
+  assert.equal(refreshed.current(), "special");
+  assert.equal(refreshed.selection().activeFileId, null);
+  assert.equal(refreshed.isUnlocked(), true);
+});
+
+test("解锁持久化失败时自动回滚本地：恢复原自定义背景与解锁前状态，不留下分裂状态", async () => {
+  const customLayer = { style: {} };
+  const root = {
+    dataset: {},
+    style: {},
+    querySelector: (selector) => selector === ".console-background--custom" ? customLayer : null,
+  };
+  const previousCreate = URL.createObjectURL;
+  URL.createObjectURL = () => "blob:original";
+  try {
+    const controller = createBackgroundController(root, cookieDocument(), async (file) => new Blob([file.fileId]), async () => {
+      throw new Error("persist failed");
+    });
+    await controller.selectFile({ fileId: "a", filename: "a.png", url: "/a" }, false, new Blob(["a"]));
+    assert.equal(controller.selection().activeFileId, "a");
+    assert.equal(root.dataset.background, "custom");
+
+    controller.unlock();
+    assert.equal(controller.current(), "special", "解锁先本地切到特殊背景");
+    assert.equal(controller.isUnlocked(), true);
+
+    await waitFor(() => controller.current() === "default", "持久化失败后应自动回滚本地背景");
+    assert.equal(controller.isUnlocked(), false, "持久化失败后解锁状态也要回滚");
+    assert.equal(controller.selection().activeFileId, "a", "回滚后恢复原自定义背景");
+    assert.equal(root.dataset.background, "custom");
+    assert.equal(customLayer.style.backgroundImage, 'url("blob:original")', "浏览器重新显示原背景");
+    assert.match(controller.lastError(), /特殊背景解锁状态保存失败/);
+  } finally {
+    URL.createObjectURL = previousCreate;
+  }
 });
 
 test("一次性迁移把旧解锁 cookie 写入服务端偏好并清理全部旧 cookie", async () => {
