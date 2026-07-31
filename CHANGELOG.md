@@ -2,6 +2,39 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.23.0] - 2026-07-31
+
+### Release Focus
+
+* **控制台用户数据与 Provider 路由扩展**：为独立前端增加按部署管理员隔离的用户偏好和通用文件能力，同时统一自定义 Provider 的图片、模型候选和原生搜索路由，改善多 Provider 场景下的认证失败降级。
+
+### Added
+
+* **控制台用户偏好与通用文件 API**（PR #619）：新增偏好读取/部分更新，以及文件上传、列表、读取和删除接口；偏好支持自定义颜色、背景文件列表、当前背景和 `kuliantnt` 标记，所有请求只作用于当前部署管理员。
+* **安全的控制台文件存储**（PR #619）：文件 ID 和磁盘存储名由服务端生成，原始文件名只作为元数据保存；文件内容持久化到 `APP_DB_FILE` 父目录的 `console-files/`，并限制单文件大小为 10 MiB。
+* **自定义 Provider 图片与原生搜索能力**（PR #617）：`openai_compatible` 与 `openai_responses` 复用公共图片请求编码；`provider_native` 搜索可以按完整 Provider 身份选择内置 OpenAI、Gemini 或配置驱动的 Responses Provider。
+
+### Changed
+
+* **Provider 模型候选身份**（PR #617）：模型路线以完整的 `provider:model` 保存和路由，允许不同 Provider 使用同名模型而不互相覆盖；配置预检、Provider 构建、普通聊天、流式回复和 Agent Tool Loop 保持相同候选顺序。
+* **控制台文件备份边界**（PR #619）：备份与恢复同时处理数据库中的文件元数据和 `console-files/` 内容；文件删除先隔离磁盘文件，再与偏好背景引用和数据库记录在事务中一致清理。
+* **仓库文档导航与归档**（PR #611）：新增统一 `docs/` 导航和管理 API 文档入口，归档已完成或被替代的任务/设计文档，并修正仓库内过时的控制台与 Tool Loop 描述。
+* **前端协作鸣谢**（PR #613）：在贡献者列表中加入 `@nimkBob`，记录其对前端工作的支持。
+
+### Fixed
+
+* **自定义 Provider 图片输入一致性**（PR #617）：移除历史上的纯文本硬拦截，使普通、流式和 Agent Tool Loop 在 Provider 已支持图片时使用统一 payload；文件输入仍按既有边界拒绝，不额外引入视觉模型白名单或图片生成工具。
+* **Responses 认证失败的候选切换**（PR #617）：公共 Responses transport 将请求发出后的 HTTP 401/403 归类为当前 Provider 不可用，允许候选链切换到下一个 Provider；认证拒绝不会在同一 Provider 内触发 Responses 到 Chat Completions 的重试，本地缺少 API Key 等配置错误仍在预检阶段报告。
+* **自定义 Provider 原生搜索归属**（PR #617）：搜索请求、SSE、正文、引用和错误解析均按完整 Provider 身份选择对应连接，不再只允许固定的 OpenAI/Gemini 执行器；未实现的 `x_search` 继续保持未实现。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.23.0`；内部 crate 版本不统一提升。
+* 新增 `console_user_data_schema_v1` SQLite migration，为已有 `APP_DB_FILE` 创建控制台用户偏好和文件元数据表；无必需的手工配置迁移。升级时必须继续保留数据库父目录下的 `console-files/`，并按新版备份规则一并保护文件内容。
+* 用户数据 API 仅在启用控制台时注册，继续要求部署管理员 Session、同源 Origin 和 CSRF；接口不接受外部用户 ID，现有控制台配置接口和仓库内 `web-console` 前端行为保持不变。
+* 自定义 Provider 仍不接受文件输入，不实现 `x_search`；本版本未使用真实上游图片、搜索或认证凭据联调，实际部署仍需确认目标 Provider 的协议支持。
+* PR 已覆盖控制台用户数据隔离、偏好局部更新、文件生命周期与备份恢复、跨 Provider 同名模型、图片 payload、SSE、搜索引用和 401/403 fallback；本次发布前的本地检查结果以最终发布报告为准。
+
 ## [v0.22.2] - 2026-07-30
 
 ### Release Focus
