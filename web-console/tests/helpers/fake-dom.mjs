@@ -196,6 +196,14 @@ export function createFakeDom() {
       };
     }
 
+    get className() {
+      return [...this.classTokens].join(" ");
+    }
+
+    set className(value) {
+      this.classTokens = new Set(String(value).split(/\s+/).filter(Boolean));
+    }
+
     append(...nodes) {
       for (const node of nodes) {
         if (node === null || node === undefined) continue;

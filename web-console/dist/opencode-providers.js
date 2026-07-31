@@ -57,6 +57,22 @@ export function readOpenCodeProviders(documentValue) {
         };
     });
 }
+/** 非预设 Provider 不由这组三张卡片改写，但仍明确展示其原始 ID 与类型。 */
+export function readPreservedCustomProviders(documentValue) {
+    const providers = record(record(documentValue).providers);
+    const presetIds = new Set(PRESETS.map((preset) => preset.id));
+    return Object.entries(providers)
+        .filter(([id]) => !presetIds.has(id))
+        .map(([id, value]) => {
+        const provider = record(value);
+        return {
+            id,
+            kind: string(provider.kind),
+            baseUrl: string(provider.base_url),
+        };
+    })
+        .sort((left, right) => left.id.localeCompare(right.id));
+}
 export function openCodeProviderChange(form) {
     const preset = PRESETS.find((value) => value.id === form.id);
     if (!preset || form.kind !== preset.kind)
@@ -108,6 +124,24 @@ export function renderOpenCodeProviders(snapshot, onSave, onRemove) {
         grid.append(providerCard(form, runningForm, keyConfigured, snapshot.agent?.editable === true, onSave, onRemove));
     }
     section.append(heading, intro, grid);
+    const preserved = readPreservedCustomProviders(snapshot.agent?.savedValue);
+    if (preserved.length > 0) {
+        const preservedBox = document.createElement("aside");
+        preservedBox.className = "preserved-provider-list";
+        const title = document.createElement("strong");
+        title.textContent = "其他自定义 Provider（原样保留）";
+        const note = document.createElement("p");
+        note.className = "hint";
+        note.textContent = "这些 Provider 不属于当前预设卡片；编辑其他配置时不会生成针对它们的修改或删除操作。";
+        const list = document.createElement("ul");
+        for (const provider of preserved) {
+            const item = document.createElement("li");
+            item.textContent = `${provider.id} · ${provider.kind || "未知类型"} · ${provider.baseUrl || "未提供 Base URL"}`;
+            list.append(item);
+        }
+        preservedBox.append(title, note, list);
+        section.append(preservedBox);
+    }
     return section;
 }
 export function renderOpenCodeRouteHints(disabled, enabledProviders, keyConfigured) {

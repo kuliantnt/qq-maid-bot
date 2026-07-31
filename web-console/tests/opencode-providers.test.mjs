@@ -7,6 +7,7 @@ import {
   openCodeProviderPresets,
   openCodeProviderWarning,
   readOpenCodeProviders,
+  readPreservedCustomProviders,
 } from "../dist/opencode-providers.js";
 
 test("OpenCode 三个预设使用固定 ID、协议、官方 Base URL 和共享 Key", () => {
@@ -53,6 +54,28 @@ test("页面从 agent.toml 已保存值恢复 Provider 表单", () => {
   assert.equal(providers[0].authScheme, "Bearer");
   assert.equal(providers[0].requestTimeoutSeconds, 12);
   assert.equal(providers[1].enabled, false);
+});
+
+test("非预设自定义 Provider 按原始 ID、类型和地址展示且不被预设表单替换", () => {
+  const documentValue = {
+    providers: {
+      custom_future: {
+        kind: "future_protocol",
+        base_url: "https://future.example/v2",
+        extension_field: "keep-me",
+      },
+      opencode_go: {
+        kind: "openai_compatible",
+        base_url: "https://opencode.ai/zen/go/v1",
+      },
+    },
+  };
+  assert.deepEqual(readPreservedCustomProviders(documentValue), [{
+    id: "custom_future",
+    kind: "future_protocol",
+    baseUrl: "https://future.example/v2",
+  }]);
+  assert.equal(documentValue.providers.custom_future.extension_field, "keep-me");
 });
 
 test("Responses 保存操作显式关闭 Chat fallback 且不携带 Key 明文", () => {

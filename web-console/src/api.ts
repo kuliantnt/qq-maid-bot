@@ -226,16 +226,6 @@ export async function validateConfiguration(): Promise<{ valid: boolean; message
   return { valid: validation.valid === true, message: string(validation.message, "配置校验已完成") };
 }
 
-export async function testProviderConnection(target: string): Promise<{ success: boolean; classification: string; message: string }> {
-  const payload = record(await mutatingJson("/api/v1/console/configuration/test-connection", "POST", { target }));
-  const connection = record(payload.connection);
-  return {
-    success: connection.success === true,
-    classification: string(connection.classification, "unknown"),
-    message: string(connection.message, "连接测试已完成"),
-  };
-}
-
 export async function fetchConsoleStatus(): Promise<ConsoleStatus> {
   const value = await fetchJson("/api/v1/console/status", { headers: { Accept: "application/json" } });
   const root = record(value);

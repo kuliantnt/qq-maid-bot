@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | 部署管理员认证 | 已实现 | Bootstrap / PreAuth、初始化、登录、登出和密码重置由 `qq-maid-core/src/http/management/` 提供 |
 | Web 会话与 CSRF | 已实现 | 服务端 Session、HttpOnly Cookie、同源校验、CSRF 和管理请求限流由通用认证层负责 |
-| 配置与重启 | 已实现 | 控制台可读写 runtime / agent / secret 配置，并执行校验、连接测试和受控重启 |
+| 配置与重启 | 已实现 | 控制台可读写 runtime / agent / secret 配置，并执行本地校验和受控重启 |
 | Todo 管理 API | 已实现 | 复用管理员 Session、同源和 CSRF；业务归属仍保留真实平台 owner / scope / delivery target |
 | Memory 领域门面 | 已实现 | `qq-maid-core/src/runtime/tools/memory/` 维护 personal、group profile 和 group memory 的权限与持久化不变量 |
 | Memory 管理 API / 页面 | 未实现 | 当前路由树不注册 Memory HTTP 路由，前端也没有 Memory 资源页 |

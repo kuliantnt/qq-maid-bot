@@ -22,7 +22,6 @@
 | PATCH | `/api/v1/console/configuration/secrets` | 替换或清除 secret | admin + CSRF |
 | PATCH | `/api/v1/console/configuration/agent` | 保存 Agent 策略 | admin + CSRF |
 | POST | `/api/v1/console/configuration/validate` | 本地配置预检 | admin + CSRF |
-| POST | `/api/v1/console/configuration/test-connection` | Provider HTTPS 模型列表测试 | admin + CSRF |
 | POST | `/api/v1/console/restart` | 提交受控重启 | admin + CSRF |
 | POST | `/api/v1/markdown/render` | 服务端 Markdown 安全预览 | 只读 |
 
@@ -34,7 +33,7 @@
 
 客户端统一使用 `ConsoleApiError`，保留 `status`、`code` 和安全的 `message`。页面必须提供 loading、empty 和 error 状态。不能把原始响应、secret、内部路径或 raw ID直接显示给用户。
 
-`validate` 只做本地预检，不保存也不联网。`test-connection` 只证明受控 `/models` 探测结果。`restart` 只表示受控重启请求已接受，页面必须在服务恢复后刷新 status，不能把 accepted 当作 completed。
+`validate` 只做本地预检，不保存也不联网。`restart` 只表示受控重启请求已接受，页面必须在服务恢复后刷新 status，不能把 accepted 当作 completed。
 
 ## Future slots
 
