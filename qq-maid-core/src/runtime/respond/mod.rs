@@ -464,27 +464,26 @@ impl RustRespondService {
         let stage_snapshot = request_stage_snapshot(&req);
         log_request_stage_snapshot("before_route", &stage_snapshot);
         warn_large_request_context_snapshot("before_route", &stage_snapshot);
-        let outcome = CommandDispatcher::new(self).dispatch(req, planned).await?;
-        match outcome {
-            DispatchOutcome::Respond(response) => {
-                log_request_stage_snapshot("request_end", &stage_snapshot);
-                Ok(*response)
+        let outcome = CommandDispatcher::new(self).dispatch(req, planned).await;
+        let result = match outcome {
+            Ok(DispatchOutcome::Respond(response)) => Ok(*response),
+            Ok(DispatchOutcome::Chat(chat)) => {
+                self.handle_chat(
+                    *chat,
+                    ChatFlowSinks {
+                        progress_sink,
+                        final_delta_sink,
+                        run_handle,
+                    },
+                )
+                .await
             }
-            DispatchOutcome::Chat(chat) => {
-                let response = self
-                    .handle_chat(
-                        *chat,
-                        ChatFlowSinks {
-                            progress_sink,
-                            final_delta_sink,
-                            run_handle,
-                        },
-                    )
-                    .await?;
-                log_request_stage_snapshot("request_end", &stage_snapshot);
-                Ok(response)
-            }
-        }
+            Err(err) => Err(err),
+        };
+        // Issue #361 诊断：请求结束阶段在成功与错误路径都采样一次，便于区分
+        // 有界增长与请求级大对象滞留（错误路径也不能漏采样）。
+        log_request_stage_snapshot("request_end", &stage_snapshot);
+        result
     }
 
     /// 仅供 Core 进程内 stream 边界使用的真流式入口。

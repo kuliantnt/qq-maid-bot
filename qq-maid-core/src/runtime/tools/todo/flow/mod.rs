@@ -29,7 +29,7 @@ use chrono::NaiveDate;
 
 mod command;
 mod completed_query;
-mod deterministic;
+pub(crate) mod deterministic;
 mod format;
 mod group_admin;
 mod pending;

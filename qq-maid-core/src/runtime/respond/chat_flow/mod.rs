@@ -632,10 +632,14 @@ impl RustRespondService {
             return Ok(KnowledgeContextOutcome::skipped());
         }
         // Issue #361 诊断：知识检索阶段只输出尺寸/计数，不输出证据正文。
+        let before_mem = qq_maid_common::process_mem::process_memory_sample();
         tracing::debug!(
             knowledge_mode = %mode.as_str(),
             user_text_chars = user_text.trim().chars().count(),
-            rss_kb = qq_maid_common::process_mem::process_memory_sample().rss_kb,
+            rss_kb = before_mem.rss_kb,
+            vm_size_kb = before_mem.vm_size_kb,
+            pss_kb = before_mem.pss_kb,
+            private_dirty_kb = before_mem.private_dirty_kb,
             "before_knowledge_search"
         );
         let evidence = match mode {
@@ -683,6 +687,7 @@ impl RustRespondService {
             });
         }
         let hit_count = evidence.diagnostics.returned_chunk_count;
+        let after_mem = qq_maid_common::process_mem::process_memory_sample();
         tracing::debug!(
             knowledge_mode = %mode.as_str(),
             candidate_count,
@@ -692,7 +697,10 @@ impl RustRespondService {
                 .iter()
                 .map(|item| item.body_excerpt.chars().count())
                 .sum::<usize>(),
-            rss_kb = qq_maid_common::process_mem::process_memory_sample().rss_kb,
+            rss_kb = after_mem.rss_kb,
+            vm_size_kb = after_mem.vm_size_kb,
+            pss_kb = after_mem.pss_kb,
+            private_dirty_kb = after_mem.private_dirty_kb,
             "after_knowledge_search"
         );
         Ok(KnowledgeContextOutcome {

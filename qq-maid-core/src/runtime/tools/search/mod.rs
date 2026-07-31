@@ -411,11 +411,15 @@ impl Tool for WebSearchTool {
             self.model_override.clone(),
         )?;
         // Issue #361 诊断：联网查询前后只记录尺寸/计数与内存，不记录查询正文。
+        let before_mem = qq_maid_common::process_mem::process_memory_sample();
         tracing::debug!(
             tool = WEB_SEARCH_TOOL_NAME,
             query_chars = request.query.chars().count(),
             max_results = request.max_results,
-            rss_kb = qq_maid_common::process_mem::process_memory_sample().rss_kb,
+            rss_kb = before_mem.rss_kb,
+            vm_size_kb = before_mem.vm_size_kb,
+            pss_kb = before_mem.pss_kb,
+            private_dirty_kb = before_mem.private_dirty_kb,
             "before_web_search"
         );
         let outcome = self
@@ -847,6 +851,7 @@ fn log_web_search_execution(
         .get("execution_succeeded")
         .and_then(Value::as_bool)
         .unwrap_or_else(|| output.get("ok").and_then(Value::as_bool).unwrap_or(false));
+    let mem = qq_maid_common::process_mem::process_memory_sample();
     tracing::debug!(
         tool = WEB_SEARCH_TOOL_NAME,
         tool_call_id = context.tool_call_id.as_deref().unwrap_or("direct"),
@@ -875,7 +880,10 @@ fn log_web_search_execution(
             .and_then(|value| value.as_bool())
             .unwrap_or(false),
         execution_succeeded,
-        rss_kb = qq_maid_common::process_mem::process_memory_sample().rss_kb,
+        rss_kb = mem.rss_kb,
+        vm_size_kb = mem.vm_size_kb,
+        pss_kb = mem.pss_kb,
+        private_dirty_kb = mem.private_dirty_kb,
         error_code = output
             .get("error")
             .and_then(|error| error.get("code"))

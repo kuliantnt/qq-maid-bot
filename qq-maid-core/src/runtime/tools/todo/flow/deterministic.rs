@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use qq_maid_common::identity_context::ConversationKind;
 use qq_maid_llm::{
     agent_loop::{AgentRunDiagnostics, AgentStopReason, ToolExecutionAttempt, ToolExecutionResult},
     tool::DynTool,
@@ -30,7 +31,7 @@ use crate::{
     runtime::{
         respond::{
             RespondRequest, RespondResponse, RustRespondService,
-            common::{session_error, tool_context_from_request},
+            common::{session_error, tool_context_from_request, tool_conversation_from_request},
             interaction_state::respond_interaction_meta,
             llm_service::{RespondOutput, response_from_output},
         },
@@ -90,12 +91,14 @@ pub(crate) fn plan_deterministic_todo(
     active_interaction_session: Option<&SessionRecord>,
     enabled_tool_names: &[&str],
 ) -> Result<Option<DeterministicTodoPlan>, LlmError> {
-    // 群聊保持现有 Tool Loop 路径：群聊还需要 actor / 角色 / 确认边界，v1 不短路。
-    if req
-        .group_id
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
-    {
+    // 与 Agent 路径共用统一 conversation kind 解析，不能只看 group_id：
+    // 只有明确解析为 Private / ServiceAccount 才短路；Channel、Group、Unknown
+    // （含事件类型缺失、频道元数据等无法确认的场景）一律保持现有 Tool Loop 流程。
+    let (kind, _) = tool_conversation_from_request(req);
+    if !matches!(
+        kind,
+        ConversationKind::Private | ConversationKind::ServiceAccount
+    ) {
         return Ok(None);
     }
     let user_text = req.effective_user_text();

@@ -1,10 +1,13 @@
 //! 进程内存采样工具。
 //!
 //! 只做诊断用途的进程级内存读数，不参与任何业务判断：
-//! - `/proc/self/statm`：RSS / VmSize，读取成本极低，任何阶段都可采样。
+//! - `/proc/self/status`：VmSize / VmRSS（单位本身就是 kB），读取成本极低，
+//!   任何阶段都可采样。
 //! - `/proc/self/smaps_rollup`：PSS / PrivateDirty，读取成本较高，仅在
 //!   `QQ_MAID_MEMORY_DIAGNOSTICS` 显式开启时采样。
 //!
+//! 不解析 statm 的页数再换算：页大小因架构而异（不能硬编码 4KB），而
+//! `/proc/self/status` 的 VmSize / VmRSS 直接以 kB 给出，无需任何换算。
 //! 非 Linux 或无法读取时返回 `None` 对应字段，调用方按缺失处理，不阻断主流程。
 //! 本模块不输出任何聊天正文、知识正文、搜索正文或鉴权信息。
 
@@ -13,9 +16,9 @@ use std::fs;
 /// 一次进程内存采样结果；单位均为 KB。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProcessMemorySample {
-    /// Resident Set Size（KB）；Linux `/proc/self/statm` 第二列。
+    /// Resident Set Size（KB）；Linux `/proc/self/status` 的 VmRSS。
     pub rss_kb: Option<u64>,
-    /// 虚拟地址空间大小（KB）。
+    /// 虚拟地址空间大小（KB）；Linux `/proc/self/status` 的 VmSize。
     pub vm_size_kb: Option<u64>,
     /// Proportional Set Size（KB）；仅在显式开启内存诊断时采样。
     pub pss_kb: Option<u64>,
@@ -48,7 +51,7 @@ pub fn memory_diagnostics_enabled() -> bool {
 /// 读取一次进程内存采样。
 pub fn process_memory_sample() -> ProcessMemorySample {
     let mut sample = ProcessMemorySample::default();
-    if let Some((rss, vsize)) = read_statm_kb() {
+    if let Some((rss, vsize)) = read_status_kb() {
         sample.rss_kb = Some(rss);
         sample.vm_size_kb = Some(vsize);
     }
@@ -60,22 +63,25 @@ pub fn process_memory_sample() -> ProcessMemorySample {
     sample
 }
 
-/// 从 `/proc/self/statm` 读取 RSS / VmSize（单位 KB）。
+/// 从 `/proc/self/status` 读取 VmSize / VmRSS（单位即 kB，无需换算页大小）。
 ///
-/// statm 各列均以内存页为单位：size resident shared text lib data dt。
-fn read_statm_kb() -> Option<(u64, u64)> {
-    let statm = fs::read_to_string("/proc/self/statm").ok()?;
-    statm_to_kb(&statm, page_size_kb()?)
+/// 任意一行缺失（非 Linux、容器限制或内核裁剪）时整体返回 `None`，不阻断业务。
+fn read_status_kb() -> Option<(u64, u64)> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    status_to_kb(&status)
 }
 
-fn statm_to_kb(content: &str, page_size_kb: u64) -> Option<(u64, u64)> {
-    let mut fields = content.split_whitespace();
-    let page_count = fields.next()?.parse::<u64>().ok()?;
-    let resident = fields.next()?.parse::<u64>().ok()?;
-    Some((
-        resident.saturating_mul(page_size_kb),
-        page_count.saturating_mul(page_size_kb),
-    ))
+fn status_to_kb(content: &str) -> Option<(u64, u64)> {
+    let mut vm_size = None;
+    let mut vm_rss = None;
+    for line in content.lines() {
+        if let Some(value) = parse_kb_line(line, "VmSize:") {
+            vm_size = Some(value);
+        } else if let Some(value) = parse_kb_line(line, "VmRSS:") {
+            vm_rss = Some(value);
+        }
+    }
+    Some((vm_rss?, vm_size?))
 }
 
 /// 从 `/proc/self/smaps_rollup` 读取 PSS / PrivateDirty（单位 KB）。
@@ -100,22 +106,30 @@ fn parse_kb_line(line: &str, prefix: &str) -> Option<u64> {
     value.strip_suffix("kB")?.trim().parse::<u64>().ok()
 }
 
-/// 系统内存页大小（KB）。
-///
-/// 主流 Linux 架构均为 4KB；这里不解析 auxv，直接返回常量，避免诊断路径
-/// 引入额外系统调用成本。若将来需要支持非常见页面大小，再改为读取 sysconf。
-fn page_size_kb() -> Option<u64> {
-    Some(4)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn statm_parsing_uses_page_size() {
-        // 1 页 size + 1 页 resident -> 4KB
-        assert_eq!(statm_to_kb("1 1 1 1 0 0 0", 4), Some((4, 4)));
+    fn status_parsing_reads_vmsize_and_vmrss_in_kb() {
+        // /proc/self/status 的 VmSize / VmRSS 本身就是 kB，不涉及页大小换算。
+        let content = "\
+Name:   test
+VmPeak:	  524288 kB
+VmSize:	  262144 kB
+VmLck:	       0 kB
+VmHWM:	   65536 kB
+VmRSS:	   32768 kB
+RssAnon:   28672 kB
+";
+        assert_eq!(status_to_kb(content), Some((32768, 262144)));
+    }
+
+    #[test]
+    fn status_parsing_missing_lines_returns_none() {
+        // 非 Linux / 容器裁剪导致关键字段缺失时整体返回 None，不阻塞业务。
+        assert_eq!(status_to_kb("Name:   test\nVmRSS:   100 kB\n"), None);
+        assert_eq!(status_to_kb("Name:   test\n"), None);
     }
 
     #[test]

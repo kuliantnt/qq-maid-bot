@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use crate::{
     agent_loop::{
         AgentInputSizeEstimate, AgentSessionRequest, AgentStep, AgentStepSession,
-        AgentTextDeltaSink, AgentToolCall, AgentToolResult,
+        AgentTextDeltaSink, AgentToolCall, AgentToolResult, log_input_size_after_append,
     },
     context_budget::{ContextBudgetConfig, estimated_json_chars, fit_tool_loop_payload},
     error::LlmError,
@@ -81,25 +81,7 @@ impl AgentStepSession for ChatCompletionsAgentSession {
     }
 
     fn input_size_estimate(&self) -> AgentInputSizeEstimate {
-        let mut estimate = AgentInputSizeEstimate {
-            item_count: self.messages.len(),
-            ..Default::default()
-        };
-        for message in &self.messages {
-            if message.get("role").and_then(Value::as_str) == Some("tool")
-                && let Some(content) = message.get("content").and_then(Value::as_str)
-            {
-                estimate.tool_result_chars = estimate
-                    .tool_result_chars
-                    .saturating_add(content.chars().count());
-            }
-        }
-        if tracing::enabled!(tracing::Level::DEBUG)
-            && let Ok(chars) = estimated_json_chars(&self.messages, "tool_loop_diagnostics")
-        {
-            estimate.estimated_chars = chars;
-        }
-        estimate
+        chat_messages_input_size_estimate(&self.messages)
     }
 
     async fn advance(
@@ -109,6 +91,8 @@ impl AgentStepSession for ChatCompletionsAgentSession {
     ) -> Result<AgentStep, LlmError> {
         // 回填上一轮工具执行结果（首轮 results 为空，跳过）。
         append_tool_results(&mut self.messages, results);
+        // Issue #361 诊断：append 后、payload 构造前的真实输入尺寸；DEBUG 门控。
+        log_input_size_after_append(self.provider(), self.model(), self.input_size_estimate());
 
         let payload = chat_completions_tool_loop_payload(
             &self.messages,
@@ -172,6 +156,13 @@ impl AgentStepSession for ChatCompletionsAgentSession {
     ) -> Result<Option<AgentStep>, LlmError> {
         let mut messages = self.messages.clone();
         append_tool_results(&mut messages, results);
+        // 流式路径的 payload 从克隆的 messages 构造；此处记录克隆后（即实际发送前）
+        // 的输入尺寸，避免把“未追加本轮结果”的会话状态误报为发送尺寸。
+        log_input_size_after_append(
+            self.provider(),
+            self.model(),
+            chat_messages_input_size_estimate(&messages),
+        );
         let payload = chat_completions_tool_loop_payload(
             &messages,
             &self.tool_defs,
@@ -192,6 +183,32 @@ impl AgentStepSession for ChatCompletionsAgentSession {
         self.messages = messages;
         Ok(Some(step))
     }
+}
+
+/// 估算 Chat Completions 会话 `messages` 的尺寸；只用于 Issue #361 诊断，不参与预算。
+///
+/// `estimated_chars` 只在 DEBUG 级别开启时计算，避免每轮为诊断额外序列化
+/// 整个上下文；`tool_result_chars` 只统计 `role:tool` 消息的输出字符数。
+fn chat_messages_input_size_estimate(messages: &[Value]) -> AgentInputSizeEstimate {
+    let mut estimate = AgentInputSizeEstimate {
+        item_count: messages.len(),
+        ..Default::default()
+    };
+    for message in messages {
+        if message.get("role").and_then(Value::as_str) == Some("tool")
+            && let Some(content) = message.get("content").and_then(Value::as_str)
+        {
+            estimate.tool_result_chars = estimate
+                .tool_result_chars
+                .saturating_add(content.chars().count());
+        }
+    }
+    if tracing::enabled!(tracing::Level::DEBUG)
+        && let Ok(chars) = estimated_json_chars(messages, "tool_loop_diagnostics")
+    {
+        estimate.estimated_chars = chars;
+    }
+    estimate
 }
 
 /// 把“OpenAI 兼容 Chat Completions provider 的 Agent 会话接线”收敛成公共 helper。

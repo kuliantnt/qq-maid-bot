@@ -42,7 +42,9 @@ mod trace;
 
 use cache_diagnostics::{PromptCacheDiagnostics, prompt_cache_diagnostics};
 use compact_messages::build_compact_messages;
-use context_diagnostics::{log_request_stage, warn_large_request_context};
+use context_diagnostics::{
+    log_after_build_llm_messages, log_request_stage, warn_large_request_context,
+};
 use message_parts::current_user_parts_for_model;
 #[cfg(test)]
 use trace::{CHAT_TRACE_TEXT_LIMIT, trace_text};
@@ -241,7 +243,8 @@ impl LlmChatService {
             }
             _ => Ok(build_respond_messages_for_model(req, supports_vision)),
         }?;
-        log_request_stage("after_build_llm_messages", req);
+        // after_build_llm_messages 统计实际生成的 ChatMessage 数量与序列化估算。
+        log_after_build_llm_messages(&messages);
         warn_large_request_context("after_build_llm_messages", req);
         Ok(messages)
     }

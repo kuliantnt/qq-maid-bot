@@ -8,6 +8,7 @@
 //! `after_tool_result` / `request_end` 等阶段观察上下文是否台阶式放大。
 
 use qq_maid_common::{input_part::MessageInputPart, process_mem::process_memory_sample};
+use qq_maid_llm::provider::types::ChatMessage;
 use sha2::{Digest, Sha256};
 
 use super::super::{RespondPurpose, RespondRequest};
@@ -215,6 +216,30 @@ pub(crate) fn log_request_stage_snapshot(stage: &'static str, snapshot: &Request
     );
 }
 
+/// `after_build_llm_messages` 阶段：统计**实际生成**的 `ChatMessage` 数量与
+/// 序列化估算，而不是请求前各分项统计。
+///
+/// 只输出数量、尺寸与进程内存，不输出消息正文；序列化估算在 DEBUG 开启时才
+/// 执行一次，失败时如实记录 `None`，不回退为误导性的 0。
+pub(super) fn log_after_build_llm_messages(messages: &[ChatMessage]) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+    let mem = process_memory_sample();
+    let estimated_chars =
+        qq_maid_llm::context_budget::estimated_json_chars(messages, "build_llm_messages").ok();
+    tracing::debug!(
+        stage = "after_build_llm_messages",
+        message_count = messages.len(),
+        estimated_chars,
+        rss_kb = mem.rss_kb,
+        vm_size_kb = mem.vm_size_kb,
+        pss_kb = mem.pss_kb,
+        private_dirty_kb = mem.private_dirty_kb,
+        "respond request stage"
+    );
+}
+
 /// 大上下文告警：估算请求字符数超过阈值时输出 warn，并给出分项统计定位。
 ///
 /// 只输出计数与尺寸，不输出任何正文内容。
@@ -247,6 +272,8 @@ pub(crate) fn warn_large_request_context_snapshot(
         visible_snapshot_count = stats.visible_snapshot_count,
         rss_kb = mem.rss_kb,
         vm_size_kb = mem.vm_size_kb,
+        pss_kb = mem.pss_kb,
+        private_dirty_kb = mem.private_dirty_kb,
         "large respond request context detected"
     );
 }

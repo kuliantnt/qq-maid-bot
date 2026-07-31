@@ -4,9 +4,18 @@
 //! 不经过 LLM；歧义、缺快照、删除（需二次确认）保持现有 Tool Loop 流程；
 //! 编号到真实 todo_id 的映射不被破坏。
 
+use qq_maid_common::{identity_context::ConversationKind, time_context::now_iso_cn};
 use qq_maid_llm::provider::ToolCallingProtocol;
 
-use crate::runtime::tools::todo::{TodoOwner, TodoStatus, TodoStore};
+use crate::{
+    runtime::{
+        respond::RespondRequest,
+        tools::todo::{
+            TodoOwner, TodoStatus, TodoStore, flow::deterministic::plan_deterministic_todo,
+        },
+    },
+    service::{VisibleEntityItem, VisibleEntitySnapshot},
+};
 
 use super::support::*;
 
@@ -200,5 +209,69 @@ async fn chinese_ordinal_and_mixed_actions_keep_tool_loop() {
                 .status,
             TodoStatus::Pending
         );
+    }
+}
+
+/// 构造一个“快照有效、编号唯一”的 Channel / Unknown 请求，验证确定性短路
+/// 只用统一 conversation kind 判定会话类型：Channel、Unknown 一律不短路。
+fn non_private_request_with_valid_snapshot(
+    kind: ConversationKind,
+    channel_id: Option<&str>,
+) -> RespondRequest {
+    let scope_key = "guild:g1:channel:c1".to_owned();
+    let owner = TodoStore::owner(Some("u1"), &scope_key);
+    let mut req = RespondRequest {
+        content: "完成第1条".to_owned(),
+        scope_key,
+        conversation_kind: kind,
+        conversation_id: Some("c1".to_owned()),
+        user_id: Some("u1".to_owned()),
+        guild_id: Some("g1".to_owned()),
+        channel_id: channel_id.map(str::to_owned),
+        platform: "qq_official".to_owned(),
+        ..RespondRequest::default()
+    };
+    req.visible_entity_snapshot = Some(VisibleEntitySnapshot {
+        platform: "qq_official".to_owned(),
+        account_id: None,
+        scope_key: req.scope_key.clone(),
+        owner_key: Some(owner.key),
+        created_at: now_iso_cn(),
+        items: vec![VisibleEntityItem {
+            domain: "todo".to_owned(),
+            entity_kind: "todo".to_owned(),
+            entity_id: "todo-1".to_owned(),
+            visible_number: 1,
+            label: Some("待办".to_owned()),
+            status: Some("pending".to_owned()),
+        }],
+    });
+    req
+}
+
+#[test]
+fn channel_and_unknown_conversation_kinds_keep_tool_loop_even_with_valid_snapshot() {
+    let cases = [
+        // 显式 Channel：即使快照有效也必须保持现有 Tool Loop 流程。
+        (
+            "explicit channel",
+            non_private_request_with_valid_snapshot(ConversationKind::Channel, Some("c1")),
+        ),
+        // 显式 Unknown（无 group/channel/事件类型可归一）：同样不短路。
+        (
+            "explicit unknown",
+            non_private_request_with_valid_snapshot(ConversationKind::Unknown, None),
+        ),
+        // Unknown + channel 元数据：统一 conversation kind 解析应归一为 Channel，
+        // 不能因 group_id 为空而误判为私聊后短路。
+        (
+            "unknown with channel metadata",
+            non_private_request_with_valid_snapshot(ConversationKind::Unknown, Some("c1")),
+        ),
+    ];
+
+    for (label, req) in cases {
+        let plan = plan_deterministic_todo(&req, None, &["complete_todos"]).unwrap();
+        assert!(plan.is_none(), "{label} must keep the Tool Loop flow");
     }
 }
