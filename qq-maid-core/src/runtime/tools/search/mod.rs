@@ -862,28 +862,42 @@ fn log_web_search_attempt(
     duration: Duration,
     outcome: &Result<WebSearchOutcome, LlmError>,
 ) {
-    let Err(error) = outcome else {
-        return;
-    };
-    tracing::warn!(
-        tool_name = WEB_SEARCH_TOOL_NAME,
-        tool_call_id = context.tool_call_id.as_deref().unwrap_or("direct"),
-        attempt,
-        duration_ms = duration.as_millis().min(u128::from(u64::MAX)) as u64,
-        error_kind = error.error_kind(),
-        retriable = error.retriable(),
-        backend = tool.backend_label(),
-        upstream_status = ?error.upstream_status,
-        provider = error
-            .upstream_provider()
-            .unwrap_or_else(|| tool.executor.provider_name()),
-        model = error
-            .upstream_model()
-            .or(tool.model_override.as_deref())
-            .unwrap_or("configured_default"),
-        failure_layer = error.stage.as_str(),
-        "web search attempt failed"
-    );
+    let duration_ms = duration.as_millis().min(u128::from(u64::MAX)) as u64;
+    match outcome {
+        Ok(outcome) => tracing::info!(
+            tool_name = WEB_SEARCH_TOOL_NAME,
+            tool_call_id = context.tool_call_id.as_deref().unwrap_or("direct"),
+            attempt,
+            duration_ms,
+            error_kind = "none",
+            retriable = false,
+            backend = tool.backend_label(),
+            upstream_status = ?Option::<u16>::None,
+            provider = outcome.provider.as_str(),
+            model = tool.model_override.as_deref().unwrap_or("configured_default"),
+            failure_layer = "none",
+            "web search attempt succeeded"
+        ),
+        Err(error) => tracing::warn!(
+            tool_name = WEB_SEARCH_TOOL_NAME,
+            tool_call_id = context.tool_call_id.as_deref().unwrap_or("direct"),
+            attempt,
+            duration_ms,
+            error_kind = error.error_kind(),
+            retriable = error.retriable(),
+            backend = tool.backend_label(),
+            upstream_status = ?error.upstream_status,
+            provider = error
+                .upstream_provider()
+                .unwrap_or_else(|| tool.executor.provider_name()),
+            model = error
+                .upstream_model()
+                .or(tool.model_override.as_deref())
+                .unwrap_or("configured_default"),
+            failure_layer = error.stage.as_str(),
+            "web search attempt failed"
+        ),
+    }
 }
 
 /// 搜索诊断只保留可定位重试的结构化字段；不记录 query、raw_question、聊天历史或上游正文。

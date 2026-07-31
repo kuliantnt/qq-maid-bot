@@ -421,6 +421,54 @@ async fn web_search_failure_log_is_classified_and_secret_free() {
     assert!(!logs.contains("private query"));
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn web_search_success_log_keeps_attempt_chain_without_content() {
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(LogWriter(bytes.clone()))
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let tool = WebSearchTool::new(Arc::new(MockWebSearchExecutor::default()))
+        .with_backend_override(WebSearchBackend::ProviderNative)
+        .with_model_override("safe-search-model".to_owned());
+    let mut context = test_context();
+    context.tool_call_id = Some("safe-tool-call".to_owned());
+
+    let output = tool
+        .execute(
+            context,
+            json!({"query": "private query content", "raw_question": "private prompt body"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(output.value["ok"], true);
+
+    let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+    for field in [
+        "tool_name",
+        "tool_call_id",
+        "attempt",
+        "duration_ms",
+        "error_kind",
+        "retriable",
+        "backend",
+        "upstream_status",
+        "provider",
+        "model",
+        "failure_layer",
+    ] {
+        assert!(logs.contains(field), "missing log field {field}: {logs}");
+    }
+    assert!(logs.contains("safe-tool-call"));
+    assert!(logs.contains("mock-query"));
+    assert!(logs.contains("safe-search-model"));
+    assert!(!logs.contains("private query content"));
+    assert!(!logs.contains("private prompt body"));
+    assert!(!logs.contains("answer:"));
+}
+
 #[tokio::test]
 async fn large_search_result_keeps_structured_evidence_through_tool_registry() {
     const OUTPUT_MAX_CHARS: usize = 1_200;
