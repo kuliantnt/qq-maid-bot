@@ -67,6 +67,48 @@ export async function logoutAdmin() {
     await mutatingJson("/api/v1/console/auth/logout", "POST", undefined, true);
     setCsrfToken("");
 }
+export async function fetchUserPreferences() {
+    const payload = record(await mutatingJson("/api/v1/console/user-preferences/get", "POST", {}));
+    return parseUserPreferences(payload.data);
+}
+export async function updateUserPreferences(patch) {
+    const payload = record(await mutatingJson("/api/v1/console/user-preferences/update", "POST", {
+        ...(patch.customColors === undefined ? {} : { custom_colors: patch.customColors }),
+        ...(patch.backgroundFileIds === undefined ? {} : { background_file_ids: patch.backgroundFileIds }),
+        ...(patch.activeBackgroundFileId === undefined ? {} : { active_background_file_id: patch.activeBackgroundFileId }),
+        ...(patch.kuliantnt === undefined ? {} : { kuliantnt: patch.kuliantnt }),
+    }));
+    return parseUserPreferences(payload.data);
+}
+export async function listUserFiles() {
+    const payload = record(await mutatingJson("/api/v1/console/files/list", "POST", { page: 1, page_size: 100 }));
+    return array(record(payload.data).items).map(parseUserFile);
+}
+export async function uploadUserFile(file) {
+    const response = await fetch("/api/v1/console/files/upload", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { Accept: "application/json", "X-CSRF-Token": csrfToken },
+        body: (() => { const form = new FormData(); form.append("file", file); return form; })(),
+    });
+    if (!response.ok)
+        throw new ConsoleApiError(`文件上传失败（HTTP ${response.status}）`, "request_failed", response.status);
+    const payload = record(await response.json());
+    return parseUserFile(payload.data);
+}
+export async function readUserFile(file) {
+    const response = await fetch(file.url, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "X-CSRF-Token": csrfToken },
+    });
+    if (!response.ok)
+        throw new ConsoleApiError(`文件读取失败（HTTP ${response.status}）`, "request_failed", response.status);
+    return response.blob();
+}
+export async function deleteUserFile(fileId) {
+    await mutatingJson("/api/v1/console/files/delete", "POST", { file_id: fileId });
+}
 export async function fetchConfiguration() {
     const payload = record(await fetchJson("/api/v1/console/configuration", {
         headers: { Accept: "application/json" },
@@ -140,12 +182,12 @@ export async function listTodos(filters = {}) {
     }));
     return parseTodoPage(payload.data);
 }
-export async function listTodoTargets() {
+export async function listTodoTargets(page = 1, pageSize = 100) {
     const payload = record(await mutatingJson("/api/v1/console/todo/targets", "POST", {
-        page: 1,
-        page_size: 100,
+        page,
+        page_size: pageSize,
     }));
-    return array(record(payload.data).items).map(parseTodoTargetOption);
+    return parseTodoTargetPage(payload.data);
 }
 export async function createTodo(input) {
     const payload = record(await mutatingJson("/api/v1/console/todo/create", "POST", input));
@@ -170,6 +212,26 @@ function parseTodoPage(value) {
         pageSize: finiteNumber(data.page_size) ?? 50,
         total: finiteNumber(data.total) ?? 0,
         totalPages: finiteNumber(data.total_pages) ?? 1,
+    };
+}
+function parseUserPreferences(value) {
+    const item = record(value);
+    return {
+        customColors: array(item.custom_colors).filter((entry) => typeof entry === "string"),
+        backgroundFileIds: array(item.background_file_ids).filter((entry) => typeof entry === "string"),
+        activeBackgroundFileId: nullableString(item.active_background_file_id),
+        kuliantnt: item.kuliantnt === true,
+    };
+}
+function parseUserFile(value) {
+    const item = record(value);
+    return {
+        fileId: string(item.file_id, ""),
+        filename: string(item.filename, "未命名文件"),
+        contentType: string(item.content_type, "application/octet-stream"),
+        size: finiteNumber(item.size) ?? 0,
+        createdAt: string(item.created_at, ""),
+        url: string(item.url, ""),
     };
 }
 function parseTodoItem(value) {
@@ -213,6 +275,16 @@ function parseTodoTargetOption(value) {
         userId: nullableString(item.user_id),
         groupId: nullableString(item.group_id),
         reminderSupported: item.reminder_supported === true,
+    };
+}
+function parseTodoTargetPage(value) {
+    const data = record(value);
+    return {
+        items: array(data.items).map(parseTodoTargetOption),
+        page: finiteNumber(data.page) ?? 1,
+        pageSize: finiteNumber(data.page_size) ?? 100,
+        total: finiteNumber(data.total) ?? 0,
+        totalPages: finiteNumber(data.total_pages) ?? 1,
     };
 }
 async function fetchJson(input, init) {

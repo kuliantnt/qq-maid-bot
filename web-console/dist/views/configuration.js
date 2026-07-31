@@ -237,17 +237,17 @@ let configurationNavigation = { primary: "runtime", secondary: {} };
 let autosaveBound = false;
 let queuedFocusRestoreId = null;
 let saveQueue = Promise.resolve();
-export async function initializeConfiguration(themeController, backgroundController) {
+export async function initializeConfiguration(themeController, backgroundController, userData = null) {
     currentThemeController = themeController;
     currentBackgroundController = backgroundController;
     current = await fetchConfiguration();
     bindAutosave();
-    render(current, themeController, backgroundController);
+    render(current, themeController, backgroundController, userData);
 }
-function render(snapshot, themeController, backgroundController) {
+function render(snapshot, themeController, backgroundController, userData = null) {
     current = snapshot;
     renderSummary(snapshot);
-    renderThemeSelector(element("console-theme-selector"), themeController, backgroundController);
+    renderThemeSelector(element("console-theme-selector"), themeController, backgroundController, userData);
     renderPublicFields(snapshot);
     renderSecretFields(snapshot);
     bindTtsProviderState();

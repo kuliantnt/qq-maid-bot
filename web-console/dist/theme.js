@@ -52,11 +52,19 @@ export function serializeTheme(preference) {
 export function defaultThemePreference() {
     return { preset: DEFAULT_CONSOLE_THEME, version: CONSOLE_THEME_VERSION };
 }
+export function safeCustomColors(colors) {
+    return colors.filter((color) => /^#[0-9a-f]{6}$/i.test(color)).slice(0, 3).map((color) => color.toUpperCase());
+}
 export function createThemeController(storage, root) {
     let current = readStoredTheme(storage);
     applyTheme(root, current);
     return {
         current: () => current,
+        apply: (preference) => {
+            current = preference;
+            applyTheme(root, current);
+            writeStoredTheme(storage, current);
+        },
         select: (preset) => {
             current = { preset, version: CONSOLE_THEME_VERSION };
             applyTheme(root, current);
@@ -68,6 +76,20 @@ export function createThemeController(storage, root) {
             applyTheme(root, current);
             removeStoredTheme(storage);
             return current;
+        },
+        applyCustomColors: (colors) => {
+            const customColors = safeCustomColors(colors);
+            current = { ...current, customColors };
+            applyTheme(root, current);
+            return current;
+        },
+        hydrate: (preference) => {
+            const preset = typeof preference.preset === "string" && isConsoleThemePreset(preference.preset)
+                ? preference.preset
+                : DEFAULT_CONSOLE_THEME;
+            const customColors = safeCustomColors(preference.customColors ?? []);
+            current = customColors.length === 3 ? { preset, version: CONSOLE_THEME_VERSION, customColors } : { preset, version: CONSOLE_THEME_VERSION };
+            applyTheme(root, current);
         },
     };
 }
@@ -109,6 +131,19 @@ function removeStoredTheme(storage) {
 }
 function applyTheme(root, preference) {
     root.dataset.theme = preference.preset;
+    const colors = preference.customColors;
+    if (!root.style)
+        return;
+    if (colors?.length === 3) {
+        root.style.setProperty("--console-dark", colors[0] ?? "");
+        root.style.setProperty("--console-light", colors[1] ?? "");
+        root.style.setProperty("--console-contrast", colors[2] ?? "");
+    }
+    else {
+        root.style.removeProperty("--console-dark");
+        root.style.removeProperty("--console-light");
+        root.style.removeProperty("--console-contrast");
+    }
 }
 function isRecord(value) {
     return typeof value === "object" && value !== null;

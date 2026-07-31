@@ -1,17 +1,15 @@
 import { createTodo, deleteTodo, getTodo, listTodoTargets, listTodos, updateTodo } from "../api.js";
+import { TARGET_PAGE_SIZE, appendTargetPage, hasMoreTargetPages, initialRefreshPage, initialTargetPager, pageAfterDelete } from "./todo-paging.js";
 let todos = [];
-let targets = [];
 let page = 1;
+let pager = initialTargetPager();
+let targetLoading = false;
+let createLoadMore = null;
+let filterLoadMore = null;
 export async function initializeTodo() {
     bindTodoControls();
-    try {
-        targets = await listTodoTargets();
-        renderTargets();
-        await refreshTodos();
-    }
-    catch (cause) {
-        showResult(cause instanceof Error ? cause.message : "Todo 加载失败", true);
-    }
+    await loadMoreTargets();
+    await refreshTodos("refresh");
 }
 function bindTodoControls() {
     const refresh = document.getElementById("todo-refresh");
@@ -20,14 +18,15 @@ function bindTodoControls() {
     if (!(refresh instanceof HTMLButtonElement) || !(filter instanceof HTMLButtonElement) || !(form instanceof HTMLFormElement)) {
         throw new Error("Todo 页面缺少必要控件");
     }
-    refresh.onclick = () => void refreshTodos();
-    filter.onclick = () => void refreshTodos();
+    refresh.onclick = () => void refreshTodos("refresh");
+    filter.onclick = () => void refreshTodos("filter");
     form.onsubmit = (event) => {
         event.preventDefault();
         void submitTodo(form);
     };
 }
-async function refreshTodos() {
+async function refreshTodos(trigger = "refresh") {
+    page = initialRefreshPage(trigger, page);
     try {
         const status = valueOf("todo-status-filter");
         const keyword = valueOf("todo-keyword-filter").trim();
@@ -40,7 +39,6 @@ async function refreshTodos() {
         const scopeType = valueOf("todo-scope-filter");
         const dateStart = valueOf("todo-date-start");
         const dateEnd = valueOf("todo-date-end");
-        page = Math.max(1, page);
         const result = await listTodos({
             page,
             ...(status === "all" ? {} : { status }),
@@ -54,6 +52,10 @@ async function refreshTodos() {
             ...(scopeType ? { scope_type: scopeType } : {}),
             ...(dateStart && dateEnd ? { date_start: dateStart, date_end: dateEnd } : {}),
         });
+        if (page > result.totalPages && page > 1) {
+            page = pageAfterDelete(page, result.totalPages);
+            return refreshTodos("refresh");
+        }
         todos = result.items;
         renderTodos();
         renderPagination(result.page, result.totalPages);
@@ -85,7 +87,7 @@ async function submitTodo(form) {
             recurrence_unit: valueOf("todo-create-recurrence-unit"),
         });
         form.reset();
-        await refreshTodos();
+        await refreshTodos("refresh");
         showResult("Todo 已创建", false);
     }
     catch (cause) {
@@ -96,27 +98,64 @@ async function submitTodo(form) {
             button.disabled = false;
     }
 }
+async function loadMoreTargets() {
+    if (targetLoading || (pager.page > 0 && !hasMoreTargetPages(pager)))
+        return;
+    targetLoading = true;
+    try {
+        pager = appendTargetPage(pager, await listTodoTargets(pager.page + 1, TARGET_PAGE_SIZE));
+        renderTargets();
+    }
+    catch (cause) {
+        showResult(cause instanceof Error ? cause.message : "目标加载失败", true);
+    }
+    finally {
+        targetLoading = false;
+    }
+}
 function renderTargets() {
     const select = document.getElementById("todo-create-target");
-    if (!(select instanceof HTMLSelectElement))
-        return;
-    select.replaceChildren();
-    if (targets.length === 0) {
-        select.append(new Option("没有可用目标", ""));
-        select.disabled = true;
-        return;
-    }
-    select.disabled = false;
-    select.append(new Option("选择目标…", ""));
-    for (const target of targets) {
-        select.append(new Option(`${target.platform} · ${target.scopeType} · ${target.userId ?? target.groupId ?? target.targetRef}`, target.targetRef));
+    if (select instanceof HTMLSelectElement) {
+        select.replaceChildren();
+        if (pager.items.length === 0) {
+            select.append(new Option("没有可用目标", ""));
+            select.disabled = true;
+        }
+        else {
+            select.disabled = false;
+            select.append(new Option("选择目标…", ""));
+            for (const target of pager.items)
+                select.append(new Option(targetLabel(target), target.targetRef));
+        }
+        ensureLoadMoreButton(select);
     }
     const filter = document.getElementById("todo-target-filter");
     if (filter instanceof HTMLSelectElement) {
         filter.replaceChildren(new Option("全部目标", ""));
-        for (const target of targets)
-            filter.append(new Option(`${target.platform} · ${target.scopeType} · ${target.userId ?? target.groupId ?? target.targetRef}`, target.targetRef));
+        for (const target of pager.items)
+            filter.append(new Option(targetLabel(target), target.targetRef));
+        ensureLoadMoreButton(filter);
     }
+}
+function ensureLoadMoreButton(select) {
+    const button = select.id === "todo-create-target"
+        ? createLoadMore ??= loadMoreTargetsButton()
+        : filterLoadMore ??= loadMoreTargetsButton();
+    const container = select.parentElement;
+    if (container && button.parentElement !== container.parentElement)
+        container.after(button);
+    button.hidden = !hasMoreTargetPages(pager);
+}
+function loadMoreTargetsButton() {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary";
+    button.textContent = "加载更多目标…";
+    button.onclick = () => void loadMoreTargets();
+    return button;
+}
+function targetLabel(target) {
+    return `${target.platform} · ${target.scopeType} · ${target.userId ?? target.groupId ?? target.targetRef}`;
 }
 function renderTodos() {
     const list = document.getElementById("todo-list");
@@ -167,14 +206,25 @@ function todoCard(todo) {
 async function changeTodoStatus(todo, status) {
     try {
         await updateTodo(todo.id, { status });
-        await refreshTodos();
+        await refreshTodos("refresh");
     }
     catch (cause) {
         showResult(cause instanceof Error ? cause.message : "Todo 更新失败", true);
     }
 }
+export async function loadTodoForEdit(id, get = getTodo, onError = (message) => showResult(message, true)) {
+    try {
+        return await get(id);
+    }
+    catch (cause) {
+        onError(cause instanceof Error ? cause.message : "Todo 加载失败");
+        return null;
+    }
+}
 async function openEditor(todo) {
-    const latest = await getTodo(todo.id);
+    const latest = await loadTodoForEdit(todo.id);
+    if (latest === null)
+        return;
     const title = window.prompt("Todo 标题", latest.title);
     if (title === null || !title.trim())
         return;
@@ -208,7 +258,7 @@ async function openEditor(todo) {
             reminder_at: reminderAt.trim() || null, time_precision: timePrecision, recurrence_kind: recurrenceKind,
             recurrence_interval: recurrenceInterval.trim() ? Number(recurrenceInterval) : null, recurrence_unit: recurrenceUnit,
         });
-        await refreshTodos();
+        await refreshTodos("refresh");
     }
     catch (cause) {
         showResult(cause instanceof Error ? cause.message : "Todo 更新失败", true);
@@ -223,14 +273,14 @@ function renderPagination(current, totalPages) {
         return;
     list.append(actionButton("上一页", () => { if (page > 1) {
         page -= 1;
-        void refreshTodos();
+        void refreshTodos("refresh");
     } }));
     const label = document.createElement("span");
     label.textContent = `${current} / ${totalPages}`;
     list.append(label);
     list.append(actionButton("下一页", () => { if (page < totalPages) {
         page += 1;
-        void refreshTodos();
+        void refreshTodos("refresh");
     } }));
 }
 async function removeTodo(todo) {
@@ -238,7 +288,7 @@ async function removeTodo(todo) {
         return;
     try {
         await deleteTodo(todo.id);
-        await refreshTodos();
+        await refreshTodos("refresh");
     }
     catch (cause) {
         showResult(cause instanceof Error ? cause.message : "Todo 删除失败", true);

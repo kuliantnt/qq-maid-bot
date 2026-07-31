@@ -35,7 +35,7 @@ export function pageForTarget(targetId) {
             return undefined;
     }
 }
-export function createConsoleIcon(name) {
+function createConsoleIconWith(document, name) {
     const definition = ICONS[name];
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("viewBox", "0 0 24 24");
@@ -53,83 +53,138 @@ export function createConsoleIcon(name) {
     }
     return svg;
 }
+export function createConsoleIcon(name) {
+    return createConsoleIconWith(document, name);
+}
 export function iconLabel(name) {
     return ICONS[name].label;
 }
-export function bindConsoleNavigation(backgroundController) {
+const COVER_DURATION_MS = 784;
+const WASHOUT_DURATION_MS = 896;
+function hashForPage(page) {
+    return page === undefined ? "#dashboard" : `#${page.targetId}`;
+}
+export function createConsoleNavigationShell(environment) {
+    const { document, window, backgroundController, wait } = environment;
     const nav = document.getElementById("console-nav");
     const list = document.getElementById("console-nav-list");
     const content = document.getElementById("console-content");
-    if (!(nav instanceof HTMLElement) || !(list instanceof HTMLElement) || !(content instanceof HTMLElement)) {
+    if (nav === null || list === null || content === null) {
         throw new Error("页面缺少控制台壳层元素");
     }
+    const transition = document.getElementById("console-transition");
+    const image = document.getElementById("console-transition-image");
+    let currentPageId = null;
+    let pendingRequest = null;
+    let transitionInFlight = false;
+    let activeChain = Promise.resolve();
+    const prefersReducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const syncActiveLink = (page) => {
+        for (const link of document.querySelectorAll(".bottom-nav-link")) {
+            const active = link.dataset.pageId === page.id;
+            link.classList.toggle("active", active);
+            if (active)
+                link.setAttribute("aria-current", "page");
+            else
+                link.removeAttribute("aria-current");
+        }
+    };
+    // 单次转换：封面(784ms)后换页，再清洗(896ms)。目标页已显示时只做状态同步、不再播动画，
+    // 保证“已显示但 aria-current 缺失”的入口（如默认总览）也能补齐导航状态。
+    const runTransition = async (pageId, animate) => {
+        const page = CONSOLE_PAGES.find((candidate) => candidate.id === pageId);
+        if (page === undefined)
+            return;
+        const needsSwitch = currentPageId !== page.id;
+        const animated = needsSwitch && animate && !prefersReducedMotion() && transition !== null && image !== null;
+        if (animated) {
+            image.src = backgroundController.nextTransitionImage();
+            transition.hidden = false;
+            transition.classList.remove("is-running");
+            void transition.offsetWidth;
+            transition.classList.add("is-running");
+            await wait(COVER_DURATION_MS);
+        }
+        if (needsSwitch) {
+            for (const container of document.querySelectorAll("[data-console-page]")) {
+                container.hidden = container.dataset.consolePage !== page.id;
+            }
+            currentPageId = page.id;
+        }
+        syncActiveLink(page);
+        content.scrollTop = 0;
+        if (animated) {
+            await wait(WASHOUT_DURATION_MS);
+            transition.classList.remove("is-running");
+            transition.hidden = true;
+        }
+    };
+    // 状态机：转换中到达的请求不丢弃，只保留最新一个（合并连续点击）；
+    // 转换结束后切换到最新请求。锁在任何路径（含失败）都在 finally 中释放。
+    const run = async (pageId, animate) => {
+        transitionInFlight = true;
+        try {
+            await runTransition(pageId, animate);
+        }
+        finally {
+            transitionInFlight = false;
+        }
+        const next = pendingRequest;
+        if (next !== null) {
+            pendingRequest = null;
+            await run(next.pageId, next.animate);
+        }
+    };
+    const navigate = (pageId, animate) => {
+        if (transitionInFlight) {
+            pendingRequest = { pageId, animate };
+            return activeChain;
+        }
+        activeChain = run(pageId, animate);
+        return activeChain;
+    };
     list.replaceChildren(...CONSOLE_PAGES.map((page) => {
         const link = document.createElement("a");
         link.href = `#${page.targetId}`;
         link.className = "bottom-nav-link";
         link.dataset.pageId = page.id;
         link.setAttribute("aria-label", page.label);
+        // 点击立即 pushState 形成历史记录，后退/前进由 hashchange 驱动同一状态机。
         link.addEventListener("click", (event) => {
             event.preventDefault();
-            void activatePage(page.id, true, content, backgroundController, true);
+            window.history.pushState(null, "", `#${page.targetId}`);
+            void navigate(page.id, true);
         });
-        link.append(createConsoleIcon(page.icon));
+        link.append(createConsoleIconWith(document, page.icon));
         const label = document.createElement("span");
         label.textContent = page.label;
         link.append(label);
         return link;
     }));
-    const initialPage = pageForTarget(window.location.hash.slice(1));
-    void activatePage(initialPage?.id ?? "overview", false, content, backgroundController, false);
     window.addEventListener("hashchange", () => {
         const page = pageForTarget(window.location.hash.slice(1));
-        if (page)
-            void activatePage(page.id, false, content, backgroundController, true);
+        if (page !== undefined) {
+            void navigate(page.id, true);
+        }
+        else {
+            // 未知哈希回退到总览并修正地址，避免页面与哈希长期不一致。
+            window.history.replaceState(null, "", hashForPage(undefined));
+            void navigate("overview", true);
+        }
     });
+    const initialHash = window.location.hash.slice(1);
+    const initialPage = pageForTarget(initialHash);
+    if (initialPage === undefined) {
+        window.history.replaceState(null, "", hashForPage(undefined));
+    }
+    const initialNavigation = navigate(initialPage?.id ?? "overview", false);
+    return { navigate, initialNavigation };
 }
-let transitionInFlight = false;
-async function activatePage(pageId, updateHistory, content, backgroundController, animate) {
-    const page = CONSOLE_PAGES.find((candidate) => candidate.id === pageId);
-    if (!page)
-        return;
-    const current = document.querySelector("[data-console-page]:not([hidden])")?.dataset.consolePage;
-    if (current === page.id)
-        return;
-    if (transitionInFlight)
-        return;
-    transitionInFlight = true;
-    const transition = document.getElementById("console-transition");
-    const image = document.getElementById("console-transition-image");
-    const animated = animate && transition instanceof HTMLElement && image instanceof HTMLImageElement && !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (animated) {
-        image.src = backgroundController.nextTransitionImage();
-        transition.hidden = false;
-        transition.classList.remove("is-running");
-        void transition.offsetWidth;
-        transition.classList.add("is-running");
-        await wait(784);
-    }
-    for (const container of document.querySelectorAll("[data-console-page]")) {
-        container.hidden = container.dataset.consolePage !== page.id;
-    }
-    for (const link of document.querySelectorAll(".bottom-nav-link")) {
-        const active = link.dataset.pageId === page.id;
-        link.classList.toggle("active", active);
-        if (active)
-            link.setAttribute("aria-current", "page");
-        else
-            link.removeAttribute("aria-current");
-    }
-    content.scrollTop = 0;
-    if (updateHistory)
-        window.history.replaceState(null, "", `#${page.targetId}`);
-    if (animated) {
-        await wait(896);
-        transition.classList.remove("is-running");
-        transition.hidden = true;
-    }
-    transitionInFlight = false;
-}
-function wait(duration) {
-    return new Promise((resolve) => window.setTimeout(resolve, duration));
+export function bindConsoleNavigation(backgroundController) {
+    createConsoleNavigationShell({
+        document,
+        window,
+        backgroundController,
+        wait: (duration) => new Promise((resolve) => window.setTimeout(resolve, duration)),
+    });
 }

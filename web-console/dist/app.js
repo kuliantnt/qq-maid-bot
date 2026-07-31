@@ -1,4 +1,4 @@
-import { ConsoleApiError, fetchBootstrap, fetchConsoleStatus, fetchSession, issuePreAuth, initializeAdmin, loginAdmin, logoutAdmin, requestPasswordReset, resetAdminPassword, } from "./api.js";
+import { ConsoleApiError, fetchBootstrap, fetchConsoleStatus, fetchSession, fetchUserPreferences, listUserFiles, readUserFile, updateUserPreferences, uploadUserFile, deleteUserFile, issuePreAuth, initializeAdmin, loginAdmin, logoutAdmin, requestPasswordReset, resetAdminPassword, } from "./api.js";
 import { requiredElement, setText, togglePasswordReveal } from "./dom.js";
 import { renderDashboard } from "./views/dashboard.js";
 import { bindMarkdownPreview } from "./views/markdown.js";
@@ -9,6 +9,7 @@ import { createThemeController } from "./theme.js";
 import { bindConsoleNavigation } from "./console-shell.js";
 import { initializeTodo } from "./views/todo.js";
 import { createBackgroundController, installBackgroundConsoleUnlock } from "./background.js";
+import { cacheFileBlob, clearFileBlobCache, deleteCachedFileBlob, readCachedFileBlob } from "./file-cache.js";
 let localStorage = null;
 try {
     localStorage = window.localStorage;
@@ -18,8 +19,35 @@ catch (cause) {
         throw cause;
 }
 const themeController = createThemeController(localStorage, document.documentElement);
-const backgroundController = createBackgroundController(document.documentElement);
+const backgroundController = createBackgroundController(document.documentElement, document, (file, forceRefresh) => readFileWithCache(file, forceRefresh), async () => {
+    if (!userDataController)
+        return;
+    try {
+        await userDataController.updatePreferences({ kuliantnt: true });
+    }
+    catch (cause) {
+        setText("configuration-result", cause instanceof Error ? cause.message : "特殊背景解锁状态保存失败");
+    }
+});
 installBackgroundConsoleUnlock(window, backgroundController);
+/** 优先读本地缓存；未命中或强制刷新时走现有 POST 读取，并把结果尽力写回缓存。 */
+async function readFileWithCache(file, forceRefresh) {
+    if (!forceRefresh) {
+        const cached = await readCachedFileBlob(file.url);
+        if (cached)
+            return cached;
+    }
+    const blob = await readUserFile({
+        fileId: file.fileId,
+        filename: file.filename,
+        contentType: "image/*",
+        size: 0,
+        createdAt: "",
+        url: file.url,
+    });
+    void cacheFileBlob(file.url, blob);
+    return blob;
+}
 const statusError = requiredElement("status-error", HTMLElement);
 const authForm = requiredElement("auth-form", HTMLFormElement);
 const logoutButton = requiredElement("logout", HTMLButtonElement);
@@ -28,6 +56,7 @@ let authMode = "login";
 let appBound = false;
 let autoRefreshTimer;
 let refreshInFlight = false;
+let userDataController = null;
 const AUTO_REFRESH_INTERVAL_MS = 30_000;
 authForm.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -182,12 +211,61 @@ async function showConsole(username) {
         bindMarkdownPreview();
         appBound = true;
     }
-    await Promise.all([refreshStatus(), refreshConfiguration()]);
+    await Promise.all([refreshStatus(), hydrateUserData()]);
+    await refreshConfiguration();
     await initializeTodo();
+}
+async function hydrateUserData() {
+    try {
+        const [preferences, files] = await Promise.all([fetchUserPreferences(), listUserFiles()]);
+        themeController.hydrate({ customColors: preferences.customColors });
+        await backgroundController.hydrate({
+            fileIds: preferences.backgroundFileIds,
+            activeFileId: preferences.activeBackgroundFileId,
+            kuliantnt: preferences.kuliantnt,
+        }, files);
+        let currentPreferences = preferences;
+        let currentFiles = files;
+        const dataController = {
+            get preferences() { return currentPreferences; },
+            get files() { return currentFiles; },
+            updatePreferences: async (patch) => {
+                currentPreferences = await updateUserPreferences(patch);
+                return currentPreferences;
+            },
+            uploadFile: async (file) => {
+                const uploaded = await uploadUserFile(file);
+                currentFiles = [...currentFiles, uploaded];
+                return uploaded;
+            },
+            deleteFile: async (file) => {
+                await deleteUserFile(file.fileId);
+                currentFiles = currentFiles.filter((candidate) => candidate.fileId !== file.fileId);
+                void deleteCachedFileBlob(file.url);
+                // 删除后以服务端返回的完整偏好为准，避免乐观更新与真实状态不一致。
+                currentPreferences = await fetchUserPreferences();
+            },
+        };
+        userDataController = dataController;
+        try {
+            // 认证成功后服务端偏好是唯一权威：把旧 cookie 一次性迁移进服务端偏好并清理。
+            await backgroundController.migrateFromLegacy({ kuliantnt: preferences.kuliantnt }, async () => {
+                currentPreferences = await dataController.updatePreferences({ kuliantnt: true });
+            });
+        }
+        catch (cause) {
+            setText("configuration-result", cause instanceof Error ? cause.message : "背景解锁状态迁移失败");
+        }
+    }
+    catch (cause) {
+        userDataController = null;
+        backgroundController.dispose();
+        setText("configuration-result", cause instanceof Error ? cause.message : "用户界面偏好加载失败");
+    }
 }
 async function refreshConfiguration() {
     try {
-        await initializeConfiguration(themeController, backgroundController);
+        await initializeConfiguration(themeController, backgroundController, userDataController);
     }
     catch (cause) {
         setText("configuration-result", cause instanceof Error ? cause.message : "配置加载失败");
@@ -198,6 +276,9 @@ async function logout() {
         await logoutAdmin();
     }
     finally {
+        backgroundController.dispose();
+        void clearFileBlobCache();
+        userDataController = null;
         stopAutoRefresh();
         bootstrapStatus = null;
         authMode = "login";

@@ -1,5 +1,5 @@
 import { CONSOLE_THEME_IDS, CONSOLE_THEMES, isConsoleThemePreset, } from "../theme.js";
-export function renderThemeSelector(target, controller, backgroundController) {
+export function renderThemeSelector(target, controller, backgroundController, userData = null) {
     target.replaceChildren();
     const fieldset = document.createElement("fieldset");
     fieldset.className = "console-theme-selector";
@@ -12,6 +12,24 @@ export function renderThemeSelector(target, controller, backgroundController) {
     status.className = "field-meta";
     status.setAttribute("aria-live", "polite");
     status.id = "console-theme-selection";
+    let saveInFlight = false;
+    const savePreference = async (patch, success, failure, apply) => {
+        if (!userData || saveInFlight)
+            return;
+        saveInFlight = true;
+        status.textContent = "正在保存界面偏好……";
+        try {
+            await userData.updatePreferences(patch);
+            apply();
+            status.textContent = success;
+        }
+        catch (cause) {
+            status.textContent = cause instanceof Error ? `${failure}：${cause.message}` : failure;
+        }
+        finally {
+            saveInFlight = false;
+        }
+    };
     const sync = (preset) => {
         for (const input of choices.querySelectorAll("input[type=radio]")) {
             const selected = input.value === preset;
@@ -33,8 +51,11 @@ export function renderThemeSelector(target, controller, backgroundController) {
         input.addEventListener("change", () => {
             if (!isConsoleThemePreset(input.value))
                 return;
-            controller.select(input.value);
-            sync(input.value);
+            const nextPreset = input.value;
+            void savePreference({ customColors: [] }, "主题已保存。", "主题保存失败", () => {
+                controller.select(nextPreset);
+                sync(nextPreset);
+            });
         });
         const name = document.createElement("span");
         name.className = "console-theme-choice-name";
@@ -57,8 +78,10 @@ export function renderThemeSelector(target, controller, backgroundController) {
     reset.className = "secondary console-theme-reset";
     reset.textContent = "恢复默认";
     reset.addEventListener("click", () => {
-        const preference = controller.reset();
-        sync(preference.preset);
+        void savePreference({ customColors: [] }, "已恢复默认主题。", "恢复默认主题失败", () => {
+            const preference = controller.reset();
+            sync(preference.preset);
+        });
     });
     const backgroundFieldset = document.createElement("fieldset");
     backgroundFieldset.className = "console-background-selector";
@@ -93,8 +116,10 @@ export function renderThemeSelector(target, controller, backgroundController) {
         input.disabled = option.mode === "special" && !backgroundController.isUnlocked();
         input.addEventListener("change", () => {
             const mode = input.value;
-            backgroundController.select(mode);
-            syncBackground(backgroundController.current());
+            void savePreference({ activeBackgroundFileId: null }, "背景已保存。", "背景保存失败", () => {
+                backgroundController.select(mode);
+                syncBackground(backgroundController.current());
+            });
         });
         const name = document.createElement("span");
         name.className = "console-theme-choice-name";
@@ -110,4 +135,109 @@ export function renderThemeSelector(target, controller, backgroundController) {
     target.append(fieldset);
     sync(controller.current().preset);
     syncBackground(backgroundController.current());
+    if (userData) {
+        const custom = document.createElement("div");
+        custom.className = "console-custom-theme-controls";
+        const label = document.createElement("label");
+        label.textContent = "自定义颜色（深色、浅色、强调色）";
+        const input = document.createElement("input");
+        input.type = "text";
+        input.value = userData.preferences.customColors.join(", ");
+        input.placeholder = "#07130F, #E9F4E7, #78E3AD";
+        const save = document.createElement("button");
+        save.type = "button";
+        save.className = "secondary";
+        save.textContent = "保存颜色";
+        const customStatus = document.createElement("p");
+        customStatus.className = "field-meta";
+        customStatus.setAttribute("aria-live", "polite");
+        save.addEventListener("click", () => {
+            const colors = input.value.split(",").map((value) => value.trim());
+            if (colors.length !== 3 || colors.some((color) => !/^#[0-9a-f]{6}$/i.test(color))) {
+                customStatus.textContent = "请输入三个六位十六进制颜色。";
+                return;
+            }
+            void savePreference({ customColors: colors }, "自定义颜色已保存。", "自定义颜色保存失败", () => {
+                controller.applyCustomColors(colors);
+                customStatus.textContent = "自定义颜色已保存。";
+            });
+        });
+        custom.append(label, input, save, customStatus);
+        fieldset.append(custom);
+        if (userData.uploadFile && userData.deleteFile) {
+            const filesSection = document.createElement("div");
+            filesSection.className = "console-custom-background-controls";
+            const fileLabel = document.createElement("label");
+            fileLabel.textContent = "自定义背景图片";
+            const fileInput = document.createElement("input");
+            fileInput.type = "file";
+            fileInput.accept = "image/*";
+            const fileStatus = document.createElement("p");
+            fileStatus.className = "field-meta";
+            fileStatus.setAttribute("aria-live", "polite");
+            const fileList = document.createElement("div");
+            fileList.className = "console-background-file-list";
+            for (const file of userData.files) {
+                const row = document.createElement("div");
+                row.className = "console-background-file-row";
+                const name = document.createElement("span");
+                name.textContent = file.filename;
+                const activate = document.createElement("button");
+                activate.type = "button";
+                activate.className = "secondary";
+                activate.textContent = "使用";
+                activate.addEventListener("click", () => {
+                    void savePreference({
+                        backgroundFileIds: [...new Set([...userData.preferences.backgroundFileIds, file.fileId])],
+                        activeBackgroundFileId: file.fileId,
+                    }, "背景已保存。", "背景保存失败", () => {
+                        void backgroundController.selectFile(file, true).catch(() => {
+                            backgroundStatus.textContent = "背景读取失败，已保留原背景。";
+                            void userData.updatePreferences({ activeBackgroundFileId: null });
+                        });
+                    });
+                });
+                const remove = document.createElement("button");
+                remove.type = "button";
+                remove.className = "danger";
+                remove.textContent = "删除";
+                remove.addEventListener("click", () => {
+                    void userData.deleteFile?.(file).then(() => {
+                        backgroundController.deleteFile(file.fileId);
+                        row.remove();
+                        fileStatus.textContent = "背景文件已删除。";
+                    });
+                });
+                row.append(name, activate, remove);
+                fileList.append(row);
+            }
+            fileInput.addEventListener("change", () => {
+                const file = fileInput.files?.[0];
+                if (!file)
+                    return;
+                void userData.uploadFile?.(file).then((uploaded) => {
+                    fileStatus.textContent = `${uploaded.filename} 已上传，请刷新配置后选择。`;
+                    fileInput.value = "";
+                    const name = document.createElement("span");
+                    name.textContent = uploaded.filename;
+                    const activate = document.createElement("button");
+                    activate.type = "button";
+                    activate.className = "secondary";
+                    activate.textContent = "使用";
+                    activate.addEventListener("click", () => {
+                        void savePreference({
+                            backgroundFileIds: [...new Set([...userData.preferences.backgroundFileIds, uploaded.fileId])],
+                            activeBackgroundFileId: uploaded.fileId,
+                        }, "背景已保存。", "背景保存失败", () => { void backgroundController.selectFile(uploaded, true); });
+                    });
+                    const row = document.createElement("div");
+                    row.className = "console-background-file-row";
+                    row.append(name, activate);
+                    fileList.append(row);
+                });
+            });
+            filesSection.append(fileLabel, fileInput, fileList, fileStatus);
+            backgroundFieldset.append(filesSection);
+        }
+    }
 }
