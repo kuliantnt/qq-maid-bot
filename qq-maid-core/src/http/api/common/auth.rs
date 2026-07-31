@@ -16,6 +16,7 @@ const REQUEST_ID_HEADER: &str = "x-request-id";
 /// 服务端认证后得到的通用 API 身份；领域层仍需自行判断资源权限。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AuthenticatedApiActor {
+    admin_id: i64,
     subject: String,
 }
 
@@ -23,6 +24,10 @@ impl AuthenticatedApiActor {
     /// 不暴露原始 cookie；领域只消费认证系统签发的稳定 subject。
     pub(crate) fn subject(&self) -> &str {
         &self.subject
+    }
+
+    pub(crate) fn admin_id(&self) -> i64 {
+        self.admin_id
     }
 }
 
@@ -125,6 +130,7 @@ pub(crate) fn authenticate_admin_request(
         csrf,
         actor_id: admin_id,
         actor: AuthenticatedApiActor {
+            admin_id,
             subject: format!("console_admin:{admin_id}"),
         },
     })

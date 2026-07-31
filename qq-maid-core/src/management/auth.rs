@@ -255,6 +255,14 @@ impl AdminAuth {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn open_silent(
+        database: SqliteDatabase,
+        bootstrap_token_file: PathBuf,
+    ) -> Result<Self, AdminAuthError> {
+        Self::open_with_token_output(database, bootstrap_token_file, None)
+    }
+
     pub fn open_if_enabled(
         database: SqliteDatabase,
         bootstrap_token_file: PathBuf,

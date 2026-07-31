@@ -6,7 +6,7 @@ use axum::{
 };
 
 use super::{
-    api::todo,
+    api::{todo, user_data},
     console_routes::{
         console_asset, console_configuration, console_index, console_status, healthz,
         markdown_render, markdown_render_preflight,
@@ -29,6 +29,7 @@ pub fn build_router(state: OpsHttpState) -> Router {
                 "/api/v1/markdown/render",
                 post(markdown_render).options(markdown_render_preflight),
             )
+            .merge(user_data::router())
             .merge(todo::router())
             .merge(management_router())
     } else {

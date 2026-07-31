@@ -17,6 +17,7 @@ use crate::{
         DynConsoleStatusSource, EmptyConsoleStatusSource,
     },
     management::AdminAuth,
+    management::ConsoleUserDataService,
     runtime::tools::todo::TodoManagementService,
 };
 
@@ -59,6 +60,8 @@ pub struct OpsHttpState {
     pub admin_auth: Option<AdminAuth>,
     /// Todo 管理领域门面；Handler 不直接持有数据库或通知 Store。
     pub(crate) todo_management: Option<TodoManagementService>,
+    /// 控制台用户私有偏好与通用文件领域门面。
+    pub(crate) console_user_data: Option<ConsoleUserDataService>,
     /// 当前进程真实注册的 Tool 元数据，供 WebUI 动态展示白名单选项。
     pub registered_tools: Arc<Vec<ConsoleToolMetadata>>,
     /// 仅复用部署目录中的受控 botctl 脚本，不直接操作 systemd 或 Docker。
@@ -75,6 +78,11 @@ impl OpsHttpState {
 
     pub(crate) fn with_todo_management(mut self, service: TodoManagementService) -> Self {
         self.todo_management = Some(service);
+        self
+    }
+
+    pub(crate) fn with_console_user_data(mut self, service: ConsoleUserDataService) -> Self {
+        self.console_user_data = Some(service);
         self
     }
 
@@ -101,6 +109,7 @@ impl OpsHttpState {
             config_center: None,
             admin_auth: None,
             todo_management: None,
+            console_user_data: None,
             registered_tools: Arc::new(Vec::new()),
             restart_controller: ConsoleRestartController::default(),
             setup_required: false,
@@ -143,6 +152,7 @@ impl OpsHttpState {
             config_center,
             admin_auth,
             todo_management: None,
+            console_user_data: None,
             registered_tools: Arc::new(Vec::new()),
             restart_controller: ConsoleRestartController::from_current_dir(),
             setup_required: false,
@@ -164,6 +174,7 @@ impl OpsHttpState {
             config_center: Some(config_center),
             admin_auth,
             todo_management: None,
+            console_user_data: None,
             registered_tools: Arc::new(Vec::new()),
             restart_controller: ConsoleRestartController::from_current_dir(),
             setup_required: true,

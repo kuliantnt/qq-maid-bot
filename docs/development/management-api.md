@@ -1,14 +1,14 @@
 # 管理 API 约定
 
-> 当前状态：本文记录已落地的部署管理员资源 API 通用约定，以及 Todo 资源的现行契约。路由和 DTO 仍以 `qq-maid-core/src/http/api/` 源码为准。
+> 当前状态：本文记录已落地的部署管理员资源 API 通用约定，以及 Todo、当前用户偏好和通用文件资源的现行契约。路由和 DTO 仍以 `qq-maid-core/src/http/api/` 源码为准。
 
-本文定义 Web 控制台资源管理接口的公共约定。当前首个资源是 Todo；后续 Memory、知识库等接口复用鉴权、分页、响应和错误基础设施，但必须保留各自的领域权限与数据归属模型。
+本文定义 Web 控制台资源管理接口的公共约定。Todo 使用部署管理员的全局管理权限；用户偏好和文件严格归属当前登录管理员。后续 Memory、知识库等接口复用鉴权、分页、响应和错误基础设施，但必须保留各自的领域权限与数据归属模型。
 
 ## 路由与公共鉴权
 
 资源管理路由仅在 `WEB_CONSOLE_ENABLED=true` 时注册，统一使用 `/api/v1/console/` 前缀和 `POST`。调用者必须先通过部署管理员登录取得服务端 Session cookie，并携带同一会话签发的 `x-csrf-token`；浏览器请求还必须通过现有同源校验和管理请求限流。
 
-`AuthenticatedApiActor` 表示本次操作的管理员调用者，只用于认证、CSRF、Origin、限流、审计和诊断。它不是 Todo owner，不能用于构造 `owner_key` 或 `scope_key`。所有已认证部署管理员当前都具有同一份全局 Todo 管理权限。
+`AuthenticatedApiActor` 表示本次操作的管理员调用者，用于认证、CSRF、Origin、限流、审计、诊断，以及控制台私有资源的归属。它不是 Todo owner，不能用于构造 `owner_key` 或 `scope_key`。所有已认证部署管理员当前都具有同一份全局 Todo 管理权限，但用户偏好和文件必须按 actor 对应的 `console_admins.id` 隔离；请求体不能指定其他管理员 ID。
 
 客户端可以传入不超过 128 字符且仅包含字母、数字、`-`、`_`、`.`、`:` 的 `x-request-id`；缺失或非法时由服务端生成 UUID。进入 API Handler 后的成功和错误响应都会回传该 Header，并在 JSON 中包含 `request_id`。
 
@@ -52,7 +52,9 @@
 | 未登录或会话失效 | 401 | `unauthenticated` |
 | Origin、CSRF 或领域权限拒绝 | 403 | 对应安全错误码 / `permission_denied` |
 | Todo 不存在 | 404 | `not_found` |
+| 当前用户文件不存在或属于其他用户 | 404 | `not_found` |
 | 状态或并发版本冲突 | 409 | `conflict` |
+| 上传请求超过大小限制 | 413 | `payload_too_large` |
 | 领域服务未装配 | 503 | `<domain>_unavailable` |
 | 数据库、Outbox 或其他内部失败 | 500 | `internal_error` |
 
@@ -74,6 +76,21 @@
 - `total=0` 时 `total_pages=0`；其余情况按向上取整计算。
 
 SQLite 使用同一组筛选分别执行 `COUNT(*)` 与带 `LIMIT/OFFSET` 的当前页查询，不会全量加载后在内存切片。排序沿用 Todo 的状态/计划时间/完成时间顺序，并以内部 Todo ID 作为最终稳定次级排序。
+
+## 当前用户偏好与通用文件 API
+
+这些接口供独立前端调用，不依赖仓库内置 `web-console` 的页面或静态资源。所有接口仍只在 `WEB_CONSOLE_ENABLED=true` 时注册，并统一使用 `POST`、部署管理员 Session、同源校验和 `x-csrf-token`。
+
+| 路径 | 请求类型 | 用途 |
+| --- | --- | --- |
+| `/api/v1/console/user-preferences/get` | JSON `{}` | 读取当前用户偏好；无记录时返回完整默认值 |
+| `/api/v1/console/user-preferences/update` | JSON 部分字段 | 部分更新当前用户偏好 |
+| `/api/v1/console/files/upload` | `multipart/form-data` | 上传单个通用文件 |
+| `/api/v1/console/files/list` | JSON 分页参数 | 分页列出当前用户文件 |
+| `/api/v1/console/files/get/{file_id}` | 无请求体 | 返回当前用户文件原始内容 |
+| `/api/v1/console/files/delete` | JSON `file_id` | 删除当前用户文件并清理背景引用 |
+
+偏好字段、文件响应、限制、Blob 读取方式和删除一致性的完整前端契约见[控制台用户偏好与通用文件 API](./console-user-data-api.md)。文件 ID 是服务端生成的规范 UUID；原始文件名只作为元数据保存，不参与服务器路径解析。文件列表复用公共分页协议，文件内容读取是唯一不返回 JSON 成功包络的接口，会返回真实 `Content-Type` 与 `Content-Length`，错误仍使用统一 JSON 包络。
 
 ## Todo API
 

@@ -10,4 +10,4 @@ pub(crate) use auth::{
 };
 pub(crate) use error::{ApiError, auth_error_response, error_response};
 pub(crate) use pagination::{PagedResponse, PaginationRequest, ValidatedPagination};
-pub(crate) use response::{json_payload, respond, respond_error};
+pub(crate) use response::{json_payload, respond, respond_error, respond_raw};

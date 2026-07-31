@@ -54,6 +54,25 @@ pub(crate) fn respond<T: Serialize>(
     with_console_cors(response, state, headers)
 }
 
+/// 文件内容等非 JSON 成功响应仍复用请求 ID、错误包络、CORS 与安全响应头。
+pub(crate) fn respond_raw(
+    state: &OpsHttpState,
+    headers: &HeaderMap,
+    context: &ApiRequestContext,
+    result: Result<Response, ApiError>,
+) -> Response {
+    let mut response = match result {
+        Ok(response) => response,
+        Err(error) => error
+            .with_request_id(context.request_id.clone())
+            .into_response(),
+    };
+    if let Ok(value) = HeaderValue::from_str(context.request_id.as_str()) {
+        response.headers_mut().insert("x-request-id", value);
+    }
+    with_console_cors(response, state, headers)
+}
+
 pub(crate) fn respond_error(
     state: &OpsHttpState,
     headers: &HeaderMap,
