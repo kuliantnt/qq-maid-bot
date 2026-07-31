@@ -108,14 +108,15 @@ test("切换 disabled 只保存 Provider，不清除或改写 Qwen 配置", () =
 
 test("千问 API Key 继续使用 secret replace/clear，且留空不修改", () => {
   const secret = field("delivery.tts.qwen_api_key", null, "secret");
+  const dirty = new Set([secret.key]);
 
-  assert.deepEqual(secretConfigurationChanges([secret], new Map(), new Set()), []);
+  assert.deepEqual(secretConfigurationChanges([secret], new Map(), new Set(), new Set()), []);
   assert.deepEqual(
-    secretConfigurationChanges([secret], new Map([[secret.key, "new-key"]]), new Set()),
+    secretConfigurationChanges([secret], new Map([[secret.key, "new-key"]]), new Set(), dirty),
     [{ action: "replace", key: secret.key, value: "new-key", expected_revision: "revision-1" }],
   );
   assert.deepEqual(
-    secretConfigurationChanges([secret], new Map([[secret.key, "must-not-win"]]), new Set([secret.key])),
+    secretConfigurationChanges([secret], new Map([[secret.key, "must-not-win"]]), new Set([secret.key]), dirty),
     [{ action: "clear", key: secret.key, expected_revision: "revision-1" }],
   );
   assert.deepEqual(

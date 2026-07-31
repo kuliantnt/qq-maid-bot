@@ -5,7 +5,9 @@
 
 use crate::{
     config::center::CONFIG_SECRET_SCHEMA_V1,
-    management::{CONSOLE_ADMIN_SCHEMA_V1, CONSOLE_USER_DATA_SCHEMA_V1},
+    management::{
+        CONSOLE_ADMIN_SCHEMA_V1, CONSOLE_USER_DATA_SCHEMA_V1, CONSOLE_USER_DATA_SCHEMA_V2,
+    },
     runtime::tools::knowledge::{KNOWLEDGE_SCHEMA_V1, KNOWLEDGE_SCHEMA_V2, KNOWLEDGE_SCHEMA_V3},
     runtime::tools::memory::{
         MEMORY_CONSOLIDATION_SCHEMA_V4, MEMORY_DOMAIN_SCHEMA_V3, MEMORY_SCHEMA_V1,
@@ -42,6 +44,7 @@ pub const APP_MIGRATIONS: &[SqliteMigration] = &[
     CONFIG_SECRET_SCHEMA_V1,
     CONSOLE_ADMIN_SCHEMA_V1,
     CONSOLE_USER_DATA_SCHEMA_V1,
+    CONSOLE_USER_DATA_SCHEMA_V2,
     RSS_SUBSCRIPTIONS_SCHEMA,
     RSS_ITEM_STATES_SCHEMA,
     RSS_LEGACY_SEEN_ITEMS_MIGRATION,
@@ -74,6 +77,7 @@ pub const APP_MIGRATIONS: &[SqliteMigration] = &[
 mod tests {
     use super::*;
     use crate::{
+        management::{BackgroundMode, ConsoleUserDataService, UserPreferencesPatch},
         runtime::tools::{
             memory::{CreateMemoryRequest, ListMemoryQuery, MemoryStore},
             rss::{RssFeedItem, RssStore, RssTarget, RssTargetType},
@@ -199,5 +203,64 @@ mod tests {
         let memories = reopened_memory.list(ListMemoryQuery::default()).unwrap();
         assert_eq!(memories.len(), 1);
         assert_eq!(memories[0].id, memory.id);
+    }
+
+    #[test]
+    fn console_user_data_v2_upgrades_legacy_v1_preferences_without_data_loss() {
+        let directory = std::env::temp_dir().join(format!(
+            "qq-maid-console-user-data-v2-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        // 先以旧 schema（V1，无 background_mode 列）建库并写入历史偏好。
+        let legacy = SqliteDatabase::open(
+            &directory,
+            &[CONSOLE_ADMIN_SCHEMA_V1, CONSOLE_USER_DATA_SCHEMA_V1],
+        )
+        .unwrap();
+        legacy
+            .connection()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO console_admins (username, password_hash, disabled, created_at)
+                 VALUES ('admin', 'legacy-hash', 0, 1);
+                 INSERT INTO console_user_preferences
+                   (admin_id, custom_colors_json, background_file_ids_json,
+                    active_background_file_id, kuliantnt, created_at, updated_at)
+                 VALUES (1, '[\"#112233\"]', '[]', NULL, 1,
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        drop(legacy);
+
+        // 用完整 APP_MIGRATIONS 重开：V1 已应用被跳过，V2 补 background_mode 列。
+        let upgraded = SqliteDatabase::open(&directory, APP_MIGRATIONS).unwrap();
+        let service = ConsoleUserDataService::new(upgraded.clone());
+        let preferences = service.get_preferences(1).unwrap();
+        assert_eq!(preferences.custom_colors, vec!["#112233".to_owned()]);
+        assert!(preferences.kuliantnt);
+        assert_eq!(preferences.background_mode, BackgroundMode::Default);
+
+        // 新字段可写可读，且不会改变旧数据语义。
+        let updated = service
+            .update_preferences(
+                1,
+                UserPreferencesPatch {
+                    background_mode: Some(BackgroundMode::Special),
+                    ..UserPreferencesPatch::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.background_mode, BackgroundMode::Special);
+        assert!(updated.kuliantnt);
+
+        // 再次重开不重复执行 migration，数据保持一致。
+        let reopened = SqliteDatabase::open(&directory, APP_MIGRATIONS).unwrap();
+        let reread = ConsoleUserDataService::new(reopened)
+            .get_preferences(1)
+            .unwrap();
+        assert_eq!(reread.background_mode, BackgroundMode::Special);
+        assert_eq!(reread.custom_colors, vec!["#112233".to_owned()]);
+
+        let _ = std::fs::remove_file(&directory);
     }
 }

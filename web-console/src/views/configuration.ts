@@ -16,7 +16,10 @@ import {
   renderOpenCodeProviders,
   renderOpenCodeRouteHints,
 } from "../opencode-providers.js";
-import type { ConfigFieldSnapshot, ConfigurationSnapshot } from "../types.js";
+import type { ConfigFieldSnapshot, ConfigurationSnapshot, UserFile, UserPreferences } from "../types.js";
+import type { ThemeController } from "../theme.js";
+import { renderThemeSelector } from "./theme-selector.js";
+import type { BackgroundController } from "../background.js";
 
 const FIELD_LABELS: Record<string, string> = {
   "command.prefix": "聊天命令前缀",
@@ -154,6 +157,29 @@ const AGENT_ROUTE_LABELS: Record<string, string> = {
   group_search: "群聊搜索路线",
 };
 
+type ConfigurationPrimary = "runtime" | "secrets" | "agent" | "interface";
+type ConfigurationNavigation = {
+  primary: ConfigurationPrimary;
+  secondary: Partial<Record<ConfigurationPrimary, string>>;
+};
+
+const PRIMARY_NAVIGATION: ReadonlyArray<{ id: ConfigurationPrimary; label: string; description: string }> = [
+  { id: "runtime", label: "普通配置", description: "runtime.toml" },
+  { id: "secrets", label: "敏感凭据", description: "高风险" },
+  { id: "agent", label: "Agent 策略", description: "可能需重启" },
+  { id: "interface", label: "Interface / Theme", description: "local-only" },
+];
+
+const SECONDARY_LABELS: Record<string, string> = {
+  knowledge: "知识检索",
+  "web-search": "联网搜索",
+  providers: "模型 Provider",
+  routes: "模型路线",
+  "private-scene": "私聊场景",
+  "group-scene": "群聊场景",
+  theme: "主题",
+};
+
 export type AgentWebSearchBackend = "provider_native" | "tavily" | "disabled";
 
 export interface AgentWebSearchConfig {
@@ -166,6 +192,49 @@ export interface AgentWebSearchConfig {
   firstResponseTimeoutSeconds: number;
   totalTimeoutSeconds: number;
   routes: Record<string, string>;
+}
+
+export type AutosaveScope = "public" | "secret" | "agent";
+export interface AutosaveBlurInput {
+  readonly scope: AutosaveScope;
+  readonly value: unknown;
+  readonly baseline: unknown;
+  readonly configured?: boolean;
+  readonly clearRequested?: boolean;
+}
+
+export interface UserDataController {
+  readonly preferences: UserPreferences;
+  readonly files: readonly UserFile[];
+  readonly updatePreferences: (patch: {
+    readonly customColors?: readonly string[];
+    readonly backgroundFileIds?: readonly string[];
+    readonly activeBackgroundFileId?: string | null;
+    readonly backgroundMode?: "default" | "special";
+    readonly kuliantnt?: boolean;
+  }) => Promise<UserPreferences>;
+  readonly uploadFile?: (file: File) => Promise<UserFile>;
+  readonly deleteFile?: (file: UserFile) => Promise<void>;
+}
+
+/** 仅测试使用：重置自动保存绑定与保存队列等模块级状态，避免多个测试文档互相泄漏。 */
+export function resetConfigurationStateForTests(): void {
+  current = null;
+  autosaveBound = false;
+  queuedFocusRestoreId = null;
+  secretSavedStates.clear();
+  saveQueue = Promise.resolve(null);
+}
+
+export function shouldAutosaveOnBlur(input: AutosaveBlurInput): boolean {
+  if (input.scope === "secret") {
+    if (input.clearRequested === true) return input.configured === true;
+    return typeof input.value === "string" && input.value.length > 0;
+  }
+  if (input.scope === "public" && (input.baseline === null || input.baseline === undefined) && isEmptyInputValue(input.value)) {
+    return false;
+  }
+  return JSON.stringify(input.value) !== JSON.stringify(input.baseline);
 }
 
 const DEFAULT_WEB_SEARCH_CONFIG: AgentWebSearchConfig = {
@@ -257,20 +326,55 @@ export function webSearchRouteChanges(
 }
 
 let current: ConfigurationSnapshot | null = null;
+let currentThemeController: ThemeController | null = null;
+let currentBackgroundController: BackgroundController | null = null;
+let currentUserDataController: UserDataController | null = null;
 let toastTimer: number | undefined;
+let configurationNavigation: ConfigurationNavigation = { primary: "runtime", secondary: {} };
+let autosaveBound = false;
+let queuedFocusRestoreId: string | null = null;
+let saveQueue: Promise<ConfigurationSnapshot | null> = Promise.resolve(null);
 
-export async function initializeConfiguration(): Promise<void> {
+/** Secret 的“最后成功保存状态”。服务端不回传 secret 明文，前端只能靠本地记录判断脏状态，
+ *  避免连续修改多个 Secret 时重复提交已经成功替换的旧 revision。 */
+interface SecretSavedState {
+  readonly value: string;
+  readonly clear: boolean;
+  readonly revision: string | null;
+}
+const secretSavedStates = new Map<string, SecretSavedState>();
+const EMPTY_EXCLUDED_KEYS: ReadonlySet<string> = new Set();
+
+export async function initializeConfiguration(
+  themeController: ThemeController,
+  backgroundController: BackgroundController,
+  userData: UserDataController | null = null,
+): Promise<void> {
+  currentThemeController = themeController;
+  currentBackgroundController = backgroundController;
+  currentUserDataController = userData;
+  // 每次（重新）初始化都清空跨登录会话残留的 Secret 已保存状态：服务端不回传明文，
+  // 旧会话记录的 value/revision 可能与新会话的实际配置不一致，残留会导致脏判断失真。
+  secretSavedStates.clear();
   current = await fetchConfiguration();
-  render(current);
+  bindAutosave();
+  render(current, themeController, backgroundController, userData);
 }
 
-function render(snapshot: ConfigurationSnapshot): void {
+function render(
+  snapshot: ConfigurationSnapshot,
+  themeController: ThemeController,
+  backgroundController: BackgroundController,
+  userData: UserDataController | null = null,
+): void {
   current = snapshot;
   renderSummary(snapshot);
+  renderThemeSelector(element("console-theme-selector"), themeController, backgroundController, userData);
   renderPublicFields(snapshot);
   renderSecretFields(snapshot);
   bindTtsProviderState();
   renderAgent(snapshot);
+  renderConfigurationNavigation();
   bindRestart(snapshot);
   bindValidation();
   bindConnectionTest();
@@ -304,6 +408,7 @@ function renderPublicFields(snapshot: ConfigurationSnapshot): void {
     label.textContent = configFieldLabel(field.key);
     label.append(meta(field));
     const input = fieldInput(field);
+    input.dataset.autosaveScope = "public";
     row.append(label, input);
     if (field.savedValue !== null && field.editable) {
       const remove = button("恢复未保存值", "secondary");
@@ -312,7 +417,7 @@ function renderPublicFields(snapshot: ConfigurationSnapshot): void {
     }
       return row;
     },
-    true,
+    "runtime",
   );
   const save = element("save-public-config", HTMLButtonElement);
   save.onclick = () => void savePublicFields();
@@ -339,6 +444,7 @@ function renderSecretFields(snapshot: ConfigurationSnapshot): void {
     input.placeholder = field.configured ? "已配置；留空表示不修改" : "尚未配置";
     input.disabled = !field.editable;
     input.dataset.configKey = field.key;
+    input.dataset.autosaveScope = "secret";
     const reveal = document.createElement("button");
     reveal.type = "button";
     reveal.className = "reveal-button";
@@ -360,6 +466,7 @@ function renderSecretFields(snapshot: ConfigurationSnapshot): void {
     row.append(label, wrap, clearLabel);
       return row;
     },
+    "secrets",
   );
   const save = element("save-secret-config", HTMLButtonElement);
   save.onclick = () => void saveSecrets();
@@ -379,13 +486,13 @@ function renderAgent(snapshot: ConfigurationSnapshot): void {
   const embedding = record(knowledge.embedding);
   const runningKnowledge = record(record(agent.runningValue).knowledge);
   const runningEmbedding = record(runningKnowledge.embedding);
-  target.append(fieldGroup("知识检索", [
+  target.append(configurationGroup("agent", "knowledge", fieldGroup("知识检索", [
     selectField("知识检索模式", "agent-knowledge-mode", string(knowledge.mode) || "preflight", [
       ["preflight", "preflight（高相关时条件注入）"],
       ["tool", "tool（完全由 Agent 检索）"],
       ["auto", "auto（紧急回退）"],
-    ], !agent.editable),
-    checkboxField("本地语义召回", "agent-knowledge-embedding-enabled", embedding.enabled === true, !agent.editable),
+    ], !agent.editable, "agent"),
+    checkboxField("本地语义召回", "agent-knowledge-embedding-enabled", embedding.enabled === true, !agent.editable, "agent"),
     statusField(
       `当前生效：${string(runningKnowledge.mode) || "preflight"} · 本地语义召回：${runningEmbedding.enabled === true ? "开启" : "关闭"}`,
       `来源：${sourceLabel(agent.source)}${agent.pendingRestart ? " · 已保存变更等待重启" : ""}`,
@@ -394,7 +501,7 @@ function renderAgent(snapshot: ConfigurationSnapshot): void {
       "本地模型资源",
       "首次开启会下载 BAAI/bge-small-zh-v1.5，并增加 CPU、内存占用；低配置服务器建议关闭。",
     ),
-  ]));
+  ])));
   const savedWebSearch = readAgentWebSearchConfig(documentValue);
   const runningWebSearch = readAgentWebSearchConfig(agent.runningValue);
   const tavilyKeyConfigured = snapshot.fields.some(
@@ -403,7 +510,7 @@ function renderAgent(snapshot: ConfigurationSnapshot): void {
   const backendPendingRestart = savedWebSearch.backend !== runningWebSearch.backend;
   const credentialStatus = statusField("Tavily 凭据", "");
   credentialStatus.id = "agent-web-search-credential-status";
-  target.append(fieldGroup("联网搜索", [
+  target.append(configurationGroup("agent", "web-search", fieldGroup("联网搜索", [
     statusField(
       `当前生效后端：${webSearchBackendLabel(runningWebSearch.backend)}`,
       `已保存后端：${webSearchBackendLabel(savedWebSearch.backend)} · ${backendPendingRestart ? "等待重启" : "当前已生效"}`,
@@ -412,29 +519,29 @@ function renderAgent(snapshot: ConfigurationSnapshot): void {
       ["provider_native", "Provider 原生搜索"],
       ["tavily", "Tavily"],
       ["disabled", "关闭联网搜索"],
-    ], !agent.editable),
-    numberField("Tavily 结果数", "agent-web-search-max-results", savedWebSearch.maxResults, 1, 10, !agent.editable),
+    ], !agent.editable, "agent"),
+    numberField("Tavily 结果数", "agent-web-search-max-results", savedWebSearch.maxResults, 1, 10, !agent.editable, "agent"),
     selectField("Tavily 搜索深度", "agent-web-search-depth", savedWebSearch.searchDepth, [
       ["basic", "basic"],
       ["advanced", "advanced"],
-    ], !agent.editable),
+    ], !agent.editable, "agent"),
     selectField("Tavily 主题", "agent-web-search-topic", savedWebSearch.topic, [
       ["general", "通用"],
       ["news", "新闻"],
       ["finance", "金融"],
-    ], !agent.editable),
+    ], !agent.editable, "agent"),
     selectField("Tavily 时间范围", "agent-web-search-time-range", savedWebSearch.timeRange ?? "", [
       ["", "不限"],
       ["day", "最近一天"],
       ["week", "最近一周"],
       ["month", "最近一月"],
       ["year", "最近一年"],
-    ], !agent.editable),
-    numberField("连接超时（秒）", "agent-web-search-connect-timeout", savedWebSearch.connectTimeoutSeconds, 1, 3600, !agent.editable),
-    numberField("首响应超时（秒）", "agent-web-search-first-response-timeout", savedWebSearch.firstResponseTimeoutSeconds, 1, 3600, !agent.editable),
-    numberField("总超时（秒）", "agent-web-search-total-timeout", savedWebSearch.totalTimeoutSeconds, 1, 3600, !agent.editable),
+    ], !agent.editable, "agent"),
+    numberField("连接超时（秒）", "agent-web-search-connect-timeout", savedWebSearch.connectTimeoutSeconds, 1, 3600, !agent.editable, "agent"),
+    numberField("首响应超时（秒）", "agent-web-search-first-response-timeout", savedWebSearch.firstResponseTimeoutSeconds, 1, 3600, !agent.editable, "agent"),
+    numberField("总超时（秒）", "agent-web-search-total-timeout", savedWebSearch.totalTimeoutSeconds, 1, 3600, !agent.editable, "agent"),
     credentialStatus,
-  ]));
+  ])));
   const backendSelect = element("agent-web-search-backend", HTMLSelectElement);
   const refreshCredentialStatus = (): void => {
     updateTavilyCredentialStatus(
@@ -444,7 +551,7 @@ function renderAgent(snapshot: ConfigurationSnapshot): void {
   };
   backendSelect.addEventListener("change", refreshCredentialStatus);
   refreshCredentialStatus();
-  target.append(renderOpenCodeProviders(
+  target.append(configurationGroup("agent", "providers", renderOpenCodeProviders(
     snapshot,
     async (form) => {
       let change: Record<string, unknown>;
@@ -456,32 +563,38 @@ function renderAgent(snapshot: ConfigurationSnapshot): void {
       }
       await runSave(async () => updateAgentConfiguration(current!.agent!.revision, [change]));
     },
-    async (id) => runSave(async () => updateAgentConfiguration(current!.agent!.revision, [{
-      action: "remove_provider",
-      id,
-    }])),
-  ));
+    async (id) => {
+      await runSave(async () => updateAgentConfiguration(current!.agent!.revision, [{
+        action: "remove_provider",
+        id,
+      }]));
+    },
+  )));
+  const openCodeKeyConfigured = snapshot.fields.some(
+    (field) => field.key === "provider.opencode.api_key" && field.configured,
+  );
   const modelRoutes = record(documentValue.model_routes);
-  for (const routeName of ["private_main", "group_main", "aux"]) {
-    const route = record(modelRoutes[routeName]);
-    target.append(textField(AGENT_ROUTE_LABELS[routeName] ?? routeName, `agent-route-${routeName}`, array(route.candidates).join(", "), !agent.editable));
-  }
-  for (const routeName of ["private_search", "group_search"]) {
-    target.append(textField(
+  const routes = document.createElement("div");
+  routes.append(fieldGroup("模型路线", [
+    ...["private_main", "group_main", "aux"].map((routeName) => {
+      const route = record(modelRoutes[routeName]);
+      return textField(AGENT_ROUTE_LABELS[routeName] ?? routeName, `agent-route-${routeName}`, array(route.candidates).join(", "), !agent.editable, "agent");
+    }),
+    ...["private_search", "group_search"].map((routeName) => textField(
       AGENT_ROUTE_LABELS[routeName] ?? routeName,
       `agent-search-${routeName}`,
       savedWebSearch.routes[routeName] ?? "",
       !agent.editable,
-    ));
-  }
-  const openCodeKeyConfigured = snapshot.fields.some(
-    (field) => field.key === "provider.opencode.api_key" && field.configured,
-  );
-  target.append(renderOpenCodeRouteHints(
+      "agent",
+    )),
+  ]));
+  routes.append(renderOpenCodeRouteHints(
     !agent.editable,
     readOpenCodeProviders(documentValue).filter((provider) => provider.enabled).map((provider) => provider.id),
     openCodeKeyConfigured,
   ));
+  target.append(configurationGroup("agent", "routes", routes));
+  const scenesGroup = document.createElement("div");
   const scenes = record(documentValue.scenes);
   for (const sceneName of ["private", "group"]) {
     const scene = record(scenes[sceneName]);
@@ -495,8 +608,11 @@ function renderAgent(snapshot: ConfigurationSnapshot): void {
     input.type = "checkbox";
     input.checked = scene.tool_calling_enabled === true;
     input.disabled = !agent.editable;
+    input.dataset.autosaveScope = "agent-scene";
+    input.dataset.autosaveScene = sceneName;
     row.append(label, input);
-    target.append(row);
+    const sceneGroup = document.createElement("div");
+    sceneGroup.append(row);
 
     const tools = document.createElement("fieldset");
     tools.className = "tool-whitelist";
@@ -525,8 +641,10 @@ function renderAgent(snapshot: ConfigurationSnapshot): void {
     saveScene.disabled = !agent.editable;
     saveScene.onclick = () => void saveAgentScene(sceneName);
     tools.append(saveScene);
-    target.append(tools);
+    sceneGroup.append(tools);
+    scenesGroup.append(configurationGroup("agent", `${sceneName}-scene`, sceneGroup));
   }
+  target.append(scenesGroup);
   const save = element("save-agent-config", HTMLButtonElement);
   save.disabled = !agent.editable;
   save.onclick = () => void saveAgent();
@@ -536,20 +654,25 @@ function appendGroupedFields(
   target: HTMLElement,
   fields: ConfigFieldSnapshot[],
   row: (field: ConfigFieldSnapshot) => HTMLElement,
-  showDescriptions = false,
+  primary: ConfigurationPrimary,
 ): void {
   const remaining = new Set(fields);
   for (const group of FIELD_GROUPS) {
     const grouped = fields.filter((field) => field.key.startsWith(group.prefix));
     if (grouped.length === 0) continue;
-    target.append(fieldGroup(
-      group.label,
-      grouped.map(row),
-      showDescriptions ? group.description : undefined,
-    ));
+    target.append(configurationGroup(primary, group.prefix, fieldGroup(group.label, grouped.map(row))));
     grouped.forEach((field) => remaining.delete(field));
   }
-  if (remaining.size > 0) target.append(fieldGroup("其他配置", [...remaining].map(row)));
+  if (remaining.size > 0) target.append(configurationGroup(primary, "other", fieldGroup("其他配置", [...remaining].map(row))));
+}
+
+function configurationGroup(primary: ConfigurationPrimary, group: string, content: HTMLElement): HTMLElement {
+  const wrapper = document.createElement("section");
+  wrapper.className = "configuration-content-group";
+  wrapper.dataset.configurationGroup = group;
+  wrapper.dataset.configurationPrimary = primary;
+  wrapper.append(content);
+  return wrapper;
 }
 
 function fieldGroup(label: string, rows: HTMLElement[], description?: string): HTMLElement {
@@ -569,6 +692,120 @@ function fieldGroup(label: string, rows: HTMLElement[], description?: string): H
   }
   section.append(grid);
   return section;
+}
+
+function renderConfigurationNavigation(): void {
+  const primaryTabs = element("configuration-primary-tabs");
+  const secondaryTabs = element("configuration-secondary-tabs");
+  primaryTabs.replaceChildren();
+  secondaryTabs.replaceChildren();
+  const availableGroups = new Map<ConfigurationPrimary, string[]>();
+  for (const primary of PRIMARY_NAVIGATION.map((item) => item.id)) {
+    const panel = element(`configuration-panel-${primary}`);
+    const groups = [...panel.querySelectorAll<HTMLElement>("[data-configuration-group]")]
+      .map((group) => group.dataset.configurationGroup)
+      .filter((group): group is string => typeof group === "string");
+    availableGroups.set(primary, primary === "interface" ? ["theme"] : groups);
+  }
+  if (!availableGroups.get(configurationNavigation.primary)?.length) configurationNavigation.primary = "runtime";
+  const secondary = availableGroups.get(configurationNavigation.primary) ?? [];
+  const selectedSecondary = configurationNavigation.secondary[configurationNavigation.primary];
+  if (!selectedSecondary || !secondary.includes(selectedSecondary)) {
+    const firstSecondary = secondary[0];
+    if (firstSecondary) configurationNavigation.secondary[configurationNavigation.primary] = firstSecondary;
+  }
+
+  for (const [index, item] of PRIMARY_NAVIGATION.entries()) {
+    const tab = configurationTab(`configuration-primary-${item.id}`, item.label, item.description);
+    tab.dataset.configurationPrimary = item.id;
+    tab.setAttribute("aria-selected", String(item.id === configurationNavigation.primary));
+    tab.tabIndex = item.id === configurationNavigation.primary ? 0 : -1;
+    tab.addEventListener("click", () => {
+      configurationNavigation.primary = item.id;
+      renderConfigurationNavigation();
+    });
+    bindTabKeyboard(tab, primaryTabs, index, PRIMARY_NAVIGATION.length, () => {
+      configurationNavigation.primary = item.id;
+      renderConfigurationNavigation();
+    });
+    primaryTabs.append(tab);
+  }
+  for (const [index, group] of secondary.entries()) {
+    const tab = configurationTab(
+      `configuration-secondary-${configurationNavigation.primary}-${group.replaceAll(".", "-")}`,
+      secondaryLabel(configurationNavigation.primary, group),
+      "配置分组",
+    );
+    tab.dataset.configurationGroup = group;
+    tab.setAttribute("aria-selected", String(group === configurationNavigation.secondary[configurationNavigation.primary]));
+    tab.tabIndex = group === configurationNavigation.secondary[configurationNavigation.primary] ? 0 : -1;
+    tab.addEventListener("click", () => {
+      configurationNavigation.secondary[configurationNavigation.primary] = group;
+      renderConfigurationNavigation();
+    });
+    bindTabKeyboard(tab, secondaryTabs, index, secondary.length, () => {
+      configurationNavigation.secondary[configurationNavigation.primary] = group;
+      renderConfigurationNavigation();
+    });
+    secondaryTabs.append(tab);
+  }
+  for (const item of PRIMARY_NAVIGATION) {
+    const panel = element(`configuration-panel-${item.id}`);
+    const isPrimary = item.id === configurationNavigation.primary;
+    panel.hidden = !isPrimary;
+    if (!isPrimary) continue;
+    for (const group of panel.querySelectorAll<HTMLElement>("[data-configuration-group]")) {
+      group.hidden = group.dataset.configurationGroup !== configurationNavigation.secondary[item.id];
+    }
+  }
+}
+
+function configurationTab(id: string, label: string, description: string): HTMLButtonElement {
+  const tab = document.createElement("button");
+  tab.id = id;
+  tab.type = "button";
+  tab.className = "configuration-tab";
+  tab.setAttribute("role", "tab");
+  const panelId = id.includes("-secondary-")
+    ? `configuration-panel-${id.split("-secondary-")[1]?.split("-")[0] ?? "runtime"}`
+    : id.replace("-primary-", "-panel-");
+  tab.setAttribute("aria-controls", panelId);
+  tab.title = description;
+  tab.textContent = label;
+  return tab;
+}
+
+function bindTabKeyboard(
+  tab: HTMLButtonElement,
+  tablist: HTMLElement,
+  index: number,
+  count: number,
+  activate: () => void,
+): void {
+  tab.addEventListener("keydown", (event) => {
+    const tabs = [...tablist.querySelectorAll<HTMLButtonElement>("[role=tab]")];
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") nextIndex = (index + 1) % count;
+    if (event.key === "ArrowLeft") nextIndex = (index - 1 + count) % count;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = count - 1;
+    if (nextIndex !== null) {
+      event.preventDefault();
+      tabs[nextIndex]?.focus();
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      activate();
+    }
+  });
+}
+
+function secondaryLabel(primary: ConfigurationPrimary, group: string): string {
+  if (primary === "runtime" || primary === "secrets") {
+    return FIELD_GROUPS.find((item) => item.prefix === group)?.label ?? "其他配置";
+  }
+  return SECONDARY_LABELS[group] ?? group;
 }
 
 export function publicConfigurationChanges(
@@ -614,16 +851,24 @@ async function savePublicFields(): Promise<void> {
 
 async function removePublicField(key: string): Promise<void> {
   if (!current) return;
-  await runSave(async () => updateRuntimeConfiguration(current!.revision, [{ action: "remove", key }]));
+  // 用户点击“恢复未保存值”即明确放弃该字段的页面输入：重建后该字段应显示服务端默认值，
+  // 因此把该输入排除在恢复集合之外。
+  await runSave(
+    async () => updateRuntimeConfiguration(current!.revision, [{ action: "remove", key }]),
+    new Set([`id:${inputId(key)}`]),
+  );
 }
 
 export function secretConfigurationChanges(
   fields: ConfigFieldSnapshot[],
   values: ReadonlyMap<string, string>,
   clearKeys: ReadonlySet<string>,
+  dirtyKeys: ReadonlySet<string>,
 ): Array<Record<string, unknown>> {
   const changes: Array<Record<string, unknown>> = [];
   for (const field of fields.filter((value) => value.sensitivity === "secret" && value.editable)) {
+    // 只提交真正发生变化的 Secret：已成功保存的 Secret 输入仍留在页面，但不能重复提交旧 revision。
+    if (!dirtyKeys.has(field.key)) continue;
     if (clearKeys.has(field.key)) {
       changes.push({ action: "clear", key: field.key, expected_revision: field.revision ?? "missing" });
     } else {
@@ -638,16 +883,71 @@ export function secretConfigurationChanges(
 
 async function saveSecrets(): Promise<void> {
   if (!current) return;
-  const values = new Map<string, string>();
-  const clearKeys = new Set<string>();
-  for (const field of current.fields.filter((value) => value.sensitivity === "secret" && value.editable)) {
-    values.set(field.key, element(inputId(field.key), HTMLInputElement).value);
-    const clear = document.querySelector<HTMLInputElement>(`input[data-clear-key="${field.key}"]`);
-    if (clear?.checked) clearKeys.add(field.key);
+  // Secret 的脏状态、changes 与 expected_revision 必须在保存队列真正执行时重新计算：
+  // 前一个保存完成会更新 current snapshot 与 secretSavedStates，只有执行时才能拿到最新
+  // revision；若在入队前就计算，两个 Secret 连续失焦时第二个请求会重复携带第一个 Secret
+  // 的旧 revision，触发 config_conflict 并阻止第二个 Secret 保存。
+  let excluded: ReadonlySet<string> = EMPTY_EXCLUDED_KEYS;
+  await runSave(async () => {
+    const fields = current?.fields ?? [];
+    const values = new Map<string, string>();
+    const clearKeys = new Set<string>();
+    const dirtyKeys = new Set<string>();
+    for (const field of fields.filter((value) => value.sensitivity === "secret" && value.editable)) {
+      const value = element(inputId(field.key), HTMLInputElement).value;
+      const clear = document.querySelector<HTMLInputElement>(`input[data-clear-key="${field.key}"]`);
+      const clearChecked = clear?.checked === true;
+      values.set(field.key, value);
+      if (secretIsDirty(field, value, clearChecked)) {
+        dirtyKeys.add(field.key);
+        if (clearChecked) clearKeys.add(field.key);
+      }
+    }
+    const changes = secretConfigurationChanges(fields, values, clearKeys, dirtyKeys);
+    if (changes.length === 0) {
+      showResult("留空不会清除 secret；当前没有显式变更。", false);
+      return null;
+    }
+    // 显式清除成功后，输入框和“显式清除”勾选都应复位到服务端状态，不能通过重建后的恢复保留旧值。
+    const nextExcluded = new Set<string>();
+    for (const key of clearKeys) {
+      nextExcluded.add(`clear:${key}`);
+      nextExcluded.add(`id:${inputId(key)}`);
+    }
+    excluded = nextExcluded;
+    const snapshot = await updateSecretConfiguration(changes);
+    rememberSecretSavedStates(snapshot, dirtyKeys, values, clearKeys);
+    return snapshot;
+  }, () => excluded);
+}
+
+function secretIsDirty(field: ConfigFieldSnapshot, value: string, clearChecked: boolean): boolean {
+  const saved = secretSavedStates.get(field.key);
+  if (saved) {
+    if (clearChecked !== saved.clear) return true;
+    return !clearChecked && value.length > 0 && value !== saved.value;
   }
-  const changes = secretConfigurationChanges(current.fields, values, clearKeys);
-  if (changes.length === 0) return showResult("留空不会清除 secret；当前没有显式变更。", false);
-  await runSave(async () => updateSecretConfiguration(changes));
+  // 首次交互沿用既有语义：显式清除只在已配置时生效；非空输入视为新值；留空表示不修改。
+  if (clearChecked) return field.configured;
+  return value.length > 0;
+}
+
+/** 保存成功后按提交结果记录每个 Secret 的最新已保存状态，供后续脏判断使用。 */
+function rememberSecretSavedStates(
+  snapshot: ConfigurationSnapshot,
+  dirtyKeys: ReadonlySet<string>,
+  values: ReadonlyMap<string, string>,
+  clearKeys: ReadonlySet<string>,
+): void {
+  for (const key of dirtyKeys) {
+    const field = snapshot.fields.find((candidate) => candidate.key === key);
+    if (!field) continue;
+    secretSavedStates.set(key, {
+      value: clearKeys.has(key) ? "" : values.get(key) ?? "",
+      clear: clearKeys.has(key),
+      revision: field.revision ?? null,
+    });
+  }
 }
 
 async function saveAgent(): Promise<void> {
@@ -696,6 +996,30 @@ async function saveAgentScene(sceneName: string): Promise<void> {
   }]));
 }
 
+async function saveOpenCodeProvider(id: string): Promise<void> {
+  if (!current?.agent) return;
+  const baseUrl = element(`${id}-base-url`, HTMLInputElement);
+  const timeout = element(`${id}-timeout`, HTMLInputElement);
+  const saved = readOpenCodeProviders(current.agent.savedValue).find((provider) => provider.id === id);
+  // 未添加的预设只能通过“添加 Provider”显式启用，浏览默认字段不能改变配置。
+  if (!saved?.enabled) return;
+  const form = {
+    ...saved,
+    baseUrl: baseUrl.value,
+    requestTimeoutSeconds: timeout.value.trim() ? Number(timeout.value) : null,
+    enabled: true,
+  };
+  if (!shouldAutosaveOnBlur({ scope: "agent", value: form, baseline: saved })) return;
+  let change: Record<string, unknown>;
+  try {
+    change = openCodeProviderChange(form);
+  } catch (cause) {
+    showResult(errorMessage(cause), true);
+    return;
+  }
+  await runSave(async () => updateAgentConfiguration(current?.agent?.revision ?? "missing", [change]));
+}
+
 function agentSceneConfig(sceneName: string, scenes: Record<string, unknown>): Record<string, unknown> {
   const toolInputs = document.querySelectorAll<HTMLInputElement>(`input[data-agent-tool="${sceneName}"]`);
   return {
@@ -724,6 +1048,118 @@ function webSearchFormConfig(): AgentWebSearchConfig {
   };
 }
 
+function bindAutosave(): void {
+  if (autosaveBound) return;
+  autosaveBound = true;
+  document.addEventListener("focusout", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLSelectElement)) return;
+    const related = event.relatedTarget;
+    queuedFocusRestoreId = related instanceof HTMLElement && related.id ? related.id : null;
+    // 点击显式保存按钮会先触发输入框 blur；此时由按钮提交，避免同一 revision 入队两次。
+    if (related instanceof HTMLElement && shouldDeferAutosaveToButton(target, related)) return;
+    void autosaveBlur(target);
+  });
+}
+
+function shouldDeferAutosaveToButton(
+  target: HTMLInputElement | HTMLSelectElement,
+  related: HTMLElement,
+): boolean {
+  if (related.id === "save-secret-config") {
+    return target.dataset.autosaveScope === "secret" || target.dataset.clearKey !== undefined;
+  }
+  if (related.id === "save-public-config") return target.dataset.autosaveScope === "public";
+  if (related.id === "save-agent-config") return target.dataset.autosaveScope === "agent";
+  return target.dataset.autosaveProvider !== undefined && related.matches(".provider-action");
+}
+
+async function autosaveBlur(target: HTMLInputElement | HTMLSelectElement): Promise<void> {
+  if (target.disabled || !current) return;
+  const scene = target.dataset.autosaveScene;
+  if (target.dataset.configKey) {
+    const field = current.fields.find((value) => value.key === target.dataset.configKey);
+    if (!field || !field.editable) return;
+    if (field.sensitivity === "secret") {
+      const clear = document.querySelector<HTMLInputElement>(`input[data-clear-key="${field.key}"]`);
+      if (!secretIsDirty(field, target.value, clear?.checked === true)) return;
+      await saveSecrets();
+      return;
+    }
+    const value = inputValue(target, field);
+    if (!shouldAutosaveOnBlur({ scope: "public", value, baseline: field.savedValue ?? field.effectiveValue })) return;
+    await savePublicFields();
+    return;
+  }
+  if (target.dataset.clearKey) {
+    const field = current.fields.find((value) => value.key === target.dataset.clearKey);
+    if (!(target instanceof HTMLInputElement) || !field || !field.editable || !target.checked) return;
+    if (!secretIsDirty(field, element(inputId(field.key), HTMLInputElement).value, true)) return;
+    await saveSecrets();
+    return;
+  }
+  const providerId = target.dataset.autosaveProvider;
+  if (providerId) {
+    await saveOpenCodeProvider(providerId);
+    return;
+  }
+  if (scene) {
+    if (agentSceneChanged(scene)) await saveAgentScene(scene);
+    return;
+  }
+  if (target.dataset.autosaveScope === "agent" && agentFieldChanged(target.id)) await saveAgent();
+}
+
+function agentSceneChanged(sceneName: string): boolean {
+  if (!current?.agent) return false;
+  const savedScenes = record(record(current.agent.savedValue).scenes);
+  return shouldAutosaveOnBlur({
+    scope: "agent",
+    value: agentSceneConfig(sceneName, savedScenes),
+    baseline: record(savedScenes[sceneName]),
+  });
+}
+
+function agentFieldChanged(id: string): boolean {
+  if (!current?.agent) return false;
+  const saved = record(current.agent.savedValue);
+  const webSearch = readAgentWebSearchConfig(current.agent.savedValue);
+  const currentValue = id === "agent-knowledge-mode" ? element(id, HTMLSelectElement).value
+    : id === "agent-knowledge-embedding-enabled" ? element(id, HTMLInputElement).checked
+    : id.startsWith("agent-web-search-") ? agentWebSearchInputValue(id)
+    : id.startsWith("agent-route-") ? element(id, HTMLInputElement).value.split(",").map((value) => value.trim()).filter(Boolean)
+    : id.startsWith("agent-search-") ? element(id, HTMLInputElement).value.trim()
+    : null;
+  const baseline = id === "agent-knowledge-mode" ? string(record(saved.knowledge).mode) || "preflight"
+    : id === "agent-knowledge-embedding-enabled" ? record(record(saved.knowledge).embedding).enabled === true
+    : id.startsWith("agent-web-search-") ? webSearch[agentWebSearchKey(id)]
+    : id.startsWith("agent-route-") ? array(record(record(saved.model_routes)[id.replace("agent-route-", "")]).candidates).map(string)
+    : id.startsWith("agent-search-") ? webSearch.routes[id.replace("agent-search-", "")]
+    : null;
+  return currentValue !== null && shouldAutosaveOnBlur({ scope: "agent", value: currentValue, baseline });
+}
+
+function agentWebSearchKey(id: string): keyof AgentWebSearchConfig {
+  return ({
+    "agent-web-search-backend": "backend",
+    "agent-web-search-max-results": "maxResults",
+    "agent-web-search-depth": "searchDepth",
+    "agent-web-search-topic": "topic",
+    "agent-web-search-time-range": "timeRange",
+    "agent-web-search-connect-timeout": "connectTimeoutSeconds",
+    "agent-web-search-first-response-timeout": "firstResponseTimeoutSeconds",
+    "agent-web-search-total-timeout": "totalTimeoutSeconds",
+  } as const)[id] ?? "backend";
+}
+
+function agentWebSearchInputValue(id: string): unknown {
+  const key = agentWebSearchKey(id);
+  if (key === "backend" || key === "searchDepth" || key === "topic" || key === "timeRange") {
+    return element(id, HTMLSelectElement).value;
+  }
+  return Number(element(id, HTMLInputElement).value);
+}
+
 function toolCheckbox(tool: AgentToolOption, sceneName: string): HTMLElement {
   const label = document.createElement("label");
   label.className = "tool-checkbox";
@@ -734,6 +1170,7 @@ function toolCheckbox(tool: AgentToolOption, sceneName: string): HTMLElement {
   input.checked = tool.checked;
   input.disabled = tool.disabled;
   input.dataset.agentTool = sceneName;
+  input.dataset.autosaveScene = sceneName;
   const name = document.createElement("span");
   name.textContent = tool.name === "image_generation" ? "图片生成" : tool.name;
   label.append(input, name);
@@ -790,20 +1227,92 @@ function bindConnectionTest(): void {
   };
 }
 
-async function runSave(action: () => Promise<ConfigurationSnapshot>): Promise<void> {
-  setButtonsDisabled(true);
-  try {
-    const snapshot = await action();
-    render(snapshot);
-    showResult("配置已真实持久化；标记为“重启后生效”的项需按部署方式重启服务。", false);
-  } catch (cause) {
-    if (cause instanceof ConsoleApiError && cause.code === "config_conflict") {
-      showResult("配置文件已被其他操作修改。请刷新后重新合并，旧 revision 未覆盖新文件。", true);
-    } else {
-      showResult(errorMessage(cause), true);
+async function runSave(
+  action: () => Promise<ConfigurationSnapshot | null>,
+  excludeKeys: ReadonlySet<string> | (() => ReadonlySet<string>) = EMPTY_EXCLUDED_KEYS,
+): Promise<ConfigurationSnapshot | null> {
+  const save = async (): Promise<ConfigurationSnapshot | null> => {
+    setButtonsDisabled(true);
+    try {
+      const snapshot = await action();
+      if (!snapshot) return null;
+      if (!currentThemeController || !currentBackgroundController) throw new Error("界面控制器尚未初始化");
+      const restoreId = queuedFocusRestoreId;
+      queuedFocusRestoreId = null;
+      // 保存完成后会重建配置 DOM；重建前先完整收集所有 input/select 的当前值
+      // （含 checkbox、select 与 Secret 输入），重建后恢复，避免覆盖其他字段未保存的输入。
+      const captured = captureConfigurationInputState();
+      render(snapshot, currentThemeController, currentBackgroundController, currentUserDataController);
+      const restoredExcluded = typeof excludeKeys === "function" ? excludeKeys() : excludeKeys;
+      restoreConfigurationInputState(captured, restoredExcluded);
+      if (restoreId) document.getElementById(restoreId)?.focus();
+      showResult("配置已真实持久化；标记为“重启后生效”的项需按部署方式重启服务。", false);
+      return snapshot;
+    } catch (cause) {
+      if (cause instanceof ConsoleApiError && cause.code === "config_conflict") {
+        showResult("配置文件已被其他操作修改。请刷新后重新合并，旧 revision 未覆盖新文件。", true);
+      } else {
+        showResult(errorMessage(cause), true);
+      }
+      return null;
+    } finally {
+      setButtonsDisabled(false);
     }
-  } finally {
-    setButtonsDisabled(false);
+  };
+  saveQueue = saveQueue.then(save, save);
+  return saveQueue;
+}
+
+const CONFIGURATION_ROOT_ID = "configuration";
+
+/** 在重建配置 DOM 前收集所有用户可编辑输入的当前状态，键由 `inputCaptureKey` 稳定生成。 */
+function captureConfigurationInputState(): Map<string, string | boolean> {
+  const captured = new Map<string, string | boolean>();
+  const root = document.getElementById(CONFIGURATION_ROOT_ID);
+  if (!root) return captured;
+  for (const input of root.querySelectorAll<HTMLInputElement | HTMLSelectElement>("input, select")) {
+    if (input instanceof HTMLInputElement && input.type === "file") continue;
+    const key = inputCaptureKey(input);
+    if (!key) continue;
+    captured.set(key, input instanceof HTMLSelectElement || input.type !== "checkbox" ? input.value : input.checked);
+  }
+  return captured;
+}
+
+function inputCaptureKey(input: HTMLInputElement | HTMLSelectElement): string | null {
+  if (input.id) return `id:${input.id}`;
+  if (input.dataset.clearKey) return `clear:${input.dataset.clearKey}`;
+  if (input instanceof HTMLInputElement && input.type === "checkbox") {
+    if (input.dataset.agentTool) return `tool:${input.dataset.agentTool}:${input.value}`;
+    const name = input.getAttribute("name");
+    if (name === "console-theme" || name === "console-background") return `${name}:${input.value}`;
+  }
+  return null;
+}
+
+/**
+ * 重建后恢复输入状态。`excludeKeys` 中的键保持重建后的服务端快照值（例如显式清除的
+ * Secret、用户主动“恢复未保存值”的字段），避免把用户已决定丢弃的旧值再写回页面。
+ */
+function restoreConfigurationInputState(
+  captured: ReadonlyMap<string, string | boolean>,
+  excludeKeys: ReadonlySet<string>,
+): void {
+  const root = document.getElementById(CONFIGURATION_ROOT_ID);
+  if (!root) return;
+  for (const input of root.querySelectorAll<HTMLInputElement | HTMLSelectElement>("input, select")) {
+    if (input instanceof HTMLInputElement && input.type === "file") continue;
+    const key = inputCaptureKey(input);
+    if (!key || excludeKeys.has(key) || !captured.has(key)) continue;
+    const value = captured.get(key);
+    if (value === undefined) continue;
+    if (input instanceof HTMLSelectElement || input.type !== "checkbox") {
+      // select 只恢复仍然存在的选项；选项列表随数据变化时以重建后的快照为准。
+      if (input instanceof HTMLSelectElement && ![...input.options].some((option) => option.value === value)) continue;
+      input.value = String(value);
+    } else {
+      input.checked = value === true;
+    }
   }
 }
 
@@ -921,7 +1430,7 @@ function sourceLabel(source: string): string {
   return ({ environment: "环境变量", managed_toml: "runtime.toml", agent_toml: "agent.toml", encrypted_secret: "加密存储", default: "默认值", not_configured: "未配置" } as Record<string, string>)[source] ?? source;
 }
 
-function textField(labelText: string, id: string, value: string, disabled: boolean): HTMLElement {
+function textField(labelText: string, id: string, value: string, disabled: boolean, autosaveScope?: AutosaveScope): HTMLElement {
   const row = document.createElement("div");
   row.className = "config-row";
   const label = document.createElement("label");
@@ -932,6 +1441,7 @@ function textField(labelText: string, id: string, value: string, disabled: boole
   input.type = "text";
   input.value = value;
   input.disabled = disabled;
+  if (autosaveScope) input.dataset.autosaveScope = autosaveScope;
   row.append(label, input);
   return row;
 }
@@ -943,6 +1453,7 @@ function numberField(
   min: number,
   max: number,
   disabled: boolean,
+  autosaveScope?: AutosaveScope,
 ): HTMLElement {
   const row = document.createElement("div");
   row.className = "config-row";
@@ -957,6 +1468,7 @@ function numberField(
   input.step = "1";
   input.value = String(value);
   input.disabled = disabled;
+  if (autosaveScope) input.dataset.autosaveScope = autosaveScope;
   row.append(label, input);
   return row;
 }
@@ -967,6 +1479,7 @@ function selectField(
   value: string,
   options: Array<[string, string]>,
   disabled: boolean,
+  autosaveScope?: AutosaveScope,
 ): HTMLElement {
   const row = document.createElement("div");
   row.className = "config-row";
@@ -976,6 +1489,7 @@ function selectField(
   const select = document.createElement("select");
   select.id = id;
   select.disabled = disabled;
+  if (autosaveScope) select.dataset.autosaveScope = autosaveScope;
   for (const [optionValue, optionLabel] of options) {
     const option = document.createElement("option");
     option.value = optionValue;
@@ -987,7 +1501,7 @@ function selectField(
   return row;
 }
 
-function checkboxField(labelText: string, id: string, checked: boolean, disabled: boolean): HTMLElement {
+function checkboxField(labelText: string, id: string, checked: boolean, disabled: boolean, autosaveScope?: AutosaveScope): HTMLElement {
   const row = document.createElement("div");
   row.className = "config-row compact-row";
   const label = document.createElement("label");
@@ -998,6 +1512,7 @@ function checkboxField(labelText: string, id: string, checked: boolean, disabled
   input.type = "checkbox";
   input.checked = checked;
   input.disabled = disabled;
+  if (autosaveScope) input.dataset.autosaveScope = autosaveScope;
   row.append(label, input);
   return row;
 }

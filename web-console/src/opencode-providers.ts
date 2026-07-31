@@ -264,6 +264,8 @@ function textInput(labelText: string, id: string, value: string, disabled: boole
   input.type = type;
   input.value = value;
   input.disabled = disabled;
+  const providerId = id.replace(/-(base-url|timeout)$/, "");
+  if (!disabled && providerId.startsWith("opencode_")) input.dataset.autosaveProvider = providerId;
   if (type === "number") input.min = "1";
   row.append(input);
   return { row, input };

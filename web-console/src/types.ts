@@ -30,6 +30,23 @@ export interface AdminSession {
   expiresAt: number;
 }
 
+export interface UserPreferences {
+  readonly customColors: readonly string[];
+  readonly backgroundFileIds: readonly string[];
+  readonly activeBackgroundFileId: string | null;
+  readonly backgroundMode: "default" | "special";
+  readonly kuliantnt: boolean;
+}
+
+export interface UserFile {
+  readonly fileId: string;
+  readonly filename: string;
+  readonly contentType: string;
+  readonly size: number;
+  readonly createdAt: string;
+  readonly url: string;
+}
+
 export interface BootstrapStatus {
   initialized: boolean;
   setupRequired: boolean;
@@ -160,4 +177,62 @@ export interface ConsoleStatus {
   platforms: PlatformStatus[];
   storage: StorageStatus[];
   configuration: ConfigurationStatus;
+}
+
+export type TodoStatus = "pending" | "completed";
+
+export interface TodoTarget {
+  targetRef: string | null;
+  platform: string;
+  scopeType: string;
+  userId: string | null;
+  groupId: string | null;
+  accountId: string | null;
+  reminderSupported: boolean;
+  diagnostic: string | null;
+}
+
+export interface TodoItem {
+  id: string;
+  title: string;
+  detail: string | null;
+  dueDate: string | null;
+  dueAt: string | null;
+  reminderAt: string | null;
+  timePrecision: string;
+  recurrenceKind: string;
+  recurrenceIntervalDays: number;
+  recurrenceInterval: number;
+  recurrenceUnit: string;
+  status: TodoStatus;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  target: TodoTarget;
+}
+
+export interface TodoPage {
+  items: TodoItem[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface TodoTargetOption {
+  targetRef: string;
+  platform: string;
+  accountId: string | null;
+  scopeType: string;
+  userId: string | null;
+  groupId: string | null;
+  reminderSupported: boolean;
+}
+
+export interface TodoTargetPage {
+  items: TodoTargetOption[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
 }

@@ -53,7 +53,7 @@ impl ManagementRuntime {
             config.server_port,
             &config.app_db_file,
         );
-        let http_state = OpsHttpState::setup_required(
+        let mut http_state = OpsHttpState::setup_required(
             crate::http::routes::OpsHttpConfig {
                 web_console_enabled: config.web_console_enabled,
                 web_console_allowed_origins: config.web_console_allowed_origins,
@@ -63,8 +63,10 @@ impl ManagementRuntime {
             summary,
             config_center,
             admin_auth,
-        )
-        .with_console_user_data(ConsoleUserDataService::new(database));
+        );
+        if config.web_console_enabled {
+            http_state = http_state.with_console_user_data(ConsoleUserDataService::new(database));
+        }
         Ok(Self { addr, http_state })
     }
 
@@ -147,17 +149,12 @@ impl LlmRuntime {
         application_version: &'static str,
     ) -> anyhow::Result<Self> {
         let addr: SocketAddr = format!("{}:{}", config.server_host, config.server_port).parse()?;
-        let console_user_data = ConsoleUserDataService::new(database.clone());
+        // 控制台开关（WEB_CONSOLE_ENABLED）关闭时不初始化控制台专属服务与工具元数据，
+        // 减少进程常驻内存；路由层同样不会注册 /console 与相关 API。
+        let console_enabled = config.web_console_enabled;
+        let console_user_data_database = console_enabled.then(|| database.clone());
         let core_state = CoreRuntimeState::from_config_with_database(config, database)?;
-        let registered_tools = crate::service::CoreHandle::new(core_state.clone())
-            .registered_tool_metadata()
-            .into_iter()
-            .map(|tool| ConsoleToolMetadata {
-                name: tool.name,
-                description: tool.description,
-            })
-            .collect();
-        let http_state = OpsHttpState::from_config_with_center(
+        let mut http_state = OpsHttpState::from_config_with_center(
             &core_state.config,
             core_state.provider.clone(),
             core_state.upstream_status.clone(),
@@ -165,13 +162,24 @@ impl LlmRuntime {
             application_version,
             config_center,
             admin_auth,
-        )
-        .with_todo_management(crate::runtime::tools::todo::TodoManagementService::new(
-            core_state.stores.todo_store.clone(),
-            core_state.stores.notification_store.clone(),
-        ))
-        .with_console_user_data(console_user_data)
-        .with_registered_tools(registered_tools);
+        );
+        if let Some(user_data_database) = console_user_data_database {
+            let registered_tools = crate::service::CoreHandle::new(core_state.clone())
+                .registered_tool_metadata()
+                .into_iter()
+                .map(|tool| ConsoleToolMetadata {
+                    name: tool.name,
+                    description: tool.description,
+                })
+                .collect();
+            http_state = http_state
+                .with_todo_management(crate::runtime::tools::todo::TodoManagementService::new(
+                    core_state.stores.todo_store.clone(),
+                    core_state.stores.notification_store.clone(),
+                ))
+                .with_console_user_data(ConsoleUserDataService::new(user_data_database))
+                .with_registered_tools(registered_tools);
+        }
         let workers = CoreWorkers::from_runtime_state(&core_state, push_sink)?;
 
         Ok(Self {

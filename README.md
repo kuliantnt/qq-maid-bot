@@ -277,7 +277,7 @@ flowchart LR
 | [Gateway README](./qq-maid-gateway-rs/README.md) | 平台事件和消息发送实现 |
 | [Core README](./qq-maid-core/README.md) | 会话、命令和业务编排实现 |
 | [LLM README](./qq-maid-llm/README.md) | Provider、路由、SSE 和 Tool Loop 实现 |
-| [Web Console README](./web-console/README.md) | 构建部署管理控制台 |
+| [Web Console README](./web-console/README.md) | 构建并增量维护用于替代旧前端的管理控制台 |
 
 ## 参与项目
 

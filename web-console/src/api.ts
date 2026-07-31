@@ -15,6 +15,13 @@ import type {
   ConfigurationSnapshot,
   ConfigFieldSnapshot,
   RegisteredTool,
+  TodoItem,
+  TodoPage,
+  TodoTargetOption,
+  TodoTargetPage,
+  TodoStatus,
+  UserFile,
+  UserPreferences,
 } from "./types.js";
 
 export class ConsoleApiError extends Error {
@@ -92,6 +99,94 @@ export async function logoutAdmin(): Promise<void> {
   setCsrfToken("");
 }
 
+export async function fetchUserPreferences(): Promise<UserPreferences> {
+  const payload = record(await mutatingJson("/api/v1/console/user-preferences/get", "POST", {}));
+  return parseUserPreferences(payload.data);
+}
+
+export async function updateUserPreferences(patch: {
+  readonly customColors?: readonly string[];
+  readonly backgroundFileIds?: readonly string[];
+  readonly activeBackgroundFileId?: string | null;
+  readonly backgroundMode?: "default" | "special";
+  readonly kuliantnt?: boolean;
+}): Promise<UserPreferences> {
+  const payload = record(await mutatingJson("/api/v1/console/user-preferences/update", "POST", {
+    ...(patch.customColors === undefined ? {} : { custom_colors: patch.customColors }),
+    ...(patch.backgroundFileIds === undefined ? {} : { background_file_ids: patch.backgroundFileIds }),
+    ...(patch.activeBackgroundFileId === undefined ? {} : { active_background_file_id: patch.activeBackgroundFileId }),
+    ...(patch.backgroundMode === undefined ? {} : { background_mode: patch.backgroundMode }),
+    ...(patch.kuliantnt === undefined ? {} : { kuliantnt: patch.kuliantnt }),
+  }));
+  return parseUserPreferences(payload.data);
+}
+
+export interface UserFilePageData {
+  readonly items: readonly UserFile[];
+  readonly page: number;
+  readonly pageSize: number;
+  readonly total: number;
+  readonly totalPages: number;
+}
+
+/** 按文件列表分页元数据完整收集全部用户文件，避免假设用户文件最多一页（100 条）。 */
+export async function collectAllUserFiles(
+  fetchPage: (page: number) => Promise<UserFilePageData>,
+): Promise<readonly UserFile[]> {
+  const collected: UserFile[] = [];
+  let page = 1;
+  while (true) {
+    const current = await fetchPage(page);
+    collected.push(...current.items);
+    const totalPages = Math.max(current.totalPages, Math.ceil(current.total / Math.max(current.pageSize, 1)));
+    if (page >= totalPages) return collected;
+    page += 1;
+  }
+}
+
+export async function listUserFiles(): Promise<readonly UserFile[]> {
+  return collectAllUserFiles(async (page) => {
+    const payload = record(await mutatingJson("/api/v1/console/files/list", "POST", {
+      page,
+      page_size: 100,
+    }));
+    const data = record(payload.data);
+    return {
+      items: array(data.items).map(parseUserFile),
+      page: finiteNumber(data.page) ?? 1,
+      pageSize: finiteNumber(data.page_size) ?? 100,
+      total: finiteNumber(data.total) ?? 0,
+      totalPages: finiteNumber(data.total_pages) ?? 1,
+    };
+  });
+}
+
+export async function uploadUserFile(file: File): Promise<UserFile> {
+  const response = await fetch("/api/v1/console/files/upload", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { Accept: "application/json", "X-CSRF-Token": csrfToken },
+    body: (() => { const form = new FormData(); form.append("file", file); return form; })(),
+  });
+  if (!response.ok) throw new ConsoleApiError(`文件上传失败（HTTP ${response.status}）`, "request_failed", response.status);
+  const payload = record(await response.json() as unknown);
+  return parseUserFile(payload.data);
+}
+
+export async function readUserFile(file: UserFile): Promise<Blob> {
+  const response = await fetch(file.url, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "X-CSRF-Token": csrfToken },
+  });
+  if (!response.ok) throw new ConsoleApiError(`文件读取失败（HTTP ${response.status}）`, "request_failed", response.status);
+  return response.blob();
+}
+
+export async function deleteUserFile(fileId: string): Promise<void> {
+  await mutatingJson("/api/v1/console/files/delete", "POST", { file_id: fileId });
+}
+
 export async function fetchConfiguration(): Promise<ConfigurationSnapshot> {
   const payload = record(await fetchJson("/api/v1/console/configuration", {
     headers: { Accept: "application/json" },
@@ -164,6 +259,132 @@ export async function renderMarkdown(markdown: string): Promise<string> {
     throw new ConsoleApiError("Markdown 渲染服务返回了无法识别的结果");
   }
   return payload.html;
+}
+
+export async function listTodos(filters: Record<string, unknown> = {}): Promise<TodoPage> {
+  const payload = record(await mutatingJson("/api/v1/console/todo/list", "POST", {
+    page: 1,
+    page_size: 50,
+    ...filters,
+  }));
+  return parseTodoPage(payload.data);
+}
+
+export async function listTodoTargets(page = 1, pageSize = 100): Promise<TodoTargetPage> {
+  const payload = record(await mutatingJson("/api/v1/console/todo/targets", "POST", {
+    page,
+    page_size: pageSize,
+  }));
+  return parseTodoTargetPage(payload.data);
+}
+
+export async function createTodo(input: Record<string, unknown>): Promise<TodoItem> {
+  const payload = record(await mutatingJson("/api/v1/console/todo/create", "POST", input));
+  return parseTodoItem(payload.data);
+}
+
+export async function getTodo(id: string): Promise<TodoItem> {
+  const payload = record(await mutatingJson("/api/v1/console/todo/get", "POST", { id }));
+  return parseTodoItem(payload.data);
+}
+
+export async function updateTodo(id: string, changes: Record<string, unknown>): Promise<TodoItem> {
+  const payload = record(await mutatingJson("/api/v1/console/todo/update", "POST", { id, ...changes }));
+  return parseTodoItem(payload.data);
+}
+
+export async function deleteTodo(id: string): Promise<void> {
+  await mutatingJson("/api/v1/console/todo/delete", "POST", { id });
+}
+
+function parseTodoPage(value: unknown): TodoPage {
+  const data = record(value);
+  return {
+    items: array(data.items).map(parseTodoItem),
+    page: finiteNumber(data.page) ?? 1,
+    pageSize: finiteNumber(data.page_size) ?? 50,
+    total: finiteNumber(data.total) ?? 0,
+    totalPages: finiteNumber(data.total_pages) ?? 1,
+  };
+}
+
+function parseUserPreferences(value: unknown): UserPreferences {
+  const item = record(value);
+  return {
+    customColors: array(item.custom_colors).filter((entry): entry is string => typeof entry === "string"),
+    backgroundFileIds: array(item.background_file_ids).filter((entry): entry is string => typeof entry === "string"),
+    activeBackgroundFileId: nullableString(item.active_background_file_id),
+    backgroundMode: item.background_mode === "special" ? "special" : "default",
+    kuliantnt: item.kuliantnt === true,
+  };
+}
+
+function parseUserFile(value: unknown): UserFile {
+  const item = record(value);
+  return {
+    fileId: string(item.file_id, ""),
+    filename: string(item.filename, "未命名文件"),
+    contentType: string(item.content_type, "application/octet-stream"),
+    size: finiteNumber(item.size) ?? 0,
+    createdAt: string(item.created_at, ""),
+    url: string(item.url, ""),
+  };
+}
+
+function parseTodoItem(value: unknown): TodoItem {
+  const item = record(value);
+  const target = record(item.target);
+  return {
+    id: string(item.id, ""),
+    title: string(item.title, "未命名 Todo"),
+    detail: nullableString(item.detail),
+    dueDate: nullableString(item.due_date),
+    dueAt: nullableString(item.due_at),
+    reminderAt: nullableString(item.reminder_at),
+    timePrecision: string(item.time_precision, "none"),
+    recurrenceKind: string(item.recurrence_kind, "none"),
+    recurrenceIntervalDays: finiteNumber(item.recurrence_interval_days) ?? 0,
+    recurrenceInterval: finiteNumber(item.recurrence_interval) ?? 0,
+    recurrenceUnit: string(item.recurrence_unit, "day"),
+    status: item.status === "completed" ? "completed" : "pending",
+    createdAt: string(item.created_at, ""),
+    updatedAt: string(item.updated_at, ""),
+    completedAt: nullableString(item.completed_at),
+    target: {
+      targetRef: nullableString(target.target_ref),
+      platform: string(target.platform, "unknown"),
+      scopeType: string(target.scope_type, "unknown"),
+      userId: nullableString(target.user_id),
+      groupId: nullableString(target.group_id),
+      accountId: nullableString(target.account_id),
+      reminderSupported: target.reminder_supported === true,
+      diagnostic: nullableString(target.diagnostic),
+    },
+  };
+}
+
+function parseTodoTargetOption(value: unknown): TodoTargetOption {
+  const item = record(value);
+  return {
+    targetRef: string(item.target_ref, ""),
+    platform: string(item.platform, "unknown"),
+    accountId: nullableString(item.account_id),
+    scopeType: string(item.scope_type, "unknown"),
+    userId: nullableString(item.user_id),
+    groupId: nullableString(item.group_id),
+    reminderSupported: item.reminder_supported === true,
+  };
+}
+
+function parseTodoTargetPage(value: unknown): TodoTargetPage {
+  const data = record(value);
+  return {
+    items: array(data.items).map(parseTodoTargetOption),
+    page: finiteNumber(data.page) ?? 1,
+    pageSize: finiteNumber(data.page_size) ?? 100,
+    total: finiteNumber(data.total) ?? 0,
+    totalPages: finiteNumber(data.total_pages) ?? 1,
+  };
 }
 
 async function fetchJson(input: RequestInfo | URL, init?: RequestInit): Promise<unknown> {

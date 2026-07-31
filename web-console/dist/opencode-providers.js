@@ -222,6 +222,9 @@ function textInput(labelText, id, value, disabled, type = "text") {
     input.type = type;
     input.value = value;
     input.disabled = disabled;
+    const providerId = id.replace(/-(base-url|timeout)$/, "");
+    if (!disabled && providerId.startsWith("opencode_"))
+        input.dataset.autosaveProvider = providerId;
     if (type === "number")
         input.min = "1";
     row.append(input);

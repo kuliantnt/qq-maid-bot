@@ -95,6 +95,7 @@ fn console_files_and_background_preferences_survive_backup_restore() {
             UserPreferencesPatch {
                 background_file_ids: Some(vec![file.file_id.clone()]),
                 active_background_file_id: PreferenceValuePatch::Set(file.file_id.clone()),
+                background_mode: Some(crate::management::BackgroundMode::Default),
                 ..UserPreferencesPatch::default()
             },
         )
@@ -164,6 +165,10 @@ fn console_files_and_background_preferences_survive_backup_restore() {
     assert_eq!(
         restored_preferences.active_background_file_id.as_deref(),
         Some(file.file_id.as_str())
+    );
+    assert_eq!(
+        restored_preferences.background_mode,
+        crate::management::BackgroundMode::Default
     );
 
     fs::write(

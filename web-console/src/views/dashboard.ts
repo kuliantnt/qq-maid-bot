@@ -1,4 +1,4 @@
-import { formatMarker, setText, stateLabel, yesNoUnknown } from "../dom.js";
+import { formatMarker, requiredElement, setText, stateLabel, yesNoUnknown } from "../dom.js";
 import type { ConsoleStatus } from "../types.js";
 
 export function renderDashboard(status: ConsoleStatus): void {
@@ -8,14 +8,20 @@ export function renderDashboard(status: ConsoleStatus): void {
       : status.runtime.ok
         ? "健康"
         : "异常";
-  setText("health-value", healthLabel);
+  const healthValue = requiredElement("health-value", HTMLElement);
+  healthValue.className = `console-status overview-health-value ${
+    status.runtime.state === "setup_required" ? "console-status--warn" : status.runtime.ok ? "console-status--good" : "console-status--error"
+  }`;
+  healthValue.textContent = healthLabel;
   setText("version-value", status.runtime.version);
   setText("started-value", formatMarker(status.runtime.startedAt));
   setText("uptime-value", formatDuration(status.runtime.uptimeSeconds));
   setText("provider-value", status.provider.name);
   setText("model-value", status.provider.model);
   setText("stream-value", yesNoUnknown(status.provider.streaming));
-  setText("upstream-value", stateLabel(status.provider.upstreamState));
+  const upstreamValue = requiredElement("upstream-value", HTMLElement);
+  upstreamValue.className = `console-status console-status--neutral state-${status.provider.upstreamState}`;
+  upstreamValue.textContent = stateLabel(status.provider.upstreamState);
   setText("upstream-time", formatMarker(status.provider.lastCheckedAt));
   setText("upstream-error", status.provider.errorSummary ?? "无");
   setText("listen-value", status.configuration.listen);

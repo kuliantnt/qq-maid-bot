@@ -1,4 +1,8 @@
 //! Web 控制台静态资源、状态摘要、Markdown 预览和安全响应头。
+//!
+//! 静态资源统一使用重新验证式缓存：构建产物不带内容哈希、URL 不含版本号，
+//! 固定文件名一旦被重建覆盖，长期 `immutable` 缓存会让浏览器无限期使用旧版本。
+//! 具体策略见 [`CONSOLE_ASSET_CACHE_CONTROL`]。
 
 use axum::{
     Json,
@@ -57,12 +61,27 @@ pub(super) async fn console_index(
     State(state): State<OpsHttpState>,
     headers: HeaderMap,
 ) -> Response {
-    with_console_csp(with_console_cors(
+    let mut response = with_console_csp(with_console_cors(
         Html(include_str!("../../../web-console/dist/index.html")).into_response(),
         &state,
         &headers,
-    ))
+    ));
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    response
 }
+
+/// 控制台固定名静态资源的统一缓存策略。
+///
+/// 构建产物没有内容哈希、URL 也不含版本号，一旦 dist 重新构建覆盖同名文件，
+/// 浏览器或代理中 `public, max-age=31536000, immutable` 的旧缓存永远不会失效，
+/// 只能靠用户强制刷新才能拿到新版本。因此对全部固定名资源（JS/CSS/文本与
+/// 背景图片）统一采用重新验证策略：允许共享缓存保存副本，但每次使用前都必须
+/// 回源重新验证，浏览器不会无限期复用陈旧内容。当前响应未下发
+/// ETag / Last-Modified，重新验证实际表现为完整重新拉取；后续若引入内容
+/// 版本化（文件名带哈希），再对带哈希的 URL 单独启用 `immutable` 长期缓存。
+const CONSOLE_ASSET_CACHE_CONTROL: &str = "public, max-age=0, must-revalidate";
 
 // dist 新增前端模块时必须同步登记；下方测试会校验构建产物与静态 import 均已覆盖。
 const CONSOLE_ASSETS: &[(&str, &str, &str)] = &[
@@ -74,6 +93,16 @@ const CONSOLE_ASSETS: &[(&str, &str, &str)] = &[
     (
         "app.js",
         include_str!("../../../web-console/dist/app.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "theme.js",
+        include_str!("../../../web-console/dist/theme.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "console-shell.js",
+        include_str!("../../../web-console/dist/console-shell.js"),
         "text/javascript; charset=utf-8",
     ),
     (
@@ -89,6 +118,11 @@ const CONSOLE_ASSETS: &[(&str, &str, &str)] = &[
     (
         "dom.js",
         include_str!("../../../web-console/dist/dom.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "file-cache.js",
+        include_str!("../../../web-console/dist/file-cache.js"),
         "text/javascript; charset=utf-8",
     ),
     (
@@ -126,6 +160,39 @@ const CONSOLE_ASSETS: &[(&str, &str, &str)] = &[
         include_str!("../../../web-console/dist/views/configuration.js"),
         "text/javascript; charset=utf-8",
     ),
+    (
+        "views/theme-selector.js",
+        include_str!("../../../web-console/dist/views/theme-selector.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/todo-paging.js",
+        include_str!("../../../web-console/dist/views/todo-paging.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/todo.js",
+        include_str!("../../../web-console/dist/views/todo.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "background.js",
+        include_str!("../../../web-console/dist/background.js"),
+        "text/javascript; charset=utf-8",
+    ),
+];
+
+const CONSOLE_BINARY_ASSETS: &[(&str, &[u8], &str)] = &[
+    (
+        "background/default.png",
+        include_bytes!("../../../web-console/dist/background/default.png"),
+        "image/png",
+    ),
+    (
+        "background/special.webp",
+        include_bytes!("../../../web-console/dist/background/special.webp"),
+        "image/webp",
+    ),
 ];
 
 pub(super) async fn console_asset(
@@ -139,7 +206,16 @@ pub(super) async fn console_asset(
         .map(|(_, body, content_type)| (*body, *content_type));
     match found {
         Some((body, content_type)) => static_console_asset(body, content_type, &state, &headers),
-        None => with_console_cors(StatusCode::NOT_FOUND.into_response(), &state, &headers),
+        None => match CONSOLE_BINARY_ASSETS
+            .iter()
+            .find(|(path, _, _)| *path == asset)
+            .map(|(_, body, content_type)| (*body, *content_type))
+        {
+            Some((body, content_type)) => {
+                static_console_binary_asset(body, content_type, &state, &headers)
+            }
+            None => with_console_cors(StatusCode::NOT_FOUND.into_response(), &state, &headers),
+        },
     }
 }
 
@@ -153,6 +229,27 @@ fn static_console_asset(
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(CONSOLE_ASSET_CACHE_CONTROL),
+    );
+    response
+}
+
+fn static_console_binary_asset(
+    body: &'static [u8],
+    content_type: &'static str,
+    state: &OpsHttpState,
+    headers: &HeaderMap,
+) -> Response {
+    let mut response = with_console_cors(body.into_response(), state, headers);
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(CONSOLE_ASSET_CACHE_CONTROL),
+    );
     response
 }
 
@@ -302,8 +399,10 @@ fn with_console_security(mut response: Response) -> Response {
 fn with_console_csp(mut response: Response) -> Response {
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
+        // img-src 允许 blob:：自定义背景通过 POST 文件接口读取为 Blob 后，
+        // 前端以 object URL（blob:）渲染，CSP 必须放行才能显示。
         HeaderValue::from_static(
-            "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+            "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
         ),
     );
     response
@@ -375,9 +474,28 @@ pub(super) fn allowed_console_origin<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::CONSOLE_ASSETS;
+    use super::{CONSOLE_ASSET_CACHE_CONTROL, CONSOLE_ASSETS, CONSOLE_BINARY_ASSETS};
+    use crate::{
+        error::LlmError,
+        http::routes::{OpsHttpConfig, OpsHttpState, build_router},
+        util::metrics::LlmMetrics,
+    };
+    use async_trait::async_trait;
+    use axum::{
+        body::Body,
+        http::{HeaderMap, StatusCode, header},
+    };
+    use qq_maid_llm::provider::{
+        ChatOutcome, LlmProvider,
+        status::{UpstreamStatus, observe_provider},
+        types::{ChatRequest, TokenUsage},
+    };
     use regex::Regex;
-    use std::path::{Path, PathBuf};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
+    use tower::ServiceExt;
 
     fn dist_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../web-console/dist")
@@ -432,6 +550,10 @@ mod tests {
                 (*path).to_owned()
             })
             .collect::<Vec<_>>();
+        embedded.extend(CONSOLE_BINARY_ASSETS.iter().map(|(path, body, _)| {
+            assert!(!body.is_empty(), "控制台资源内容不能为空: {path}");
+            (*path).to_owned()
+        }));
         embedded.sort();
 
         assert_eq!(
@@ -442,10 +564,11 @@ mod tests {
 
     #[test]
     fn html_and_javascript_static_imports_are_embedded() {
-        let registered = CONSOLE_ASSETS
+        let mut registered = CONSOLE_ASSETS
             .iter()
             .map(|(path, _, _)| *path)
             .collect::<std::collections::HashSet<_>>();
+        registered.extend(CONSOLE_BINARY_ASSETS.iter().map(|(path, _, _)| *path));
         let html = std::fs::read_to_string(dist_root().join("index.html")).unwrap();
         let html_asset = Regex::new(r#"(?:src|href)=["'](/console/[^"'?#]+)["']"#).unwrap();
         for captures in html_asset.captures_iter(&html) {
@@ -471,6 +594,131 @@ mod tests {
                     "JavaScript 静态 import 未注册: {source} -> {specifier} ({imported})"
                 );
             }
+        }
+    }
+
+    // 与 http::routes::tests 相同的 MockProvider 模式，仅用于构建路由状态。
+    #[derive(Clone)]
+    struct MockProvider;
+
+    #[async_trait]
+    impl LlmProvider for MockProvider {
+        async fn chat(&self, _req: ChatRequest) -> Result<ChatOutcome, LlmError> {
+            Ok(ChatOutcome {
+                reply: "# 标题\n- hello".to_owned(),
+                output_parts: Vec::new(),
+                metrics: LlmMetrics {
+                    provider: "mock".to_owned(),
+                    model: "mock-model".to_owned(),
+                    stream: true,
+                    ttfe_ms: Some(1),
+                    ttft_ms: Some(2),
+                    total_latency_ms: 3,
+                },
+                usage: Some(TokenUsage {
+                    input_tokens: None,
+                    cached_input_tokens: None,
+                    output_tokens: None,
+                    total_tokens: None,
+                }),
+                fallback_used: false,
+                agent: Default::default(),
+            })
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn model(&self) -> &str {
+            "mock-model"
+        }
+
+        fn stream_enabled(&self) -> bool {
+            true
+        }
+    }
+
+    fn test_console_state() -> OpsHttpState {
+        let upstream_status = UpstreamStatus::default();
+        let provider = observe_provider(Arc::new(MockProvider), upstream_status.clone());
+        OpsHttpState::from_parts(
+            OpsHttpConfig {
+                web_console_enabled: true,
+                web_console_allowed_origins: Vec::new(),
+                web_console_trusted_proxy_ips: Vec::new(),
+                web_console_secure_cookies: false,
+            },
+            provider,
+            upstream_status,
+        )
+    }
+
+    async fn get_console_response(state: OpsHttpState, path: &str) -> (StatusCode, HeaderMap) {
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        (response.status(), response.headers().clone())
+    }
+
+    fn assert_revalidatable_cache_control(headers: &HeaderMap, path: &str) {
+        let value = headers
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_else(|| panic!("{path} 必须返回 Cache-Control"));
+        assert_eq!(
+            value, CONSOLE_ASSET_CACHE_CONTROL,
+            "{path} 应使用重新验证式缓存策略"
+        );
+        assert!(
+            !value.contains("31536000") && !value.contains("immutable"),
+            "{path} 不得使用长期不可变缓存"
+        );
+    }
+
+    #[tokio::test]
+    async fn console_index_uses_no_cache_without_long_max_age() {
+        let (status, headers) = get_console_response(test_console_state(), "/console/").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let value = headers
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_else(|| panic!("/console/ 必须返回 Cache-Control"));
+        assert_eq!(value, "no-cache");
+        assert!(
+            !value.contains("31536000") && !value.contains("immutable"),
+            "/console/ 不得使用长期不可变缓存"
+        );
+    }
+
+    #[tokio::test]
+    async fn fixed_name_text_assets_are_revalidated_not_immutable() {
+        for (path, _, _) in CONSOLE_ASSETS {
+            let (status, headers) =
+                get_console_response(test_console_state(), &format!("/console/{path}")).await;
+
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_revalidatable_cache_control(&headers, path);
+        }
+    }
+
+    #[tokio::test]
+    async fn fixed_name_binary_assets_are_revalidated_not_immutable() {
+        for (path, _, _) in CONSOLE_BINARY_ASSETS {
+            let (status, headers) =
+                get_console_response(test_console_state(), &format!("/console/{path}")).await;
+
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_revalidatable_cache_control(&headers, path);
         }
     }
 }
