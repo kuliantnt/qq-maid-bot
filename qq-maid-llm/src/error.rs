@@ -6,6 +6,12 @@ use thiserror::Error;
 
 use crate::agent_loop::AgentRunDiagnostics;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UpstreamErrorContext {
+    provider: String,
+    model: String,
+}
+
 /// 可序列化的错误信息，用于 HTTP 响应或 API 返回。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ErrorInfo {
@@ -27,6 +33,10 @@ pub struct LlmError {
     pub message: String,
     /// 错误发生的阶段（如 config、http、realtime）
     pub stage: String,
+    /// 上游 HTTP 状态码；仅在确实收到上游响应时填写，不从错误文本反向猜测。
+    pub upstream_status: Option<u16>,
+    /// 搜索上游的低敏路由身份；装箱避免增大每个通用错误返回值。
+    upstream_context: Option<Box<UpstreamErrorContext>>,
     /// Agent Runtime 失败时已经发生的可信执行轨迹。
     pub agent: Option<Box<AgentRunDiagnostics>>,
 }
@@ -42,6 +52,8 @@ impl LlmError {
             code: code.into(),
             message: message.into(),
             stage: stage.into(),
+            upstream_status: None,
+            upstream_context: None,
             agent: None,
         }
     }
@@ -78,6 +90,82 @@ impl LlmError {
     pub fn with_agent(mut self, diagnostics: AgentRunDiagnostics) -> Self {
         self.agent = Some(Box::new(diagnostics));
         self
+    }
+
+    /// 附加真实上游 HTTP 状态，供重试判定和低敏结构化日志使用。
+    pub fn with_upstream_status(mut self, status: u16) -> Self {
+        self.upstream_status = Some(status);
+        self
+    }
+
+    /// 附加低敏搜索路由身份，避免日志把发起 Tool Call 的模型误当成搜索上游。
+    pub fn with_upstream_context(
+        mut self,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        if self.upstream_context.is_none() {
+            self.upstream_context = Some(Box::new(UpstreamErrorContext {
+                provider: provider.into(),
+                model: model.into(),
+            }));
+        }
+        self
+    }
+
+    pub fn upstream_provider(&self) -> Option<&str> {
+        self.upstream_context
+            .as_deref()
+            .map(|context| context.provider.as_str())
+    }
+
+    pub fn upstream_model(&self) -> Option<&str> {
+        self.upstream_context
+            .as_deref()
+            .map(|context| context.model.as_str())
+    }
+
+    /// 将历史错误码归一为稳定的联网/工具故障分类。
+    pub fn error_kind(&self) -> &'static str {
+        match self.upstream_status {
+            Some(400) => return "upstream_bad_request",
+            Some(401) => return "authentication_failed",
+            Some(403) => return "permission_denied",
+            Some(429) => return "rate_limited",
+            Some(500..=599) => return "upstream_unavailable",
+            _ => {}
+        }
+        match self.code.as_str() {
+            "bad_tool_arguments" | "bad_request" => "invalid_arguments",
+            "config" | "web_search_not_configured" | "web_search_disabled" => {
+                "missing_configuration"
+            }
+            "authentication_failed" | "tavily_auth_error" => "authentication_failed",
+            "permission_denied" | "quota_exhausted" => "permission_denied",
+            "rate_limited" => "rate_limited",
+            "upstream_bad_request" => "upstream_bad_request",
+            "upstream_unavailable" => "upstream_unavailable",
+            "timeout" => "timeout",
+            "http_error" | "network_error" => "network_error",
+            "provider_error" if matches!(self.stage.as_str(), "json" | "sse" | "stream") => {
+                "invalid_response"
+            }
+            "invalid_response" => "invalid_response",
+            _ => "internal_error",
+        }
+    }
+
+    /// 只有瞬时故障允许有限重试；400/401/403、配置和参数错误永不重试。
+    pub fn retriable(&self) -> bool {
+        match self.upstream_status {
+            Some(429 | 502 | 503 | 504) => return true,
+            Some(_) => return false,
+            None => {}
+        }
+        matches!(
+            self.error_kind(),
+            "rate_limited" | "timeout" | "network_error" | "upstream_unavailable"
+        )
     }
 }
 

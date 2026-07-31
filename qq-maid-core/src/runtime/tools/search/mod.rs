@@ -45,6 +45,9 @@ const WEB_SEARCH_MAX_RESULTS_LIMIT: u8 = 10;
 const WEB_SEARCH_TOOL_SOURCE_LIMIT: usize = 4;
 const WEB_SEARCH_TOOL_SOURCE_TITLE_MAX_CHARS: usize = 100;
 const WEB_SEARCH_TOOL_SOURCE_SNIPPET_MAX_CHARS: usize = 160;
+/// 联网搜索是只读操作；瞬时故障最多补发一次，仍受 Agent 工具绝对 deadline 约束。
+const WEB_SEARCH_MAX_ATTEMPTS: usize = 2;
+const WEB_SEARCH_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 /// 搜索流三段超时的默认值；绝对上限独立于 90 秒整体请求预算。
 pub const DEFAULT_WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT: Duration =
     Duration::from_secs(DEFAULT_WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT_SECONDS);
@@ -179,6 +182,38 @@ impl WebSearchTool {
     ) -> Result<WebSearchOutcome, LlmError> {
         self.query_stream_with_timeouts(req, execution_deadline, None)
             .await
+    }
+
+    async fn query_stream_for_agent_with_retry(
+        &self,
+        req: WebSearchToolRequest,
+        execution_deadline: Option<Instant>,
+        context: &ToolContext,
+    ) -> (Result<WebSearchOutcome, LlmError>, usize) {
+        for attempt in 1..=WEB_SEARCH_MAX_ATTEMPTS {
+            let started = Instant::now();
+            let fallback_model = req
+                .model_override
+                .as_deref()
+                .unwrap_or("configured_default")
+                .to_owned();
+            let outcome = self
+                .query_stream_for_agent(req.clone(), execution_deadline)
+                .await
+                .map_err(|err| {
+                    err.with_upstream_context(self.executor.provider_name(), fallback_model)
+                });
+            log_web_search_attempt(self, context, attempt, started.elapsed(), &outcome);
+            let should_retry = outcome.as_ref().err().is_some_and(LlmError::retriable)
+                && attempt < WEB_SEARCH_MAX_ATTEMPTS
+                && execution_deadline
+                    .is_none_or(|deadline| Instant::now() + WEB_SEARCH_RETRY_BACKOFF < deadline);
+            if !should_retry {
+                return (outcome, attempt);
+            }
+            tokio::time::sleep(WEB_SEARCH_RETRY_BACKOFF).await;
+        }
+        unreachable!("web search retry loop always returns")
     }
 
     async fn query_stream_with_timeouts(
@@ -351,6 +386,12 @@ impl Tool for WebSearchTool {
         ToolEffect::ReadOnly
     }
 
+    fn cache_terminal_failures(&self) -> bool {
+        // 搜索工具已在内部耗尽有限瞬时重试；其余参数、配置、认证等失败在同一
+        // 请求内不会被业务写工具修复，允许阻止模型重复发起相同上游请求。
+        true
+    }
+
     fn deduplication_key(&self, arguments: &Value) -> Option<String> {
         if let Ok(Some(targets)) = ops::parse_research_targets(arguments.get("research_targets")) {
             return serde_json::to_string(&json!({
@@ -404,23 +445,29 @@ impl Tool for WebSearchTool {
             log_web_search_execution(&context, &arguments, &output.value, true);
             return Ok(output);
         }
-        let request = request_from_arguments(
+        let request = match request_from_arguments(
             &context,
             &arguments,
             self.backend_override,
             self.model_override.clone(),
-        )?;
-        let outcome = self
+        ) {
+            Ok(request) => request,
+            Err(err) => {
+                log_web_search_attempt(self, &context, 1, Duration::ZERO, &Err(err.clone()));
+                return Err(err);
+            }
+        };
+        let (outcome, attempts) = self
             // Agent 最终回复仍由模型统一生成，但搜索上游必须复用 `/查` 的 SSE 路径，
             // 不能因进入 Tool Loop 退化成完整非流请求。
-            .query_stream_for_agent(request, context.execution_deadline)
+            .query_stream_for_agent_with_retry(request, context.execution_deadline, &context)
             .await;
         let value = match outcome {
             Ok(outcome) => {
                 web_search_tool_output(&outcome, self.backend_label(), self.output_max_chars)
             }
             Err(err) => {
-                let value = web_search_failure_output(self.backend_label(), &err);
+                let value = web_search_failure_output(self.backend_label(), attempts, &err);
                 log_web_search_execution(&context, &arguments, &value, false);
                 // 只有 Agent Tool Loop 需要把执行失败回填给模型，以便统一记录失败进度和
                 // 保守重试；显式查询等非 Agent 兼容入口仍保留原始 Err 语义。
@@ -786,20 +833,71 @@ fn serialized_value_chars(value: &Value) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-fn web_search_failure_output(backend: &str, error: &LlmError) -> Value {
+fn web_search_failure_output(backend: &str, attempts: usize, error: &LlmError) -> Value {
     json!({
         "ok": false,
         "execution_succeeded": false,
         "backend": backend,
+        "provider": error.upstream_provider().unwrap_or("unknown"),
+        "model": error.upstream_model().unwrap_or("configured_default"),
         "answer": "",
         "sources": [],
         "result_count": 0,
+        "attempts": attempts,
         "error": {
             "code": error.code,
             "message": error.message,
             "stage": error.stage,
+            "kind": error.error_kind(),
+            "retriable": error.retriable(),
+            "upstream_status": error.upstream_status,
         },
     })
+}
+
+fn log_web_search_attempt(
+    tool: &WebSearchTool,
+    context: &ToolContext,
+    attempt: usize,
+    duration: Duration,
+    outcome: &Result<WebSearchOutcome, LlmError>,
+) {
+    let duration_ms = duration.as_millis().min(u128::from(u64::MAX)) as u64;
+    match outcome {
+        Ok(outcome) => tracing::info!(
+            tool_name = WEB_SEARCH_TOOL_NAME,
+            tool_call_id = context.tool_call_id.as_deref().unwrap_or("direct"),
+            attempt,
+            duration_ms,
+            error_kind = "none",
+            retriable = false,
+            backend = tool.backend_label(),
+            upstream_status = ?Option::<u16>::None,
+            provider = outcome.provider.as_str(),
+            model = tool.model_override.as_deref().unwrap_or("configured_default"),
+            failure_layer = "none",
+            "web search attempt succeeded"
+        ),
+        Err(error) => tracing::warn!(
+            tool_name = WEB_SEARCH_TOOL_NAME,
+            tool_call_id = context.tool_call_id.as_deref().unwrap_or("direct"),
+            attempt,
+            duration_ms,
+            error_kind = error.error_kind(),
+            retriable = error.retriable(),
+            backend = tool.backend_label(),
+            upstream_status = ?error.upstream_status,
+            provider = error
+                .upstream_provider()
+                .unwrap_or_else(|| tool.executor.provider_name()),
+            model = error
+                .upstream_model()
+                .or(tool.model_override.as_deref())
+                .unwrap_or("configured_default"),
+            failure_layer = error.stage.as_str(),
+            "web search attempt failed"
+        ),
+    }
 }
 
 /// 搜索诊断只保留可定位重试的结构化字段；不记录 query、raw_question、聊天历史或上游正文。

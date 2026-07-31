@@ -1,4 +1,6 @@
 use std::{
+    collections::VecDeque,
+    io,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -89,6 +91,61 @@ impl WebSearchExecutor for FailingWebSearchExecutor {
 }
 
 struct LargeWebSearchExecutor;
+
+#[derive(Clone)]
+struct ScriptedWebSearchExecutor {
+    outcomes: Arc<Mutex<VecDeque<Result<WebSearchOutcome, LlmError>>>>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl ScriptedWebSearchExecutor {
+    fn failures(errors: Vec<LlmError>) -> Self {
+        Self {
+            outcomes: Arc::new(Mutex::new(errors.into_iter().map(Err).collect())),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+#[async_trait]
+impl WebSearchExecutor for ScriptedWebSearchExecutor {
+    async fn query(&self, _req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("scripted web search outcome")
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "openai_responses"
+    }
+}
+
+#[derive(Clone)]
+struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+struct LogGuard(Arc<Mutex<Vec<u8>>>);
+
+impl io::Write for LogGuard {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogWriter {
+    type Writer = LogGuard;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        LogGuard(self.0.clone())
+    }
+}
 
 #[async_trait]
 impl WebSearchExecutor for LargeWebSearchExecutor {
@@ -239,6 +296,179 @@ async fn tavily_execution_failure_remains_retryable_tool_failure() {
     assert_eq!(output.value["error"]["stage"], "tavily_http");
 }
 
+fn agent_search_argument_value() -> Value {
+    json!({
+        "query": "公开资料",
+        "raw_question": "联网查询公开资料",
+        "max_results": null,
+        "context_size": null,
+        "topic": null,
+        "time_range": null,
+        "research_targets": null,
+    })
+}
+
+fn upstream_error(status: u16) -> LlmError {
+    let code = match status {
+        429 => "rate_limited",
+        500..=599 => "upstream_unavailable",
+        _ => "http_error",
+    };
+    LlmError::new(code, format!("upstream returned HTTP {status}"), "http")
+        .with_upstream_status(status)
+        .with_upstream_context("codexauv", "grok-4.5")
+}
+
+async fn execute_scripted_failures(errors: Vec<LlmError>) -> (ToolOutput, usize) {
+    let executor = ScriptedWebSearchExecutor::failures(errors);
+    let calls = executor.calls.clone();
+    let tool = WebSearchTool::new(Arc::new(executor))
+        .with_backend_override(WebSearchBackend::ProviderNative)
+        .with_model_override("codexauv:grok-4.5".to_owned());
+    let mut context = test_context();
+    context.tool_call_id = Some("task-1:call-search".to_owned());
+    let output = tool
+        .execute(context, agent_search_argument_value())
+        .await
+        .unwrap();
+    (output, calls.load(Ordering::SeqCst))
+}
+
+#[tokio::test]
+async fn deterministic_web_search_failures_are_not_retried() {
+    for (status, kind) in [
+        (400, "upstream_bad_request"),
+        (401, "authentication_failed"),
+        (403, "permission_denied"),
+    ] {
+        let (output, calls) =
+            execute_scripted_failures(vec![upstream_error(status), upstream_error(status)]).await;
+        assert_eq!(calls, 1, "HTTP {status} must not retry");
+        assert_eq!(output.value["attempts"], 1);
+        assert_eq!(output.value["error"]["kind"], kind);
+        assert_eq!(output.value["error"]["retriable"], false);
+        assert_eq!(output.value["error"]["upstream_status"], status);
+    }
+
+    let missing = LlmError::new(
+        "web_search_not_configured",
+        "search credential is missing",
+        "config",
+    );
+    let (output, calls) = execute_scripted_failures(vec![missing.clone(), missing]).await;
+    assert_eq!(calls, 1);
+    assert_eq!(output.value["error"]["kind"], "missing_configuration");
+    assert_eq!(output.value["error"]["retriable"], false);
+}
+
+#[tokio::test]
+async fn transient_web_search_failures_have_one_bounded_retry() {
+    for error in [
+        upstream_error(429),
+        upstream_error(503),
+        LlmError::new("timeout", "upstream timed out", "http")
+            .with_upstream_context("codexauv", "grok-4.5"),
+        LlmError::new("http_error", "connection reset", "http")
+            .with_upstream_context("codexauv", "grok-4.5"),
+    ] {
+        let (output, calls) =
+            execute_scripted_failures(vec![error.clone(), error.clone(), error]).await;
+        assert_eq!(calls, WEB_SEARCH_MAX_ATTEMPTS);
+        assert_eq!(output.value["attempts"], WEB_SEARCH_MAX_ATTEMPTS);
+        assert_eq!(output.value["error"]["retriable"], true);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn web_search_failure_log_is_classified_and_secret_free() {
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(LogWriter(bytes.clone()))
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let error = LlmError::new(
+        "http_error",
+        "upstream rejected super-secret-key and private query",
+        "http",
+    )
+    .with_upstream_status(400)
+    .with_upstream_context("codexauv", "grok-4.5");
+
+    let (_output, calls) = execute_scripted_failures(vec![error]).await;
+    assert_eq!(calls, 1);
+    let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+    for field in [
+        "tool_name",
+        "tool_call_id",
+        "attempt",
+        "duration_ms",
+        "error_kind",
+        "retriable",
+        "backend",
+        "upstream_status",
+        "provider",
+        "model",
+        "failure_layer",
+    ] {
+        assert!(logs.contains(field), "missing log field {field}: {logs}");
+    }
+    assert!(logs.contains("upstream_bad_request"));
+    assert!(logs.contains("codexauv"));
+    assert!(logs.contains("grok-4.5"));
+    assert!(!logs.contains("super-secret-key"));
+    assert!(!logs.contains("private query"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn web_search_success_log_keeps_attempt_chain_without_content() {
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(LogWriter(bytes.clone()))
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let tool = WebSearchTool::new(Arc::new(MockWebSearchExecutor::default()))
+        .with_backend_override(WebSearchBackend::ProviderNative)
+        .with_model_override("safe-search-model".to_owned());
+    let mut context = test_context();
+    context.tool_call_id = Some("safe-tool-call".to_owned());
+
+    let output = tool
+        .execute(
+            context,
+            json!({"query": "private query content", "raw_question": "private prompt body"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(output.value["ok"], true);
+
+    let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+    for field in [
+        "tool_name",
+        "tool_call_id",
+        "attempt",
+        "duration_ms",
+        "error_kind",
+        "retriable",
+        "backend",
+        "upstream_status",
+        "provider",
+        "model",
+        "failure_layer",
+    ] {
+        assert!(logs.contains(field), "missing log field {field}: {logs}");
+    }
+    assert!(logs.contains("safe-tool-call"));
+    assert!(logs.contains("mock-query"));
+    assert!(logs.contains("safe-search-model"));
+    assert!(!logs.contains("private query content"));
+    assert!(!logs.contains("private prompt body"));
+    assert!(!logs.contains("answer:"));
+}
+
 #[tokio::test]
 async fn large_search_result_keeps_structured_evidence_through_tool_registry() {
     const OUTPUT_MAX_CHARS: usize = 1_200;
@@ -344,6 +574,7 @@ fn web_search_tool_is_read_only_and_deduplicates_normalized_query() {
     let tool = WebSearchTool::new(Arc::new(MockWebSearchExecutor::default()));
 
     assert_eq!(tool.effect(), ToolEffect::ReadOnly);
+    assert!(tool.cache_terminal_failures());
     let default_key = tool
         .deduplication_key(&json!({"query": " Rust   News "}))
         .unwrap();
@@ -726,286 +957,4 @@ async fn web_search_tool_rejects_invalid_options() {
     }
 }
 
-#[derive(Clone, Default)]
-struct ResearchExecutor {
-    requests: Arc<Mutex<Vec<WebSearchRequest>>>,
-    active: Arc<AtomicUsize>,
-    max_active: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl WebSearchExecutor for ResearchExecutor {
-    async fn query(&self, _req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
-        unreachable!("research test requires streaming")
-    }
-
-    async fn query_stream(
-        &self,
-        req: WebSearchRequest,
-        delta_tx: mpsc::Sender<String>,
-    ) -> Result<WebSearchOutcome, LlmError> {
-        struct ActiveGuard(Arc<AtomicUsize>);
-        impl Drop for ActiveGuard {
-            fn drop(&mut self) {
-                self.0.fetch_sub(1, Ordering::SeqCst);
-            }
-        }
-
-        self.requests.lock().unwrap().push(req.clone());
-        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
-        self.max_active.fetch_max(active, Ordering::SeqCst);
-        let _guard = ActiveGuard(self.active.clone());
-        if req.query.contains("失败") {
-            return Err(LlmError::provider("simulated research failure", "provider"));
-        }
-        if req.query.contains("超时") {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        } else {
-            tokio::time::sleep(Duration::from_millis(15)).await;
-        }
-        if req.query.contains("无结果") {
-            return Ok(WebSearchOutcome {
-                answer: String::new(),
-                sources: Vec::new(),
-                provider: "research-mock".to_owned(),
-                elapsed_ms: 15,
-            });
-        }
-        let _ = delta_tx.send("事实".to_owned()).await;
-        let long_result = req.query.contains("长结果");
-        Ok(WebSearchOutcome {
-            answer: if long_result {
-                "事实".repeat(1000)
-            } else {
-                format!("{} 的可核实事实", req.query)
-            },
-            sources: vec![WebSearchSource {
-                title: "研究来源".to_owned(),
-                url: if long_result {
-                    format!("https://example.test/{}", "long".repeat(100))
-                } else {
-                    format!("https://example.test/{}", req.query)
-                },
-                snippet: "公开资料摘要".to_owned(),
-            }],
-            provider: "research-mock".to_owned(),
-            elapsed_ms: 15,
-        })
-    }
-
-    fn provider_name(&self) -> &'static str {
-        "research-mock"
-    }
-}
-
-fn research_arguments(queries: &[(&str, &str)]) -> Value {
-    json!({
-        "query": null,
-        "raw_question": "对比这些项目",
-        "max_results": 2,
-        "context_size": "low",
-        "comparison_dimensions": ["功能", "优缺点"],
-        "research_targets": queries.iter().map(|(entity, query)| json!({
-            "entity": entity,
-            "query": query,
-            "assumption": if *entity == "Hermes" {
-                Some("指 Nous Research 的 Hermes Agent")
-            } else {
-                None
-            },
-        })).collect::<Vec<_>>(),
-        "model_override": "model-from-tool-arguments"
-    })
-}
-
-#[tokio::test]
-async fn multi_entity_research_runs_independent_searches_with_bounded_concurrency() {
-    let executor = ResearchExecutor::default();
-    let requests = executor.requests.clone();
-    let max_active = executor.max_active.clone();
-    let tool = WebSearchTool::new(Arc::new(executor))
-        .with_backend_override(WebSearchBackend::Tavily)
-        .with_model_override("gemini:server-search-model".to_owned())
-        .with_timeouts(WebSearchTimeouts {
-            first_activity: Duration::from_millis(50),
-            idle: Duration::from_millis(50),
-            absolute: Duration::from_millis(100),
-        });
-    let mut context = test_context();
-    context.tool_call_id = Some("agent-call".to_owned());
-
-    let output = tool
-        .execute(
-            context,
-            research_arguments(&[
-                ("AstrBot", "AstrBot 功能"),
-                ("Hermes", "Hermes Agent 功能"),
-                ("OpenClaw", "OpenClaw 功能"),
-            ]),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(output.value["ok"], true);
-    assert_eq!(output.value["mode"], "multi_entity_research");
-    assert_eq!(output.value["successful"], 3);
-    assert_eq!(output.value["failed"], 0);
-    assert_eq!(output.value["results"][1]["entity"], "Hermes");
-    assert_eq!(
-        output.value["results"][1]["assumption"],
-        "指 Nous Research 的 Hermes Agent"
-    );
-    assert!(max_active.load(Ordering::SeqCst) > 1);
-    assert!(max_active.load(Ordering::SeqCst) <= ops::WEB_SEARCH_RESEARCH_CONCURRENCY);
-    let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 3);
-    assert!(requests.iter().all(|request| {
-        request.model_override.as_deref() == Some("gemini:server-search-model")
-    }));
-    assert!(
-        requests
-            .iter()
-            .all(|request| request.backend_override == Some(WebSearchBackend::Tavily))
-    );
-    assert!(requests.iter().all(|request| {
-        request
-            .raw_question
-            .as_deref()
-            .is_some_and(|question| question.contains("不要在本次搜索中生成跨实体对比"))
-    }));
-}
-
-#[tokio::test]
-async fn multi_entity_research_returns_partial_results() {
-    let tool = WebSearchTool::new(Arc::new(ResearchExecutor::default())).with_timeouts(
-        WebSearchTimeouts {
-            first_activity: Duration::from_millis(20),
-            idle: Duration::from_millis(20),
-            absolute: Duration::from_millis(40),
-        },
-    );
-
-    let output = tool
-        .execute(
-            test_context(),
-            research_arguments(&[
-                ("成功项", "成功查询"),
-                ("失败项", "失败查询"),
-                ("超时项", "超时查询"),
-            ]),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(output.value["ok"], true);
-    assert_eq!(output.value["successful"], 1);
-    assert_eq!(output.value["failed"], 2);
-    assert_eq!(output.value["results"][0]["status"], "success");
-    assert_eq!(output.value["results"][1]["status"], "failed");
-    assert_eq!(output.value["results"][2]["status"], "timeout");
-}
-
-#[tokio::test]
-async fn multi_entity_research_reports_all_failed_without_tool_error() {
-    let tool = WebSearchTool::new(Arc::new(ResearchExecutor::default()));
-
-    let output = tool
-        .execute(
-            test_context(),
-            research_arguments(&[("失败一", "失败查询一"), ("失败二", "失败查询二")]),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(output.value["ok"], false);
-    assert_eq!(output.value["successful"], 0);
-    assert_eq!(output.value["failed"], 2);
-    assert_eq!(output.value["error"]["code"], "provider_error");
-    assert_eq!(output.value["error"]["stage"], "provider");
-    assert!(
-        output.value["results"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|result| result["status"] == "failed")
-    );
-}
-
-#[tokio::test]
-async fn multi_entity_research_all_empty_results_keep_execution_success() {
-    let tool = WebSearchTool::new(Arc::new(ResearchExecutor::default()));
-
-    let output = tool
-        .execute(
-            test_context(),
-            research_arguments(&[("空结果一", "无结果查询一"), ("空结果二", "无结果查询二")]),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(output.value["ok"], false);
-    assert_eq!(output.value["execution_succeeded"], true);
-    assert_eq!(output.value["result_count"], 0);
-    assert_eq!(output.value["error"]["code"], "empty_result");
-    assert_eq!(output.value["error"]["stage"], "web_search");
-    assert_eq!(
-        output.value["error"]["message"],
-        WEB_SEARCH_EMPTY_RESULT_MODEL_MESSAGE
-    );
-    assert!(
-        output.value["results"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|result| result["error"]["code"] == "empty_result")
-    );
-}
-
-#[tokio::test]
-async fn multi_entity_research_real_failure_is_not_masked_by_empty_results() {
-    let tool = WebSearchTool::new(Arc::new(ResearchExecutor::default()));
-
-    let output = tool
-        .execute(
-            test_context(),
-            research_arguments(&[("空结果", "无结果查询"), ("失败项", "失败查询")]),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(output.value["ok"], false);
-    assert_ne!(output.value["execution_succeeded"], true);
-    assert_eq!(output.value["result_count"], 0);
-    assert_eq!(output.value["error"]["code"], "provider_error");
-    assert_eq!(output.value["error"]["stage"], "provider");
-}
-
-#[tokio::test]
-async fn multi_entity_research_keeps_max_batch_output_structured_under_default_limit() {
-    let tool = WebSearchTool::new(Arc::new(ResearchExecutor::default()));
-
-    let output = tool
-        .execute(
-            test_context(),
-            research_arguments(&[
-                ("实体一", "长结果一"),
-                ("实体二", "长结果二"),
-                ("实体三", "长结果三"),
-                ("实体四", "长结果四"),
-                ("实体五", "长结果五"),
-            ]),
-        )
-        .await
-        .unwrap();
-    let serialized = serde_json::to_string(&output.value).unwrap();
-
-    assert!(serialized.chars().count() <= DEFAULT_TOOL_OUTPUT_MAX_CHARS);
-    assert_eq!(output.value["results"].as_array().unwrap().len(), 5);
-    assert!(
-        output.value["results"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|result| result["status"] == "success" && result["sources"] == json!([]))
-    );
-}
+mod research;

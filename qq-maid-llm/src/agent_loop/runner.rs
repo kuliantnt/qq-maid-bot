@@ -339,13 +339,20 @@ pub(super) async fn run_agent_loop_with_timeouts(
                     ));
                 }
                 force_finalization_without_tools |= batch_budget_reserved;
-                let batch =
-                    execute_tool_batch(&calls, round, &mut executor, &run_handle, attempt_baseline)
-                        .await
-                        .map_err(|err| {
-                            let reason = stop_reason_for_error(&err);
-                            agent_error(err, &run_handle, &executor, reason, attempt_baseline)
-                        })?;
+                let batch = execute_tool_batch(
+                    &calls,
+                    round,
+                    &provider,
+                    &model,
+                    &mut executor,
+                    &run_handle,
+                    attempt_baseline,
+                )
+                .await
+                .map_err(|err| {
+                    let reason = stop_reason_for_error(&err);
+                    agent_error(err, &run_handle, &executor, reason, attempt_baseline)
+                })?;
                 results = batch.results;
                 force_finalization_without_tools |= batch.skipped_for_finalization;
                 sync_diagnostics(&run_handle, &executor, &emitted_tools, attempt_baseline);
@@ -733,6 +740,8 @@ fn track_visible_delta_sink(
 async fn execute_tool_batch(
     calls: &[AgentToolCall],
     round: usize,
+    provider: &str,
+    model: &str,
     executor: &mut ToolLoopExecutor<'_>,
     run_handle: &AgentRunHandle,
     baseline: AgentAttemptBaseline,
@@ -793,10 +802,11 @@ async fn execute_tool_batch(
                 |result| run_handle.record_tool_result(result),
             )
             .await;
+        let tool_duration_ms = tool_started_at.elapsed().as_millis();
         debug!(
             tool = call.name,
             round,
-            tool_elapsed_ms = tool_started_at.elapsed().as_millis(),
+            tool_elapsed_ms = tool_duration_ms,
             tool_succeeded = output.is_ok(),
             remaining_budget_ms = run_handle.remaining_budget().map(|value| value.as_millis()),
             "agent tool call completed"
@@ -805,6 +815,14 @@ async fn execute_tool_batch(
         let emitted_tools = snapshot.emitted_tools[baseline.emitted_tools..].to_vec();
         sync_diagnostics(run_handle, executor, &emitted_tools, baseline);
         let output = output?;
+        log_structured_tool_failure(
+            call,
+            round,
+            provider,
+            model,
+            tool_duration_ms,
+            &output.output,
+        );
         skipped_for_finalization |= output.skipped_for_finalization;
         stop_remaining_batch |= output.stop_remaining_batch;
         results.push(AgentToolResult {
@@ -817,6 +835,58 @@ async fn execute_tool_batch(
         results,
         skipped_for_finalization,
     })
+}
+
+fn log_structured_tool_failure(
+    call: &AgentToolCall,
+    round: usize,
+    agent_provider: &str,
+    agent_model: &str,
+    duration_ms: u128,
+    output: &str,
+) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
+        return;
+    };
+    if value.get("ok").and_then(serde_json::Value::as_bool) != Some(false) {
+        return;
+    }
+    let error = value.get("error").unwrap_or(&serde_json::Value::Null);
+    warn!(
+        tool_name = call.name.as_str(),
+        tool_call_id = call.call_id.as_str(),
+        attempt = value
+            .get("attempts")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(round as u64 + 1),
+        duration_ms = duration_ms.min(u128::from(u64::MAX)) as u64,
+        error_kind = error
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("internal_error"),
+        retriable = error
+            .get("retriable")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        backend = value
+            .get("backend")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown"),
+        upstream_status = ?error.get("upstream_status").and_then(serde_json::Value::as_u64),
+        provider = value
+            .get("provider")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(agent_provider),
+        model = value
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(agent_model),
+        failure_layer = error
+            .get("stage")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("tool_loop"),
+        "agent tool call failed"
+    );
 }
 
 struct ToolBatchOutcome {
