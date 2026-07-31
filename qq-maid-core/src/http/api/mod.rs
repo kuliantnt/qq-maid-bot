@@ -5,6 +5,7 @@
 
 pub(crate) mod common;
 pub(crate) mod todo;
+pub(crate) mod user_data;
 
 use axum::{
     Json,

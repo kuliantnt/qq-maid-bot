@@ -1,0 +1,175 @@
+//! 控制台用户偏好与通用文件领域门面。
+//!
+//! 本模块只使用认证系统提供的管理员 ID 做资源归属，不接受客户端提交其他用户 ID。
+//! 文件元数据写入通用 SQLite，文件内容写入数据库同级的持久化目录。
+
+use std::{path::PathBuf, sync::Arc};
+
+use serde::{Deserialize, Serialize};
+
+use crate::storage::database::{SqliteDatabase, SqliteMigration};
+
+mod files;
+mod preferences;
+
+pub const MAX_CONSOLE_FILE_BYTES: usize = 10 * 1024 * 1024;
+pub(crate) const MAX_CUSTOM_COLORS: usize = 32;
+pub(crate) const MAX_CUSTOM_COLOR_CHARS: usize = 64;
+pub(crate) const MAX_BACKGROUND_FILES: usize = 64;
+pub(crate) const MAX_ORIGINAL_FILENAME_CHARS: usize = 255;
+pub(crate) const MAX_CONTENT_TYPE_CHARS: usize = 255;
+
+pub const CONSOLE_USER_DATA_SCHEMA_V1: SqliteMigration = SqliteMigration {
+    name: "console_user_data_schema_v1",
+    sql: "CREATE TABLE IF NOT EXISTS console_user_files (
+            file_id TEXT PRIMARY KEY,
+            admin_id INTEGER NOT NULL,
+            original_filename TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            size INTEGER NOT NULL CHECK(size >= 0),
+            storage_filename TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(admin_id) REFERENCES console_admins(id) ON DELETE CASCADE
+          );
+          CREATE INDEX IF NOT EXISTS idx_console_user_files_owner_created
+            ON console_user_files(admin_id, created_at DESC, file_id DESC);
+          CREATE TABLE IF NOT EXISTS console_user_preferences (
+            admin_id INTEGER PRIMARY KEY,
+            custom_colors_json TEXT NOT NULL,
+            background_file_ids_json TEXT NOT NULL,
+            active_background_file_id TEXT,
+            kuliantnt INTEGER NOT NULL DEFAULT 0 CHECK(kuliantnt IN (0, 1)),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(admin_id) REFERENCES console_admins(id) ON DELETE CASCADE
+          );",
+};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct UserPreferences {
+    pub custom_colors: Vec<String>,
+    pub background_file_ids: Vec<String>,
+    pub active_background_file_id: Option<String>,
+    pub kuliantnt: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum PreferenceValuePatch<T> {
+    #[default]
+    Unchanged,
+    Clear,
+    Set(T),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UserPreferencesPatch {
+    pub custom_colors: Option<Vec<String>>,
+    pub background_file_ids: Option<Vec<String>>,
+    pub active_background_file_id: PreferenceValuePatch<String>,
+    pub kuliantnt: Option<bool>,
+}
+
+impl UserPreferencesPatch {
+    pub fn is_empty(&self) -> bool {
+        self.custom_colors.is_none()
+            && self.background_file_ids.is_none()
+            && self.active_background_file_id == PreferenceValuePatch::Unchanged
+            && self.kuliantnt.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct UserFile {
+    pub file_id: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size: u64,
+    pub created_at: String,
+    #[serde(skip)]
+    pub(crate) storage_filename: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserFileContent {
+    pub metadata: UserFile,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserFilePage {
+    pub items: Vec<UserFile>,
+    pub total_count: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{code}: {message}")]
+pub struct ConsoleUserDataError {
+    code: &'static str,
+    message: String,
+}
+
+impl ConsoleUserDataError {
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub(crate) fn invalid(message: impl Into<String>) -> Self {
+        Self {
+            code: "bad_request",
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            code: "not_found",
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn storage(message: impl Into<String>) -> Self {
+        Self {
+            code: "storage_error",
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ConsoleUserDataService {
+    pub(crate) database: SqliteDatabase,
+    pub(crate) file_root: Arc<PathBuf>,
+}
+
+impl ConsoleUserDataService {
+    pub fn new(database: SqliteDatabase) -> Self {
+        let parent = database
+            .path()
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        Self {
+            database,
+            file_root: Arc::new(parent.join("console-files")),
+        }
+    }
+}
+
+pub(crate) fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+pub(crate) fn validate_file_id(file_id: &str) -> Result<(), ConsoleUserDataError> {
+    let parsed = uuid::Uuid::parse_str(file_id)
+        .map_err(|_| ConsoleUserDataError::invalid("file_id must be a canonical UUID"))?;
+    if parsed.hyphenated().to_string() != file_id {
+        return Err(ConsoleUserDataError::invalid(
+            "file_id must be a canonical UUID",
+        ));
+    }
+    Ok(())
+}

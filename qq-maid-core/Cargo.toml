@@ -17,7 +17,7 @@ async-trait = "0.1"
 # HTML 清理
 ammonia = "4"
 # HTTP 服务框架
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 # 日期时间处理
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Web 可写敏感值使用带认证的 XChaCha20-Poly1305 密文保存。

@@ -76,7 +76,7 @@ qbot restart
 
 - `PROMPT_DIR`：包含 `maid_system.md`、`mode_rules.md`、`session_context.md` 的目录。
 - `KNOWLEDGE_DIR`：Markdown 知识目录，留空时使用 `config/knowledge`。
-- `APP_DB_FILE`：通用 SQLite 文件路径，承载 Session、待办、长期记忆、RSS / Atom 订阅、通知 Outbox、Ops 入站幂等领取和知识检索索引。
+- `APP_DB_FILE`：通用 SQLite 文件路径，承载 Session、待办、长期记忆、RSS / Atom 订阅、通知 Outbox、Ops 入站幂等领取、控制台用户偏好、文件元数据和知识检索索引；控制台上传文件内容位于其父目录的 `console-files/`。
 - `AGENT_CONFIG_FILE`：Agent 场景策略文件路径，默认 `config/agent.toml`。默认路径缺失时由首次启动从二进制内嵌的同版模板自动生成；只读 `config check` 会直接校验该内嵌模板而不落盘。显式指定其他路径时，目标文件必须存在且完整合法。该路径只由 Bootstrap 配置决定，WebUI 不能指定其他文件。
 - `OPS_CONFIG_FILE`：`/ops` 白名单运维配置路径，默认 `config/ops.toml`。默认文件缺失时功能保持关闭；显式设置后文件缺失会启动失败。
 - `CHAT_COMMAND_PREFIX`：所有平台共用的单字符命令前缀，默认 `/`；也可通过 Web 控制台下拉框或 `runtime.toml` 的 `command.prefix` 设置为 `#`、`*` 等可见非空白字符，重启后生效。
@@ -363,7 +363,7 @@ runtime/
 └── qq-maid-bot
 ```
 
-Session、待办、长期记忆、RSS / Atom 订阅、RSS 去重状态和知识检索索引均保存在 `APP_DB_FILE` 指向的通用 SQLite 文件中。长期记忆只能通过明确记忆指令生成草稿，并由用户确认后写入；普通聊天不会自动写长期记忆。
+Session、待办、长期记忆、RSS / Atom 订阅、RSS 去重状态、控制台用户偏好、文件元数据和知识检索索引均保存在 `APP_DB_FILE` 指向的通用 SQLite 文件中。控制台上传文件内容保存在该数据库父目录的 `console-files/`，不会写入 SQLite Base64 字段。长期记忆只能通过明确记忆指令生成草稿，并由用户确认后写入；普通聊天不会自动写长期记忆。
 
 配置、prompt、知识源 Markdown、日志、pid、release 二进制和 gateway WebSocket 临时状态不属于 `APP_DB_FILE` 承载范围。
 

@@ -72,7 +72,8 @@ SQLite migration 和备份格式；Web 控制台仍只是另一种交互入口�
 ## 数据库备份、配置恢复包与完整部署备份
 
 CLI 使用 SQLite Online Backup API，可在有 WAL 写入时取得数据库一致快照，并复制配置目录内
-允许纳入的文件。输出是包含 `manifest.toml` 与逐文件 SHA-256 的新目录：
+允许纳入的文件以及快照引用的控制台上传文件。输出是包含 `manifest.toml` 与逐文件 SHA-256
+的新目录：
 
 ```bash
 ./qq-maid-bot backup create --output /secure/backup-20260722
@@ -82,7 +83,10 @@ CLI 使用 SQLite Online Backup API，可在有 WAL 写入时取得数据库一�
 边界必须区分：
 
 - `database/app.db` 是数据库备份，包含 Todo、Session、Memory、RSS、管理员认证以及受管 secret
-  的密文；它不包含解密主密钥，不能独立读取加密受管配置。
+  的密文和控制台文件元数据；它不包含解密主密钥或上传文件字节，不能独立读取加密受管配置。
+- 格式 v2 的 `console-files/<storage_filename>`（当前为服务端 UUID 加 `.blob`）只包含数据库快照中
+  `console_user_files.storage_filename` 引用的文件；上传/删除临时文件、tombstone 和孤儿文件不会
+  进入恢复包。所有这些文件都列入 `manifest.toml` 的 `[files]` 平面路径到 SHA-256 映射。
 - 默认 CLI 恢复包还复制当前配置目录，但排除 `.env`、整个 `secrets/` 和一次性 Bootstrap token。
 - `--include-secrets` 允许复制当前配置目录内的 `.env` 与 `secrets/`（Bootstrap token 始终排除）：
 
@@ -96,10 +100,26 @@ CLI 使用 SQLite Online Backup API，可在有 WAL 写入时取得数据库一�
 `MASTER_KEY_FILE` 指向配置目录外，主密钥不会进入恢复包，必须通过独立安全通道保存和恢复。
 含敏感材料的恢复包在 Unix 上限制为目录 `0700`、文件 `0600`，仍应使用受控加密介质离线保存。
 
+格式 v2 的主要目录结构如下；空的 `console-files/` 目录仍会保留：
+
+```text
+manifest.toml
+database/app.db
+config/...
+console-files/<服务端 UUID>.blob
+```
+
+备份先完成 SQLite 快照，再从源数据库同级 `console-files/` 复制该快照引用的精确文件集合，并按
+快照中的大小复核。快照存在记录但源文件缺失、不是普通文件、服务端文件名不合法、大小不一致，
+或文件在复制期间发生不一致变化时，`backup create` 明确失败且不会提交目标恢复包。并发上传若尚未
+写入快照元数据，其文件按孤儿文件忽略；并发删除若已暂存文件但快照仍保留记录，本次备份失败，待
+操作结束后重试。格式 v1 的既有恢复包仍按原有数据库、配置和 manifest 规则读取，不追溯要求其中
+包含上传文件。
+
 上述两种 CLI 恢复包都不是完整部署备份：它们不包含二进制或容器镜像、Compose、
-`compose.env`/`.image.env`、media、服务管理配置，也不包含配置目录外的 Agent/Ops/Prompt/知识文件
-或外部 secret。完整部署灾备必须在恢复包之外另行保存这些部署材料和路径映射。不要把任何恢复包
-放入 Git、普通 Artifact、公开对象存储或与实例相同的单一磁盘。
+`compose.env`/`.image.env`、控制台上传目录以外的媒体、服务管理配置，也不包含配置目录外的
+Agent/Ops/Prompt/知识文件或外部 secret。完整部署灾备必须在恢复包之外另行保存这些部署材料和
+路径映射。不要把任何恢复包放入 Git、普通 Artifact、公开对象存储或与实例相同的单一磁盘。
 
 ## 恢复
 
@@ -120,15 +140,16 @@ CLI 使用 SQLite Online Backup API，可在有 WAL 写入时取得数据库一�
   --apply
 ```
 
-恢复固定写入新实例的 `data/storage/app.db` 与 `config/`，不会覆盖当前运行目录，也不会在打开的
+格式 v2 恢复固定写入新实例的 `data/storage/app.db`、`data/storage/console-files/` 与
+`config/`；格式 v1 仍只恢复原有数据库和配置内容。恢复不会覆盖当前运行目录，也不会在打开的
 SQLite inode 旁替换文件。数据库存在加密受管配置时，必须把同期主密钥恢复到默认
 `config/secrets/master.key` 或 `MASTER_KEY_FILE` 指定位置：缺失时启动明确报错且不会生成新密钥，
 密钥不匹配时认证解密明确失败。补齐外部 secret 和部署文件后，在新目录运行 `config check`，
 再启动服务。原实例在新实例验证完成前应保持停止但不要删除。
 
-建议至少做一次受控演练：创建 Todo、Session、Memory、RSS 数据，备份后修改原实例，恢复到
-干净目录，再用当前版本打开数据库并验证四类数据仍可读取。没有真实平台凭据时，这不等于
-QQ/OneBot/微信或 Provider 联调成功。
+建议至少做一次受控演练：创建 Todo、Session、Memory、RSS 和控制台背景文件，备份后修改原
+实例，恢复到干净目录，再用当前版本打开数据库并验证业务数据、偏好和文件字节仍可读取。没有
+真实平台凭据时，这不等于 QQ/OneBot/微信或 Provider 联调成功。
 
 ## Docker 升级与回滚
 

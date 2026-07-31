@@ -8,7 +8,7 @@ QQ 平台事件解析、白名单、`/ping` 本地诊断和消息回发不在本
 
 - HTTP 层默认只公开进程级 `GET /healthz`；本地 Web 控制台默认关闭，启用后才注册 `/console/`、只读状态 API 和 `/api/v1/markdown/render`。
 - 普通聊天、查询、列车时刻、天气、翻译、会话命令、长期记忆、Todo、RSS、`/ops` 指令和业务 Tool 都通过 `CoreService::respond` 进程内分发。
-- Session、Todo、长期记忆、RSS / Atom 订阅、RSS 去重状态和知识检索索引统一写入 `APP_DB_FILE` 指向的 SQLite。
+- Session、Todo、长期记忆、RSS / Atom 订阅、RSS 去重状态、控制台用户偏好、文件元数据和知识检索索引统一写入 `APP_DB_FILE` 指向的 SQLite；控制台上传文件内容保存在数据库同级的 `console-files/`。
 - 长期记忆可通过确定性 `/memory` 命令或 `save_memory` Tool 写入；只有用户明确要求长期保存时才应调用 Tool，普通陈述不会自动写入。新增校验通过后直接保存，破坏性管理仍需确认。
 - RSS 后台轮询、Todo 单次提醒和 Todo 每日提醒由本模块调度，推送内容先写入 Notification Outbox，再由统一 Worker 通过进程内 `PushSink` 交给 gateway 发送。
 - OpenAI / DeepSeek、模型候选链 fallback、Web Search 传输、Tool Loop 协议和上游健康观测由 `qq-maid-llm` 提供，Core 只保留业务调用边界和 Tool 注册。
