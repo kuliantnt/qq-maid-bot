@@ -71,7 +71,12 @@ impl RequestSizeStats {
                         .sum::<usize>()
             })
             .sum();
-        let system_chars = req.system_prompts.iter().map(String::len).sum();
+        // 与其他分项保持一致按 Unicode 字符数统计，避免字节数混入字符单位。
+        let system_chars = req
+            .system_prompts
+            .iter()
+            .map(|prompt| prompt.chars().count())
+            .sum();
         let quoted_chars = req
             .quoted
             .as_ref()
@@ -220,14 +225,16 @@ pub(crate) fn log_request_stage_snapshot(stage: &'static str, snapshot: &Request
 /// 序列化估算，而不是请求前各分项统计。
 ///
 /// 只输出数量、尺寸与进程内存，不输出消息正文；序列化估算在 DEBUG 开启时才
-/// 执行一次，失败时如实记录 `None`，不回退为误导性的 0。
+/// 执行一次，失败时如实记录 `None`，不回退为误导性的 0。估算使用不保留正文的
+/// counting writer，避免诊断本身为完整上下文再生成一份 String 副本抬高内存。
 pub(super) fn log_after_build_llm_messages(messages: &[ChatMessage]) {
     if !tracing::enabled!(tracing::Level::DEBUG) {
         return;
     }
     let mem = process_memory_sample();
     let estimated_chars =
-        qq_maid_llm::context_budget::estimated_json_chars(messages, "build_llm_messages").ok();
+        qq_maid_llm::context_budget::estimated_json_chars_counting(messages, "build_llm_messages")
+            .ok();
     tracing::debug!(
         stage = "after_build_llm_messages",
         message_count = messages.len(),
@@ -364,7 +371,7 @@ mod tests {
             stats.history_chars,
             "你好".repeat(10).chars().count() + "在的".repeat(5).chars().count()
         );
-        assert_eq!(stats.system_chars, "系统提示词".repeat(3).len());
+        assert_eq!(stats.system_chars, "系统提示词".repeat(3).chars().count());
         assert_eq!(
             stats.knowledge_evidence_chars,
             "知识证据正文".repeat(5).chars().count()

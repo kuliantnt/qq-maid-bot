@@ -195,7 +195,9 @@ impl AgentStepSession for ResponsesAgentSession {
         // 回填上一轮工具执行结果（首轮 results 为空，跳过）。
         append_tool_results(&mut self.input, results);
         // Issue #361 诊断：append 后、payload 构造前的真实输入尺寸；DEBUG 门控。
-        log_input_size_after_append(self.provider(), self.model(), self.input_size_estimate());
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            log_input_size_after_append(self.provider(), self.model(), self.input_size_estimate());
+        }
 
         let payload = openai_tool_loop_payload(
             &self.input,
@@ -272,11 +274,13 @@ impl AgentStepSession for ResponsesAgentSession {
         append_tool_results(&mut input, results);
         // 流式路径的 payload 从克隆的 input 构造；此处记录克隆后（即实际发送前）
         // 的输入尺寸，避免把“未追加本轮结果”的会话状态误报为发送尺寸。
-        log_input_size_after_append(
-            self.provider(),
-            self.model(),
-            responses_input_size_estimate(&input),
-        );
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            log_input_size_after_append(
+                self.provider(),
+                self.model(),
+                responses_input_size_estimate(&input),
+            );
+        }
         let payload = openai_tool_loop_payload(
             &input,
             &self.tool_defs,

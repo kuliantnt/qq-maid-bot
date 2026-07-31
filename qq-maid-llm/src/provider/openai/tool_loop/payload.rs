@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use crate::{
     agent_loop::AgentInputSizeEstimate,
-    context_budget::{ContextBudgetConfig, estimated_json_chars, fit_tool_loop_payload},
+    context_budget::{ContextBudgetConfig, estimated_json_chars_counting, fit_tool_loop_payload},
     error::LlmError,
     provider::types::{ChatMessage, ReasoningEffort},
     tool::ToolMetadata,
@@ -48,7 +48,8 @@ pub(super) fn openai_tool_loop_input(
 /// 估算 Responses 会话 `input` 的尺寸；只用于 Issue #361 诊断，不参与预算。
 ///
 /// `estimated_chars` 只在 DEBUG 级别开启时计算，避免每轮为诊断额外序列化
-/// 整个上下文；`tool_result_chars` 只统计 `function_call_output` 的输出字符数。
+/// 整个上下文；序列化估算走不保留正文的 counting writer，不会在堆上生成
+/// 完整 String 副本。`tool_result_chars` 只统计 `function_call_output` 的输出字符数。
 pub(super) fn responses_input_size_estimate(input: &[Value]) -> AgentInputSizeEstimate {
     let mut estimate = AgentInputSizeEstimate {
         item_count: input.len(),
@@ -64,7 +65,7 @@ pub(super) fn responses_input_size_estimate(input: &[Value]) -> AgentInputSizeEs
         }
     }
     if tracing::enabled!(tracing::Level::DEBUG)
-        && let Ok(chars) = estimated_json_chars(input, "tool_loop_diagnostics")
+        && let Ok(chars) = estimated_json_chars_counting(input, "tool_loop_diagnostics")
     {
         estimate.estimated_chars = chars;
     }

@@ -411,17 +411,20 @@ impl Tool for WebSearchTool {
             self.model_override.clone(),
         )?;
         // Issue #361 诊断：联网查询前后只记录尺寸/计数与内存，不记录查询正文。
-        let before_mem = qq_maid_common::process_mem::process_memory_sample();
-        tracing::debug!(
-            tool = WEB_SEARCH_TOOL_NAME,
-            query_chars = request.query.chars().count(),
-            max_results = request.max_results,
-            rss_kb = before_mem.rss_kb,
-            vm_size_kb = before_mem.vm_size_kb,
-            pss_kb = before_mem.pss_kb,
-            private_dirty_kb = before_mem.private_dirty_kb,
-            "before_web_search"
-        );
+        // 进程内存采样放进 DEBUG 门控，默认级别不触碰 /proc 读取。
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let before_mem = qq_maid_common::process_mem::process_memory_sample();
+            tracing::debug!(
+                tool = WEB_SEARCH_TOOL_NAME,
+                query_chars = request.query.chars().count(),
+                max_results = request.max_results,
+                rss_kb = before_mem.rss_kb,
+                vm_size_kb = before_mem.vm_size_kb,
+                pss_kb = before_mem.pss_kb,
+                private_dirty_kb = before_mem.private_dirty_kb,
+                "before_web_search"
+            );
+        }
         let outcome = self
             // Agent 最终回复仍由模型统一生成，但搜索上游必须复用 `/查` 的 SSE 路径，
             // 不能因进入 Tool Loop 退化成完整非流请求。
@@ -821,6 +824,10 @@ fn log_web_search_execution(
     output: &Value,
     multi_entity_research: bool,
 ) {
+    // 该函数只输出 DEBUG 诊断：默认级别不触碰输出正文计数、`/proc` 采样。
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
     let query_chars = if multi_entity_research {
         0
     } else {

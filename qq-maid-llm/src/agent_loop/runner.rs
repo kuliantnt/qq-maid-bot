@@ -157,22 +157,32 @@ pub(super) async fn run_agent_loop_with_timeouts(
                 && run_handle.should_preserve_finalization_budget());
         let allow_tool_calls = round < max_rounds && !preserve_finalization_budget;
         // Issue #361 诊断：每轮开始采样会话输入尺寸与进程内存，观察 Tool Loop
-        // 多轮输入是否有界；只输出计数与尺寸，不输出正文。
-        let round_input = session.input_size_estimate();
-        let round_mem = qq_maid_common::process_mem::process_memory_sample();
+        // 多轮输入是否有界；只输出计数与尺寸，不输出正文。采样全部放进 DEBUG
+        // 门控，默认级别不触碰会话上下文与 /proc 读取。
+        let round_size = if tracing::enabled!(tracing::Level::DEBUG) {
+            let estimate = session.input_size_estimate();
+            let mem = qq_maid_common::process_mem::process_memory_sample();
+            Some((estimate, mem))
+        } else {
+            None
+        };
         debug!(
             provider = provider.as_str(),
             model = %model,
             round,
             allow_tool_calls,
             preserve_finalization_budget,
-            input_item_count = round_input.item_count,
-            input_estimated_chars = round_input.estimated_chars,
-            input_tool_result_chars = round_input.tool_result_chars,
-            rss_kb = round_mem.rss_kb,
-            vm_size_kb = round_mem.vm_size_kb,
-            pss_kb = round_mem.pss_kb,
-            private_dirty_kb = round_mem.private_dirty_kb,
+            input_item_count = round_size.as_ref().map(|(estimate, _)| estimate.item_count),
+            input_estimated_chars = round_size
+                .as_ref()
+                .map(|(estimate, _)| estimate.estimated_chars),
+            input_tool_result_chars = round_size
+                .as_ref()
+                .map(|(estimate, _)| estimate.tool_result_chars),
+            rss_kb = round_size.as_ref().and_then(|(_, mem)| mem.rss_kb),
+            vm_size_kb = round_size.as_ref().and_then(|(_, mem)| mem.vm_size_kb),
+            pss_kb = round_size.as_ref().and_then(|(_, mem)| mem.pss_kb),
+            private_dirty_kb = round_size.as_ref().and_then(|(_, mem)| mem.private_dirty_kb),
             remaining_budget_ms = run_handle.remaining_budget().map(|value| value.as_millis()),
             "starting agent model round"
         );
@@ -233,24 +243,33 @@ pub(super) async fn run_agent_loop_with_timeouts(
             } => {
                 let step_input_tokens = step_usage.as_ref().and_then(|item| item.input_tokens);
                 usage = merge_usage(usage, step_usage);
-                let final_input = session.input_size_estimate();
-                let final_mem = qq_maid_common::process_mem::process_memory_sample();
+                // Issue #361 诊断：最终输入尺寸与进程内存只在 DEBUG 开启时采样，
+                // 默认级别不触碰会话上下文与 /proc 读取；DEBUG 关闭时这些字段
+                // 记录为空，避免 INFO 日志出现无意义的估算值。
+                let final_size = if tracing::enabled!(tracing::Level::DEBUG) {
+                    let estimate = session.input_size_estimate();
+                    let mem = qq_maid_common::process_mem::process_memory_sample();
+                    Some((estimate, mem))
+                } else {
+                    None
+                };
                 tracing::info!(
                     provider = provider.as_str(),
                     model = %model,
                     tool_loop_used = true,
                     model_rounds = run_handle.snapshot().model_rounds,
                     input_tokens = step_input_tokens,
-                    input_item_count = final_input.item_count,
-                    // DEBUG 关闭时不计算序列化估算，避免默认 INFO 出现无意义的 0。
-                    input_estimated_chars =
-                        tracing::enabled!(tracing::Level::DEBUG)
-                            .then_some(final_input.estimated_chars),
-                    input_tool_result_chars = final_input.tool_result_chars,
-                    rss_kb = final_mem.rss_kb,
-                    vm_size_kb = final_mem.vm_size_kb,
-                    pss_kb = final_mem.pss_kb,
-                    private_dirty_kb = final_mem.private_dirty_kb,
+                    input_item_count = final_size.as_ref().map(|(estimate, _)| estimate.item_count),
+                    input_estimated_chars = final_size
+                        .as_ref()
+                        .map(|(estimate, _)| estimate.estimated_chars),
+                    input_tool_result_chars = final_size
+                        .as_ref()
+                        .map(|(estimate, _)| estimate.tool_result_chars),
+                    rss_kb = final_size.as_ref().and_then(|(_, mem)| mem.rss_kb),
+                    vm_size_kb = final_size.as_ref().and_then(|(_, mem)| mem.vm_size_kb),
+                    pss_kb = final_size.as_ref().and_then(|(_, mem)| mem.pss_kb),
+                    private_dirty_kb = final_size.as_ref().and_then(|(_, mem)| mem.private_dirty_kb),
                     "agent_loop_request_end"
                 );
                 debug!(

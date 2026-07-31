@@ -1,7 +1,7 @@
 use super::super::response::append_tool_results;
 use super::*;
 use crate::{
-    agent_loop::AgentToolResult,
+    agent_loop::AgentToolResult, context_budget::estimated_json_chars,
     provider::openai::tool_loop::payload::responses_input_size_estimate,
 };
 

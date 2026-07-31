@@ -35,6 +35,9 @@ pub(crate) fn log_input_size_after_append(
     model: &str,
     estimate: AgentInputSizeEstimate,
 ) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
     let mem = qq_maid_common::process_mem::process_memory_sample();
     debug!(
         provider = provider,

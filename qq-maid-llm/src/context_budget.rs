@@ -633,6 +633,98 @@ pub fn estimated_json_chars<T: Serialize + ?Sized>(
     Ok(text.chars().count())
 }
 
+/// 不保留正文的 JSON 字符计数 writer。
+///
+/// `serde_json::to_writer` 会把序列化结果以 UTF-8 字节流写入；本 writer 只累计
+/// 完整字符数，不在堆上生成完整 String 副本。多字节 UTF-8 序列可能跨 `write`
+/// 分片，内部用 4 字节缓冲暂存未完成的序列（serde_json 输出的 JSON 一定是
+/// 合法 UTF-8，无需校验 continuation 字节）。
+#[derive(Debug, Default)]
+pub struct JsonCharCounter {
+    chars: usize,
+    partial: [u8; 4],
+    partial_len: usize,
+}
+
+impl JsonCharCounter {
+    /// 已累计的完整 UTF-8 字符数。
+    pub fn chars(&self) -> usize {
+        self.chars
+    }
+}
+
+impl std::io::Write for JsonCharCounter {
+    fn write(&mut self, mut buf: &[u8]) -> std::io::Result<usize> {
+        let written = buf.len();
+        // 先补全上一片未完成的 UTF-8 序列。
+        if self.partial_len > 0 {
+            let first = self.partial[0];
+            let total = utf8_sequence_len(first);
+            let take = total.saturating_sub(self.partial_len).min(buf.len());
+            self.partial[self.partial_len..self.partial_len + take].copy_from_slice(&buf[..take]);
+            self.partial_len += take;
+            buf = &buf[take..];
+            if self.partial_len == total {
+                self.chars += 1;
+                self.partial_len = 0;
+            } else {
+                // 这一片仍凑不齐完整序列，等待下一片。
+                return Ok(written);
+            }
+        }
+        while !buf.is_empty() {
+            let first = buf[0];
+            let len = utf8_sequence_len(first);
+            if buf.len() < len {
+                self.partial[..buf.len()].copy_from_slice(buf);
+                self.partial_len = buf.len();
+                break;
+            }
+            self.chars += 1;
+            buf = &buf[len..];
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// 根据 UTF-8 首字节推断完整序列长度（1-4 字节）。
+fn utf8_sequence_len(first: u8) -> usize {
+    if first < 0x80 {
+        1
+    } else if first >> 5 == 0b110 {
+        2
+    } else if first >> 4 == 0b1110 {
+        3
+    } else {
+        4
+    }
+}
+
+/// 估算 JSON 序列化后的字符数，但不保留序列化正文。
+///
+/// 与 [`estimated_json_chars`] 的差异仅在实现方式：序列化直接写入计数 writer，
+/// 堆上不保留完整 String 副本，专供 DEBUG 诊断使用，避免诊断本身抬高
+/// allocator / RSS 高水位（Issue #361）。失败语义与 `estimated_json_chars`
+/// 一致：序列化失败必须显式返回错误，不能按 0 字符放行。
+pub fn estimated_json_chars_counting<T: Serialize + ?Sized>(
+    value: &T,
+    stage: &'static str,
+) -> Result<usize, LlmError> {
+    let mut writer = JsonCharCounter::default();
+    serde_json::to_writer(&mut writer, value).map_err(|err| {
+        LlmError::new(
+            "context_budget_estimate_error",
+            format!("failed to estimate JSON chars for context budget: {err}"),
+            stage,
+        )
+    })?;
+    Ok(writer.chars())
+}
+
 pub fn log_budget_report(scope: &'static str, report: &BudgetReport) {
     let evicted_items = report
         .actions
@@ -667,6 +759,7 @@ mod tests {
     use super::*;
     use serde::Serializer;
     use serde_json::json;
+    use std::io::Write;
 
     fn config(limit: usize) -> ContextBudgetConfig {
         ContextBudgetConfig {
@@ -1033,6 +1126,52 @@ mod tests {
     #[test]
     fn estimated_json_chars_returns_error_on_serialize_failure() {
         let err = estimated_json_chars(&FailingSerialize, "context_budget").unwrap_err();
+
+        assert_eq!(err.code, "context_budget_estimate_error");
+        assert_eq!(err.stage, "context_budget");
+        assert!(err.message.contains("failed to estimate JSON chars"));
+    }
+
+    #[test]
+    fn json_char_counter_handles_split_utf8_sequences() {
+        // 中文（3 字节）与 emoji（4 字节）跨任意字节边界分片写入时，计数必须
+        // 与完整字符串的字符数一致，且不保留正文。
+        let text = "完成待办🎉 收尾";
+        let bytes = text.as_bytes();
+        for chunk_size in 1..=4 {
+            let mut writer = JsonCharCounter::default();
+            for chunk in bytes.chunks(chunk_size) {
+                writer.write_all(chunk).unwrap();
+            }
+            assert_eq!(
+                writer.chars(),
+                text.chars().count(),
+                "chunk size {chunk_size} must not lose or duplicate characters"
+            );
+        }
+    }
+
+    #[test]
+    fn estimated_json_chars_counting_matches_string_serialization() {
+        // 计数 writer 与旧 `to_string().chars().count()` 口径必须一致，
+        // 只是不再保留完整 String 副本。
+        let value = json!({
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "中文正文".repeat(20)}]},
+                {"type": "function_call_output", "call_id": "call-1", "output": "工具结果正文".repeat(40)}
+            ],
+            "tools": [{"type": "function", "name": "完成待办"}]
+        });
+        let expected = serde_json::to_string(&value).unwrap().chars().count();
+        assert_eq!(
+            estimated_json_chars_counting(&value, "context_budget").unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn estimated_json_chars_counting_returns_error_on_serialize_failure() {
+        let err = estimated_json_chars_counting(&FailingSerialize, "context_budget").unwrap_err();
 
         assert_eq!(err.code, "context_budget_estimate_error");
         assert_eq!(err.stage, "context_budget");

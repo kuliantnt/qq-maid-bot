@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent_loop::{AgentTextDeltaFuture, run_agent_loop};
+use crate::context_budget::estimated_json_chars;
 use crate::provider::test_support::{WeatherToolStub, test_tool_context};
 use crate::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
 use async_trait::async_trait;

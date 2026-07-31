@@ -8,7 +8,7 @@ use crate::{
     agent_loop::{
         AgentStep, AgentStepSession, AgentTextDeltaFuture, AgentTextDeltaSink, run_agent_loop,
     },
-    context_budget::{ContextBudgetConfig, estimated_json_chars},
+    context_budget::ContextBudgetConfig,
     error::LlmError,
     provider::types::{ChatMessage, ReasoningEffort},
     sse::SseFrame,
