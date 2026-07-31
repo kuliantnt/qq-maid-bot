@@ -4,14 +4,19 @@
 //! 不经过 LLM；歧义、缺快照、删除（需二次确认）保持现有 Tool Loop 流程；
 //! 编号到真实 todo_id 的映射不被破坏。
 
-use qq_maid_common::{identity_context::ConversationKind, time_context::now_iso_cn};
+use chrono::Duration;
+use qq_maid_common::{
+    identity_context::ConversationKind,
+    time_context::{now_iso_cn, request_time_context},
+};
 use qq_maid_llm::provider::ToolCallingProtocol;
 
 use crate::{
     runtime::{
         respond::RespondRequest,
         tools::todo::{
-            TodoOwner, TodoStatus, TodoStore, flow::deterministic::plan_deterministic_todo,
+            TodoItemDraft, TodoOwner, TodoRecurrenceKind, TodoRecurrenceUnit, TodoStatus,
+            TodoStore, TodoTimePrecision, flow::deterministic::plan_deterministic_todo,
         },
     },
     service::{VisibleEntityItem, VisibleEntitySnapshot},
@@ -96,6 +101,88 @@ async fn deterministic_restore_uses_snapshot_real_id_without_llm_request() {
         .unwrap();
     assert_eq!(restored.status, TodoStatus::Pending);
     assert!(response.text.unwrap().contains("收尾 2"));
+}
+
+#[tokio::test]
+async fn repeated_same_message_deterministic_complete_reuses_dedup_output() {
+    // 回归：确定性短路必须保留 TodoToolScope 的 dedup 语义。同一 message_id +
+    // 同一请求级可见快照重复执行“完成第1条”时，第二次必须复用既有 dedup 输出，
+    // 重复待办只能推进一个周期，不能重复推进。
+    let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = private_todo_owner();
+    // 重复待办：完成本次后推进到下一天（今天 -> 明天）。
+    let today = request_time_context().local_date();
+    let recurring = service
+        .task_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "每日收尾".to_owned(),
+                due_date: Some(today.to_string()),
+                time_precision: TodoTimePrecision::Date,
+                recurrence_kind: TodoRecurrenceKind::Daily,
+                recurrence_interval_days: 1,
+                recurrence_interval: 1,
+                recurrence_unit: TodoRecurrenceUnit::Day,
+                ..todo_draft("每日收尾")
+            },
+        )
+        .unwrap();
+    // 请求级可见快照：同一编号范围只包含这条重复待办。
+    let snapshot = VisibleEntitySnapshot {
+        platform: "qq_official".to_owned(),
+        account_id: None,
+        scope_key: "private:u1".to_owned(),
+        owner_key: Some(owner.key.clone()),
+        created_at: now_iso_cn(),
+        items: vec![VisibleEntityItem {
+            domain: "todo".to_owned(),
+            entity_kind: "todo".to_owned(),
+            entity_id: recurring.id.clone(),
+            visible_number: 1,
+            label: Some(recurring.title.clone()),
+            status: Some("pending".to_owned()),
+        }],
+    };
+
+    let mut req = private_message("完成第1条");
+    req.message_id = Some("msg-1".to_owned());
+    req.visible_entity_snapshot = Some(snapshot.clone());
+
+    let first = service.respond(req.clone()).await.unwrap();
+    let second = service.respond(req).await.unwrap();
+
+    assert!(
+        inspector.requests().is_empty(),
+        "short circuit must not call the LLM"
+    );
+    assert!(first.text.unwrap().contains("每日收尾"));
+    assert!(second.text.unwrap().contains("每日收尾"));
+
+    let after_first = service
+        .task_store
+        .get_by_id(&owner, &recurring.id)
+        .unwrap()
+        .unwrap();
+    let after_second = service
+        .task_store
+        .get_by_id(&owner, &recurring.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_first.status, TodoStatus::Pending);
+    assert_eq!(after_second.status, TodoStatus::Pending);
+    let expected_due = (today + Duration::days(1)).to_string();
+    assert_eq!(
+        after_first.due_date.as_deref(),
+        Some(expected_due.as_str()),
+        "first execution must advance exactly one cycle"
+    );
+    assert_eq!(
+        after_second.due_date.as_deref(),
+        Some(expected_due.as_str()),
+        "second execution must reuse the dedup output and not advance again"
+    );
 }
 
 #[tokio::test]

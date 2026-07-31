@@ -329,7 +329,13 @@ async fn execute_deterministic_todo(
         notification_store,
         ids,
     );
-    let context = tool_context_from_request(req);
+    // 确定性短路没有上游模型调用，因此没有 provider 下发的 call_id；这里派生
+    // 稳定 synthetic tool_call_id 并同时写入 ToolContext 与 ToolExecutionAttempt，
+    // 否则 TodoToolScope 的 dedup（task_id:tool_call_id）不生效，同一消息重发会
+    // 把重复待办推进多个周期。
+    let call_id = deterministic_tool_call_id(req, plan.action, &plan.numbers);
+    let mut context = tool_context_from_request(req);
+    context.tool_call_id = Some(call_id.clone());
     let arguments = json!({ "numbers": plan.numbers });
     let preparation = tool.prepare(&context, arguments)?;
     let output = tool.execute(context.clone(), preparation.arguments).await?;
@@ -346,7 +352,7 @@ async fn execute_deterministic_todo(
     };
     let attempt = ToolExecutionAttempt {
         result_index: 0,
-        call_id: String::new(),
+        call_id,
         round: 0,
         retry_of: None,
     };
@@ -390,6 +396,34 @@ async fn execute_deterministic_todo(
         },
         executed_tools,
     ))
+}
+
+/// 生成确定性 Todo 短路的稳定 synthetic tool_call_id。
+///
+/// 至少由入站 message_id（与 `tool_context_from_request` 的 task_id 同源）、
+/// 动作和规范化编号派生；同一 message_id + 动作 + 编号的重复请求会命中
+/// `TodoToolScope` 的 dedup 历史，避免重复推进重复待办周期，而不同消息 /
+/// 动作 / 编号必然产生不同 call id，不会跨请求串号。
+fn deterministic_tool_call_id(
+    req: &RespondRequest,
+    action: DeterministicTodoAction,
+    numbers: &[usize],
+) -> String {
+    let message_key = req
+        .message_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("no-message-id");
+    let action_key = match action {
+        DeterministicTodoAction::Complete => "complete",
+        DeterministicTodoAction::Restore => "restore",
+    };
+    let numbers_key = numbers
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("det-{action_key}:{message_key}:{numbers_key}")
 }
 
 impl RustRespondService {
