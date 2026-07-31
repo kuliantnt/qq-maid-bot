@@ -16,6 +16,7 @@ export type ConsoleTheme = {
 export type ConsoleThemePreference = {
   readonly preset: ConsoleThemePreset;
   readonly version: typeof CONSOLE_THEME_VERSION;
+  readonly customColors?: readonly string[];
 };
 
 export const CONSOLE_THEMES = {
@@ -70,10 +71,17 @@ export function defaultThemePreference(): ConsoleThemePreference {
   return { preset: DEFAULT_CONSOLE_THEME, version: CONSOLE_THEME_VERSION };
 }
 
+export function safeCustomColors(colors: readonly string[]): readonly string[] {
+  return colors.filter((color) => /^#[0-9a-f]{6}$/i.test(color)).slice(0, 3).map((color) => color.toUpperCase());
+}
+
 export type ThemeController = {
   readonly current: () => ConsoleThemePreference;
   readonly select: (preset: ConsoleThemePreset) => ConsoleThemePreference;
+  readonly apply: (preference: ConsoleThemePreference) => void;
   readonly reset: () => ConsoleThemePreference;
+  readonly applyCustomColors: (colors: readonly string[]) => ConsoleThemePreference;
+  readonly hydrate: (preference: { readonly preset?: string; readonly customColors?: readonly string[] }) => void;
 };
 
 export function createThemeController(storage: Storage | null, root: HTMLElement): ThemeController {
@@ -82,6 +90,11 @@ export function createThemeController(storage: Storage | null, root: HTMLElement
 
   return {
     current: () => current,
+    apply: (preference) => {
+      current = preference;
+      applyTheme(root, current);
+      writeStoredTheme(storage, current);
+    },
     select: (preset) => {
       current = { preset, version: CONSOLE_THEME_VERSION };
       applyTheme(root, current);
@@ -93,6 +106,20 @@ export function createThemeController(storage: Storage | null, root: HTMLElement
       applyTheme(root, current);
       removeStoredTheme(storage);
       return current;
+    },
+    applyCustomColors: (colors) => {
+      const customColors = safeCustomColors(colors);
+      current = { ...current, customColors };
+      applyTheme(root, current);
+      return current;
+    },
+    hydrate: (preference) => {
+      const preset = typeof preference.preset === "string" && isConsoleThemePreset(preference.preset)
+        ? preference.preset
+        : DEFAULT_CONSOLE_THEME;
+      const customColors = safeCustomColors(preference.customColors ?? []);
+      current = customColors.length === 3 ? { preset, version: CONSOLE_THEME_VERSION, customColors } : { preset, version: CONSOLE_THEME_VERSION };
+      applyTheme(root, current);
     },
   };
 }
@@ -129,6 +156,17 @@ function removeStoredTheme(storage: Storage | null): void {
 
 function applyTheme(root: HTMLElement, preference: ConsoleThemePreference): void {
   root.dataset.theme = preference.preset;
+  const colors = preference.customColors;
+  if (!root.style) return;
+  if (colors?.length === 3) {
+    root.style.setProperty("--console-dark", colors[0] ?? "");
+    root.style.setProperty("--console-light", colors[1] ?? "");
+    root.style.setProperty("--console-contrast", colors[2] ?? "");
+  } else {
+    root.style.removeProperty("--console-dark");
+    root.style.removeProperty("--console-light");
+    root.style.removeProperty("--console-contrast");
+  }
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {

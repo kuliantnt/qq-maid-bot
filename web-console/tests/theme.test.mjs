@@ -7,6 +7,7 @@ import {
   createThemeController,
   parseStoredTheme,
   serializeTheme,
+  safeCustomColors,
 } from "../dist/theme.js";
 
 test("缺失、损坏和未知主题回退到默认值且不改变存储格式", () => {
@@ -59,4 +60,9 @@ test("localStorage 失败时主题控制器继续使用内存状态", () => {
   assert.equal(root.dataset.theme, "ember-grid");
   controller.reset();
   assert.equal(root.dataset.theme, DEFAULT_CONSOLE_THEME);
+});
+
+test("自定义颜色只接受三个安全六位 hex 值", () => {
+  assert.deepEqual(safeCustomColors(["#abc", "red", "#112233", "#445566", "#778899"]), ["#112233", "#445566", "#778899"]);
+  assert.deepEqual(safeCustomColors(["#112233", "#445566"]), ["#112233", "#445566"]);
 });

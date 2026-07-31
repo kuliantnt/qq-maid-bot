@@ -16,7 +16,7 @@ import {
   renderOpenCodeProviders,
   renderOpenCodeRouteHints,
 } from "../opencode-providers.js";
-import type { ConfigFieldSnapshot, ConfigurationSnapshot } from "../types.js";
+import type { ConfigFieldSnapshot, ConfigurationSnapshot, UserFile, UserPreferences } from "../types.js";
 import type { ThemeController } from "../theme.js";
 import { renderThemeSelector } from "./theme-selector.js";
 import type { BackgroundController } from "../background.js";
@@ -203,6 +203,19 @@ export interface AutosaveBlurInput {
   readonly clearRequested?: boolean;
 }
 
+export interface UserDataController {
+  readonly preferences: UserPreferences;
+  readonly files: readonly UserFile[];
+  readonly updatePreferences: (patch: {
+    readonly customColors?: readonly string[];
+    readonly backgroundFileIds?: readonly string[];
+    readonly activeBackgroundFileId?: string | null;
+    readonly kuliantnt?: boolean;
+  }) => Promise<UserPreferences>;
+  readonly uploadFile?: (file: File) => Promise<UserFile>;
+  readonly deleteFile?: (file: UserFile) => Promise<void>;
+}
+
 export function shouldAutosaveOnBlur(input: AutosaveBlurInput): boolean {
   if (input.scope === "secret") {
     if (input.clearRequested === true) return input.configured === true;
@@ -314,22 +327,24 @@ let saveQueue: Promise<void> = Promise.resolve();
 export async function initializeConfiguration(
   themeController: ThemeController,
   backgroundController: BackgroundController,
+  userData: UserDataController | null = null,
 ): Promise<void> {
   currentThemeController = themeController;
   currentBackgroundController = backgroundController;
   current = await fetchConfiguration();
   bindAutosave();
-  render(current, themeController, backgroundController);
+  render(current, themeController, backgroundController, userData);
 }
 
 function render(
   snapshot: ConfigurationSnapshot,
   themeController: ThemeController,
   backgroundController: BackgroundController,
+  userData: UserDataController | null = null,
 ): void {
   current = snapshot;
   renderSummary(snapshot);
-  renderThemeSelector(element("console-theme-selector"), themeController, backgroundController);
+  renderThemeSelector(element("console-theme-selector"), themeController, backgroundController, userData);
   renderPublicFields(snapshot);
   renderSecretFields(snapshot);
   bindTtsProviderState();

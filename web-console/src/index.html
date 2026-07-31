@@ -24,6 +24,7 @@
         <img data-background-src="/console/background/09.png" alt="">
       </div>
     </div>
+    <div class="console-background console-background--custom" aria-hidden="true"></div>
     <div id="console-transition" class="console-transition" aria-hidden="true" hidden>
       <div class="console-transition-wash"></div>
       <img id="console-transition-image" class="console-transition-image" src="/console/background/default.png" alt="">
@@ -303,7 +304,7 @@
             <button id="save-agent-config" type="button">保存 Agent 策略</button>
           </section>
           <section id="configuration-panel-interface" class="configuration-tabpanel" role="tabpanel" aria-labelledby="configuration-primary-interface" hidden>
-            <p class="hint">主题是当前浏览器 origin 的本地偏好，不会发送到后端，也不会写入 runtime.toml、SQLite 或 secret store。</p>
+            <p class="hint">预设主题保留在本地；登录后自定义颜色与背景会保存到当前管理员的用户偏好。</p>
             <div class="configuration-content-group" data-configuration-group="theme" data-configuration-primary="interface">
               <div id="console-theme-selector" class="grouped-config-grid"></div>
             </div>
