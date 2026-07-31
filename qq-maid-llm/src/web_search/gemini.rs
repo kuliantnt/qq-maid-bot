@@ -237,12 +237,15 @@ async fn gemini_status_error(status: StatusCode, response: reqwest::Response) ->
             status.as_u16()
         )
     };
-    match status.as_u16() {
-        401 | 403 => LlmError::config(message),
+    let error = match status.as_u16() {
+        400 => LlmError::new("upstream_bad_request", message, "http"),
+        401 => LlmError::new("authentication_failed", message, "http"),
+        403 => LlmError::new("permission_denied", message, "http"),
         429 => LlmError::new("rate_limited", message, "http"),
         500..=599 => LlmError::new("upstream_unavailable", message, "http"),
         _ => LlmError::http(message),
-    }
+    };
+    error.with_upstream_status(status.as_u16())
 }
 
 fn extract_gemini_output_text(body: &Value) -> Option<String> {

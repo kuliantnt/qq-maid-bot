@@ -170,7 +170,8 @@ impl WebSearchExecutor for ResponsesWebSearchExecutor {
             &payload,
             false,
         )
-        .await?;
+        .await
+        .map_err(|err| err.with_upstream_context(self.provider.clone(), model.to_owned()))?;
 
         let body: Value = response.json().await.map_err(|err| {
             LlmError::provider(format!("invalid Responses web search JSON: {err}"), "json")
@@ -228,7 +229,8 @@ impl WebSearchExecutor for ResponsesWebSearchExecutor {
             &payload,
             true,
         )
-        .await?;
+        .await
+        .map_err(|err| err.with_upstream_context(self.provider.clone(), model.to_owned()))?;
 
         let mut frame_buffer = Vec::new();
         let mut answer = String::new();

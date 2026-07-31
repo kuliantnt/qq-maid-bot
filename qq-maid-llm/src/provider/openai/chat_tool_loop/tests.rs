@@ -26,6 +26,43 @@ fn recording_delta_sink(deltas: Arc<StdMutex<Vec<String>>>) -> AgentTextDeltaSin
     })
 }
 
+#[test]
+fn deepseek_streaming_tool_call_merges_name_id_and_all_argument_fragments() {
+    let mut calls = Vec::new();
+    merge_streaming_tool_calls(
+        &mut calls,
+        &[json!({
+            "index": 0,
+            "id": "call_search_1",
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "arguments": "{\"query\":\"2026 "
+            }
+        })],
+    )
+    .unwrap();
+    merge_streaming_tool_calls(
+        &mut calls,
+        &[json!({
+            "index": 0,
+            "function": {
+                "arguments": "AI news\",\"raw_question\":null}"
+            }
+        })],
+    )
+    .unwrap();
+
+    let calls = streaming_tool_calls_to_function_calls(calls).unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "web_search");
+    assert_eq!(calls[0].call_id, "call_search_1");
+    assert_eq!(
+        serde_json::from_str::<Value>(&calls[0].arguments).unwrap(),
+        json!({"query": "2026 AI news", "raw_question": null})
+    );
+}
+
 #[tokio::test]
 async fn streaming_tool_call_does_not_release_buffered_text_delta() {
     let mut messages = Vec::new();
