@@ -1,31 +1,32 @@
 # Web Console Design System
 
-本文件是生产 Web Console 的视觉和交互契约。Demo 的视觉实验记录在 `src/demo/DESIGN.md`，生产实现必须遵循本文，不能直接复制 Demo 的页面结构。
+本文件是生产 Web Console 的视觉和交互契约。
 
 ## 1. Atmosphere & Identity
 
-这是一个本地优先的运维控制台。它应该像安静、精确的控制室，而不是营销页面。页面使用浅色画布承载内容，深色液态玻璃承载状态栏和重要组件，对色负责文字、图标、边框和状态信号。识别性来自方形双线框体：外部 1px 线、1px 空隙、内部 1px 线。
+这是一个本地优先的运维控制台。它应该像安静、精确的控制室，而不是营销页面。默认使用低饱和黑灰背景，通过背景、面板、卡片和输入框的明暗关系建立层级；绿色只承担操作、焦点和成功信号。识别性来自方形双线框体：外部 1px 线、1px 空隙、内部 1px 线。
 
 生产页面采用“信号先于说明”的构图规则：页面标题只负责定位，主模块负责判断，旁侧模块负责扫描，长解释退到紧邻控件的短提示或原生 disclosure。Overview 是运行信号面板，Platforms 是身份卡与能力矩阵，Storage 是资源健康清单，Configuration 是控制面工作台，Tools 是编辑器与可信预览的分栏工作区。
 
 ## 2. Color
 
-每套主题只定义三种源色：`dark`、`light`、`contrast`。其他颜色必须由源色或固定状态语义推导，不在组件中散落硬编码颜色。
+每套主题定义完整语义色。基础色集中在 `src/theme.ts`，其他视觉状态只能从语义 token 推导，不在组件中散落硬编码颜色。
 
 | 角色 | CSS token | 用途 |
 |---|---|---|
-| 深色材质 | `--console-dark` | 状态栏、玻璃组件、导航容器 |
-| 浅色画布 | `--console-light` | 页面背景、留白、过渡区域 |
-| 对色 | `--console-contrast` | 正文、图标、边框、焦点、激活态 |
-| 主文字 | `--console-text` | 深色材质上的主要文字 |
-| 次文字 | `--console-muted` | 深色材质上的说明文字 |
-| 玻璃填充 | `--console-glass` | 半透明深色组件填充 |
-| 外框线 | `--console-line` | 外部 1px 边框 |
+| 页面背景 | `--console-background` | 页面基础画布 |
+| 一级面板 | `--console-surface` | 状态栏、面板、导航容器 |
+| 二级面板 | `--console-surface-secondary` | 次级分区和弱层级 |
+| 卡片 | `--console-card` | Provider、Todo、指标和编辑区域 |
+| 输入 | `--console-input` | 输入框、选择器和编辑器 |
+| 边框 | `--console-border` | 外部 1px 边框 |
+| 主文字 | `--console-text-primary` | 标题、正文和关键数据 |
+| 次文字 | `--console-text-secondary` | 说明、元数据和非活动状态 |
+| 强调 | `--console-accent` | 主操作、焦点和活动信号 |
 | 内框线 | `--console-line-inner` | 内部 1px 边框 |
-| 成功 | `--console-status-good` | 在线、可用、通过；使用色盲友好的蓝色和方形信号 |
-| 警告 | `--console-status-warn` | 待处理、未验证、未配置；使用黄色和菱形信号 |
-| 错误 | `--console-status-error` | 离线、失败、危险操作；使用橙色和三角形信号 |
-| 危险操作 | `--console-danger` | 重启、删除等操作按钮；由当前主题的对色派生，不固定为黄色 |
+| 成功 | `--console-success` | 在线、可用、通过；同时使用方形信号 |
+| 警告 | `--console-warning` | 待处理、未验证、未配置；同时使用菱形信号 |
+| 错误 | `--console-error` | 离线、失败、危险操作；同时使用三角形信号 |
 
 ### 新增可复用 token
 
@@ -40,8 +41,8 @@
 
 ### 规则
 
-- 页面画布使用 `--console-light`，不能让 `--console-dark` 铺满整个页面。
-- 文字和图标优先使用 `--console-contrast`，不能根据组件临时选择黑色或白色。
+- 页面层级依次使用 `background -> surface -> card/input`，不能靠大面积强调色区分区域。
+- 文字和图标优先使用主、次文字 token；强调色只用于操作、焦点、活动状态和成功信号。
 - 主题切换必须检查正文对比度至少 4.5:1，较大文字和图标至少 3:1。
 - 状态不能只靠颜色表达，必须同时有文本或可访问名称。
 - 状态信号不能只靠红绿差异表达；成功、警告、错误必须同时使用不同几何形状，且保留文本标签。
