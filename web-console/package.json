@@ -6,8 +6,6 @@
   "scripts": {
     "check": "tsc --noEmit",
     "build": "node scripts/build.mjs",
-    "check:demo": "tsc --noEmit --project tsconfig.demo.json",
-    "build:demo": "node scripts/build-demo.mjs",
     "test": "npm run build && node --test tests/*.test.mjs"
   },
   "devDependencies": {

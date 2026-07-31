@@ -45,7 +45,7 @@ npm run build
 
 5. 涉及 Rust 静态资源登记、响应头或 API DTO 时，再运行对应 Rust 测试；新增前端模块必须同步更新 `qq-maid-core/src/http/console_routes.rs` 的资源 allowlist。涉及缓存策略时，HTML 使用可重新验证的缓存，带有当前构建内容的静态 JS/CSS/图片才使用长期缓存。
 
-6. 提交时按功能拆分：页面/API/后端契约/文档分别保持可独立审查；不要提交 `scripts/deploy.conf`、密钥、`.omo/`、demo 临时目录或本地构建缓存。
+6. 提交时按功能拆分：页面/API/后端契约/文档分别保持可独立审查；不要提交 `scripts/deploy.conf`、密钥、`.omo/` 或本地构建缓存。
 
 7. 部署前先在本地完成上述检查，再由部署脚本或服务器兼容环境构建。部署重启会使内存中的管理员 session 失效，需要重新登录；管理员数据库、配置和 secrets 不应被部署流程覆盖。
 

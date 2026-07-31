@@ -1,6 +1,6 @@
 # Web Console Design System
 
-本文件是生产 Web Console 的视觉和交互契约。Demo 的视觉实验记录在 `src/demo/DESIGN.md`，生产实现必须遵循本文，不能直接复制 Demo 的页面结构。
+本文件是生产 Web Console 的视觉和交互契约。
 
 ## 1. Atmosphere & Identity
 
