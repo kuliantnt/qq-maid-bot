@@ -57,7 +57,7 @@ export function renderThemeSelector(target, controller, backgroundController, us
     const fieldset = document.createElement("fieldset");
     fieldset.className = "console-theme-selector";
     const legend = document.createElement("legend");
-    legend.textContent = "Color";
+    legend.textContent = "主题";
     fieldset.append(legend);
     const choices = document.createElement("div");
     choices.className = "console-theme-choices";
@@ -113,17 +113,20 @@ export function renderThemeSelector(target, controller, backgroundController, us
         const name = document.createElement("span");
         name.className = "console-theme-choice-name";
         name.textContent = theme.name;
+        const description = document.createElement("span");
+        description.className = "field-meta console-theme-choice-description";
+        description.textContent = theme.description;
         const preview = document.createElement("span");
         preview.className = "console-theme-preview";
-        preview.setAttribute("aria-label", `预览：深色材质、浅色画布、对色 ${theme.name}`);
-        for (const role of ["dark", "light", "contrast"]) {
+        preview.setAttribute("aria-label", `${theme.name} 的背景、卡片和强调色预览`);
+        for (const role of ["background", "card", "accent"]) {
             const swatch = document.createElement("span");
             swatch.className = `console-theme-swatch console-theme-swatch--${role}`;
             swatch.style.backgroundColor = theme[role];
-            swatch.title = role === "dark" ? "深色材质" : role === "light" ? "浅色画布" : "对色";
+            swatch.title = role === "background" ? "背景" : role === "card" ? "卡片" : "强调色";
             preview.append(swatch);
         }
-        label.append(input, name, preview);
+        label.append(input, name, description, preview);
         choices.append(label);
     }
     const reset = document.createElement("button");
@@ -199,12 +202,12 @@ export function renderThemeSelector(target, controller, backgroundController, us
         const custom = document.createElement("div");
         custom.className = "console-custom-theme-controls";
         const label = document.createElement("label");
-        label.textContent = "自定义颜色（深色、浅色、强调色）";
+        label.textContent = "自定义颜色（背景、主文字、强调色）";
         const input = document.createElement("input");
         input.type = "text";
         input.id = "custom-colors-input";
         input.value = userData.preferences.customColors.join(", ");
-        input.placeholder = "#07130F, #E9F4E7, #78E3AD";
+        input.placeholder = "#0D1117, #E6EDF3, #3FB950";
         const save = document.createElement("button");
         save.type = "button";
         save.className = "secondary";

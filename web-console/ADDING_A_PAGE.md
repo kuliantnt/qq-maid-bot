@@ -42,7 +42,7 @@ git diff --check
 
 ## 新增主题步骤
 
-按 `docs/THEME.md` 添加三色 preset。只写 `console-theme` localStorage，绝不添加后端字段、请求 header 或其他持久化 key。
+按 `docs/THEME.md` 添加完整语义 preset。预设只写 `console-theme` localStorage，绝不添加后端运行配置、请求 header 或其他持久化 key。
 
 ## 禁止事项
 

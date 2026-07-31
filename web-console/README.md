@@ -65,7 +65,7 @@ git diff --exit-code -- web-console/dist
 |---|---|
 | [DESIGN.md](DESIGN.md) | 生产设计系统、token、组件层和目标页面领域 |
 | [COMPONENT_REGISTRY.md](docs/COMPONENT_REGISTRY.md) | 可复用组件的结构、状态和扩展规则 |
-| [THEME.md](docs/THEME.md) | 三色主题预设和 localStorage-only 持久化协议 |
+| [THEME.md](docs/THEME.md) | 语义主题 token、预设和 localStorage 持久化协议 |
 | [API_CONTRACTS.md](docs/API_CONTRACTS.md) | 当前 API、认证边界和未来接口槽位 |
 | [INTERACTION_CONTRACTS.md](docs/INTERACTION_CONTRACTS.md) | 配置保存、修改、冲突、密钥和重启交互协议 |
 | [ADDING_A_PAGE.md](ADDING_A_PAGE.md) | 新增页面、组件、主题和 API 消费者的步骤 |
