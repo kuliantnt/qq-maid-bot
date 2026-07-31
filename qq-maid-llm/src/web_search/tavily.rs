@@ -399,10 +399,20 @@ fn tavily_transport_error(err: reqwest::Error) -> LlmError {
 async fn tavily_status_error(status: StatusCode, response: reqwest::Response) -> LlmError {
     let detail = response.text().await.unwrap_or_default();
     let detail = truncate_error_detail(&detail, 300);
-    match status.as_u16() {
+    let error = match status.as_u16() {
+        400 => LlmError::new(
+            "upstream_bad_request",
+            "Tavily rejected the search request",
+            "tavily_http",
+        ),
         401 => LlmError::new(
             "tavily_auth_error",
             "Tavily rejected the configured API key",
+            "tavily_http",
+        ),
+        403 => LlmError::new(
+            "permission_denied",
+            "Tavily denied access to the search API",
             "tavily_http",
         ),
         429 => LlmError::new("rate_limited", "Tavily rate limit exceeded", "tavily_http"),
@@ -411,11 +421,17 @@ async fn tavily_status_error(status: StatusCode, response: reqwest::Response) ->
             "Tavily plan or usage quota is exhausted",
             "tavily_http",
         ),
+        500..=599 => LlmError::new(
+            "upstream_unavailable",
+            format!("Tavily search returned HTTP {status}: {detail}"),
+            "tavily_http",
+        ),
         _ => LlmError::provider(
             format!("Tavily search returned HTTP {status}: {detail}"),
             "tavily_http",
         ),
-    }
+    };
+    error.with_upstream_status(status.as_u16())
 }
 
 #[cfg(test)]

@@ -1138,6 +1138,66 @@ async fn invalid_tool_arguments_are_emitted_and_attempted_but_not_executed() {
 }
 
 #[tokio::test]
+async fn repeated_identical_invalid_arguments_are_suppressed_without_second_failure_event() {
+    let calls = Arc::new(StdMutex::new(0));
+    let events = Arc::new(StdMutex::new(Vec::new()));
+    let progress_sink = {
+        let events = events.clone();
+        Arc::new(move |event: ToolLoopProgressEvent| {
+            let events = events.clone();
+            Box::pin(async move {
+                events.lock().unwrap().push(event);
+                Ok(())
+            }) as ToolLoopProgressFuture
+        })
+    };
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: calls.clone(),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+    let session = Box::new(ScriptedSession::new(
+        "deepseek",
+        "deepseek-v4-flash",
+        vec![
+            tool_calls(vec![tool_call("echo", "c1", "not-json")]),
+            tool_calls(vec![tool_call("echo", "c2", "not-json")]),
+            final_reply("参数无效，停止重试。"),
+        ],
+    ));
+
+    let outcome = run_agent_loop(
+        session,
+        registry,
+        test_context(),
+        3,
+        Some(progress_sink),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(*calls.lock().unwrap(), 0);
+    assert_eq!(outcome.agent.tool_results.len(), 2);
+    assert_eq!(
+        outcome.agent.tool_results[0].output["error"]["kind"],
+        "invalid_arguments"
+    );
+    assert_eq!(
+        outcome.agent.tool_results[1].output["retry_suppressed"],
+        true
+    );
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![ToolLoopProgressEvent::ToolCallFailed {
+            tool_name: "echo".to_owned()
+        }]
+    );
+}
+
+#[tokio::test]
 async fn dependency_skip_after_failure() {
     let fail_calls = Arc::new(StdMutex::new(0));
     let ok_calls = Arc::new(StdMutex::new(0));

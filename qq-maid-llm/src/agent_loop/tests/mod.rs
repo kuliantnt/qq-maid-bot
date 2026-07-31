@@ -421,7 +421,11 @@ impl crate::tool::Tool for FailOnceReadOnlyTool {
         let mut calls = self.calls.lock().unwrap();
         *calls += 1;
         if *calls == 1 {
-            return Err(LlmError::new("tool_failed", "simulated failure", "tool"));
+            return Err(LlmError::new(
+                "network_error",
+                "simulated transient failure",
+                "tool",
+            ));
         }
         Ok(ToolOutput::json(json!({
             "ok": true,

@@ -191,18 +191,33 @@ async fn same_model_name_routes_to_each_configured_responses_base_url() {
 
 #[tokio::test]
 async fn configured_responses_search_preserves_upstream_error() {
-    let (base_url, _state) = spawn_mock_search_with_status(
-        StatusCode::TOO_MANY_REQUESTS,
-        json!({"error": {"message": "xai quota exhausted"}}).to_string(),
-    )
-    .await;
-    let config = provider_config("xai", base_url);
-    let executor =
-        ResponsesWebSearchExecutor::new_configured(&config, "grok-4".to_owned(), 10).unwrap();
+    for (status, kind, retriable) in [
+        (StatusCode::BAD_REQUEST, "upstream_bad_request", false),
+        (StatusCode::UNAUTHORIZED, "authentication_failed", false),
+        (StatusCode::FORBIDDEN, "permission_denied", false),
+        (StatusCode::TOO_MANY_REQUESTS, "rate_limited", true),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "upstream_unavailable",
+            true,
+        ),
+    ] {
+        let (base_url, _state) = spawn_mock_search_with_status(
+            status,
+            json!({"error": {"message": "upstream diagnostic detail"}}).to_string(),
+        )
+        .await;
+        let config = provider_config("xai", base_url);
+        let executor =
+            ResponsesWebSearchExecutor::new_configured(&config, "grok-4".to_owned(), 10).unwrap();
 
-    let error = executor.query(request("grok-4")).await.unwrap_err();
+        let error = executor.query(request("grok-4")).await.unwrap_err();
 
-    assert_eq!(error.code, "rate_limited");
-    assert!(error.message.contains("xai quota exhausted"));
-    assert!(error.message.contains("xai Responses returned HTTP 429"));
+        assert_eq!(error.upstream_status, Some(status.as_u16()));
+        assert_eq!(error.error_kind(), kind);
+        assert_eq!(error.retriable(), retriable);
+        assert_eq!(error.upstream_provider(), Some("xai"));
+        assert_eq!(error.upstream_model(), Some("grok-4"));
+        assert!(error.message.contains("upstream diagnostic detail"));
+    }
 }

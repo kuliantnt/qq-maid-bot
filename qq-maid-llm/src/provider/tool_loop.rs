@@ -27,6 +27,8 @@ pub(crate) struct ToolLoopExecutor<'a> {
     execution_attempted: bool,
     rejected_call: bool,
     completed_read_only_calls: HashMap<String, String>,
+    /// 参数、配置、认证等确定性失败在同一请求内不会因模型再次调用而重复执行。
+    terminal_read_only_failures: HashMap<String, String>,
     execution_counts: HashMap<String, usize>,
     last_batch: Vec<BatchAttempt>,
     current_batch: Vec<BatchAttempt>,
@@ -67,6 +69,7 @@ pub(crate) struct PreparedToolLoopCall {
     call_id: String,
     round: usize,
     batch_len: usize,
+    raw_arguments: String,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +99,7 @@ impl<'a> ToolLoopExecutor<'a> {
             execution_attempted: false,
             rejected_call: false,
             completed_read_only_calls: HashMap::new(),
+            terminal_read_only_failures: HashMap::new(),
             execution_counts: HashMap::new(),
             tool_attempts: Vec::new(),
             last_batch: Vec::new(),
@@ -130,6 +134,7 @@ impl<'a> ToolLoopExecutor<'a> {
             call_id: call.call_id.to_owned(),
             round,
             batch_len,
+            raw_arguments: call.arguments.to_owned(),
         }
     }
 
@@ -154,6 +159,7 @@ impl<'a> ToolLoopExecutor<'a> {
             call_id,
             round,
             batch_len,
+            raw_arguments,
         } = call;
         let mut skipped_for_finalization = false;
         let mut stop_remaining_batch = false;
@@ -176,6 +182,14 @@ impl<'a> ToolLoopExecutor<'a> {
             prepared.context.tool_round = Some(round);
             prepared.context.retry_of = retry_of;
         }
+        let terminal_failure_key = match prepared.as_ref() {
+            Ok(prepared) if prepared.effect == ToolEffect::ReadOnly => prepared
+                .deduplication_key
+                .as_ref()
+                .map(|key| format!("{}:{key}", prepared.name)),
+            Err(_) => Some(format!("{requested_tool_name}:raw:{raw_arguments}")),
+            _ => None,
+        };
         let (tool_name, output, domain_succeeded, execution_succeeded, progress_disposition) =
             match prepared {
                 Ok(prepared) => {
@@ -185,6 +199,18 @@ impl<'a> ToolLoopExecutor<'a> {
                         .as_ref()
                         .map(|key| format!("{}:{key}", prepared.name));
                     if let Some(cached_output) = read_only_key
+                        .as_ref()
+                        .and_then(|key| self.terminal_read_only_failures.get(key))
+                    {
+                        debug!(tool = %tool_name, "agent terminal read-only failure suppressed");
+                        (
+                            tool_name,
+                            compact_terminal_failure(cached_output),
+                            false,
+                            false,
+                            ToolCallProgressDisposition::CacheHit,
+                        )
+                    } else if let Some(cached_output) = read_only_key
                         .as_ref()
                         .and_then(|key| self.completed_read_only_calls.get(key))
                     {
@@ -289,16 +315,35 @@ impl<'a> ToolLoopExecutor<'a> {
                     }
                 }
                 Err(err) => {
-                    self.rejected_call = true;
-                    (
-                        requested_tool_name,
-                        tool_error_output(&err),
-                        false,
-                        false,
-                        ToolCallProgressDisposition::FailedBeforeExecution,
-                    )
+                    if let Some(cached_output) = terminal_failure_key
+                        .as_ref()
+                        .and_then(|key| self.terminal_read_only_failures.get(key))
+                    {
+                        (
+                            requested_tool_name,
+                            compact_terminal_failure(cached_output),
+                            false,
+                            false,
+                            ToolCallProgressDisposition::CacheHit,
+                        )
+                    } else {
+                        self.rejected_call = true;
+                        (
+                            requested_tool_name,
+                            tool_error_output(&err),
+                            false,
+                            false,
+                            ToolCallProgressDisposition::FailedBeforeExecution,
+                        )
+                    }
                 }
             };
+        if progress_disposition != ToolCallProgressDisposition::CacheHit
+            && output_error_retriable(&output) == Some(false)
+            && let Some(key) = terminal_failure_key
+        {
+            self.terminal_read_only_failures.insert(key, output.clone());
+        }
         // 前序依赖只能使用领域成功。`empty_result` 虽然已完成网络请求，但不能成为
         // 依赖工具继续执行的事实依据。
         self.previous_call_succeeded = domain_succeeded;
@@ -427,9 +472,32 @@ fn tool_error_output(err: &LlmError) -> String {
             "code": err.code,
             "message": err.message,
             "stage": err.stage,
+            "kind": err.error_kind(),
+            "retriable": err.retriable(),
+            "upstream_status": err.upstream_status,
         }
     }))
     .unwrap_or_else(|_| r#"{"ok":false,"error":{"code":"tool_output_error","message":"failed to serialize tool error","stage":"tool_loop"}}"#.to_owned())
+}
+
+fn output_error_retriable(output: &str) -> Option<bool> {
+    serde_json::from_str::<Value>(output)
+        .ok()?
+        .get("error")?
+        .get("retriable")?
+        .as_bool()
+}
+
+fn compact_terminal_failure(output: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(output) else {
+        return output.to_owned();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return output.to_owned();
+    };
+    object.insert("deduplicated".to_owned(), Value::Bool(true));
+    object.insert("retry_suppressed".to_owned(), Value::Bool(true));
+    serde_json::to_string(&value).unwrap_or_else(|_| output.to_owned())
 }
 
 fn tool_skip_output(reason: &str) -> String {

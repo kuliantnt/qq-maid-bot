@@ -1,4 +1,6 @@
 use std::{
+    collections::VecDeque,
+    io,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -89,6 +91,61 @@ impl WebSearchExecutor for FailingWebSearchExecutor {
 }
 
 struct LargeWebSearchExecutor;
+
+#[derive(Clone)]
+struct ScriptedWebSearchExecutor {
+    outcomes: Arc<Mutex<VecDeque<Result<WebSearchOutcome, LlmError>>>>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl ScriptedWebSearchExecutor {
+    fn failures(errors: Vec<LlmError>) -> Self {
+        Self {
+            outcomes: Arc::new(Mutex::new(errors.into_iter().map(Err).collect())),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+#[async_trait]
+impl WebSearchExecutor for ScriptedWebSearchExecutor {
+    async fn query(&self, _req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("scripted web search outcome")
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "openai_responses"
+    }
+}
+
+#[derive(Clone)]
+struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+struct LogGuard(Arc<Mutex<Vec<u8>>>);
+
+impl io::Write for LogGuard {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogWriter {
+    type Writer = LogGuard;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        LogGuard(self.0.clone())
+    }
+}
 
 #[async_trait]
 impl WebSearchExecutor for LargeWebSearchExecutor {
@@ -237,6 +294,131 @@ async fn tavily_execution_failure_remains_retryable_tool_failure() {
         "Tavily rejected the configured API key"
     );
     assert_eq!(output.value["error"]["stage"], "tavily_http");
+}
+
+fn agent_search_argument_value() -> Value {
+    json!({
+        "query": "公开资料",
+        "raw_question": "联网查询公开资料",
+        "max_results": null,
+        "context_size": null,
+        "topic": null,
+        "time_range": null,
+        "research_targets": null,
+    })
+}
+
+fn upstream_error(status: u16) -> LlmError {
+    let code = match status {
+        429 => "rate_limited",
+        500..=599 => "upstream_unavailable",
+        _ => "http_error",
+    };
+    LlmError::new(code, format!("upstream returned HTTP {status}"), "http")
+        .with_upstream_status(status)
+        .with_upstream_context("codexauv", "grok-4.5")
+}
+
+async fn execute_scripted_failures(errors: Vec<LlmError>) -> (ToolOutput, usize) {
+    let executor = ScriptedWebSearchExecutor::failures(errors);
+    let calls = executor.calls.clone();
+    let tool = WebSearchTool::new(Arc::new(executor))
+        .with_backend_override(WebSearchBackend::ProviderNative)
+        .with_model_override("codexauv:grok-4.5".to_owned());
+    let mut context = test_context();
+    context.tool_call_id = Some("task-1:call-search".to_owned());
+    let output = tool
+        .execute(context, agent_search_argument_value())
+        .await
+        .unwrap();
+    (output, calls.load(Ordering::SeqCst))
+}
+
+#[tokio::test]
+async fn deterministic_web_search_failures_are_not_retried() {
+    for (status, kind) in [
+        (400, "upstream_bad_request"),
+        (401, "authentication_failed"),
+        (403, "permission_denied"),
+    ] {
+        let (output, calls) =
+            execute_scripted_failures(vec![upstream_error(status), upstream_error(status)]).await;
+        assert_eq!(calls, 1, "HTTP {status} must not retry");
+        assert_eq!(output.value["attempts"], 1);
+        assert_eq!(output.value["error"]["kind"], kind);
+        assert_eq!(output.value["error"]["retriable"], false);
+        assert_eq!(output.value["error"]["upstream_status"], status);
+    }
+
+    let missing = LlmError::new(
+        "web_search_not_configured",
+        "search credential is missing",
+        "config",
+    );
+    let (output, calls) = execute_scripted_failures(vec![missing.clone(), missing]).await;
+    assert_eq!(calls, 1);
+    assert_eq!(output.value["error"]["kind"], "missing_configuration");
+    assert_eq!(output.value["error"]["retriable"], false);
+}
+
+#[tokio::test]
+async fn transient_web_search_failures_have_one_bounded_retry() {
+    for error in [
+        upstream_error(429),
+        upstream_error(503),
+        LlmError::new("timeout", "upstream timed out", "http")
+            .with_upstream_context("codexauv", "grok-4.5"),
+        LlmError::new("http_error", "connection reset", "http")
+            .with_upstream_context("codexauv", "grok-4.5"),
+    ] {
+        let (output, calls) =
+            execute_scripted_failures(vec![error.clone(), error.clone(), error]).await;
+        assert_eq!(calls, WEB_SEARCH_MAX_ATTEMPTS);
+        assert_eq!(output.value["attempts"], WEB_SEARCH_MAX_ATTEMPTS);
+        assert_eq!(output.value["error"]["retriable"], true);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn web_search_failure_log_is_classified_and_secret_free() {
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(LogWriter(bytes.clone()))
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let error = LlmError::new(
+        "http_error",
+        "upstream rejected super-secret-key and private query",
+        "http",
+    )
+    .with_upstream_status(400)
+    .with_upstream_context("codexauv", "grok-4.5");
+
+    let (_output, calls) = execute_scripted_failures(vec![error]).await;
+    assert_eq!(calls, 1);
+    let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+    for field in [
+        "tool_name",
+        "tool_call_id",
+        "attempt",
+        "duration_ms",
+        "error_kind",
+        "retriable",
+        "backend",
+        "upstream_status",
+        "provider",
+        "model",
+        "failure_layer",
+    ] {
+        assert!(logs.contains(field), "missing log field {field}: {logs}");
+    }
+    assert!(logs.contains("upstream_bad_request"));
+    assert!(logs.contains("codexauv"));
+    assert!(logs.contains("grok-4.5"));
+    assert!(!logs.contains("super-secret-key"));
+    assert!(!logs.contains("private query"));
 }
 
 #[tokio::test]
