@@ -457,6 +457,21 @@ impl Tool for WebSearchTool {
                 return Err(err);
             }
         };
+        // Issue #361 诊断：联网查询前后只记录尺寸/计数与内存，不记录查询正文。
+        // 进程内存采样放进 DEBUG 门控，默认级别不触碰 /proc 读取。
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let before_mem = qq_maid_common::process_mem::process_memory_sample();
+            tracing::debug!(
+                tool = WEB_SEARCH_TOOL_NAME,
+                query_chars = request.query.chars().count(),
+                max_results = request.max_results,
+                rss_kb = before_mem.rss_kb,
+                vm_size_kb = before_mem.vm_size_kb,
+                pss_kb = before_mem.pss_kb,
+                private_dirty_kb = before_mem.private_dirty_kb,
+                "before_web_search"
+            );
+        }
         let (outcome, attempts) = self
             // Agent 最终回复仍由模型统一生成，但搜索上游必须复用 `/查` 的 SSE 路径，
             // 不能因进入 Tool Loop 退化成完整非流请求。
@@ -907,6 +922,10 @@ fn log_web_search_execution(
     output: &Value,
     multi_entity_research: bool,
 ) {
+    // 该函数只输出 DEBUG 诊断：默认级别不触碰输出正文计数、`/proc` 采样。
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
     let query_chars = if multi_entity_research {
         0
     } else {
@@ -937,6 +956,7 @@ fn log_web_search_execution(
         .get("execution_succeeded")
         .and_then(Value::as_bool)
         .unwrap_or_else(|| output.get("ok").and_then(Value::as_bool).unwrap_or(false));
+    let mem = qq_maid_common::process_mem::process_memory_sample();
     tracing::debug!(
         tool = WEB_SEARCH_TOOL_NAME,
         tool_call_id = context.tool_call_id.as_deref().unwrap_or("direct"),
@@ -965,6 +985,10 @@ fn log_web_search_execution(
             .and_then(|value| value.as_bool())
             .unwrap_or(false),
         execution_succeeded,
+        rss_kb = mem.rss_kb,
+        vm_size_kb = mem.vm_size_kb,
+        pss_kb = mem.pss_kb,
+        private_dirty_kb = mem.private_dirty_kb,
         error_code = output
             .get("error")
             .and_then(|error| error.get("code"))

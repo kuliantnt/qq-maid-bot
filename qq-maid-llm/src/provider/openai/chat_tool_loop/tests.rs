@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent_loop::{AgentTextDeltaFuture, run_agent_loop};
+use crate::context_budget::estimated_json_chars;
 use crate::provider::test_support::{WeatherToolStub, test_tool_context};
 use crate::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
 use async_trait::async_trait;
@@ -573,7 +574,7 @@ fn tool_loop_budget_ignores_transport_only_payload_fields() {
             output_reserve_chars: 20,
             protected_recent_turns: 0,
         }),
-        &payload,
+        payload,
     )
     .unwrap();
 }
@@ -605,7 +606,7 @@ fn chat_tool_loop_budget_keeps_large_structured_image_payload() {
             output_reserve_chars: 200,
             protected_recent_turns: 0,
         }),
-        &payload,
+        payload.clone(),
     )
     .unwrap();
 

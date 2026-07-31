@@ -4,12 +4,14 @@ use chrono::TimeZone;
 use qq_maid_common::markdown::to_chat_text;
 use qq_maid_common::{
     identity_context::{
-        ConversationContext, IdentitySource, MentionConfidence, MentionIdentity,
+        ConversationContext, ConversationKind, IdentitySource, MentionConfidence, MentionIdentity,
         MessageActorContext, MessageContext,
     },
     input_part::{MediaStatus, MessageInputPart, MessageMedia, QuotedMessageContext, TextSource},
 };
 use qq_maid_llm::provider::types::TokenUsage;
+
+use super::super::common::tool_conversation_from_request;
 
 mod history;
 mod quote_boundary;

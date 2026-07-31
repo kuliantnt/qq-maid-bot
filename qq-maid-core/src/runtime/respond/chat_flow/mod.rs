@@ -631,6 +631,20 @@ impl RustRespondService {
         if mode == KnowledgeRetrievalMode::Tool {
             return Ok(KnowledgeContextOutcome::skipped());
         }
+        // Issue #361 诊断：知识检索阶段只输出尺寸/计数，不输出证据正文。
+        // 采样与计数全部放进 DEBUG 门控，默认级别不触碰 /proc 读取。
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let before_mem = qq_maid_common::process_mem::process_memory_sample();
+            tracing::debug!(
+                knowledge_mode = %mode.as_str(),
+                user_text_chars = user_text.trim().chars().count(),
+                rss_kb = before_mem.rss_kb,
+                vm_size_kb = before_mem.vm_size_kb,
+                pss_kb = before_mem.pss_kb,
+                private_dirty_kb = before_mem.private_dirty_kb,
+                "before_knowledge_search"
+            );
+        }
         let evidence = match mode {
             KnowledgeRetrievalMode::Preflight => {
                 self.knowledge_index.search_preflight_evidence(user_text)
@@ -676,6 +690,26 @@ impl RustRespondService {
             });
         }
         let hit_count = evidence.diagnostics.returned_chunk_count;
+        // Issue #361 诊断：证据字符数与进程内存采样只在 DEBUG 开启时计算，
+        // 避免默认级别为诊断迭代证据正文。
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let after_mem = qq_maid_common::process_mem::process_memory_sample();
+            tracing::debug!(
+                knowledge_mode = %mode.as_str(),
+                candidate_count,
+                hit_count,
+                evidence_chars = evidence
+                    .items
+                    .iter()
+                    .map(|item| item.body_excerpt.chars().count())
+                    .sum::<usize>(),
+                rss_kb = after_mem.rss_kb,
+                vm_size_kb = after_mem.vm_size_kb,
+                pss_kb = after_mem.pss_kb,
+                private_dirty_kb = after_mem.private_dirty_kb,
+                "after_knowledge_search"
+            );
+        }
         Ok(KnowledgeContextOutcome {
             context: crate::runtime::tools::knowledge::render_context(&evidence),
             hit_count,

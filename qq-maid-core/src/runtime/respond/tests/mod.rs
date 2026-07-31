@@ -15,6 +15,7 @@ mod slash_pending;
 pub(crate) mod support;
 mod todo;
 mod todo_agent;
+mod todo_deterministic;
 mod todo_receipt;
 mod todo_tool_loop;
 mod train;

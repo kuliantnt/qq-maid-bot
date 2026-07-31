@@ -8,6 +8,7 @@ pub mod identity_context;
 pub mod input_part;
 pub mod markdown;
 pub mod output_part;
+pub mod process_mem;
 pub mod redaction;
 pub mod text;
 pub mod time_context;

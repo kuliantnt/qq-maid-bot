@@ -40,7 +40,7 @@ pub(super) fn respond_meta(req: &RespondRequest) -> SessionMeta {
     )
 }
 
-pub(super) fn respond_interaction_meta(req: &RespondRequest) -> SessionMeta {
+pub(crate) fn respond_interaction_meta(req: &RespondRequest) -> SessionMeta {
     let mut meta = respond_meta(req);
     if req
         .group_id
