@@ -17,32 +17,23 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.22.2`，项目处于 `22.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.23.0`，项目处于 `23.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
-## 22.x 版本线更新
+## 23.x 版本线更新
+
+- **控制台用户数据与 Provider 路由扩展**（v0.23.0）：部署管理员可通过受保护 API 管理自己的控制台偏好和通用文件；自定义 Provider 复用统一图片请求、保留完整 `provider:model` 候选身份，并支持按 Provider 路由原生 Responses 搜索与认证失败后的候选切换。
+
+### 更早版本（22.x）
 
 - **Todo 管理 API 与 QQ 引用可靠性**（v0.22.2）：部署管理员可通过受保护的全局 API 管理真实平台 Todo 和发现提醒目标；QQ 官方一级图文引用、Tool Loop 图片预算与被忽略群消息的引用恢复更稳定，群成员详情补全改为默认关闭。
 - **主动推送成员提醒**（v0.22.1）：群聊个人 Todo 提醒会准确 @ 实际归属成员；QQ 官方使用 `<@user_id>` 协议，OneBot 11 使用原生 `at` segment，并对私聊、共享 Todo、无效成员 ID 和 RefIndex 脱敏保持安全边界。
 - **QQ 语音回复与 Provider 扩展**（v0.22.0）：QQ 官方私聊和群聊支持按会话开启千问 TTS 最终回复；Web 控制台补齐全局 TTS 配置卡片，同时新增 OpenCode Zen / Go Provider、未知 Slash 确定性收口和知识库 embedding 内存限制。
 
-### 更早版本（21.x）
-
-- **联网搜索与群聊触发修复**（v0.21.6）：收紧长结果、嵌套调研和空结果的搜索证据语义，补充 `/todo daily status` 帮助，并避免 @全体成员误触发机器人。
-- **QQ 群消息触发修复**（v0.21.5）：修复群聊 @ 机器人识别和 mention 文本污染，兼容 `GROUP_AT_MESSAGE_CREATE`、稳定机器人身份匹配及旧事件字段，同时避免误触发其它机器人。
-- **QQ API v2 消息协议与富媒体上传**（v0.21.4）：对齐图片分片上传、入站消息归一化、稳定群聊 @ 判断和复合消息去重；收紧 ARK、临时上传 URL 与被动回复分段的安全边界。
-- **引用图文与工具领域边界**（v0.21.3）：修复 QQ 引用图文消息超时与 `/ping` 应用版本注入；收敛 Todo / Memory / RSS 等工具领域边界，降低跨领域耦合。
-- **主包版本诊断与工具结果验真**（v0.21.2）：`/ping` 显示根主包版本；收紧自然语言状态提示，并要求 Todo 成功文案必须由真实写工具结果支撑；同轮重复只读搜索只展示首次结果。
-- **群管理员 Todo 与 Agent 模板**（v0.21.1）：群主 / 管理员可用 `/todo group` 查看并删除本群未完成 Todo；Release 提供 `agent.example.toml`，首次启动从内嵌模板生成活动 `config/agent.toml`。
-- **多平台部署主线**（v0.21.0）：同一二进制覆盖 QQ 官方、OneBot、微信入口，以及 Linux / Windows / Docker 部署路径；新增 GHCR 多架构镜像、Compose 覆盖、配置迁移与备份恢复 CLI。
-- **Docker 与测试环境**（PR #562）：`linux/amd64` / `linux/arm64` 原生构建推送 GHCR，默认不映射管理端口，按需叠加 console / OneBot / 微信 override；测试环境可按 digest 自动部署与失败回滚。
-- **配置迁移与备份恢复**（PR #565）：`config migrate`、`backup create/verify/restore` 默认 dry-run，支持旧 dotenv 保守导入、SQLite 一致性快照和干净目录恢复。
-- **可选 Web 安装**（PR #565）：`qbot install --web false` 可关闭控制台，仅用 CLI / 文件配置；部署侧显式关闭具有安全优先级。
-
 ### 配置方式变化
 
-0.19 及之前需要在 `config/.env` 中手写凭证和开关；0.20 起推荐新部署走 `/console/` 引导；0.21 起 Docker / Release / 源码共用同一配置中心与运维 CLI，旧 `.env` 部署继续可用。
+0.19 及之前需要在 `config/.env` 中手写凭证和开关；0.20 起推荐新部署走 `/console/` 引导，Docker / Release / 源码共用同一配置中心与运维 CLI，旧 `.env` 部署继续可用。
 
 完整变更与升级说明见 [CHANGELOG.md](./CHANGELOG.md)。
 
@@ -143,7 +134,7 @@ runtime/botctl.sh status
 
 ## 配置方式
 
-v0.20.x 起推荐新部署通过 `/console/` 网页完成配置；v0.21.0 起也可在安装时选择关闭 Web，仅用 `qbot config` 与文件配置。启用控制台时，启动后浏览器打开 `http://127.0.0.1:8787/console/`，从启动日志中找到 `bootstrap.token` 建立首位管理员，按向导分步保存。旧 `.env` 部署可继续使用，也可先 `qq-maid-bot config migrate` dry-run 再显式导入。
+v0.20.x 起推荐新部署通过 `/console/` 网页完成配置，也可在安装时选择关闭 Web，仅用 `qbot config` 与文件配置。启用控制台时，启动后浏览器打开 `http://127.0.0.1:8787/console/`，从启动日志中找到 `bootstrap.token` 建立首位管理员，按向导分步保存。旧 `.env` 部署可继续使用，也可先 `qq-maid-bot config migrate` dry-run 再显式导入。
 
 配置分为多层：
 
@@ -280,6 +271,7 @@ flowchart LR
 | [runtime/README.md](./runtime/README.md) | 运行目录、环境变量、控制脚本和诊断细节 |
 | [Docker 与 Compose 部署](./docs/deployment/docker.md) | GHCR、容器首次启动、持久化、多实例、测试部署和回滚 |
 | [配置迁移、备份恢复与安全升级](./docs/deployment/migration-backup.md) | CLI 预检、旧配置 dry-run、SQLite 一致性备份、恢复和 schema 回滚边界 |
+| [控制台用户数据 API](./docs/development/console-user-data-api.md) | 独立前端使用的用户偏好与通用文件接口契约 |
 | [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | 开发环境、架构边界、常用命令和检查要求 |
 | [Gateway README](./qq-maid-gateway-rs/README.md) | 平台事件和消息发送实现 |
 | [Core README](./qq-maid-core/README.md) | 会话、命令和业务编排实现 |
