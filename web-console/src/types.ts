@@ -30,6 +30,22 @@ export interface AdminSession {
   expiresAt: number;
 }
 
+export interface UserPreferences {
+  readonly customColors: readonly string[];
+  readonly backgroundFileIds: readonly string[];
+  readonly activeBackgroundFileId: string | null;
+  readonly kuliantnt: boolean;
+}
+
+export interface UserFile {
+  readonly fileId: string;
+  readonly filename: string;
+  readonly contentType: string;
+  readonly size: number;
+  readonly createdAt: string;
+  readonly url: string;
+}
+
 export interface BootstrapStatus {
   initialized: boolean;
   setupRequired: boolean;
@@ -210,4 +226,12 @@ export interface TodoTargetOption {
   userId: string | null;
   groupId: string | null;
   reminderSupported: boolean;
+}
+
+export interface TodoTargetPage {
+  items: TodoTargetOption[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
 }
