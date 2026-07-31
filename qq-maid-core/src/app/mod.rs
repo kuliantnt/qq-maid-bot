@@ -11,7 +11,7 @@ use crate::{
     http::console::ConsoleCoreSummary,
     http::console::{ConsoleToolMetadata, DynConsoleStatusSource, EmptyConsoleStatusSource},
     http::routes::{OpsHttpState, build_router},
-    management::AdminAuth,
+    management::{AdminAuth, ConsoleUserDataService},
     runtime::push::PushSink,
     storage::database::SqliteDatabase,
 };
@@ -41,6 +41,7 @@ pub struct ManagementRuntime {
 impl ManagementRuntime {
     pub fn new(
         config: ManagementBootstrapConfig,
+        database: SqliteDatabase,
         config_center: ConfigCenter,
         admin_auth: Option<AdminAuth>,
         application_version: &str,
@@ -62,7 +63,8 @@ impl ManagementRuntime {
             summary,
             config_center,
             admin_auth,
-        );
+        )
+        .with_console_user_data(ConsoleUserDataService::new(database));
         Ok(Self { addr, http_state })
     }
 
@@ -145,6 +147,7 @@ impl LlmRuntime {
         application_version: &'static str,
     ) -> anyhow::Result<Self> {
         let addr: SocketAddr = format!("{}:{}", config.server_host, config.server_port).parse()?;
+        let console_user_data = ConsoleUserDataService::new(database.clone());
         let core_state = CoreRuntimeState::from_config_with_database(config, database)?;
         let registered_tools = crate::service::CoreHandle::new(core_state.clone())
             .registered_tool_metadata()
@@ -167,6 +170,7 @@ impl LlmRuntime {
             core_state.stores.todo_store.clone(),
             core_state.stores.notification_store.clone(),
         ))
+        .with_console_user_data(console_user_data)
         .with_registered_tools(registered_tools);
         let workers = CoreWorkers::from_runtime_state(&core_state, push_sink)?;
 

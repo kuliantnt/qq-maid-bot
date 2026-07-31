@@ -28,6 +28,7 @@
 | --- | --- |
 | [配置中心设计与字段清单](./development/config-center.md) | 受管 TOML、环境覆盖、secret 与主密钥边界 |
 | [管理 API 约定](./development/management-api.md) | 管理员认证、统一响应、分页与 Todo 管理 API |
+| [控制台用户数据 API](./development/console-user-data-api.md) | 独立前端使用的用户偏好与通用文件接口契约 |
 | [自定义 Tool 指南](./development/custom-tools.md) | Tool 注册、场景白名单、领域后处理与安全要求 |
 | [Gateway README](../qq-maid-gateway-rs/README.md) | 平台事件、消息发送、主动推送与 `/ping` |
 | [Core README](../qq-maid-core/README.md) | `CoreService`、会话、命令、业务 Tool 和 HTTP facade |

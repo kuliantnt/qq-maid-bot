@@ -2,7 +2,7 @@
 
 本文面向项目开发者和维护者，保留仓库级架构边界、开发命令、维护约定和检查规则。运行目录、部署、私有配置和运行数据细节已经分流到 [runtime/README.md](../runtime/README.md)；QQ 官方 gateway 细节见 [qq-maid-gateway-rs/README.md](../qq-maid-gateway-rs/README.md)；Rust Core 模块细节见 [qq-maid-core/README.md](../qq-maid-core/README.md)。
 
-当前稳定版本线为 `22.x`（`v0.22.2`）；发布变更与升级边界见 [CHANGELOG.md](../CHANGELOG.md)。
+当前稳定版本线为 `23.x`（`v0.23.0`）；发布变更与升级边界见 [CHANGELOG.md](../CHANGELOG.md)。
 
 如果只是第一次了解项目，请先阅读 [README.md](../README.md)。
 
@@ -109,6 +109,7 @@ make run
 - [config-center.md](./development/config-center.md)：受管 TOML、外部覆盖、敏感密文与主密钥边界。
 - [custom-tools.md](./development/custom-tools.md)：自定义 Tool 的注册、场景白名单、领域后处理和安全要求。
 - [management-api.md](./development/management-api.md)：管理员资源 API 的通用认证、响应、分页与 Todo 契约。
+- [console-user-data-api.md](./development/console-user-data-api.md)：独立前端使用的当前用户偏好与通用文件 API 契约。
 - [web-console/README.md](../web-console/README.md)：替代旧前端的 TypeScript Console 源码、可复现构建、嵌入产物与增量修改流程。
 - [response-event-runtime.md](./design/response-event-runtime.md)：统一响应事件流的现状基线、事件模型和分阶段迁移边界。
 
@@ -164,7 +165,7 @@ make clean
 Rust HTTP 层只公开外部运维 / 管理能力：
 
 - 始终公开：`GET /healthz`。
-- 仅在 `WEB_CONSOLE_ENABLED=true` 时公开：`GET /console/`、`GET /console/{asset}`、控制台认证/状态/配置接口、`POST /api/v1/markdown/render`，以及受管理员 Session、同源和 CSRF 保护的全局 Todo 管理 API。管理员 actor 不参与 Todo owner/scope；目标引用、全局分页、提醒 Outbox 原子写入和统一响应约定见 [管理 API 约定](./development/management-api.md)。
+- 仅在 `WEB_CONSOLE_ENABLED=true` 时公开：`GET /console/`、`GET /console/{asset}`、控制台认证/状态/配置接口、`POST /api/v1/markdown/render`，以及受管理员 Session、同源和 CSRF 保护的资源管理 API。管理员 actor 不参与 Todo owner/scope，但作为用户偏好和文件的私有归属；目标引用、全局分页、文件隔离和统一响应约定见 [管理 API 约定](./development/management-api.md)。
 
 旧 HTTP 路由 `/query`、HTTP `/memory`、`/v1/chat` 和内部 respond 主入口不再公开。查询、记忆、待办、会话和 RSS 都通过 `CoreService::respond` 进程内命令流程承载。
 

@@ -15,6 +15,9 @@ use crate::storage::database::{SqliteMigration, is_compatible_historical_migrati
 const MANIFEST_FILE: &str = "manifest.toml";
 const DATABASE_FILE: &str = "database/app.db";
 const CONFIG_DIRECTORY: &str = "config";
+const CONSOLE_FILES_DIRECTORY: &str = "console-files";
+const LEGACY_FORMAT_VERSION: u32 = 1;
+const CURRENT_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{code}: {message}")]
@@ -81,6 +84,7 @@ pub struct RestorePlan {
     pub target_root: PathBuf,
     pub database_destination: PathBuf,
     pub config_destination: PathBuf,
+    pub format_version: u32,
     pub file_count: usize,
     pub includes_secret_material: bool,
     pub warnings: Vec<String>,
@@ -117,10 +121,16 @@ pub fn create_backup(
     create_private_directory(&partial)?;
     create_private_directory(&partial.join("database"))?;
     create_private_directory(&partial.join(CONFIG_DIRECTORY))?;
+    create_private_directory(&partial.join(CONSOLE_FILES_DIRECTORY))?;
 
     let database_destination = partial.join(DATABASE_FILE);
     online_backup(&options.database_file, &database_destination)?;
     validate_database(&database_destination)?;
+    copy_console_files_from_snapshot(
+        &database_destination,
+        &options.database_file,
+        &partial.join(CONSOLE_FILES_DIRECTORY),
+    )?;
     copy_config_tree(
         &options.config_directory,
         &partial.join(CONFIG_DIRECTORY),
@@ -146,7 +156,7 @@ pub fn create_backup(
         )));
     }
     let manifest = BackupManifest {
-        format_version: 1,
+        format_version: CURRENT_FORMAT_VERSION,
         application_version: options.application_version.clone(),
         created_at_unix: SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -189,14 +199,11 @@ pub fn verify_backup(
     known_migrations: &[SqliteMigration],
 ) -> Result<BackupManifest, BackupError> {
     require_regular_directory(bundle, "backup bundle")?;
-    let manifest_path = bundle.join(MANIFEST_FILE);
-    let manifest_bytes = read_regular_file(&manifest_path, "backup manifest")?;
-    let manifest = toml::from_str::<BackupManifest>(
-        std::str::from_utf8(&manifest_bytes)
-            .map_err(|_| BackupError::invalid("backup manifest must be UTF-8"))?,
-    )
-    .map_err(|error| BackupError::invalid(format!("invalid backup manifest: {error}")))?;
-    if manifest.format_version != 1 {
+    let manifest = read_manifest(bundle)?;
+    if !matches!(
+        manifest.format_version,
+        LEGACY_FORMAT_VERSION | CURRENT_FORMAT_VERSION
+    ) {
         return Err(BackupError::invalid(format!(
             "unsupported backup format version {}",
             manifest.format_version
@@ -213,6 +220,9 @@ pub fn verify_backup(
         ));
     }
     validate_database(&bundle.join(DATABASE_FILE))?;
+    if manifest.format_version == CURRENT_FORMAT_VERSION {
+        verify_console_files(bundle, &manifest)?;
+    }
     let applied = applied_migrations(&bundle.join(DATABASE_FILE))?;
     if applied != manifest.database_migrations {
         return Err(BackupError::invalid(
@@ -261,6 +271,7 @@ pub fn plan_restore(
         target_root: target_root.to_path_buf(),
         database_destination: target_root.join("data/storage/app.db"),
         config_destination: target_root.join(CONFIG_DIRECTORY),
+        format_version: manifest.format_version,
         file_count: manifest.files.len(),
         includes_secret_material: manifest.includes_secret_material,
         warnings,
@@ -288,8 +299,167 @@ pub fn restore_backup(
     create_private_directory(&target_root.join("data/storage"))?;
     copy_regular_file(&bundle.join(DATABASE_FILE), &plan.database_destination)?;
     copy_tree_all(&bundle.join(CONFIG_DIRECTORY), &plan.config_destination)?;
+    if plan.format_version == CURRENT_FORMAT_VERSION {
+        copy_tree_all(
+            &bundle.join(CONSOLE_FILES_DIRECTORY),
+            &target_root.join("data/storage/console-files"),
+        )?;
+    }
     validate_database(&plan.database_destination)?;
     Ok(plan)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConsoleFileRecord {
+    storage_filename: String,
+    size: u64,
+}
+
+/// 文件集合以已经完成的 SQLite 快照为准。上传尚未写入元数据的孤儿文件会被忽略；
+/// 删除已暂存但快照仍引用的文件会让本次备份失败，调用方可在并发操作结束后重试。
+fn copy_console_files_from_snapshot(
+    snapshot_database: &Path,
+    source_database: &Path,
+    destination: &Path,
+) -> Result<(), BackupError> {
+    let records = console_file_records(snapshot_database)?;
+    if records.is_empty() {
+        return Ok(());
+    }
+    let source_root = source_database
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(CONSOLE_FILES_DIRECTORY);
+    require_regular_directory(&source_root, "console file source")?;
+    for record in records {
+        validate_storage_filename(&record.storage_filename)?;
+        let source = source_root.join(&record.storage_filename);
+        let metadata = require_regular_file_metadata(&source, "console file source")?;
+        if metadata.len() != record.size {
+            return Err(BackupError::invalid(format!(
+                "console file '{}' size does not match database snapshot",
+                record.storage_filename
+            )));
+        }
+        let copied = destination.join(&record.storage_filename);
+        copy_regular_file(&source, &copied)?;
+        if require_regular_file_metadata(&copied, "backup console file")?.len() != record.size {
+            return Err(BackupError::invalid(format!(
+                "console file '{}' changed while the backup was being created",
+                record.storage_filename
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn verify_console_files(bundle: &Path, manifest: &BackupManifest) -> Result<(), BackupError> {
+    let directory = bundle.join(CONSOLE_FILES_DIRECTORY);
+    require_regular_directory(&directory, "backup console file directory")?;
+    let records = console_file_records(&bundle.join(DATABASE_FILE))?;
+    let expected = records
+        .iter()
+        .map(|record| {
+            validate_storage_filename(&record.storage_filename)?;
+            Ok(format!(
+                "{CONSOLE_FILES_DIRECTORY}/{}",
+                record.storage_filename
+            ))
+        })
+        .collect::<Result<HashSet<_>, BackupError>>()?;
+    let actual = manifest
+        .files
+        .keys()
+        .filter(|path| path.starts_with(&format!("{CONSOLE_FILES_DIRECTORY}/")))
+        .cloned()
+        .collect::<HashSet<_>>();
+    if actual != expected {
+        return Err(BackupError::invalid(
+            "console file list does not match database snapshot",
+        ));
+    }
+    for record in records {
+        let path = directory.join(&record.storage_filename);
+        let metadata = require_regular_file_metadata(&path, "backup console file")?;
+        if metadata.len() != record.size {
+            return Err(BackupError::invalid(format!(
+                "console file '{}' size does not match database snapshot",
+                record.storage_filename
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn console_file_records(database: &Path) -> Result<Vec<ConsoleFileRecord>, BackupError> {
+    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| BackupError::io("open console file metadata", error))?;
+    let table_exists = connection
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM sqlite_master
+               WHERE type='table' AND name='console_user_files'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| BackupError::io("inspect console file metadata", error))?;
+    if !table_exists {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT storage_filename, size
+             FROM console_user_files
+             ORDER BY storage_filename",
+        )
+        .map_err(|error| BackupError::io("read console file metadata", error))?;
+    let rows = statement
+        .query_map([], |row| {
+            let size = row.get::<_, i64>(1)?;
+            let size = u64::try_from(size).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Integer,
+                    Box::new(error),
+                )
+            })?;
+            Ok(ConsoleFileRecord {
+                storage_filename: row.get(0)?,
+                size,
+            })
+        })
+        .map_err(|error| BackupError::io("query console file metadata", error))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| BackupError::io("decode console file metadata", error))
+}
+
+fn validate_storage_filename(storage_filename: &str) -> Result<(), BackupError> {
+    let Some(uuid) = storage_filename.strip_suffix(".blob") else {
+        return Err(BackupError::invalid(
+            "console file storage filename in database snapshot is invalid",
+        ));
+    };
+    let parsed = uuid::Uuid::parse_str(uuid).map_err(|_| {
+        BackupError::invalid("console file storage filename in database snapshot is invalid")
+    })?;
+    if parsed.hyphenated().to_string() != uuid
+        || Path::new(storage_filename).components().count() != 1
+    {
+        return Err(BackupError::invalid(
+            "console file storage filename in database snapshot is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn read_manifest(bundle: &Path) -> Result<BackupManifest, BackupError> {
+    let manifest_bytes = read_regular_file(&bundle.join(MANIFEST_FILE), "backup manifest")?;
+    toml::from_str::<BackupManifest>(
+        std::str::from_utf8(&manifest_bytes)
+            .map_err(|_| BackupError::invalid("backup manifest must be UTF-8"))?,
+    )
+    .map_err(|error| BackupError::invalid(format!("invalid backup manifest: {error}")))
 }
 
 fn online_backup(source: &Path, destination: &Path) -> Result<(), BackupError> {
@@ -562,6 +732,10 @@ fn ensure_target_is_empty(target: &Path) -> Result<(), BackupError> {
 }
 
 fn require_regular_file(path: &Path, label: &str) -> Result<(), BackupError> {
+    require_regular_file_metadata(path, label).map(|_| ())
+}
+
+fn require_regular_file_metadata(path: &Path, label: &str) -> Result<fs::Metadata, BackupError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| BackupError::io(&format!("inspect {label}"), error))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -569,7 +743,7 @@ fn require_regular_file(path: &Path, label: &str) -> Result<(), BackupError> {
             "{label} must be a regular file and not a symbolic link"
         )));
     }
-    Ok(())
+    Ok(metadata)
 }
 
 fn require_regular_directory(path: &Path, label: &str) -> Result<(), BackupError> {
@@ -656,376 +830,4 @@ fn set_private_directory_permissions(_path: &Path) -> Result<(), BackupError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        config::center::{
-            ConfigCenter, ConfigCenterPaths, ManagedConfigApplyMode, ManagedConfigField,
-            SECRET_MISSING_REVISION,
-        },
-        runtime::tools::{
-            memory::{CreateMemoryRequest, ListMemoryQuery, MemoryStore},
-            rss::{RssFeedItem, RssStore, RssTarget, RssTargetType},
-            todo::{
-                TodoItemDraft, TodoRecurrenceKind, TodoRecurrenceUnit, TodoStore, TodoTimePrecision,
-            },
-        },
-        storage::{
-            database::{SqliteDatabase, SqliteMigration},
-            migrations::APP_MIGRATIONS,
-            session::{SessionMeta, SessionStore},
-        },
-    };
-
-    const TEST_MIGRATIONS: &[SqliteMigration] = &[SqliteMigration {
-        name: "maintenance_backup_v1",
-        sql: "CREATE TABLE backup_items (id INTEGER PRIMARY KEY, value TEXT NOT NULL);",
-    }];
-
-    fn test_directory(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("qq-maid-{label}-{}", uuid::Uuid::new_v4()))
-    }
-
-    #[test]
-    fn online_backup_excludes_secrets_and_restores_into_clean_instance() {
-        let source = test_directory("backup-source");
-        fs::create_dir_all(source.join("config/secrets")).unwrap();
-        fs::write(source.join("config/runtime.toml"), "version = 1\n").unwrap();
-        fs::write(source.join("config/.env"), "OPENAI_API_KEY=private\n").unwrap();
-        fs::write(source.join("config/secrets/master.key"), "private-key").unwrap();
-        let database = SqliteDatabase::open(source.join("app.db"), TEST_MIGRATIONS).unwrap();
-        database
-            .connection()
-            .unwrap()
-            .execute("INSERT INTO backup_items (value) VALUES ('preserved')", [])
-            .unwrap();
-        drop(database);
-
-        let bundle = source.join("backups/bundle");
-        let report = create_backup(
-            &BackupOptions {
-                database_file: source.join("app.db"),
-                config_directory: source.join("config"),
-                output_directory: bundle.clone(),
-                include_secrets: false,
-                application_version: "test".to_owned(),
-            },
-            TEST_MIGRATIONS,
-        )
-        .unwrap();
-        assert!(!report.includes_secret_material);
-        assert!(!bundle.join("config/.env").exists());
-        assert!(!bundle.join("config/secrets/master.key").exists());
-        verify_backup(&bundle, TEST_MIGRATIONS).unwrap();
-
-        let target = source.join("restored");
-        restore_backup(&bundle, &target, TEST_MIGRATIONS).unwrap();
-        let restored = Connection::open(target.join("data/storage/app.db")).unwrap();
-        let value: String = restored
-            .query_row("SELECT value FROM backup_items", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(value, "preserved");
-        assert!(target.join("config/runtime.toml").exists());
-        let _ = fs::remove_dir_all(source);
-    }
-
-    #[test]
-    fn encrypted_managed_config_restores_only_with_matching_master_key() {
-        let source = test_directory("encrypted-config-backup-source");
-        fs::create_dir_all(source.join("config")).unwrap();
-        let database_file = source.join("app.db");
-        let database = SqliteDatabase::open(&database_file, APP_MIGRATIONS).unwrap();
-        let fields = || {
-            vec![ManagedConfigField::secret(
-                "provider.openai.api_key",
-                "OPENAI_API_KEY",
-                "core.provider",
-                ManagedConfigApplyMode::Restart,
-            )]
-        };
-        let paths = |root: &Path| ConfigCenterPaths {
-            managed_config_file: root.join("config/runtime.toml"),
-            master_key_file: root.join("config/secrets/master.key"),
-        };
-        let center = ConfigCenter::open(fields(), paths(&source), database.clone()).unwrap();
-        center
-            .replace_secret(
-                "provider.openai.api_key",
-                "restored-secret-value",
-                SECRET_MISSING_REVISION,
-            )
-            .unwrap();
-        drop(center);
-        drop(database);
-
-        let bundle = source.join("bundle");
-        create_backup(
-            &BackupOptions {
-                database_file,
-                config_directory: source.join("config"),
-                output_directory: bundle.clone(),
-                include_secrets: true,
-                application_version: "test".to_owned(),
-            },
-            APP_MIGRATIONS,
-        )
-        .unwrap();
-
-        let matching_target = source.join("restored-matching-key");
-        restore_backup(&bundle, &matching_target, APP_MIGRATIONS).unwrap();
-        let restored_database =
-            SqliteDatabase::open(matching_target.join("data/storage/app.db"), APP_MIGRATIONS)
-                .unwrap();
-        let restored_center =
-            ConfigCenter::open(fields(), paths(&matching_target), restored_database).unwrap();
-        assert_eq!(
-            restored_center
-                .resolved_environment(&std::collections::HashMap::new())
-                .unwrap()["OPENAI_API_KEY"],
-            "restored-secret-value"
-        );
-        drop(restored_center);
-
-        let missing_target = source.join("restored-missing-key");
-        restore_backup(&bundle, &missing_target, APP_MIGRATIONS).unwrap();
-        let missing_key = missing_target.join("config/secrets/master.key");
-        fs::remove_file(&missing_key).unwrap();
-        let missing_database =
-            SqliteDatabase::open(missing_target.join("data/storage/app.db"), APP_MIGRATIONS)
-                .unwrap();
-        let missing_error =
-            match ConfigCenter::open(fields(), paths(&missing_target), missing_database) {
-                Ok(_) => panic!("encrypted config must reject a missing master key"),
-                Err(error) => error,
-            };
-        assert_eq!(missing_error.code(), "secret_storage_error");
-        assert!(
-            missing_error
-                .message()
-                .contains("master key file is missing")
-        );
-        assert!(!missing_key.exists());
-
-        let wrong_key_source = source.join("wrong-key-source");
-        let wrong_key_database =
-            SqliteDatabase::open(wrong_key_source.join("app.db"), APP_MIGRATIONS).unwrap();
-        let wrong_key_center =
-            ConfigCenter::open(fields(), paths(&wrong_key_source), wrong_key_database).unwrap();
-        drop(wrong_key_center);
-        let wrong_target = source.join("restored-wrong-key");
-        restore_backup(&bundle, &wrong_target, APP_MIGRATIONS).unwrap();
-        fs::copy(
-            wrong_key_source.join("config/secrets/master.key"),
-            wrong_target.join("config/secrets/master.key"),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(
-                wrong_target.join("config/secrets/master.key"),
-                fs::Permissions::from_mode(0o600),
-            )
-            .unwrap();
-        }
-        let wrong_database =
-            SqliteDatabase::open(wrong_target.join("data/storage/app.db"), APP_MIGRATIONS).unwrap();
-        let wrong_error = match ConfigCenter::open(fields(), paths(&wrong_target), wrong_database) {
-            Ok(_) => panic!("encrypted config must reject a mismatched master key"),
-            Err(error) => error,
-        };
-        assert_eq!(wrong_error.code(), "secret_storage_error");
-        assert!(wrong_error.message().contains("failed authentication"));
-
-        let _ = fs::remove_dir_all(source);
-    }
-
-    #[test]
-    fn verification_rejects_modified_bundle() {
-        let source = test_directory("backup-tamper");
-        fs::create_dir_all(source.join("config")).unwrap();
-        fs::write(source.join("config/runtime.toml"), "version = 1\n").unwrap();
-        let database = SqliteDatabase::open(source.join("app.db"), TEST_MIGRATIONS).unwrap();
-        drop(database);
-        let bundle = source.join("bundle");
-        create_backup(
-            &BackupOptions {
-                database_file: source.join("app.db"),
-                config_directory: source.join("config"),
-                output_directory: bundle.clone(),
-                include_secrets: false,
-                application_version: "test".to_owned(),
-            },
-            TEST_MIGRATIONS,
-        )
-        .unwrap();
-        fs::write(bundle.join("config/runtime.toml"), "tampered = true\n").unwrap();
-
-        let error = verify_backup(&bundle, TEST_MIGRATIONS).unwrap_err();
-        assert_eq!(error.code(), "invalid_backup");
-        let _ = fs::remove_dir_all(source);
-    }
-
-    #[test]
-    fn backup_then_modify_and_restore_recovers_core_business_data() {
-        let source = test_directory("business-backup-source");
-        fs::create_dir_all(source.join("config")).unwrap();
-        fs::write(source.join("config/runtime.toml"), "version = 1\n").unwrap();
-        let database_file = source.join("app.db");
-        let owner = TodoStore::owner(Some("backup-user"), "private:backup-user");
-        let session_meta = SessionMeta::new(
-            "private:backup-user",
-            Some("backup-user".to_owned()),
-            None,
-            None,
-            None,
-            "qq_official",
-        );
-        let rss_target = RssTarget {
-            target_type: RssTargetType::Private,
-            target_id: "backup-user".to_owned(),
-            scope_key: "private:backup-user".to_owned(),
-        };
-
-        create_business_snapshot(&database_file, &owner, &session_meta, &rss_target, "backup");
-        let bundle = source.join("bundle");
-        create_backup(
-            &BackupOptions {
-                database_file: database_file.clone(),
-                config_directory: source.join("config"),
-                output_directory: bundle.clone(),
-                include_secrets: false,
-                application_version: "test".to_owned(),
-            },
-            APP_MIGRATIONS,
-        )
-        .unwrap();
-
-        // 备份完成后继续写入，恢复结果必须只包含备份时的一组业务数据。
-        create_business_snapshot(
-            &database_file,
-            &owner,
-            &session_meta,
-            &rss_target,
-            "after-backup",
-        );
-        assert_business_record_counts(&database_file, &owner, &session_meta, &rss_target, 2);
-
-        let target = source.join("restored");
-        restore_backup(&bundle, &target, APP_MIGRATIONS).unwrap();
-        assert_business_record_counts(
-            &target.join("data/storage/app.db"),
-            &owner,
-            &session_meta,
-            &rss_target,
-            1,
-        );
-        let _ = fs::remove_dir_all(source);
-    }
-
-    fn create_business_snapshot(
-        database_file: &Path,
-        owner: &crate::runtime::tools::todo::TodoOwner,
-        session_meta: &SessionMeta,
-        rss_target: &RssTarget,
-        suffix: &str,
-    ) {
-        let todo_store =
-            TodoStore::new(SqliteDatabase::open(database_file, APP_MIGRATIONS).unwrap());
-        todo_store
-            .create(
-                owner,
-                TodoItemDraft {
-                    title: format!("backup todo {suffix}"),
-                    detail: None,
-                    raw_text: None,
-                    due_date: None,
-                    due_at: None,
-                    reminder_at: None,
-                    time_precision: TodoTimePrecision::None,
-                    recurrence_kind: TodoRecurrenceKind::None,
-                    recurrence_interval_days: 0,
-                    recurrence_interval: 0,
-                    recurrence_unit: TodoRecurrenceUnit::Day,
-                },
-            )
-            .unwrap();
-
-        let session_store =
-            SessionStore::new(SqliteDatabase::open(database_file, APP_MIGRATIONS).unwrap());
-        session_store
-            .create(session_meta, format!("backup session {suffix}"), true)
-            .unwrap();
-
-        let memory_store =
-            MemoryStore::new(SqliteDatabase::open(database_file, APP_MIGRATIONS).unwrap());
-        memory_store
-            .create(CreateMemoryRequest {
-                user_id: Some("backup-user".to_owned()),
-                group_id: None,
-                content: format!("backup memory {suffix}"),
-                source_text: format!("backup memory source {suffix}"),
-                memory_type: "note".to_owned(),
-                scope: "general".to_owned(),
-            })
-            .unwrap();
-
-        let rss_store = RssStore::new(SqliteDatabase::open(database_file, APP_MIGRATIONS).unwrap());
-        rss_store
-            .create_subscription(
-                rss_target,
-                &format!("https://example.test/{suffix}.xml"),
-                &format!("backup feed {suffix}"),
-                &[RssFeedItem {
-                    item_key: format!("item-{suffix}"),
-                    revision_hash: format!("revision-{suffix}"),
-                    title: format!("backup item {suffix}"),
-                    link: None,
-                    published_at: None,
-                    updated_at: None,
-                    summary: None,
-                    source_order: 0,
-                }],
-                50,
-            )
-            .unwrap();
-    }
-
-    fn assert_business_record_counts(
-        database_file: &Path,
-        owner: &crate::runtime::tools::todo::TodoOwner,
-        session_meta: &SessionMeta,
-        rss_target: &RssTarget,
-        expected: usize,
-    ) {
-        let todo_store =
-            TodoStore::new(SqliteDatabase::open(database_file, APP_MIGRATIONS).unwrap());
-        assert_eq!(todo_store.list_pending(owner).unwrap().len(), expected);
-
-        let session_store =
-            SessionStore::new(SqliteDatabase::open(database_file, APP_MIGRATIONS).unwrap());
-        assert_eq!(
-            session_store
-                .list_for_scope(&session_meta.scope_key, None)
-                .unwrap()
-                .len(),
-            expected
-        );
-
-        let memory_store =
-            MemoryStore::new(SqliteDatabase::open(database_file, APP_MIGRATIONS).unwrap());
-        assert_eq!(
-            memory_store.list(ListMemoryQuery::default()).unwrap().len(),
-            expected
-        );
-
-        let rss_store = RssStore::new(SqliteDatabase::open(database_file, APP_MIGRATIONS).unwrap());
-        assert_eq!(
-            rss_store
-                .list_by_scope(&rss_target.scope_key)
-                .unwrap()
-                .len(),
-            expected
-        );
-    }
-}
+mod tests;

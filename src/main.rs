@@ -93,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
         );
         return ManagementRuntime::new(
             management_bootstrap,
+            database,
             config_center.with_incomplete_setup_writes(),
             admin_auth,
             env!("CARGO_PKG_VERSION"),
