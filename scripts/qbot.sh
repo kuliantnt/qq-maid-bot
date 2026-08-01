@@ -162,7 +162,7 @@ curl_qbot() {
 github_accel_prefixes() {
     # 候选源顺序：官方直连（空串）→ QBOT_GITHUB_PROXY 单代理 → QBOT_GITHUB_PROXIES 多代理。
     # 与 PowerShell 端 qbot.ps1 语义一致：按空白切分、去尾部斜杠、仅接受 http/https、
-    # 按序去重；不内置任何用户未显式配置的第三方镜像。
+    # 且必须含非空主机部分、按序去重；不内置任何用户未显式配置的第三方镜像。
     printf '\n'
 
     {
@@ -178,6 +178,14 @@ github_accel_prefixes() {
             while (value ~ /\/$/) { sub(/\/$/, "", value) }
             if (value !~ /^https?:\/\//) {
                 print "忽略无效代理前缀（仅支持 http/https 绝对地址）: " value > "/dev/stderr"
+                next
+            }
+            rest = value
+            sub(/^https?:\/\//, "", rest)
+            # 主机部分必须非空：以字母/数字或 IPv6 的 "[" 开头，
+            # 拒绝 http://、http:///path、http://:8080 等无主机名的写法。
+            if (rest !~ /^[A-Za-z0-9]/ && substr(rest, 1, 1) != "[") {
+                print "忽略无效代理前缀（需为含非空主机的 http/https 绝对地址）: " value > "/dev/stderr"
                 next
             }
             if (!seen[value]++) print value

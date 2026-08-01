@@ -322,6 +322,13 @@ candidate_list="$(github_accel_prefixes)"
 expected_candidates="$(printf '\n%s\n%s' 'https://proxy-a.example.com' 'https://proxy-b.example.com')"
 [[ "${candidate_list}" == "${expected_candidates}" ]]
 
+# 7a) 代理前缀必须含非空主机部分：纯 scheme、空主机、仅端口等写法都应被忽略。
+GITHUB_ACCEL_PROXY="https://proxy-a.example.com"
+GITHUB_ACCEL_PROXIES="http:// http:///path https://?query http://:8080 https://#frag https://good.example.com"
+candidate_list="$(github_accel_prefixes 2>/dev/null)"
+expected_candidates="$(printf '\n%s\n%s' 'https://proxy-a.example.com' 'https://good.example.com')"
+[[ "${candidate_list}" == "${expected_candidates}" ]]
+
 # 8) QBOT_GITHUB_PROXY / QBOT_GITHUB_PROXIES 环境变量映射到内部候选变量。
 env_mapping="$(QBOT_GITHUB_PROXY='https://env-a.example.com/' QBOT_GITHUB_PROXIES='https://env-b.example.com' bash -c '
     source "$1/scripts/qbot.sh"
