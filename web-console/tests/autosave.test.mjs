@@ -303,6 +303,24 @@ test("配置中心按八个业务场景渲染导航，默认展示模型与供�
   }
 });
 
+test("模型路由按聊天与辅助、搜索拆成两个独立分组", async () => {
+  const env = setupEnvironment();
+  try {
+    await env.initialize();
+    const groups = env.document.getElementById("agent-config-fields")
+      .querySelectorAll(".model-route-field-group");
+
+    assert.equal(groups.length, 2);
+    assert.deepEqual(groups.map((group) => group.querySelector("h3").textContent), [
+      "聊天与辅助路线",
+      "搜索路线",
+    ]);
+    assert.deepEqual(groups.map((group) => group.querySelector(".config-field-group-grid").children.length), [3, 2]);
+  } finally {
+    env.dispose();
+  }
+});
+
 test("慢速保存字段 A 时，字段 B 的未保存输入在 A 保存完成后仍然存在并可继续保存", async () => {
   const env = setupEnvironment({ slowRuntime: true });
   try {

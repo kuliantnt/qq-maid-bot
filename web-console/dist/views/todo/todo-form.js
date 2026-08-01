@@ -1,7 +1,18 @@
 import { createTodo } from "../../api.js";
 import { refreshTodos, showResult, valueOf, numberValue } from "./todo.js";
-export function resolveTimePrecision(dueAt, selected) {
-    return dueAt !== null ? "date_time" : selected;
+/**
+ * 将单个截止日期时间输入投影为后端兼容字段，并确保 due_date 与 due_at 始终同一天。
+ * 编辑历史“仅日期”待办时仍接受 YYYY-MM-DD，避免无意补成当天零点。
+ */
+export function todoDeadlineFields(value) {
+    const deadline = value?.trim() ?? "";
+    if (!deadline)
+        return { dueDate: null, dueAt: null, timePrecision: "none" };
+    const dueDate = deadline.slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(deadline)) {
+        return { dueDate, dueAt: null, timePrecision: "date" };
+    }
+    return { dueDate, dueAt: deadline, timePrecision: "date_time" };
 }
 export async function submitTodo(form, dialog) {
     const title = valueOf("todo-create-title").trim();
@@ -18,20 +29,17 @@ export async function submitTodo(form, dialog) {
     const button = form.querySelector("button[type=submit]");
     if (button)
         button.disabled = true;
-    const dueDate = valueOf("todo-create-due-date") || null;
-    const dueAt = valueOf("todo-create-due-at") || null;
+    const deadline = todoDeadlineFields(valueOf("todo-create-deadline"));
     const reminderAt = valueOf("todo-create-reminder-at") || null;
-    const selectedPrecision = valueOf("todo-create-time-precision");
-    const timePrecision = resolveTimePrecision(dueAt, selectedPrecision);
     try {
         await createTodo({
             title,
             target_ref: targetRef,
             detail: valueOf("todo-create-detail").trim() || null,
-            due_date: dueDate,
-            due_at: dueAt,
+            due_date: deadline.dueDate,
+            due_at: deadline.dueAt,
             reminder_at: reminderAt,
-            time_precision: timePrecision,
+            time_precision: deadline.timePrecision,
             recurrence_kind: recurrenceKind,
             // “不重复”必须同时丢弃可能残留的间隔，避免后端按 interval/unit 推导出重复规则。
             recurrence_interval: recurrenceKind === "none" ? null : numberValue("todo-create-recurrence-interval"),

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 import { listTodoTargets } from "../dist/api.js";
 import {
@@ -10,7 +11,7 @@ import {
   pageAfterDelete,
 } from "../dist/views/todo/todo-paging.js";
 import { filterResetDefaults, loadTodoForEdit } from "../dist/views/todo/todo.js";
-import { resolveTimePrecision } from "../dist/views/todo/todo-form.js";
+import { todoDeadlineFields } from "../dist/views/todo/todo-form.js";
 
 function targetOption(targetRef, overrides = {}) {
   return {
@@ -147,12 +148,28 @@ test("重置筛选默认值：状态/时间/重复恢复 all，其余清空", ()
   assert.equal(defaults["todo-date-start"], "");
 });
 
-test("时间精度决策：截止时间非空强制 date_time，否则保留用户选择", () => {
-  assert.equal(resolveTimePrecision("2026-08-01T10:00", "none"), "date_time");
-  assert.equal(resolveTimePrecision("2026-08-01T10:00", "date"), "date_time");
-  assert.equal(resolveTimePrecision(null, "none"), "none");
-  assert.equal(resolveTimePrecision(null, "date"), "date");
-  assert.equal(resolveTimePrecision(null, "date_time"), "date_time");
+test("单个截止日期时间同步生成一致的后端日期、时间和精度", () => {
+  assert.deepEqual(todoDeadlineFields("2026-08-01T10:00"), {
+    dueDate: "2026-08-01",
+    dueAt: "2026-08-01T10:00",
+    timePrecision: "date_time",
+  });
+  assert.deepEqual(todoDeadlineFields("2026-08-01"), {
+    dueDate: "2026-08-01",
+    dueAt: null,
+    timePrecision: "date",
+  });
+  assert.deepEqual(todoDeadlineFields(null), {
+    dueDate: null,
+    dueAt: null,
+    timePrecision: "none",
+  });
+});
+
+test("创建表单只保留一个截止日期与时间控件", async () => {
+  const html = await readFile(new URL("../dist/index.html", import.meta.url), "utf8");
+  assert.match(html, /截止日期与时间<input id="todo-create-deadline"[^>]*type="datetime-local">/);
+  assert.doesNotMatch(html, /todo-create-due-date|todo-create-due-at|todo-create-time-precision/);
 });
 
 test("Todo 卡片操作按钮顺序：删除恒为最后，且查看/编辑已接线", async () => {

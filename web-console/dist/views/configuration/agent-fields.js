@@ -98,7 +98,7 @@ export function renderAgent(snapshot) {
     const openCodeKeyConfigured = snapshot.fields.some((field) => field.key === "provider.opencode.api_key" && field.configured);
     const modelRoutes = record(documentValue.model_routes);
     const routes = document.createElement("div");
-    routes.append(fieldGroup("模型路线", [
+    const conversationRoutes = fieldGroup("聊天与辅助路线", [
         ...["private_main", "group_main", "aux"].map((routeName) => {
             const route = record(modelRoutes[routeName]);
             return renderModelRouteEditor({
@@ -109,8 +109,14 @@ export function renderAgent(snapshot) {
                 routeName,
             });
         }),
+    ]);
+    conversationRoutes.classList.add("model-route-field-group");
+    const searchRoutes = fieldGroup("搜索路线", [
         ...["private_search", "group_search"].map((routeName) => textField(AGENT_ROUTE_LABELS[routeName] ?? routeName, `agent-search-${routeName}`, savedWebSearch.routes[routeName] ?? "", !agent.editable, "agent")),
-    ]));
+    ]);
+    searchRoutes.classList.add("model-route-field-group");
+    // 聊天候选链与搜索模型的编辑方式不同，分组后避免奇数项跨行混排造成的视觉错位。
+    routes.append(conversationRoutes, searchRoutes);
     routes.append(renderOpenCodeRouteHints(!agent.editable, readOpenCodeProviders(documentValue).filter((provider) => provider.enabled).map((provider) => provider.id), openCodeKeyConfigured));
     target.append(configurationGroup("model-routing", "agent", routes));
     const scenes = record(documentValue.scenes);

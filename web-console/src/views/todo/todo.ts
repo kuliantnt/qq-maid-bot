@@ -1,7 +1,7 @@
-import { createTodo, deleteTodo, getTodo, listTodoTargets, listTodos, updateTodo } from "../../api.js";
+import { deleteTodo, getTodo, listTodoTargets, listTodos, updateTodo } from "../../api.js";
 import { TARGET_PAGE_SIZE, appendTargetPage, hasMoreTargetPages, initialRefreshPage, initialTargetPager, pageAfterDelete } from "./todo-paging.js";
 import { todoCard } from "./todo-card.js";
-import { submitTodo } from "./todo-form.js";
+import { submitTodo, todoDeadlineFields } from "./todo-form.js";
 export { todoRecurrenceKind } from "./todo-form.js";
 import type { TargetPager, TodoRefreshTrigger } from "./todo-paging.js";
 import type { TodoItem, TodoStatus, TodoTargetOption } from "../../types.js";
@@ -234,14 +234,14 @@ export async function openEditor(todo: TodoItem): Promise<void> {
   if (title === null || !title.trim()) return;
   const detail = window.prompt("Todo 详情（留空清除）", latest.detail ?? "");
   if (detail === null) return;
-  const dueDate = window.prompt("截止日期 YYYY-MM-DD（留空清除）", latest.dueDate ?? "");
-  if (dueDate === null) return;
-  const dueAt = window.prompt("截止时间 RFC3339/本地时间（留空清除）", latest.dueAt ?? "");
-  if (dueAt === null) return;
+  const deadlineValue = window.prompt(
+    "截止日期时间 YYYY-MM-DD HH:MM（留空清除）",
+    latest.dueAt ?? latest.dueDate ?? "",
+  );
+  if (deadlineValue === null) return;
+  const deadline = todoDeadlineFields(deadlineValue);
   const reminderAt = window.prompt("提醒时间 RFC3339/本地时间（留空清除）", latest.reminderAt ?? "");
   if (reminderAt === null) return;
-  const timePrecision = window.prompt("时间精度：none/date/date_time", latest.timePrecision);
-  if (timePrecision === null) return;
   const recurrenceKind = window.prompt(
     "重复类型：none/daily/every_n_days/weekly/every_n_weeks/monthly/every_n_months/yearly/every_n_years/every_n_minutes/every_n_hours",
     latest.recurrenceKind,
@@ -253,8 +253,8 @@ export async function openEditor(todo: TodoItem): Promise<void> {
   if (recurrenceUnit === null) return;
   try {
     await updateTodo(latest.id, {
-      title: title.trim(), detail: detail.trim() || null, due_date: dueDate.trim() || null, due_at: dueAt.trim() || null,
-      reminder_at: reminderAt.trim() || null, time_precision: timePrecision, recurrence_kind: recurrenceKind,
+      title: title.trim(), detail: detail.trim() || null, due_date: deadline.dueDate, due_at: deadline.dueAt,
+      reminder_at: reminderAt.trim() || null, time_precision: deadline.timePrecision, recurrence_kind: recurrenceKind,
       recurrence_interval: recurrenceInterval.trim() ? Number(recurrenceInterval) : null, recurrence_unit: recurrenceUnit,
     });
     await refreshTodos("refresh");
@@ -308,5 +308,3 @@ export function showResult(message: string, error: boolean): void {
   result.className = `status-message ${error ? "error" : "success"}`;
   result.textContent = message;
 }
-
-

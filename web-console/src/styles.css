@@ -465,6 +465,8 @@ textarea { width: 100%; min-height: 25rem; flex: 1; resize: vertical; padding: v
 /* ---- 模型候选路线 Chip 编辑器 ---- */
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
 .model-route-editor { display: grid; gap: .45rem; min-width: 0; }
+.model-route-field-group + .model-route-field-group { margin-top: .75rem; }
+.model-route-field-group .config-field-group-grid { grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); }
 .model-route-label { margin: 0; color: var(--ink); font-size: .76rem; font-weight: 650; }
 .model-route-chips { display: flex; flex-wrap: wrap; gap: .3rem; min-width: 0; padding: .4rem; border: 1px solid var(--line); background: color-mix(in srgb, var(--console-glass-raised) 78%, transparent); }
 .model-route-chip { display: inline-flex; align-items: center; gap: .2rem; max-width: 100%; padding: .18rem .4rem; border: 1px solid var(--console-line); background: var(--console-glass-muted); color: var(--console-text); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .7rem; line-height: 1.3; }
@@ -491,6 +493,7 @@ textarea { width: 100%; min-height: 25rem; flex: 1; resize: vertical; padding: v
 .route-template-chooser { display: inline-flex; flex-wrap: wrap; gap: .3rem; }
 @media (max-width: 767px) {
   .route-template-row { grid-template-columns: 1fr; }
+  .model-route-field-group .config-field-group-grid { grid-template-columns: minmax(0, 1fr); }
   .model-route-add-row { flex-direction: column; align-items: stretch; }
 }
 
