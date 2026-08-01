@@ -14,22 +14,36 @@ pub(crate) fn should_retry_non_stream_after_empty_stream(outcome: &ChatOutcome) 
 pub(crate) fn should_retry_non_stream_after_stream_error(err: &LlmError) -> bool {
     matches!(
         err.code.as_str(),
-        "provider_error" | "http_error" | "timeout"
+        "provider_error" | "http_error" | "network_error" | "timeout"
     ) && matches!(
         err.stage.as_str(),
-        "provider" | "stream" | "http" | "sse" | "stream_after_delta"
+        "provider"
+            | "stream"
+            | "http"
+            | "http_request"
+            | "http_request_timeout"
+            | "response_read"
+            | "stream_read"
+            | "stream_read_after_delta"
+            | "sse"
+            | "stream_after_delta"
     )
 }
 
 /// 当 Responses 主链路失败时，是否允许降级到 Chat Completions。
 /// 认证/授权拒绝对同一 Provider 的另一端点同样无效，应直接交给跨 Provider 候选链。
 pub(crate) fn should_fallback_to_chat_after_responses_error(err: &LlmError) -> bool {
+    if err.upstream_status == Some(400) {
+        // Responses 端点的协议/模型兼容错误仍按既有行为尝试 Chat Completions；
+        // 本地 bad_request 没有 upstream_status，不会因此产生额外请求。
+        return true;
+    }
     matches!(
         err.code.as_str(),
-        "provider_error" | "http_error" | "timeout"
+        "provider_error" | "http_error" | "network_error" | "timeout"
     ) && !matches!(
         err.stage.as_str(),
-        "stream_after_delta" | "provider_unavailable"
+        "stream_after_delta" | "stream_read_after_delta" | "provider_unavailable"
     )
 }
 

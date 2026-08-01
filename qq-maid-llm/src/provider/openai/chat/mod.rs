@@ -10,11 +10,11 @@ use reqwest::{
     header::{HeaderName, HeaderValue},
 };
 use serde_json::{Value, json};
-use std::{collections::VecDeque, path::Path};
+use std::{collections::VecDeque, path::Path, time::Instant};
 
 use crate::{
     config::HttpAuthConfig,
-    error::LlmError,
+    error::{LlmError, LlmErrorKind},
     metrics::MetricsRecorder,
     provider::{
         ChatOutcome, LlmStream, LlmStreamEvent, collect_llm_stream,
@@ -395,6 +395,8 @@ pub(crate) fn file_unsupported_error() -> LlmError {
 
 pub(super) async fn send_chat_completions_request(
     client: &ChatCompletionsClient,
+    provider: &str,
+    model: &str,
     payload: &Value,
     stream: bool,
 ) -> Result<reqwest::Response, LlmError> {
@@ -424,17 +426,30 @@ pub(super) async fn send_chat_completions_request(
     if stream {
         request = request.header(header::ACCEPT, "text/event-stream");
     }
+    let started = Instant::now();
     let response = request.send().await.map_err(|err| {
-        if err.is_timeout() {
-            LlmError::timeout("http")
+        let stage = if err.is_timeout() {
+            "http_request_timeout"
         } else {
-            let context = if stream {
-                "Chat Completions stream request failed"
-            } else {
-                "Chat Completions request failed"
-            };
-            LlmError::http(format!("{context}: {err}"))
-        }
+            "http_request"
+        };
+        let context = if stream {
+            "Chat Completions stream request failed"
+        } else {
+            "Chat Completions request failed"
+        };
+        let mapped = LlmError::from_error_source(&err, LlmErrorKind::Network, stage, context);
+        tracing::warn!(
+            provider,
+            model,
+            stream,
+            timeout_stage = mapped.stage.as_str(),
+            elapsed_ms = started.elapsed().as_millis(),
+            error_kind = mapped.kind().as_str(),
+            error = %err,
+            "LLM Chat Completions transport failed"
+        );
+        mapped
     })?;
     let status = response.status();
     if !status.is_success() {
@@ -459,13 +474,7 @@ async fn chat_status_error(status: StatusCode, response: reqwest::Response) -> L
     if is_prompt_blocked_error(&detail) {
         return LlmError::new("safety_blocked", message, "http");
     }
-    match status.as_u16() {
-        401 | 403 => LlmError::config(message),
-        400 | 404 | 422 => LlmError::new("bad_request", message, "http"),
-        429 => LlmError::new("rate_limited", message, "http"),
-        500..=599 => LlmError::new("upstream_unavailable", message, "http"),
-        _ => LlmError::http(message),
-    }
+    LlmError::from_upstream_status(status.as_u16(), message, "http")
 }
 
 fn truncate_error_detail(value: &str, limit: usize) -> String {
@@ -496,9 +505,9 @@ pub(crate) async fn non_stream_completion(
     let recorder = MetricsRecorder::start();
     let payload =
         chat_completions_payload(messages, model, media_max_bytes, max_output_tokens, false)?;
-    let response = send_chat_completions_request(client, &payload, false).await?;
+    let response = send_chat_completions_request(client, provider, model, &payload, false).await?;
     let body: Value = response.json().await.map_err(|err| {
-        LlmError::provider(format!("invalid Chat Completions JSON: {err}"), "json")
+        LlmError::from_response_source(&err, "failed to read Chat Completions JSON")
     })?;
     let reply = extract_chat_completion_text(&body).ok_or_else(|| {
         LlmError::provider("Chat Completions returned empty text output", "provider")
@@ -549,7 +558,7 @@ pub(crate) async fn chat_completions_stream(
     let recorder = MetricsRecorder::start();
     let payload =
         chat_completions_payload(messages, _model, media_max_bytes, max_output_tokens, true)?;
-    let response = send_chat_completions_request(client, &payload, true).await?;
+    let response = send_chat_completions_request(client, _provider, _model, &payload, true).await?;
     let frame_buffer = Vec::new();
     let answer = String::new();
     let final_message = String::new();
@@ -745,7 +754,8 @@ async fn next_chat_stream_event(
             }
             Err(err) => {
                 return Some(Err(stream_transport_error(
-                    format!("Chat Completions stream failed: {err}"),
+                    err,
+                    "Chat Completions stream failed",
                     &state.answer,
                 )));
             }

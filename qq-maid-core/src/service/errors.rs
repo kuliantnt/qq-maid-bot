@@ -106,9 +106,15 @@ impl CoreRespondFailure {
             ("timeout", _) => CoreFailureKind::LlmTimeout,
             (_, "query" | "search" | "web_search") => CoreFailureKind::SearchFailed,
             ("context_budget_exceeded", _) => CoreFailureKind::ContextBudgetExceeded,
-            ("provider_error" | "http_error" | "upstream_unavailable" | "rate_limited", _) => {
-                CoreFailureKind::LlmFailed
-            }
+            (
+                "provider_error"
+                | "http_error"
+                | "network_error"
+                | "authentication_failed"
+                | "upstream_unavailable"
+                | "rate_limited",
+                _,
+            ) => CoreFailureKind::LlmFailed,
             _ => CoreFailureKind::Internal,
         };
         Self {
@@ -131,7 +137,7 @@ fn user_visible_failure_message(kind: CoreFailureKind) -> String {
     match kind {
         CoreFailureKind::SearchTimeout => "联网查询超时了，请稍后再试。",
         CoreFailureKind::SearchFailed => "联网查询暂时不可用，请稍后再试。",
-        CoreFailureKind::LlmTimeout => "LLM 服务处理超时，请稍后再试。",
+        CoreFailureKind::LlmTimeout => "LLM 请求超时，请稍后重试。",
         CoreFailureKind::LlmFailed => "上游服务暂时不可用，请稍后再试。",
         CoreFailureKind::ContextBudgetExceeded => {
             "本次查阅的资料较多，已超出当前对话可处理范围，请缩小查询范围后重试。"
@@ -180,6 +186,7 @@ pub(crate) fn warn_core_error(scope_key: &str, err: &LlmError) {
     warn!(
         scope_key,
         error_code = err.code,
+        error_kind = err.kind().as_str(),
         error_stage = err.stage,
         error_message = %safe_error_message(err),
         agent_stop_reason = agent
@@ -197,11 +204,24 @@ pub(crate) fn warn_core_error(scope_key: &str, err: &LlmError) {
     );
 }
 
-pub(crate) fn error_core_error(scope_key: &str, err: &LlmError) {
+pub(crate) fn error_core_error(
+    scope_key: &str,
+    err: &LlmError,
+    provider: &str,
+    model: &str,
+    stream: bool,
+    timeout_seconds: u64,
+) {
     error!(
         scope_key,
+        provider,
+        model,
+        stream,
         error_code = err.code,
+        error_kind = err.kind().as_str(),
         error_stage = err.stage,
+        timeout_stage = err.stage,
+        timeout_seconds,
         error_message = %safe_error_message(err),
         "core respond request timed out"
     );
@@ -226,7 +246,13 @@ mod tests {
 
     #[test]
     fn agent_provider_failures_keep_original_classification() {
-        for code in ["provider_error", "rate_limited", "upstream_unavailable"] {
+        for code in [
+            "provider_error",
+            "network_error",
+            "authentication_failed",
+            "rate_limited",
+            "upstream_unavailable",
+        ] {
             let failure = CoreRespondFailure::from_llm_error(&agent_error(
                 code,
                 "provider",
@@ -263,6 +289,15 @@ mod tests {
         ));
         assert_eq!(max_rounds.kind, CoreFailureKind::Internal);
         assert!(!max_rounds.retryable);
+    }
+
+    #[test]
+    fn exhausted_llm_timeout_has_explicit_user_message() {
+        let failure = CoreRespondFailure::from_llm_error(&LlmError::timeout("stream_read"));
+
+        assert_eq!(failure.kind, CoreFailureKind::LlmTimeout);
+        assert!(failure.message.contains("超时"));
+        assert!(!failure.message.contains("不可用"));
     }
 
     #[test]

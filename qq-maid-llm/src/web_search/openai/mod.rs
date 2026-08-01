@@ -6,10 +6,11 @@ use tokio::sync::mpsc;
 
 use crate::{
     config::{HttpAuthConfig, LlmConfig, OpenAiResponsesProviderConfig},
-    error::LlmError,
+    error::{LlmError, LlmErrorKind},
     metrics::duration_ms,
     provider::openai::{
-        is_openai_responses_done_sentinel, openai_responses_url, send_openai_responses_request,
+        ResponsesTransportContext, is_openai_responses_done_sentinel, openai_responses_url,
+        send_openai_responses_request,
     },
     sse::{SseFrame, parse_sse_frame, take_sse_frame},
 };
@@ -165,17 +166,24 @@ impl WebSearchExecutor for ResponsesWebSearchExecutor {
             &self.client,
             &self.api_key,
             self.base_url.as_deref(),
-            &self.provider,
             self.auth.as_ref(),
             &payload,
-            false,
+            ResponsesTransportContext {
+                provider: &self.provider,
+                model,
+                stream: false,
+            },
         )
         .await
         .map_err(|err| err.with_upstream_context(self.provider.clone(), model.to_owned()))?;
 
-        let body: Value = response.json().await.map_err(|err| {
-            LlmError::provider(format!("invalid Responses web search JSON: {err}"), "json")
-        })?;
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|err| {
+                LlmError::from_response_source(&err, "failed to read Responses web search JSON")
+            })
+            .map_err(|err| err.with_upstream_context(self.provider.clone(), model.to_owned()))?;
         let answer = extract_output_text(&body).ok_or_else(|| {
             LlmError::provider(
                 "Responses web search returned empty text output",
@@ -224,10 +232,13 @@ impl WebSearchExecutor for ResponsesWebSearchExecutor {
             &self.client,
             &self.api_key,
             self.base_url.as_deref(),
-            &self.provider,
             self.auth.as_ref(),
             &payload,
-            true,
+            ResponsesTransportContext {
+                provider: &self.provider,
+                model,
+                stream: true,
+            },
         )
         .await
         .map_err(|err| err.with_upstream_context(self.provider.clone(), model.to_owned()))?;
@@ -239,7 +250,8 @@ impl WebSearchExecutor for ResponsesWebSearchExecutor {
         while let Some(chunk) = response
             .chunk()
             .await
-            .map_err(|err| web_search_stream_transport_error(err, &answer))?
+            .map_err(|err| web_search_stream_transport_error(err, &answer))
+            .map_err(|err| err.with_upstream_context(self.provider.clone(), model.to_owned()))?
         {
             frame_buffer.extend_from_slice(&chunk);
             while let Some(frame) = take_sse_frame(&mut frame_buffer) {
@@ -452,14 +464,15 @@ fn web_search_incomplete_eof_error(answer: &str) -> LlmError {
 
 fn web_search_stream_transport_error(err: reqwest::Error, answer: &str) -> LlmError {
     let stage = if answer.trim().is_empty() {
-        "http"
+        "web_search_stream_read"
     } else {
-        "stream_after_delta"
+        "web_search_stream_read_after_delta"
     };
-    LlmError::new(
-        "http_error",
-        format!("Responses web search stream failed: {err}"),
+    LlmError::from_error_source(
+        &err,
+        LlmErrorKind::Network,
         stage,
+        "Responses web search stream failed",
     )
 }
 
@@ -595,13 +608,14 @@ mod tests {
     use super::*;
     use axum::{
         Router,
-        body::Body,
+        body::{Body, Bytes},
         extract::State,
-        http::{StatusCode, header},
+        http::{Response, StatusCode, header},
         response::IntoResponse,
         routing::post,
     };
-    use std::sync::Arc;
+    use futures::stream;
+    use std::{convert::Infallible, sync::Arc, time::Duration};
     use tokio::{net::TcpListener, sync::Mutex};
 
     #[test]
@@ -718,6 +732,24 @@ mod tests {
         (format!("http://{addr}/v1"), state)
     }
 
+    async fn stalled_search_stream_handler() -> Response<Body> {
+        let body = Body::from_stream(stream::pending::<Result<Bytes, Infallible>>());
+        Response::builder()
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .body(body)
+            .unwrap()
+    }
+
+    async fn spawn_stalled_search_stream() -> String {
+        let app = Router::new().route("/v1/responses", post(stalled_search_stream_handler));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}/v1")
+    }
+
     #[tokio::test]
     async fn configured_responses_query_stream_emits_deltas_and_accepts_done_sentinel() {
         let body = concat!(
@@ -762,6 +794,49 @@ mod tests {
         assert_eq!(outcome.answer, "你好");
         assert_eq!(outcome.provider, "xai");
         assert_eq!(state.lock().await.requests[0]["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn responses_search_stream_read_timeout_stays_timeout() {
+        let base_url = spawn_stalled_search_stream().await;
+        let client = qq_maid_common::http_client::try_builder()
+            .unwrap()
+            .timeout(Duration::from_millis(30))
+            .build()
+            .unwrap();
+        let executor = ResponsesWebSearchExecutor {
+            client,
+            api_key: "test-key".to_owned(),
+            base_url: Some(base_url),
+            auth: None,
+            provider: "openai".to_owned(),
+            search_model: "gpt-search".to_owned(),
+            search_context_size_supported: true,
+        };
+        let (delta_tx, _delta_rx) = mpsc::channel(1);
+
+        let error = executor
+            .query_stream(
+                WebSearchRequest {
+                    query: "测试".to_owned(),
+                    raw_question: None,
+                    max_results: None,
+                    context_size: None,
+                    topic: None,
+                    time_range: None,
+                    backend_override: None,
+                    model_override: None,
+                },
+                delta_tx,
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, "timeout");
+        assert_eq!(error.kind(), LlmErrorKind::Timeout);
+        assert_eq!(error.stage, "web_search_stream_read");
+        assert_eq!(error.upstream_provider(), Some("openai"));
+        assert_eq!(error.upstream_model(), Some("gpt-search"));
     }
 
     #[tokio::test]

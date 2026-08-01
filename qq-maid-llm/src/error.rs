@@ -1,6 +1,8 @@
 //! 应用错误类型。定义 `LlmError` 主错误结构体及其便捷构造方法，
 //! 以及序列化友好的 `ErrorInfo` 表示。
 
+use std::{error::Error as StdError, io};
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -21,6 +23,35 @@ pub struct ErrorInfo {
     pub message: String,
     /// 错误发生的阶段
     pub stage: String,
+}
+
+/// LLM 调用失败的稳定分类。
+///
+/// Provider 可以保留自己的错误码与阶段，但路由、日志和用户提示应优先消费这一层，
+/// 避免把客户端超时、连接失败和上游 5xx 都压成同一个“服务不可用”。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmErrorKind {
+    Timeout,
+    Authentication,
+    RateLimit,
+    UpstreamUnavailable,
+    Network,
+    InvalidRequest,
+    Other,
+}
+
+impl LlmErrorKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Authentication => "authentication",
+            Self::RateLimit => "rate_limit",
+            Self::UpstreamUnavailable => "upstream_unavailable",
+            Self::Network => "network",
+            Self::InvalidRequest => "invalid_request",
+            Self::Other => "other",
+        }
+    }
 }
 
 /// 应用主错误类型，携带代码、消息和阶段信息。
@@ -66,6 +97,79 @@ impl LlmError {
     /// 创建超时类错误。
     pub fn timeout(stage: impl Into<String>) -> Self {
         Self::new("timeout", "LLM request timed out", stage)
+    }
+
+    /// 从带 source chain 的底层错误创建 LLM 错误。
+    ///
+    /// 结构化的 reqwest / io 超时优先于 fallback；无法识别时才采用调用点给出的
+    /// fallback。消息保留错误链供脱敏日志排障，用户侧不得直接展示该消息。
+    pub fn from_error_source(
+        error: &(dyn StdError + 'static),
+        fallback: LlmErrorKind,
+        stage: impl Into<String>,
+        context: impl AsRef<str>,
+    ) -> Self {
+        let detected = classify_error_source(error);
+        let kind = if detected == LlmErrorKind::Other {
+            fallback
+        } else {
+            detected
+        };
+        Self::from_kind(
+            kind,
+            format!("{}: {}", context.as_ref(), error_chain_message(error)),
+            stage,
+        )
+    }
+
+    /// 映射读取非流式响应正文时的 reqwest 错误：超时/断链属于传输阶段，纯 JSON
+    /// 解码失败仍属于上游响应协议错误。
+    pub fn from_response_source(
+        error: &(dyn StdError + 'static),
+        context: impl AsRef<str>,
+    ) -> Self {
+        let detected = classify_error_source(error);
+        let stage = if matches!(detected, LlmErrorKind::Timeout | LlmErrorKind::Network) {
+            "response_read"
+        } else {
+            "json"
+        };
+        Self::from_error_source(error, LlmErrorKind::Other, stage, context)
+    }
+
+    /// 按稳定分类构造错误，同时保留项目既有错误码以兼容调用方。
+    pub fn from_kind(
+        kind: LlmErrorKind,
+        message: impl Into<String>,
+        stage: impl Into<String>,
+    ) -> Self {
+        let code = match kind {
+            LlmErrorKind::Timeout => "timeout",
+            LlmErrorKind::Authentication => "authentication_failed",
+            LlmErrorKind::RateLimit => "rate_limited",
+            LlmErrorKind::UpstreamUnavailable => "upstream_unavailable",
+            LlmErrorKind::Network => "network_error",
+            LlmErrorKind::InvalidRequest => "bad_request",
+            LlmErrorKind::Other => "provider_error",
+        };
+        Self::new(code, message, stage)
+    }
+
+    /// 根据真实上游 HTTP 状态建立错误分类；调用方仍可在此之前处理安全拦截等
+    /// 协议特例，但不得从响应正文反向猜测状态。
+    pub fn from_upstream_status(
+        status: u16,
+        message: impl Into<String>,
+        stage: impl Into<String>,
+    ) -> Self {
+        let kind = match status {
+            401 | 403 => LlmErrorKind::Authentication,
+            429 => LlmErrorKind::RateLimit,
+            500..=599 => LlmErrorKind::UpstreamUnavailable,
+            400..=499 => LlmErrorKind::InvalidRequest,
+            _ => LlmErrorKind::Other,
+        };
+        Self::from_kind(kind, message, stage).with_upstream_status(status)
     }
 
     /// 创建供应商接口类错误。
@@ -125,6 +229,30 @@ impl LlmError {
             .map(|context| context.model.as_str())
     }
 
+    /// 返回跨 Provider 统一的错误分类。
+    pub fn kind(&self) -> LlmErrorKind {
+        match self.upstream_status {
+            Some(401 | 403) => return LlmErrorKind::Authentication,
+            Some(429) => return LlmErrorKind::RateLimit,
+            Some(500..=599) => return LlmErrorKind::UpstreamUnavailable,
+            Some(400..=499) => return LlmErrorKind::InvalidRequest,
+            _ => {}
+        }
+        match self.code.as_str() {
+            "timeout" => LlmErrorKind::Timeout,
+            "authentication_failed" | "tavily_auth_error" | "permission_denied" => {
+                LlmErrorKind::Authentication
+            }
+            "rate_limited" | "quota_exhausted" => LlmErrorKind::RateLimit,
+            "upstream_unavailable" => LlmErrorKind::UpstreamUnavailable,
+            "http_error" | "network_error" => LlmErrorKind::Network,
+            "bad_tool_arguments" | "bad_request" | "invalid_request" | "upstream_bad_request" => {
+                LlmErrorKind::InvalidRequest
+            }
+            _ => LlmErrorKind::Other,
+        }
+    }
+
     /// 将历史错误码归一为稳定的联网/工具故障分类。
     pub fn error_kind(&self) -> &'static str {
         match self.upstream_status {
@@ -169,9 +297,161 @@ impl LlmError {
     }
 }
 
+/// 沿错误 source chain 识别结构化超时与传输错误，不依赖错误文本。
+pub fn classify_error_source(error: &(dyn StdError + 'static)) -> LlmErrorKind {
+    let mut current = Some(error);
+    while let Some(source) = current {
+        if let Some(error) = source.downcast_ref::<reqwest::Error>() {
+            if error.is_timeout() {
+                return LlmErrorKind::Timeout;
+            }
+            if let Some(status) = error.status() {
+                return match status.as_u16() {
+                    401 | 403 => LlmErrorKind::Authentication,
+                    429 => LlmErrorKind::RateLimit,
+                    500..=599 => LlmErrorKind::UpstreamUnavailable,
+                    400..=499 => LlmErrorKind::InvalidRequest,
+                    _ => LlmErrorKind::Other,
+                };
+            }
+            if error.is_connect() || error.is_request() || error.is_body() {
+                return LlmErrorKind::Network;
+            }
+        }
+        if let Some(error) = source.downcast_ref::<io::Error>() {
+            match error.kind() {
+                io::ErrorKind::TimedOut => return LlmErrorKind::Timeout,
+                io::ErrorKind::ConnectionRefused
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::NotConnected
+                | io::ErrorKind::AddrInUse
+                | io::ErrorKind::AddrNotAvailable
+                | io::ErrorKind::BrokenPipe
+                | io::ErrorKind::UnexpectedEof => return LlmErrorKind::Network,
+                _ => {}
+            }
+        }
+        current = source.source();
+    }
+    LlmErrorKind::Other
+}
+
+fn error_chain_message(error: &(dyn StdError + 'static)) -> String {
+    let mut messages = Vec::new();
+    let mut current = Some(error);
+    while let Some(source) = current {
+        messages.push(source.to_string());
+        current = source.source();
+    }
+    messages.join(": caused by: ")
+}
+
 /// 自动将 LlmError 转换为 ErrorInfo。
 impl From<LlmError> for ErrorInfo {
     fn from(value: LlmError) -> Self {
         value.as_info()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[derive(Debug, Error)]
+    #[error("middle transport wrapper")]
+    struct MiddleError(#[source] reqwest::Error);
+
+    #[derive(Debug, Error)]
+    #[error("outer provider wrapper")]
+    struct OuterError(#[source] MiddleError);
+
+    async fn structured_reqwest_timeout() -> reqwest::Error {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        qq_maid_common::http_client::try_builder()
+            .unwrap()
+            .timeout(Duration::from_millis(20))
+            .build()
+            .unwrap()
+            .get(format!("http://{addr}/slow"))
+            .send()
+            .await
+            .unwrap_err()
+    }
+
+    #[tokio::test]
+    async fn structured_http_timeout_maps_to_timeout() {
+        let source = structured_reqwest_timeout().await;
+        assert!(source.is_timeout());
+
+        let error = LlmError::from_error_source(
+            &source,
+            LlmErrorKind::Network,
+            "http_request_timeout",
+            "test request failed",
+        );
+
+        assert_eq!(error.kind(), LlmErrorKind::Timeout);
+        assert_eq!(error.code, "timeout");
+        assert_eq!(error.stage, "http_request_timeout");
+    }
+
+    #[tokio::test]
+    async fn wrapped_source_chain_still_detects_reqwest_timeout() {
+        let wrapped = OuterError(MiddleError(structured_reqwest_timeout().await));
+
+        assert_eq!(classify_error_source(&wrapped), LlmErrorKind::Timeout);
+        let error = LlmError::from_error_source(
+            &wrapped,
+            LlmErrorKind::Other,
+            "response_read",
+            "wrapped request failed",
+        );
+        assert_eq!(error.code, "timeout");
+        assert!(error.message.contains("middle transport wrapper"));
+    }
+
+    #[tokio::test]
+    async fn connection_failure_is_network_not_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let source = qq_maid_common::http_client::client()
+            .get(format!("http://{addr}/unavailable"))
+            .send()
+            .await
+            .unwrap_err();
+
+        let error = LlmError::from_error_source(
+            &source,
+            LlmErrorKind::Network,
+            "http_request",
+            "test request failed",
+        );
+        assert_eq!(error.kind(), LlmErrorKind::Network);
+        assert_eq!(error.code, "network_error");
+        assert_ne!(error.kind(), LlmErrorKind::Timeout);
+    }
+
+    #[test]
+    fn upstream_statuses_have_distinct_categories() {
+        let cases = [
+            (401, LlmErrorKind::Authentication),
+            (429, LlmErrorKind::RateLimit),
+            (503, LlmErrorKind::UpstreamUnavailable),
+            (400, LlmErrorKind::InvalidRequest),
+        ];
+        for (status, expected) in cases {
+            let error = LlmError::from_upstream_status(status, "upstream failed", "http");
+            assert_eq!(error.kind(), expected, "status={status}");
+            assert_ne!(error.kind(), LlmErrorKind::Timeout, "status={status}");
+        }
     }
 }

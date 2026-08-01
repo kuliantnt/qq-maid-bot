@@ -105,12 +105,16 @@ impl AgentStepSession for ChatCompletionsAgentSession {
             false,
         );
         let (payload, tools_disabled) = enforce_tool_loop_budget(self.context_budget, payload)?;
-        let response = send_chat_completions_request(&self.client, &payload, false).await?;
+        let response = send_chat_completions_request(
+            &self.client,
+            &self.provider,
+            &self.model,
+            &payload,
+            false,
+        )
+        .await?;
         let body: Value = response.json().await.map_err(|err| {
-            LlmError::provider(
-                format!("invalid Chat Completions tool loop JSON: {err}"),
-                "json",
-            )
+            LlmError::from_response_source(&err, "failed to read Chat Completions tool loop JSON")
         })?;
         let step_usage = extract_chat_completion_usage(&body);
         let tool_rounds = extract_tool_call_rounds(&body)?;
@@ -176,7 +180,14 @@ impl AgentStepSession for ChatCompletionsAgentSession {
             true,
         );
         let (payload, tools_disabled) = enforce_tool_loop_budget(self.context_budget, payload)?;
-        let response = send_chat_completions_request(&self.client, &payload, true).await?;
+        let response = send_chat_completions_request(
+            &self.client,
+            &self.provider,
+            &self.model,
+            &payload,
+            true,
+        )
+        .await?;
         let step = collect_chat_completions_tool_loop_stream(
             response,
             &mut messages,
@@ -390,7 +401,8 @@ async fn collect_chat_completions_tool_loop_stream(
             Ok(None) => break,
             Err(err) => {
                 return Err(stream_transport_error(
-                    format!("Chat Completions tool loop stream failed: {err}"),
+                    err,
+                    "Chat Completions tool loop stream failed",
                     &answer,
                 ));
             }

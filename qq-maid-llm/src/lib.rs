@@ -15,5 +15,5 @@ pub mod sse;
 pub mod tool;
 pub mod web_search;
 
-pub use error::{ErrorInfo, LlmError};
+pub use error::{ErrorInfo, LlmError, LlmErrorKind};
 pub use service::LlmService;

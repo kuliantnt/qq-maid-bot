@@ -55,7 +55,9 @@ pub(crate) use chat_tool_loop::{
 };
 pub(crate) use configured::ConfiguredResponsesProvider;
 pub(crate) use stream::is_openai_responses_done_sentinel;
-pub(crate) use transport::{openai_responses_url, send_openai_responses_request};
+pub(crate) use transport::{
+    ResponsesTransportContext, openai_responses_url, send_openai_responses_request,
+};
 
 struct OpenAiChatFallbackRequest<'a> {
     api_mode: OpenAiApiMode,

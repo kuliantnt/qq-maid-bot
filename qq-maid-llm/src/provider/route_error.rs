@@ -56,6 +56,8 @@ pub(crate) fn should_try_next_model(err: &LlmError) -> bool {
         "timeout"
             | "provider_error"
             | "http_error"
+            | "network_error"
+            | "authentication_failed"
             | "rate_limited"
             | "upstream_unavailable"
             | "unsupported_input_part"
@@ -86,7 +88,8 @@ pub(crate) fn unavailable_provider_error(
 pub(crate) fn model_error_kind(err: &LlmError) -> &'static str {
     match err.code.as_str() {
         "timeout" => "timeout",
-        "http_error" => "http_error",
+        "http_error" | "network_error" => "network",
+        "authentication_failed" => "authentication",
         "provider_error" if matches!(err.stage.as_str(), "stream" | "sse") => "stream_error",
         "provider_error" if err.stage == "json" => "invalid_response",
         "provider_error" if err.stage == "provider_unavailable" => "provider_unavailable",
@@ -114,7 +117,10 @@ pub(crate) fn model_task_name(req: &ChatRequest) -> &str {
 ///
 /// 文案格式与原实现保持一致：`#<index> <provider>:<model> -> <code>@<stage>`，
 /// 用 `; ` 分隔，便于在调用方日志中一次性看到整条链的失败原因。
-pub(crate) fn aggregate_route_error(task: &str, failures: Vec<ModelAttemptFailure>) -> LlmError {
+pub(crate) fn aggregate_route_error(
+    task: &str,
+    mut failures: Vec<ModelAttemptFailure>,
+) -> LlmError {
     if failures
         .iter()
         .all(|failure| failure.error.code == "unsupported_input_part")
@@ -136,7 +142,7 @@ pub(crate) fn aggregate_route_error(task: &str, failures: Vec<ModelAttemptFailur
             .error;
     }
     let details = failures
-        .into_iter()
+        .iter()
         .map(|failure| {
             format!(
                 "#{} {}:{} -> {}@{}",
@@ -149,8 +155,17 @@ pub(crate) fn aggregate_route_error(task: &str, failures: Vec<ModelAttemptFailur
         })
         .collect::<Vec<_>>()
         .join("; ");
-    LlmError::provider(
-        format!("all model candidates failed for task `{task}`: {details}"),
-        "provider_route",
-    )
+    let Some(mut terminal) = failures.pop().map(|failure| failure.error) else {
+        return LlmError::provider(
+            format!("model route for task `{task}` had no candidates"),
+            "provider_route",
+        );
+    };
+    // 候选明细用于日志排障，但最终错误码、阶段、HTTP 状态和 Agent diagnostics
+    // 必须保留最后一次真实失败，尤其不能把重试耗尽的 timeout 改写成 provider_error。
+    terminal.message = format!(
+        "all model candidates failed for task `{task}`: {details}; terminal error: {}",
+        terminal.message
+    );
+    terminal
 }

@@ -634,11 +634,36 @@ async fn model_route_provider_aggregates_all_candidate_failures() {
     let err = provider.chat(request()).await.unwrap_err();
 
     assert_eq!(err.code, "provider_error");
-    assert_eq!(err.stage, "provider_route");
+    assert_eq!(err.stage, "provider");
     assert!(err.message.contains("#0 openai:gpt-a -> timeout@provider"));
     assert!(
         err.message
             .contains("#1 deepseek:deepseek-chat -> provider_error@provider")
+    );
+    assert_eq!(openai.calls(), 1);
+    assert_eq!(deepseek.calls(), 1);
+}
+
+#[tokio::test]
+async fn model_route_timeout_exhaustion_keeps_terminal_timeout() {
+    let (provider, openai, deepseek) = route_provider(
+        "openai:gpt-a,deepseek:deepseek-chat",
+        vec![Err(LlmError::timeout("http_request_timeout"))],
+        vec![Err(LlmError::timeout("stream_read"))],
+    );
+
+    let err = provider.chat(request()).await.unwrap_err();
+
+    assert_eq!(err.code, "timeout");
+    assert_eq!(err.kind(), crate::error::LlmErrorKind::Timeout);
+    assert_eq!(err.stage, "stream_read");
+    assert!(
+        err.message
+            .contains("#0 openai:gpt-a -> timeout@http_request_timeout")
+    );
+    assert!(
+        err.message
+            .contains("#1 deepseek:deepseek-chat -> timeout@stream_read")
     );
     assert_eq!(openai.calls(), 1);
     assert_eq!(deepseek.calls(), 1);
