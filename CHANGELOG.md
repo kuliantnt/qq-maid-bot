@@ -2,6 +2,28 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.23.3] - 2026-08-01
+
+### Release Focus
+
+* **从配置中心重构到前端交互收口**：本版本沿着 PR #627 → #629 → #630 → #631 的链路，把控制台的业务布局、前端模块边界、模型请求超时诊断和 Todo 截止日期语义收拢到同一套可验证的实现里。
+
+### Changed
+
+* **配置中心按业务场景重组**（PR #627）：移除没有其他调用方的 Provider 连接测试面板、前端请求和后端专用路由；配置页按模型与供应商、模型路由、联网与工具、记忆与知识库、回复与语音、平台接入、待办与通知、系统与安全等场景组织，同时保留自动保存、串行队列、revision 冲突、Secret replace/clear 和输入恢复边界。后端路由测试文件同步拆分，前端契约文档统一迁移到根 `docs/`。
+* **LLM 与联网搜索超时分类**（PR #629）：沿请求、首包、响应体、SSE 流式读取和项目总超时链路保留结构化 Timeout，避免候选全部失败时被重建成泛化的 `provider_error`；OpenAI Responses、Chat Completions、OpenAI Compatible、Gemini Search、OpenAI Search 和 Tavily Search 共用同一分类语义，日志补充超时阶段与安全诊断字段。
+* **控制台前端模块化与交互优化**（PR #630）：将配置中心和 Todo 页面按职责拆分，集中管理 API 路径，保留原有后端契约、自动保存、校验、分页和保存冲突语义；同时完善 Todo 高级筛选、创建弹窗、删除操作位置、模型路线 Chip 编辑器、OpenCode 模板和特殊背景布局，并提交可复现的 `dist` 产物。
+
+### Fixed
+
+* **Todo 仅设置截止日期**（PR #631）：日期和时间继续使用统一字段组，但只填写日期时仅提交 `due_date`，填写时间后才生成一致的 `due_at`，自动推导 `time_precision`，并拒绝只有时间没有日期的输入。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.23.3`；内部 crate 版本保持 `v0.23.2` 的版本号，不改变 workspace 依赖方向。
+* 本版本无新增 SQLite migration 和必需配置迁移；已有配置、数据库、主密钥和运行目录可按常规备份后直接升级。Provider 连接测试入口移除后，正式启动预检和 Provider 正常运行链路保持不变。
+* 控制台后端 API、自动保存、revision 冲突、Secret 脱敏、Todo 分页与管理边界保持兼容；前端详细契约见根目录 [`docs/`](./docs/README.md)。
+
 ## [v0.23.2] - 2026-07-31
 
 ### Release Focus

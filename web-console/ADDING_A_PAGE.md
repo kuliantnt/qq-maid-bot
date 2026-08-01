@@ -38,11 +38,11 @@ git diff --check
 2. 在 `DESIGN.md` 增加 token、结构、variants、states、a11y 和 motion。
 3. 写独立 primitive/composite module，不把业务 API 放进组件。
 4. 为 default、hover、active、focus、disabled、loading、empty、error 做 showcase 或测试。
-5. 在 `docs/COMPONENT_REGISTRY.md`登记 DOM 契约和 modifier。
+5. 在 `../docs/COMPONENT_REGISTRY.md` 登记 DOM 契约和 modifier。
 
 ## 新增主题步骤
 
-按 `docs/THEME.md` 添加完整语义 preset。预设只写 `console-theme` localStorage，绝不添加后端运行配置、请求 header 或其他持久化 key。
+按 `../docs/THEME.md` 添加完整语义 preset。预设只写 `console-theme` localStorage，绝不添加后端运行配置、请求 header 或其他持久化 key。
 
 ## 禁止事项
 

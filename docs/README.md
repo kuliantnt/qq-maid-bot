@@ -30,6 +30,10 @@
 | [管理 API 约定](./development/management-api.md) | 管理员认证、统一响应、分页与 Todo 管理 API |
 | [控制台用户数据 API](./development/console-user-data-api.md) | 独立前端使用的用户偏好与通用文件接口契约 |
 | [自定义 Tool 指南](./development/custom-tools.md) | Tool 注册、场景白名单、领域后处理与安全要求 |
+| [Web Console API 契约](./API_CONTRACTS.md) | 前端 API、认证边界、响应状态和未来接口槽位 |
+| [Web Console 组件注册表](./COMPONENT_REGISTRY.md) | 组件层级、状态契约和扩展规则 |
+| [Web Console 交互契约](./INTERACTION_CONTRACTS.md) | 配置保存、冲突、Secret、校验和重启交互 |
+| [Web Console 主题契约](./THEME.md) | 语义主题 token、预设和浏览器偏好持久化 |
 | [Gateway README](../qq-maid-gateway-rs/README.md) | 平台事件、消息发送、主动推送与 `/ping` |
 | [Core README](../qq-maid-core/README.md) | `CoreService`、会话、命令、业务 Tool 和 HTTP facade |
 | [LLM README](../qq-maid-llm/README.md) | Provider、路由、fallback、SSE、Web Search 和 Agent Loop |

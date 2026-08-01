@@ -47,7 +47,7 @@
 - 状态不能只靠颜色表达，必须同时有文本或可访问名称。
 - 状态信号不能只靠红绿差异表达；成功、警告、错误必须同时使用不同几何形状，且保留文本标签。
 - 状态徽章也必须保留几何信号：成功为方形、警告为菱形、中性为圆形，并保留文字标签。
-- 主题只保存浏览器本地的预设 ID，见 `docs/THEME.md`。
+- 主题只保存浏览器本地的预设 ID，见 [`../docs/THEME.md`](../docs/THEME.md)。
 
 ## 3. Typography
 
@@ -80,7 +80,7 @@
 
 ## 5. Components
 
-组件分三层，详细索引见 `docs/COMPONENT_REGISTRY.md`。
+组件分三层，详细索引见 [`../docs/COMPONENT_REGISTRY.md`](../docs/COMPONENT_REGISTRY.md)。
 
 ### Foundation
 
@@ -136,8 +136,8 @@
 
 ## 9. API Boundary
 
-页面只能通过 `src/api.ts` 或明确拆分的 typed API module 访问后端。组件不能直接调用 `fetch`，不能读取 cookie，不能处理 CSRF token。当前 API 和未来扩展规则见 `docs/API_CONTRACTS.md`。
+页面只能通过 `src/api.ts` 或明确拆分的 typed API module 访问后端。组件不能直接调用 `fetch`，不能读取 cookie，不能处理 CSRF token。当前 API 和未来扩展规则见 [`../docs/API_CONTRACTS.md`](../docs/API_CONTRACTS.md)。
 
 ## 10. Interaction Contract
 
-配置保存、revision 冲突、secret 添加/替换/清除、配置校验、Provider 测试和受控重启必须遵循 `docs/INTERACTION_CONTRACTS.md`。其中 dirty、saving、conflict、pending restart 和 session expired 是真实交互状态，不是装饰性标签。
+配置保存、revision 冲突、secret 添加/替换/清除、配置校验和受控重启必须遵循 [`../docs/INTERACTION_CONTRACTS.md`](../docs/INTERACTION_CONTRACTS.md)。其中 dirty、saving、conflict、pending restart 和 session expired 是真实交互状态，不是装饰性标签。

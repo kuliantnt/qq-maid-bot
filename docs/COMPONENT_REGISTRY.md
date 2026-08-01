@@ -65,7 +65,7 @@
 
 ### Configuration interaction composites
 
-配置相关复合组件的行为契约见 `docs/INTERACTION_CONTRACTS.md`：
+配置相关复合组件的行为契约见 [`INTERACTION_CONTRACTS.md`](./INTERACTION_CONTRACTS.md)：
 
 - `BusinessConfigNav`：只负责业务域定位；runtime、Secret 与 Agent 保存来源在同一业务域内组合，不生成重复字段入口。
 - `SaveBar`：按配置域展示 dirty 数量、保存中、成功、待重启和错误。
