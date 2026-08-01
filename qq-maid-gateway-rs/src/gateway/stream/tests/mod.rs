@@ -924,7 +924,7 @@ async fn pending_core_failure_sends_safe_ordinary_failure_reply() {
 async fn stream_timeout_failure_stops_typing_with_timeout_reason() {
     let events = FakeEventStream::new([CoreResponseEvent::Failed(CoreRespondFailure {
         kind: CoreFailureKind::LlmTimeout,
-        message: "LLM 服务处理超时，请稍后再试。".to_owned(),
+        message: "LLM 请求超时，请稍后重试。".to_owned(),
         retryable: true,
         agent: None,
     })]);
@@ -958,7 +958,7 @@ async fn stream_timeout_failure_stops_typing_with_timeout_reason() {
     assert_eq!(
         sender.calls(),
         vec![FakeCall::Text {
-            content: "LLM 服务处理超时，请稍后再试。".to_owned(),
+            content: "LLM 请求超时，请稍后重试。".to_owned(),
             msg_id: Some("msg-1".to_owned()),
         }]
     );
@@ -970,7 +970,7 @@ async fn active_core_failure_finalizes_stream_without_ordinary_failure_reply() {
         CoreResponseEvent::TextDelta("已发送".to_owned()),
         CoreResponseEvent::Failed(CoreRespondFailure {
             kind: CoreFailureKind::LlmTimeout,
-            message: "LLM 服务处理超时，请稍后再试。".to_owned(),
+            message: "LLM 请求超时，请稍后重试。".to_owned(),
             retryable: true,
             agent: None,
         }),

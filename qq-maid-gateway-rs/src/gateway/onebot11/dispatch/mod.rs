@@ -28,7 +28,7 @@ use crate::{
 use super::{OneBotSendError, OneBotSendResult, OneBotSender};
 
 const STREAM_FAILED_TEXT: &str = "处理失败，请稍后再试。";
-const STREAM_TIMEOUT_TEXT: &str = "LLM 服务处理超时，请稍后再试";
+const STREAM_TIMEOUT_TEXT: &str = "LLM 请求超时，请稍后重试。";
 const STREAM_CANCELLED_TEXT: &str = "本次处理已取消，请重新发送消息。";
 
 type EventFuture<'a> = Pin<Box<dyn Future<Output = Option<CoreResponseEvent>> + Send + 'a>>;
@@ -925,7 +925,7 @@ mod tests {
                     "respond",
                     "timed out",
                 ))),
-                "LLM 服务处理超时，请稍后再试",
+                "LLM 请求超时，请稍后重试。",
             ),
             (
                 Ok(OneBotCoreTransport::Stream(Box::new(FakeStream {

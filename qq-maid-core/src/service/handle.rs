@@ -168,7 +168,14 @@ impl CoreService for CoreHandle {
                 }
                 Err(_) => {
                     let err = LlmError::timeout("stream_init");
-                    error_core_error(&scope_key, &err);
+                    error_core_error(
+                        &scope_key,
+                        &err,
+                        state.provider.name(),
+                        state.provider.model(),
+                        state.provider.stream_enabled(),
+                        state.config.request_timeout_seconds,
+                    );
                     let _metrics = recorder.fail(
                         state.provider.name(),
                         state.provider.model(),
@@ -206,7 +213,14 @@ impl CoreService for CoreHandle {
             }
             Err(_) => {
                 let err = LlmError::timeout("request");
-                error_core_error(&scope_key, &err);
+                error_core_error(
+                    &scope_key,
+                    &err,
+                    state.provider.name(),
+                    state.provider.model(),
+                    state.provider.stream_enabled(),
+                    state.config.request_timeout_seconds,
+                );
                 let _metrics = recorder.fail(
                     state.provider.name(),
                     state.provider.model(),

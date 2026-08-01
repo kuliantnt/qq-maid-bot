@@ -16,7 +16,7 @@ fn local_group_hints_use_configured_bot_display_name() {
 async fn group_stream_timeout_sends_core_safe_failure_text() {
     let stream = FakeGroupEventStream::new([CoreResponseEvent::Failed(CoreRespondFailure {
         kind: CoreFailureKind::LlmTimeout,
-        message: "LLM 服务处理超时，请稍后再试。".to_owned(),
+        message: "LLM 请求超时，请稍后重试。".to_owned(),
         retryable: true,
         agent: None,
     })]);
@@ -39,7 +39,7 @@ async fn group_stream_timeout_sends_core_safe_failure_text() {
                 group_openid: "group-1".to_owned(),
                 msg_id: Some("group-msg-1".to_owned()),
             },
-            "LLM 服务处理超时，请稍后再试。".to_owned(),
+            "LLM 请求超时，请稍后重试。".to_owned(),
         )]
     );
     assert!(cache.lock().unwrap().contains("failure-message-id"));

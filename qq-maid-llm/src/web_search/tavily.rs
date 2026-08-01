@@ -113,15 +113,17 @@ impl WebSearchExecutor for TavilyWebSearchExecutor {
         }
 
         let body: TavilySearchResponse = response.json().await.map_err(|err| {
-            if err.is_timeout() {
-                LlmError::new(
-                    "timeout",
-                    "Tavily response body exceeded the configured total timeout",
-                    "tavily_total",
-                )
+            let stage = if err.is_timeout() {
+                "tavily_total"
             } else {
-                LlmError::provider(format!("invalid Tavily search JSON: {err}"), "tavily_json")
-            }
+                "tavily_json"
+            };
+            LlmError::from_error_source(
+                &err,
+                crate::error::LlmErrorKind::Other,
+                stage,
+                "failed to read Tavily search JSON",
+            )
         })?;
         let sources = tavily_sources(body.results, usize::from(payload.max_results));
         if sources.is_empty() {
@@ -379,21 +381,19 @@ fn truncate_chars(value: &str, limit: usize) -> String {
 }
 
 fn tavily_transport_error(err: reqwest::Error) -> LlmError {
-    if err.is_timeout() && err.is_connect() {
-        LlmError::new(
-            "timeout",
-            "Tavily connection exceeded the configured timeout",
-            "tavily_connect",
-        )
+    let stage = if err.is_timeout() && err.is_connect() {
+        "tavily_connect"
     } else if err.is_timeout() {
-        LlmError::new(
-            "timeout",
-            "Tavily request exceeded the configured total timeout",
-            "tavily_total",
-        )
+        "tavily_total"
     } else {
-        LlmError::http(format!("Tavily search request failed: {err}"))
-    }
+        "tavily_request"
+    };
+    LlmError::from_error_source(
+        &err,
+        crate::error::LlmErrorKind::Network,
+        stage,
+        "Tavily search request failed",
+    )
 }
 
 async fn tavily_status_error(status: StatusCode, response: reqwest::Response) -> LlmError {

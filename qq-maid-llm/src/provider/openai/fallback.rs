@@ -14,22 +14,36 @@ pub(crate) fn should_retry_non_stream_after_empty_stream(outcome: &ChatOutcome) 
 pub(crate) fn should_retry_non_stream_after_stream_error(err: &LlmError) -> bool {
     matches!(
         err.code.as_str(),
-        "provider_error" | "http_error" | "timeout"
+        "provider_error" | "http_error" | "network_error" | "timeout"
     ) && matches!(
         err.stage.as_str(),
-        "provider" | "stream" | "http" | "sse" | "stream_after_delta"
+        "provider"
+            | "stream"
+            | "http"
+            | "http_request"
+            | "http_request_timeout"
+            | "response_read"
+            | "stream_read"
+            | "stream_read_after_delta"
+            | "sse"
+            | "stream_after_delta"
     )
 }
 
 /// 当 Responses 主链路失败时，是否允许降级到 Chat Completions。
 /// 认证/授权拒绝对同一 Provider 的另一端点同样无效，应直接交给跨 Provider 候选链。
 pub(crate) fn should_fallback_to_chat_after_responses_error(err: &LlmError) -> bool {
+    if let Some(status) = err.upstream_status {
+        // 只有真实上游返回的端点/协议兼容状态才允许切换端点；本地 bad_request
+        // 没有 upstream_status，认证、限流和服务端错误也不应重复请求同一 Provider。
+        return matches!(status, 400 | 404 | 422);
+    }
     matches!(
         err.code.as_str(),
-        "provider_error" | "http_error" | "timeout"
+        "provider_error" | "http_error" | "network_error" | "timeout"
     ) && !matches!(
         err.stage.as_str(),
-        "stream_after_delta" | "provider_unavailable"
+        "stream_after_delta" | "stream_read_after_delta" | "provider_unavailable"
     )
 }
 
@@ -91,19 +105,46 @@ mod tests {
     }
 
     #[test]
-    fn responses_errors_trigger_chat_fallback_only_for_upstream_failures() {
-        assert!(should_fallback_to_chat_after_responses_error(
-            &LlmError::http("OpenAI chat returned HTTP 400")
-        ));
-        assert!(should_fallback_to_chat_after_responses_error(
-            &LlmError::provider("invalid OpenAI chat stream JSON", "sse")
-        ));
+    fn responses_incompatible_upstream_statuses_trigger_chat_fallback() {
+        for status in [400, 404, 422] {
+            let error =
+                LlmError::from_upstream_status(status, "incompatible Responses API", "http");
+            assert!(
+                should_fallback_to_chat_after_responses_error(&error),
+                "status={status}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_bad_request_does_not_trigger_chat_fallback() {
         assert!(!should_fallback_to_chat_after_responses_error(
             &LlmError::new(
                 "bad_request",
                 "messages must contain non-empty content",
                 "request"
             )
+        ));
+    }
+
+    #[test]
+    fn authentication_statuses_do_not_trigger_chat_fallback() {
+        for status in [401, 403] {
+            let error = LlmError::from_upstream_status(status, "authentication rejected", "http");
+            assert!(
+                !should_fallback_to_chat_after_responses_error(&error),
+                "status={status}"
+            );
+        }
+    }
+
+    #[test]
+    fn responses_protocol_errors_without_http_status_can_trigger_chat_fallback() {
+        assert!(should_fallback_to_chat_after_responses_error(
+            &LlmError::http("OpenAI Responses transport failed")
+        ));
+        assert!(should_fallback_to_chat_after_responses_error(
+            &LlmError::provider("invalid OpenAI chat stream JSON", "sse")
         ));
         assert!(!should_fallback_to_chat_after_responses_error(
             &LlmError::config("OPENAI_API_KEY is required")
