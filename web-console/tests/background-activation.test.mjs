@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createBackgroundController } from "../dist/background.js";
-import { activateBackgroundFile } from "../dist/views/theme-selector.js";
+import { activateBackgroundFile } from "../dist/views/configuration/theme-selector.js";
 
 function fakeRoot(customLayer) {
   return {

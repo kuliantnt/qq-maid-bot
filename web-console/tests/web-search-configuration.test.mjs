@@ -7,7 +7,7 @@ import {
   tavilyCredentialNotice,
   webSearchConfigChange,
   webSearchRouteChanges,
-} from "../dist/views/configuration.js";
+} from "../dist/views/configuration/configuration.js";
 
 test("blur autosave only reports changed supported values", () => {
   assert.equal(shouldAutosaveOnBlur({ scope: "public", value: "", baseline: null }), false);

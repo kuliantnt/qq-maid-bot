@@ -145,10 +145,10 @@ export function renderOpenCodeProviders(snapshot, onSave, onRemove) {
     return section;
 }
 export function renderOpenCodeRouteHints(disabled, enabledProviders, keyConfigured) {
-    const section = document.createElement("section");
-    section.className = "config-field-group route-hints";
-    const heading = document.createElement("h3");
-    heading.textContent = "OpenCode 模型路线提示";
+    const details = document.createElement("details");
+    details.className = "route-hints-disclosure";
+    const summary = document.createElement("summary");
+    summary.textContent = "OpenCode 模型路线模板";
     const note = document.createElement("p");
     note.className = "hint";
     note.textContent = OPEN_CODE_ROUTE_TEMPLATE_NOTICE;
@@ -161,30 +161,45 @@ export function renderOpenCodeRouteHints(disabled, enabledProviders, keyConfigur
     list.className = "route-example-list";
     for (const [example, provider] of examples) {
         const row = document.createElement("div");
+        row.className = "route-template-row";
         const code = document.createElement("code");
         code.textContent = example;
-        const buttons = document.createElement("span");
-        for (const [route, label] of [["private_main", "插入私聊模板"], ["group_main", "插入群聊模板"], ["aux", "插入辅助模板"]]) {
-            const button = document.createElement("button");
-            button.type = "button";
-            button.className = "secondary provider-action";
-            button.textContent = label;
-            button.disabled = disabled;
-            button.onclick = () => appendRouteCandidate(`agent-route-${route}`, example);
-            buttons.append(button);
-        }
         const warning = openCodeProviderWarning(enabledProviders.includes(provider), keyConfigured);
-        row.append(code, buttons);
-        if (warning) {
-            const warningText = document.createElement("small");
-            warningText.className = "field-warning";
-            warningText.textContent = warning;
-            row.append(warningText);
+        const state = document.createElement("span");
+        state.className = warning ? "route-template-state route-template-state--pending" : "route-template-state";
+        state.textContent = warning ? "未配置" : "已配置";
+        state.title = warning || "Provider 已配置";
+        const actions = document.createElement("span");
+        actions.className = "route-template-actions";
+        const insert = document.createElement("button");
+        insert.type = "button";
+        insert.className = "secondary provider-action";
+        insert.textContent = "插入模板";
+        insert.disabled = disabled;
+        insert.onclick = () => {
+            chooser.hidden = !chooser.hidden;
+        };
+        const chooser = document.createElement("span");
+        chooser.className = "route-template-chooser";
+        chooser.hidden = true;
+        for (const [route, label] of [["private_main", "私聊主路线"], ["group_main", "群聊主路线"], ["aux", "辅助路线"]]) {
+            const target = document.createElement("button");
+            target.type = "button";
+            target.className = "secondary provider-action";
+            target.textContent = label;
+            target.disabled = disabled;
+            target.onclick = () => {
+                appendRouteCandidate(`agent-route-${route}`, example);
+                chooser.hidden = true;
+            };
+            chooser.append(target);
         }
+        actions.append(insert, chooser);
+        row.append(code, state, actions);
         list.append(row);
     }
-    section.append(heading, note, list);
-    return section;
+    details.append(summary, note, list);
+    return details;
 }
 function providerCard(form, running, keyConfigured, editable, onSave, onRemove) {
     const card = document.createElement("article");
@@ -272,6 +287,8 @@ function appendRouteCandidate(id, candidate) {
     if (!current.includes(candidate))
         current.push(candidate);
     input.value = current.join(", ");
+    // 通知 Chip 编辑器同步视觉；change 不触发 autosave（autosave 监听 focusout）。
+    input.dispatchEvent(new Event("change", { bubbles: true }));
     input.focus();
 }
 function isHttpUrl(value) {

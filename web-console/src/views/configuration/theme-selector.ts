@@ -4,8 +4,8 @@ import {
   isConsoleThemePreset,
   type ConsoleThemePreset,
   type ThemeController,
-} from "../theme.js";
-import type { BackgroundController, BackgroundFile, BackgroundMode } from "../background.js";
+} from "../../theme.js";
+import type { BackgroundController, BackgroundFile, BackgroundMode } from "../../background.js";
 import type { UserDataController } from "./configuration.js";
 
 export interface BackgroundActivationDeps {

@@ -11,7 +11,7 @@ import {
 } from "./helpers/fake-dom.mjs";
 import { createThemeController } from "../dist/theme.js";
 import { createBackgroundController } from "../dist/background.js";
-import { initializeConfiguration, resetConfigurationStateForTests } from "../dist/views/configuration.js";
+import { initializeConfiguration, resetConfigurationStateForTests } from "../dist/views/configuration/configuration.js";
 
 function makeField({
   key,
@@ -298,6 +298,24 @@ test("配置中心按八个业务场景渲染导航，默认展示模型与供�
     assert.equal(tabs[0].getAttribute("aria-selected"), "true");
     assert.equal(env.document.getElementById("config-provider-openai-api_key").value, "");
     assert.equal(env.document.getElementById("config-delivery-tts-qwen_model").value, "model-a");
+  } finally {
+    env.dispose();
+  }
+});
+
+test("模型路由按聊天与辅助、搜索拆成两个独立分组", async () => {
+  const env = setupEnvironment();
+  try {
+    await env.initialize();
+    const groups = env.document.getElementById("agent-config-fields")
+      .querySelectorAll(".model-route-field-group");
+
+    assert.equal(groups.length, 2);
+    assert.deepEqual(groups.map((group) => group.querySelector("h3").textContent), [
+      "聊天与辅助路线",
+      "搜索路线",
+    ]);
+    assert.deepEqual(groups.map((group) => group.querySelector(".config-field-group-grid").children.length), [3, 2]);
   } finally {
     env.dispose();
   }

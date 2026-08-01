@@ -1,4 +1,4 @@
-import { CONSOLE_THEME_IDS, CONSOLE_THEMES, isConsoleThemePreset, } from "../theme.js";
+import { CONSOLE_THEME_IDS, CONSOLE_THEMES, isConsoleThemePreset, } from "../../theme.js";
 /**
  * 统一的自定义背景激活流程（已有文件与新上传文件共用）：
  * 1. 先读取 Blob——失败时保留原浏览器背景、不提交服务端、不产生未处理 rejection；

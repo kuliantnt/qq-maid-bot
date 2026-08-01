@@ -9,7 +9,7 @@ import {
   secretConfigurationChanges,
   ttsNumberRange,
   ttsProviderOptions,
-} from "../dist/views/configuration.js";
+} from "../dist/views/configuration/configuration.js";
 
 const TTS_KEYS = [
   "delivery.tts.provider",

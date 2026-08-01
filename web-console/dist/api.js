@@ -1,3 +1,4 @@
+import { AUTH_ROUTES, CONFIGURATION_ROUTES, MARKDOWN_RENDER_ROUTE, RESTART_ROUTE, STATUS_ROUTE, TODO_ROUTES, USER_DATA_ROUTES, } from "./api-routes.js";
 export class ConsoleApiError extends Error {
     code;
     status;
@@ -13,7 +14,7 @@ export function setCsrfToken(value) {
     csrfToken = value;
 }
 export async function fetchSession() {
-    const payload = record(await fetchJson("/api/v1/console/session", {
+    const payload = record(await fetchJson(AUTH_ROUTES.session, {
         headers: { Accept: "application/json" },
     }));
     const session = parseSession(payload.session);
@@ -21,13 +22,13 @@ export async function fetchSession() {
     return session;
 }
 export async function fetchBootstrap() {
-    const payload = record(await fetchJson("/api/v1/console/auth/bootstrap", {
+    const payload = record(await fetchJson(AUTH_ROUTES.bootstrap, {
         headers: { Accept: "application/json" },
     }));
     return parseBootstrapStatus(payload.bootstrap);
 }
 export async function issuePreAuth() {
-    const payload = record(await mutatingJson("/api/v1/console/auth/preauth", "POST"));
+    const payload = record(await mutatingJson(AUTH_ROUTES.preauth, "POST"));
     const token = string(payload.csrf_token, "");
     if (!token)
         throw new ConsoleApiError("认证服务未返回 CSRF token", "invalid_response");
@@ -35,7 +36,7 @@ export async function issuePreAuth() {
     return token;
 }
 export async function initializeAdmin(username, password, bootstrapToken) {
-    const payload = record(await mutatingJson("/api/v1/console/auth/initialize", "POST", {
+    const payload = record(await mutatingJson(AUTH_ROUTES.initialize, "POST", {
         username,
         password,
         bootstrap_token: bootstrapToken,
@@ -45,11 +46,11 @@ export async function initializeAdmin(username, password, bootstrapToken) {
     return session;
 }
 export async function requestPasswordReset() {
-    const payload = record(await mutatingJson("/api/v1/console/auth/password-reset/bootstrap", "POST"));
+    const payload = record(await mutatingJson(AUTH_ROUTES.passwordResetBootstrap, "POST"));
     return parseBootstrapStatus(payload.bootstrap);
 }
 export async function resetAdminPassword(password, bootstrapToken) {
-    const payload = record(await mutatingJson("/api/v1/console/auth/password-reset", "POST", {
+    const payload = record(await mutatingJson(AUTH_ROUTES.passwordReset, "POST", {
         password,
         bootstrap_token: bootstrapToken,
     }));
@@ -58,21 +59,21 @@ export async function resetAdminPassword(password, bootstrapToken) {
     return session;
 }
 export async function loginAdmin(username, password) {
-    const payload = record(await mutatingJson("/api/v1/console/auth/login", "POST", { username, password }));
+    const payload = record(await mutatingJson(AUTH_ROUTES.login, "POST", { username, password }));
     const session = parseSession(payload.session);
     setCsrfToken(session.csrfToken);
     return session;
 }
 export async function logoutAdmin() {
-    await mutatingJson("/api/v1/console/auth/logout", "POST", undefined, true);
+    await mutatingJson(AUTH_ROUTES.logout, "POST", undefined, true);
     setCsrfToken("");
 }
 export async function fetchUserPreferences() {
-    const payload = record(await mutatingJson("/api/v1/console/user-preferences/get", "POST", {}));
+    const payload = record(await mutatingJson(USER_DATA_ROUTES.preferencesGet, "POST", {}));
     return parseUserPreferences(payload.data);
 }
 export async function updateUserPreferences(patch) {
-    const payload = record(await mutatingJson("/api/v1/console/user-preferences/update", "POST", {
+    const payload = record(await mutatingJson(USER_DATA_ROUTES.preferencesUpdate, "POST", {
         ...(patch.customColors === undefined ? {} : { custom_colors: patch.customColors }),
         ...(patch.backgroundFileIds === undefined ? {} : { background_file_ids: patch.backgroundFileIds }),
         ...(patch.activeBackgroundFileId === undefined ? {} : { active_background_file_id: patch.activeBackgroundFileId }),
@@ -96,7 +97,7 @@ export async function collectAllUserFiles(fetchPage) {
 }
 export async function listUserFiles() {
     return collectAllUserFiles(async (page) => {
-        const payload = record(await mutatingJson("/api/v1/console/files/list", "POST", {
+        const payload = record(await mutatingJson(USER_DATA_ROUTES.filesList, "POST", {
             page,
             page_size: 100,
         }));
@@ -111,7 +112,7 @@ export async function listUserFiles() {
     });
 }
 export async function uploadUserFile(file) {
-    const response = await fetch("/api/v1/console/files/upload", {
+    const response = await fetch(USER_DATA_ROUTES.filesUpload, {
         method: "POST",
         credentials: "same-origin",
         headers: { Accept: "application/json", "X-CSRF-Token": csrfToken },
@@ -133,43 +134,43 @@ export async function readUserFile(file) {
     return response.blob();
 }
 export async function deleteUserFile(fileId) {
-    await mutatingJson("/api/v1/console/files/delete", "POST", { file_id: fileId });
+    await mutatingJson(USER_DATA_ROUTES.filesDelete, "POST", { file_id: fileId });
 }
 export async function fetchConfiguration() {
-    const payload = record(await fetchJson("/api/v1/console/configuration", {
+    const payload = record(await fetchJson(CONFIGURATION_ROUTES.get, {
         headers: { Accept: "application/json" },
     }));
     return parseConfigurationPayload(payload);
 }
 export async function updateRuntimeConfiguration(expectedRevision, changes) {
-    const payload = record(await mutatingJson("/api/v1/console/configuration/runtime", "PATCH", {
+    const payload = record(await mutatingJson(CONFIGURATION_ROUTES.runtime, "PATCH", {
         expected_revision: expectedRevision,
         changes,
     }));
     return parseConfigurationPayload(payload);
 }
 export async function updateSecretConfiguration(changes) {
-    const payload = record(await mutatingJson("/api/v1/console/configuration/secrets", "PATCH", { changes }));
+    const payload = record(await mutatingJson(CONFIGURATION_ROUTES.secrets, "PATCH", { changes }));
     return parseConfigurationPayload(payload);
 }
 export async function updateAgentConfiguration(expectedRevision, changes) {
-    const payload = record(await mutatingJson("/api/v1/console/configuration/agent", "PATCH", {
+    const payload = record(await mutatingJson(CONFIGURATION_ROUTES.agent, "PATCH", {
         expected_revision: expectedRevision,
         changes,
     }));
     return parseConfigurationPayload(payload);
 }
 export async function requestRestart() {
-    const payload = record(await mutatingJson("/api/v1/console/restart", "POST", {}));
+    const payload = record(await mutatingJson(RESTART_ROUTE, "POST", {}));
     return string(payload.message, "重启命令已提交");
 }
 export async function validateConfiguration() {
-    const payload = record(await mutatingJson("/api/v1/console/configuration/validate", "POST", {}));
+    const payload = record(await mutatingJson(CONFIGURATION_ROUTES.validate, "POST", {}));
     const validation = record(payload.validation);
     return { valid: validation.valid === true, message: string(validation.message, "配置校验已完成") };
 }
 export async function fetchConsoleStatus() {
-    const value = await fetchJson("/api/v1/console/status", { headers: { Accept: "application/json" } });
+    const value = await fetchJson(STATUS_ROUTE, { headers: { Accept: "application/json" } });
     const root = record(value);
     return {
         runtime: parseRuntime(root.runtime),
@@ -180,7 +181,7 @@ export async function fetchConsoleStatus() {
     };
 }
 export async function renderMarkdown(markdown) {
-    const value = await fetchJson("/api/v1/markdown/render", {
+    const value = await fetchJson(MARKDOWN_RENDER_ROUTE, {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({ markdown }),
@@ -192,7 +193,7 @@ export async function renderMarkdown(markdown) {
     return payload.html;
 }
 export async function listTodos(filters = {}) {
-    const payload = record(await mutatingJson("/api/v1/console/todo/list", "POST", {
+    const payload = record(await mutatingJson(TODO_ROUTES.list, "POST", {
         page: 1,
         page_size: 50,
         ...filters,
@@ -200,26 +201,26 @@ export async function listTodos(filters = {}) {
     return parseTodoPage(payload.data);
 }
 export async function listTodoTargets(page = 1, pageSize = 100) {
-    const payload = record(await mutatingJson("/api/v1/console/todo/targets", "POST", {
+    const payload = record(await mutatingJson(TODO_ROUTES.targets, "POST", {
         page,
         page_size: pageSize,
     }));
     return parseTodoTargetPage(payload.data);
 }
 export async function createTodo(input) {
-    const payload = record(await mutatingJson("/api/v1/console/todo/create", "POST", input));
+    const payload = record(await mutatingJson(TODO_ROUTES.create, "POST", input));
     return parseTodoItem(payload.data);
 }
 export async function getTodo(id) {
-    const payload = record(await mutatingJson("/api/v1/console/todo/get", "POST", { id }));
+    const payload = record(await mutatingJson(TODO_ROUTES.get, "POST", { id }));
     return parseTodoItem(payload.data);
 }
 export async function updateTodo(id, changes) {
-    const payload = record(await mutatingJson("/api/v1/console/todo/update", "POST", { id, ...changes }));
+    const payload = record(await mutatingJson(TODO_ROUTES.update, "POST", { id, ...changes }));
     return parseTodoItem(payload.data);
 }
 export async function deleteTodo(id) {
-    await mutatingJson("/api/v1/console/todo/delete", "POST", { id });
+    await mutatingJson(TODO_ROUTES.delete, "POST", { id });
 }
 function parseTodoPage(value) {
     const data = record(value);
