@@ -304,6 +304,30 @@ function Test-ZipArchive {
     }
 }
 
+function Test-ZipPackageDirectory {
+    param([string]$Archive, [string]$PackageName)
+    # 用 .NET ZipArchive 读取条目，确认 ZIP 包含预期的顶层包目录；
+    # 容器有效但结构损坏（缺少包目录）时返回 $false，由调用方回退下一来源。
+    try {
+        $stream = [IO.File]::OpenRead($Archive)
+        $zip = $null
+        try {
+            $zip = New-Object IO.Compression.ZipArchive($stream, [IO.Compression.ZipArchiveMode]::Read)
+            foreach ($entry in $zip.Entries) {
+                if ($entry.FullName.StartsWith("$PackageName/", [StringComparison]::OrdinalIgnoreCase)) {
+                    return $true
+                }
+            }
+            return $false
+        } finally {
+            if ($null -ne $zip) { $zip.Dispose() }
+            $stream.Dispose()
+        }
+    } catch {
+        return $false
+    }
+}
+
 function Test-ReleaseChecksum {
     param([string]$Archive, [string]$ChecksumFile)
     $checksumText = (Get-Content -LiteralPath $ChecksumFile -Raw).Trim()
@@ -346,6 +370,12 @@ function Save-ReleaseFromSource {
         Test-ReleaseChecksum -Archive $ArchivePath -ChecksumFile $ChecksumPath
     } catch {
         Write-Warning "SHA-256 校验失败，该源内容无效: $($_.Exception.Message)"
+        return $false
+    }
+    # ZIP 深度校验：确认归档包含预期的顶层包目录，使容器有效但结构损坏的来源也能回退下一来源。
+    $packageName = $ArchiveName -replace '\.zip$', ''
+    if (-not (Test-ZipPackageDirectory -Archive $ArchivePath -PackageName $packageName)) {
+        Write-Warning "ZIP 结构无效（缺少预期包目录 $packageName），该源内容不可用: $ArchiveName"
         return $false
     }
     Write-Host "SHA-256 校验通过: $ArchiveName"

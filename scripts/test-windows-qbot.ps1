@@ -294,14 +294,24 @@ try {
     }
     Set-Content -LiteralPath (Join-Path $mockPackageDir "config\.env.example") -Value "EXAMPLE=1" -Encoding ASCII
     $mockZip = Join-Path $mockServerDir "qq-maid-bot-v9.9.9-windows-x86_64.zip"
-    Compress-Archive -Path (Join-Path $mockPackageDir "*") -DestinationPath $mockZip -Force
+    # 压缩包目录本身，使 ZIP 包含与真实 Release 一致的顶层包目录（结构校验依赖该约定）。
+    Compress-Archive -Path $mockPackageDir -DestinationPath $mockZip -Force
     $mockHash = (Get-FileHash -LiteralPath $mockZip -Algorithm SHA256).Hash.ToLowerInvariant()
     Set-Content -LiteralPath "${mockZip}.sha256" -Value "$mockHash  qq-maid-bot-v9.9.9-windows-x86_64.zip" -Encoding ASCII
+    # 结构损坏产物：ZIP 容器有效但缺少预期的顶层包目录，用于验证深度校验回退。
+    $mockStructureDir = Join-Path $testRoot "structure-broken"
+    New-Item -ItemType Directory -Path $mockStructureDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $mockStructureDir "README.md") -Value "broken" -Encoding ASCII
+    $mockStructureZip = Join-Path $mockServerDir "structure-broken.zip"
+    Compress-Archive -Path (Join-Path $mockStructureDir "*") -DestinationPath $mockStructureZip -Force
+    $mockStructureHash = (Get-FileHash -LiteralPath $mockStructureZip -Algorithm SHA256).Hash.ToLowerInvariant()
+    Set-Content -LiteralPath "${mockStructureZip}.sha256" -Value "$mockStructureHash  qq-maid-bot-v9.9.9-windows-x86_64.zip" -Encoding ASCII
 
     $script:MockRequestLog = New-Object System.Collections.Generic.List[string]
     $script:MockFailPatterns = New-Object System.Collections.Generic.List[string]
     $script:MockEmptyPatterns = New-Object System.Collections.Generic.List[string]
     $script:MockCorruptPatterns = New-Object System.Collections.Generic.List[string]
+    $script:MockStructurePatterns = New-Object System.Collections.Generic.List[string]
     $script:MockWrongHashPatterns = New-Object System.Collections.Generic.List[string]
 
     function Invoke-WebRequest {
@@ -321,6 +331,16 @@ try {
         foreach ($pattern in $script:MockCorruptPatterns) {
             if ($Uri.StartsWith($pattern, [StringComparison]::OrdinalIgnoreCase)) {
                 Set-Content -LiteralPath $OutFile -Value "not-a-zip" -Encoding ASCII
+                return $null
+            }
+        }
+        foreach ($pattern in $script:MockStructurePatterns) {
+            if ($Uri.StartsWith($pattern, [StringComparison]::OrdinalIgnoreCase)) {
+                if ($Uri.EndsWith(".sha256")) {
+                    Copy-Item -LiteralPath "${mockStructureZip}.sha256" -Destination $OutFile -Force
+                } else {
+                    Copy-Item -LiteralPath $mockStructureZip -Destination $OutFile -Force
+                }
                 return $null
             }
         }
@@ -421,6 +441,12 @@ try {
     Assert-True $ok "corrupt official zip should fall back to proxy"
 
     $script:MockCorruptPatterns.Clear()
+    $script:MockStructurePatterns.Add($officialPrefix)
+    $ok = Invoke-TestDownloadChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
+    Assert-True $ok "structure-broken official zip should fall back to proxy"
+    $script:MockStructurePatterns.Clear()
+
+    $script:MockCorruptPatterns.Clear()
     $script:MockWrongHashPatterns.Add($officialPrefix)
     $ok = Invoke-TestDownloadChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
     Assert-True $ok "invalid official checksum should fall back to proxy"
@@ -465,7 +491,7 @@ try {
 
     # 7) 候选列表规范化与去重（与 Linux 端语义一致：官方 → 单代理 → 多代理，按序去重）。
     $env:QBOT_GITHUB_PROXY = "https://proxy-a.example.com/"
-    $env:QBOT_GITHUB_PROXIES = "https://proxy-b.example.com https://proxy-a.example.com bad-addr"
+    $env:QBOT_GITHUB_PROXIES = "https://proxy-b.example.com https://proxy-a.example.com bad-addr http:// http:///path https://?query"
     $prefixes = Get-GitHubProxyPrefixes
     Assert-True ($prefixes.Count -eq 3) "expected official plus two deduplicated proxies"
     Assert-True ($prefixes[0] -eq "" -and $prefixes[1] -eq "https://proxy-a.example.com" -and $prefixes[2] -eq "https://proxy-b.example.com") "proxy prefix order/normalization mismatch"

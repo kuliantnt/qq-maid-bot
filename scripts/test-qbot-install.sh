@@ -193,6 +193,18 @@ chmod +x "${fixture}/${package}/qq-maid-bot" "${fixture}/${package}/botctl.sh"
     sha256sum "${package}.tar.gz" > "${package}.tar.gz.sha256"
 )
 
+# 结构损坏 mock 产物：gzip 容器有效但内容不是 tar / 顶层目录不是包名，
+# 用于验证“单来源成功前”的归档深度校验能触发回退。
+structure_bad_gzip="${tmp_dir}/structure-bad-gzip.tar.gz"
+awk 'BEGIN { for (i = 0; i < 200; i++) print "not-a-tar-payload-line" }' | gzip -c > "${structure_bad_gzip}"
+structure_wrong_dir="${tmp_dir}/structure-wrong-dir.tar.gz"
+mkdir -p "${tmp_dir}/structure-wrong-dir-fixture/wrong-package-dir"
+printf 'x\n' > "${tmp_dir}/structure-wrong-dir-fixture/wrong-package-dir/file"
+(
+    cd "${tmp_dir}/structure-wrong-dir-fixture"
+    tar -czf "${structure_wrong_dir}" wrong-package-dir
+)
+
 # —— GitHub 下载候选与失败回退回归 ——
 # 用假 curl_qbot 模拟网络：请求 URL 写入日志；按规则返回失败、空文件、损坏压缩包或错误校验和；
 # 正常请求从 fixture 目录取文件，从而在无网络环境验证候选顺序、去重与回退行为。
@@ -201,6 +213,8 @@ MOCK_FAIL_PATTERNS=()
 MOCK_EMPTY_PATTERNS=()
 MOCK_CORRUPT_PATTERNS=()
 MOCK_WRONG_HASH_PATTERNS=()
+MOCK_STRUCTURE_PATTERNS=()
+MOCK_STRUCTURE_ARCHIVE=""
 
 curl_qbot() {
     local url="" out="" arg
@@ -232,6 +246,16 @@ curl_qbot() {
     for pattern in "${MOCK_CORRUPT_PATTERNS[@]}"; do
         if [[ "${url}" == "${pattern}"* ]]; then
             printf 'not-a-gzip\n' > "${out}"
+            return 0
+        fi
+    done
+    for pattern in "${MOCK_STRUCTURE_PATTERNS[@]}"; do
+        if [[ "${url}" == "${pattern}"* ]]; then
+            if [[ "${url}" == *.sha256 ]]; then
+                printf '%s  %s\n' "$(sha256sum "${MOCK_STRUCTURE_ARCHIVE}" | awk '{print $1}')" "${package}.tar.gz" > "${out}"
+            else
+                cp "${MOCK_STRUCTURE_ARCHIVE}" "${out}"
+            fi
             return 0
         fi
     done
@@ -291,6 +315,28 @@ MOCK_CORRUPT_PATTERNS=()
 MOCK_WRONG_HASH_PATTERNS=("https://github.com/kuliantnt")
 download_release v9.9.9 linux-x86_64 "${output}" >/dev/null 2>&1
 
+# 4b) gzip 容器有效但结构损坏（内容非 tar / 顶层目录不是包名）时继续回退下一来源。
+: > "${CURL_LOG}"
+MOCK_CORRUPT_PATTERNS=()
+MOCK_WRONG_HASH_PATTERNS=()
+GITHUB_ACCEL_PROXY="https://proxy-a.example.com"
+GITHUB_ACCEL_PROXIES=""
+
+MOCK_STRUCTURE_PATTERNS=("https://github.com/kuliantnt")
+MOCK_STRUCTURE_ARCHIVE="${structure_bad_gzip}"
+download_release v9.9.9 linux-x86_64 "${output}" >/dev/null 2>&1
+[[ -x "${output}/${package}/qq-maid-bot" ]]
+grep -q '^https://github.com/kuliantnt/qq-maid-bot/releases/download/v9.9.9/qq-maid-bot-v9.9.9-linux-x86_64.tar.gz$' "${CURL_LOG}"
+grep -q '^https://proxy-a.example.com/' "${CURL_LOG}"
+
+MOCK_STRUCTURE_ARCHIVE="${structure_wrong_dir}"
+download_release v9.9.9 linux-x86_64 "${output}" >/dev/null 2>&1
+[[ -x "${output}/${package}/qq-maid-bot" ]]
+grep -q '^https://github.com/kuliantnt/qq-maid-bot/releases/download/v9.9.9/qq-maid-bot-v9.9.9-linux-x86_64.tar.gz$' "${CURL_LOG}"
+grep -q '^https://proxy-a.example.com/' "${CURL_LOG}"
+MOCK_STRUCTURE_PATTERNS=()
+MOCK_STRUCTURE_ARCHIVE=""
+
 # 5) 重复代理（含尾部斜杠差异）不产生重复请求。
 : > "${CURL_LOG}"
 MOCK_WRONG_HASH_PATTERNS=()
@@ -342,6 +388,8 @@ MOCK_FAIL_PATTERNS=()
 MOCK_EMPTY_PATTERNS=()
 MOCK_CORRUPT_PATTERNS=()
 MOCK_WRONG_HASH_PATTERNS=()
+MOCK_STRUCTURE_PATTERNS=()
+MOCK_STRUCTURE_ARCHIVE=""
 GITHUB_ACCEL_PROXY=""
 GITHUB_ACCEL_PROXIES=""
 release_dir="$(download_release v9.9.9 linux-x86_64 "${output}")"

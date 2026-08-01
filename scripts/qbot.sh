@@ -268,11 +268,22 @@ download_release_from_source() {
     local package="$5"
     local archive="$6"
     local raw_url="$7"
+    local listing
 
     download_github_file_from_source "${prefix}" "${raw_url}" "${tmp_dir}/${archive}" "${archive}" || return 1
     download_github_file_from_source "${prefix}" "${raw_url}.sha256" "${tmp_dir}/${archive}.sha256" "${archive}.sha256" || return 1
     if ! (cd "${tmp_dir}" && sha256sum -c "${archive}.sha256" >/dev/null 2>&1); then
         echo "SHA-256 校验失败，该源内容无效: $(github_prefix_label "${prefix}")" >&2
+        return 1
+    fi
+    # 归档深度校验：解压前确认归档可完整读取且包含预期包目录，使 gzip 容器有效但
+    # 内容结构损坏的来源也能在单源成功前回退下一来源（与 Windows 端 ZIP 校验一致）。
+    listing="$(tar -tzf "${tmp_dir}/${archive}" 2>/dev/null)" || {
+        echo "压缩包无法完整读取（结构损坏）: $(github_prefix_label "${prefix}")" >&2
+        return 1
+    }
+    if ! grep -Eq "^${package}($|/)" <<<"${listing}"; then
+        echo "压缩包缺少预期包目录 ${package}，该源内容结构无效: $(github_prefix_label "${prefix}")" >&2
         return 1
     fi
     return 0
