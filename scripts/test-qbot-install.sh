@@ -42,6 +42,18 @@ fi
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
 
+# 执行前后用户 shell、Git 与系统全局配置必须保持不变（严禁改 .bashrc/.zshrc/.profile/.gitconfig 等）。
+config_snapshot="${tmp_dir}/config-snapshot"
+mkdir -p "${config_snapshot}"
+for snapshot_file in .bashrc .zshrc .profile .gitconfig; do
+    if [[ -f "${HOME}/${snapshot_file}" ]]; then
+        cp "${HOME}/${snapshot_file}" "${config_snapshot}/${snapshot_file}"
+    else
+        : > "${config_snapshot}/${snapshot_file}.absent"
+    fi
+done
+git config --global --list > "${config_snapshot}/git-global-config" 2>/dev/null || true
+
 APP_DIR="${tmp_dir}/web-choice"
 mkdir -p "${APP_DIR}/config"
 printf '%s\n' 'WEB_CONSOLE_ENABLED=true' > "${APP_DIR}/config/.env"
@@ -181,10 +193,150 @@ chmod +x "${fixture}/${package}/qq-maid-bot" "${fixture}/${package}/botctl.sh"
     sha256sum "${package}.tar.gz" > "${package}.tar.gz.sha256"
 )
 
-download_github_file() {
-    cp "${fixture}/$3" "$2"
+# —— GitHub 下载候选与失败回退回归 ——
+# 用假 curl_qbot 模拟网络：请求 URL 写入日志；按规则返回失败、空文件、损坏压缩包或错误校验和；
+# 正常请求从 fixture 目录取文件，从而在无网络环境验证候选顺序、去重与回退行为。
+CURL_LOG="${tmp_dir}/curl-log"
+MOCK_FAIL_PATTERNS=()
+MOCK_EMPTY_PATTERNS=()
+MOCK_CORRUPT_PATTERNS=()
+MOCK_WRONG_HASH_PATTERNS=()
+
+curl_qbot() {
+    local url="" out="" arg
+    local -a args=("$@")
+    local i
+    for ((i = 0; i < ${#args[@]}; i++)); do
+        arg="${args[$i]}"
+        if [[ "${arg}" == "-o" && $((i + 1)) -le $# ]]; then
+            out="${args[$((i + 1))]}"
+        elif [[ "${arg}" == http* ]]; then
+            url="${arg}"
+        fi
+    done
+    printf '%s\n' "${url}" >> "${CURL_LOG}"
+    local pattern base
+    for pattern in "${MOCK_FAIL_PATTERNS[@]}"; do
+        if [[ "${url}" == "${pattern}"* ]]; then
+            return 1
+        fi
+    done
+    [[ -n "${out}" ]] || return 0
+    base="$(basename -- "${url}")"
+    for pattern in "${MOCK_EMPTY_PATTERNS[@]}"; do
+        if [[ "${url}" == "${pattern}"* ]]; then
+            : > "${out}"
+            return 0
+        fi
+    done
+    for pattern in "${MOCK_CORRUPT_PATTERNS[@]}"; do
+        if [[ "${url}" == "${pattern}"* ]]; then
+            printf 'not-a-gzip\n' > "${out}"
+            return 0
+        fi
+    done
+    for pattern in "${MOCK_WRONG_HASH_PATTERNS[@]}"; do
+        if [[ "${url}" == "${pattern}"* && "${url}" == *.sha256 ]]; then
+            printf '%064d\n' 0 > "${out}"
+            return 0
+        fi
+    done
+    cp "${fixture}/${base}" "${out}"
+    return 0
 }
 
+# 1) 未配置代理时只访问 GitHub 官方源，且安装成功。
+: > "${CURL_LOG}"
+GITHUB_ACCEL_PROXY=""
+GITHUB_ACCEL_PROXIES=""
+download_release v9.9.9 linux-x86_64 "${output}" >/dev/null 2>&1
+[[ -x "${output}/${package}/qq-maid-bot" ]]
+if grep -qv '^https://github.com/kuliantnt/qq-maid-bot/releases/download/v9.9.9/' "${CURL_LOG}"; then
+    echo "未配置代理时访问了非官方源" >&2
+    exit 1
+fi
+
+# 2) 官方源失败时回退到单个代理源。
+: > "${CURL_LOG}"
+MOCK_FAIL_PATTERNS=("https://github.com/kuliantnt")
+GITHUB_ACCEL_PROXY="https://proxy-a.example.com/"
+GITHUB_ACCEL_PROXIES=""
+download_release v9.9.9 linux-x86_64 "${output}" >/dev/null 2>&1
+grep -q '^https://proxy-a.example.com/https://github.com/kuliantnt/qq-maid-bot/releases/download/v9.9.9/qq-maid-bot-v9.9.9-linux-x86_64.tar.gz$' "${CURL_LOG}"
+
+# 3) 第一个代理失败时继续尝试后续代理。
+: > "${CURL_LOG}"
+MOCK_FAIL_PATTERNS=("https://github.com/kuliantnt" "https://proxy-bad.example.com")
+GITHUB_ACCEL_PROXY="https://proxy-bad.example.com"
+GITHUB_ACCEL_PROXIES="https://proxy-good.example.com"
+download_release v9.9.9 linux-x86_64 "${output}" >/dev/null 2>&1
+proxy_bad_first="$(grep -n 'proxy-bad.example.com' "${CURL_LOG}" | head -n 1 | cut -d: -f1)"
+proxy_good_first="$(grep -n 'proxy-good.example.com' "${CURL_LOG}" | head -n 1 | cut -d: -f1)"
+[[ -n "${proxy_bad_first}" && -n "${proxy_good_first}" && "${proxy_bad_first}" -lt "${proxy_good_first}" ]]
+
+# 4) HTTP 成功但文件为空 / 压缩包损坏 / 校验和无效时继续回退。
+: > "${CURL_LOG}"
+MOCK_EMPTY_PATTERNS=("https://github.com/kuliantnt")
+GITHUB_ACCEL_PROXY="https://proxy-a.example.com"
+GITHUB_ACCEL_PROXIES=""
+download_release v9.9.9 linux-x86_64 "${output}" >/dev/null 2>&1
+
+: > "${CURL_LOG}"
+MOCK_EMPTY_PATTERNS=()
+MOCK_CORRUPT_PATTERNS=("https://github.com/kuliantnt")
+download_release v9.9.9 linux-x86_64 "${output}" >/dev/null 2>&1
+
+: > "${CURL_LOG}"
+MOCK_CORRUPT_PATTERNS=()
+MOCK_WRONG_HASH_PATTERNS=("https://github.com/kuliantnt")
+download_release v9.9.9 linux-x86_64 "${output}" >/dev/null 2>&1
+
+# 5) 重复代理（含尾部斜杠差异）不产生重复请求。
+: > "${CURL_LOG}"
+MOCK_WRONG_HASH_PATTERNS=()
+MOCK_FAIL_PATTERNS=("https://github.com/kuliantnt")
+GITHUB_ACCEL_PROXY="https://proxy-a.example.com/"
+GITHUB_ACCEL_PROXIES="https://proxy-a.example.com https://proxy-a.example.com/"
+download_release v9.9.9 linux-x86_64 "${output}" >/dev/null 2>&1
+archive_requests="$(grep -c '^https://proxy-a.example.com/https://github.com/kuliantnt/qq-maid-bot/releases/download/v9.9.9/qq-maid-bot-v9.9.9-linux-x86_64.tar.gz$' "${CURL_LOG}" || true)"
+[[ "${archive_requests}" == "1" ]]
+
+# 6) 所有来源失败时返回非零且不落盘任何程序文件。
+: > "${CURL_LOG}"
+MOCK_FAIL_PATTERNS=("https://github.com/kuliantnt")
+GITHUB_ACCEL_PROXY=""
+GITHUB_ACCEL_PROXIES=""
+fail_output="${tmp_dir}/output-fail"
+set +e
+fail_output_text="$(download_release v9.9.9 linux-x86_64 "${fail_output}" 2>&1)"
+fail_status=$?
+set -e
+[[ "${fail_status}" -ne 0 ]]
+[[ ! -e "${fail_output}/${package}" ]]
+[[ "${fail_output_text}" == *"QBOT_GITHUB_PROXY"* ]]
+
+# 7) 候选列表规范化与去重（与 PowerShell 端语义一致）。
+GITHUB_ACCEL_PROXY="https://proxy-a.example.com/"
+GITHUB_ACCEL_PROXIES="https://proxy-b.example.com https://proxy-a.example.com bad-addr"
+candidate_list="$(github_accel_prefixes)"
+expected_candidates="$(printf '\n%s\n%s' 'https://proxy-a.example.com' 'https://proxy-b.example.com')"
+[[ "${candidate_list}" == "${expected_candidates}" ]]
+
+# 8) QBOT_GITHUB_PROXY / QBOT_GITHUB_PROXIES 环境变量映射到内部候选变量。
+env_mapping="$(QBOT_GITHUB_PROXY='https://env-a.example.com/' QBOT_GITHUB_PROXIES='https://env-b.example.com' bash -c '
+    source "$1/scripts/qbot.sh"
+    printf "%s|%s" "${GITHUB_ACCEL_PROXY}" "${GITHUB_ACCEL_PROXIES}"
+' _ "${REPO_DIR}")"
+# 内部候选变量保留原始值，去尾部斜杠等规范化发生在 github_accel_prefixes（见第 7 项测试）。
+[[ "${env_mapping}" == "https://env-a.example.com/|https://env-b.example.com" ]]
+
+# 恢复正常来源，验证完整安装链路仍然可用。
+MOCK_FAIL_PATTERNS=()
+MOCK_EMPTY_PATTERNS=()
+MOCK_CORRUPT_PATTERNS=()
+MOCK_WRONG_HASH_PATTERNS=()
+GITHUB_ACCEL_PROXY=""
+GITHUB_ACCEL_PROXIES=""
 release_dir="$(download_release v9.9.9 linux-x86_64 "${output}")"
 [[ -x "${release_dir}/qq-maid-bot" ]]
 
@@ -238,5 +390,23 @@ do
         exit 1
     }
 done
+
+# 校验用户 shell、Git 与系统全局配置在测试前后没有变化。
+for snapshot_file in .bashrc .zshrc .profile .gitconfig; do
+    if [[ -f "${HOME}/${snapshot_file}" ]]; then
+        cmp -s "${HOME}/${snapshot_file}" "${config_snapshot}/${snapshot_file}" || {
+            echo "用户配置文件在测试期间被修改: ${HOME}/${snapshot_file}" >&2
+            exit 1
+        }
+    elif [[ -f "${config_snapshot}/${snapshot_file}.absent" ]]; then
+        echo "测试期间不应创建用户配置文件: ${HOME}/${snapshot_file}" >&2
+        exit 1
+    fi
+done
+git config --global --list > "${config_snapshot}/git-global-config.after" 2>/dev/null || true
+cmp -s "${config_snapshot}/git-global-config" "${config_snapshot}/git-global-config.after" || {
+    echo "git 全局配置在测试期间被修改" >&2
+    exit 1
+}
 
 echo "qbot Unix installer regression tests passed"

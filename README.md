@@ -88,12 +88,33 @@ qbot restart   # 重启服务
 qbot update    # 更新版本
 ```
 
+GitHub 下载不稳定时可设置 `QBOT_GITHUB_PROXY`（单个代理前缀）或
+`QBOT_GITHUB_PROXIES`（空格分隔的多个代理前缀）指向自己信任的加速源；安装器会依次尝试
+官方源和所有代理，任一来源失败自动回退下一来源，并且只有压缩包格式有效且 SHA-256
+校验通过才会继续安装：
+
+```bash
+export QBOT_GITHUB_PROXIES="https://gh-proxy-a.example.com https://gh-proxy-b.example.com"
+qbot install
+```
+
+代理前缀必须是 `https://域名/` 形式的完整前缀，脚本会把它拼接在
+`https://github.com/<仓库>/releases/download/<版本>/<文件>` 前面后再下载。
+
 ### Windows 一键安装
 
 在 PowerShell 中下载安装器：
 
 ```powershell
 $p="$env:TEMP\qbot.ps1"; Invoke-WebRequest https://github.com/kuliantnt/qq-maid-bot/raw/refs/heads/master/scripts/qbot.ps1 -OutFile $p -UseBasicParsing; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $p install
+```
+
+Windows 端支持与 Linux 相同的代理变量（`QBOT_GITHUB_PROXY` / `QBOT_GITHUB_PROXIES`），
+下载失败时同样会自动回退到下一来源并校验 ZIP 与 SHA-256：
+
+```powershell
+$env:QBOT_GITHUB_PROXIES = "https://gh-proxy-a.example.com https://gh-proxy-b.example.com"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\qbot.ps1" install
 ```
 
 然后编辑配置并启动：

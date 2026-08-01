@@ -11,8 +11,6 @@ RELEASES_URL="https://github.com/${REPO_SLUG}/releases"
 API_LATEST_URL="https://api.github.com/repos/${REPO_SLUG}/releases/latest"
 GITHUB_ACCEL_PROXY="${QBOT_GITHUB_PROXY:-${GH_PROXY:-}}"
 GITHUB_ACCEL_PROXIES="${QBOT_GITHUB_PROXIES:-}"
-GITHUB_PROBE_CONNECT_TIMEOUT="${QBOT_GITHUB_PROBE_CONNECT_TIMEOUT:-5}"
-GITHUB_PROBE_MAX_TIME="${QBOT_GITHUB_PROBE_MAX_TIME:-12}"
 GITHUB_DOWNLOAD_CONNECT_TIMEOUT="${QBOT_GITHUB_DOWNLOAD_CONNECT_TIMEOUT:-10}"
 GITHUB_DOWNLOAD_MAX_TIME="${QBOT_GITHUB_DOWNLOAD_MAX_TIME:-300}"
 CURL_PROXY="${QBOT_CURL_PROXY:-}"
@@ -137,7 +135,8 @@ usage() {
 
 目录: ${APP_DIR}
 项目: https://github.com/${REPO_SLUG}
-下载: 默认直连官方 GitHub；如需加速，可用 QBOT_GITHUB_PROXY 或 QBOT_GITHUB_PROXIES 指定可信镜像
+下载: 默认直连官方 GitHub；网络不稳定时可用 QBOT_GITHUB_PROXY（单个代理）或
+      QBOT_GITHUB_PROXIES（空格分隔的多个代理）指定可信前缀；官方源与代理会依次尝试并校验 SHA-256
 自动化: QBOT_INSTALL_WEB_CONSOLE=true|false 可指定非交互安装的 Web 选择
 EOF
 }
@@ -161,17 +160,29 @@ curl_qbot() {
 }
 
 github_accel_prefixes() {
-    echo ""
+    # 候选源顺序：官方直连（空串）→ QBOT_GITHUB_PROXY 单代理 → QBOT_GITHUB_PROXIES 多代理。
+    # 与 PowerShell 端 qbot.ps1 语义一致：按空白切分、去尾部斜杠、仅接受 http/https、
+    # 按序去重；不内置任何用户未显式配置的第三方镜像。
+    printf '\n'
 
     {
-        if [[ -n "${GITHUB_ACCEL_PROXY}" ]]; then
-            echo "${GITHUB_ACCEL_PROXY%/}/"
-        fi
+        printf '%s\n' "${GITHUB_ACCEL_PROXY:-}"
 
-        if [[ -n "${GITHUB_ACCEL_PROXIES}" ]]; then
+        if [[ -n "${GITHUB_ACCEL_PROXIES:-}" ]]; then
             printf '%s\n' ${GITHUB_ACCEL_PROXIES}
         fi
-    } | awk 'NF {sub(/\/?$/, "/", $0); if (!seen[$0]++) print}'
+    } | awk '
+        NF {
+            value = $0
+            gsub(/^[ \t]+|[ \t]+$/, "", value)
+            while (value ~ /\/$/) { sub(/\/$/, "", value) }
+            if (value !~ /^https?:\/\//) {
+                print "忽略无效代理前缀（仅支持 http/https 绝对地址）: " value > "/dev/stderr"
+                next
+            }
+            if (!seen[value]++) print value
+        }
+    '
 }
 
 github_url_for_prefix() {
@@ -179,7 +190,7 @@ github_url_for_prefix() {
     local raw_url="$2"
 
     if [[ -n "${prefix}" ]]; then
-        echo "${prefix%/}/${raw_url}"
+        echo "${prefix}/${raw_url}"
     else
         echo "${raw_url}"
     fi
@@ -189,57 +200,10 @@ github_prefix_label() {
     local prefix="$1"
 
     if [[ -n "${prefix}" ]]; then
-        echo "${prefix%/}/"
+        echo "代理源 ${prefix}"
     else
-        echo "直连 GitHub"
+        echo "GitHub 官方源"
     fi
-}
-
-probe_github_prefix_ms() {
-    local prefix="$1"
-    local raw_url="$2"
-    local url result http_code total
-
-    url="$(github_url_for_prefix "${prefix}" "${raw_url}")"
-    result="$(
-        curl_qbot -L -sS --range 0-0 \
-            --connect-timeout "${GITHUB_PROBE_CONNECT_TIMEOUT}" \
-            --max-time "${GITHUB_PROBE_MAX_TIME}" \
-            -o /dev/null \
-            -w '%{http_code} %{time_total}' \
-            "${url}" 2>/dev/null || true
-    )"
-
-    http_code="${result%% *}"
-    total="${result#* }"
-    if [[ "${http_code}" =~ ^20[0-9]$ || "${http_code}" =~ ^30[0-9]$ ]]; then
-        awk -v sec="${total}" 'BEGIN { printf "%d", sec * 1000 }'
-    else
-        echo 999999
-    fi
-}
-
-sorted_github_sources() {
-    local raw_url="$1"
-    local tmp_file prefix latency order token
-
-    tmp_file="$(mktemp)"
-    order=0
-
-    while IFS= read -r prefix; do
-        latency="$(probe_github_prefix_ms "${prefix}" "${raw_url}")"
-        token="${prefix:-__DIRECT__}"
-        if [[ "${latency}" -lt 999999 ]]; then
-            echo "可用 GitHub 源: $(github_prefix_label "${prefix}") (${latency}ms)" >&2
-        else
-            echo "跳过不可用源: $(github_prefix_label "${prefix}")" >&2
-        fi
-        printf '%s\t%s\t%s\n' "${latency}" "${order}" "${token}" >> "${tmp_file}"
-        order=$((order + 1))
-    done < <(github_accel_prefixes)
-
-    sort -n -k1,1 -k2,2 "${tmp_file}" | awk -F '\t' '$1 < 999999 {print $1 "\t" $3}'
-    rm -f "${tmp_file}"
 }
 
 downloaded_file_is_valid() {
@@ -261,45 +225,49 @@ downloaded_file_is_valid() {
     esac
 }
 
-download_github_file() {
-    local raw_url="$1"
-    local output="$2"
-    local description="$3"
-    local latency prefix_token prefix url
+download_github_file_from_source() {
+    # 从单个候选源下载一个文件；网络/HTTP 失败或内容无效时返回 1，由调用方继续尝试下一来源。
+    local prefix="$1"
+    local raw_url="$2"
+    local output="$3"
+    local description="$4"
+    local url
+
+    url="$(github_url_for_prefix "${prefix}" "${raw_url}")"
+    echo "尝试从 $(github_prefix_label "${prefix}") 下载: ${description}" >&2
 
     rm -f "${output}"
-    echo "测速 GitHub 下载源: ${description}" >&2
-
-    while IFS=$'\t' read -r latency prefix_token; do
-        prefix="${prefix_token}"
-        [[ "${prefix}" == "__DIRECT__" ]] && prefix=""
-        url="$(github_url_for_prefix "${prefix}" "${raw_url}")"
-        echo "尝试下载源: $(github_prefix_label "${prefix}") (${latency}ms)" >&2
-
-        rm -f "${output}"
-        if curl_qbot -fL --retry 2 \
-            --connect-timeout "${GITHUB_DOWNLOAD_CONNECT_TIMEOUT}" \
-            --max-time "${GITHUB_DOWNLOAD_MAX_TIME}" \
-            -o "${output}" "${url}"; then
-            if downloaded_file_is_valid "${output}" "${description}"; then
-                return 0
-            fi
-            echo "下载结果无效，继续尝试下一个源: $(github_prefix_label "${prefix}")" >&2
-        fi
-    done < <(sorted_github_sources "${raw_url}")
-
-    echo "所有 GitHub 下载源失败，最后重试官方直连: ${description}" >&2
-    rm -f "${output}"
-    if curl_qbot -fL --retry 2 \
+    if ! curl_qbot -fL --retry 2 \
         --connect-timeout "${GITHUB_DOWNLOAD_CONNECT_TIMEOUT}" \
         --max-time "${GITHUB_DOWNLOAD_MAX_TIME}" \
-        -o "${output}" "${raw_url}"; then
-        if downloaded_file_is_valid "${output}" "${description}"; then
-            return 0
-        fi
+        -o "${output}" "${url}"; then
+        echo "下载失败（网络或 HTTP 错误）: $(github_prefix_label "${prefix}")" >&2
+        return 1
     fi
+    if ! downloaded_file_is_valid "${output}" "${description}"; then
+        echo "下载内容无效（文件为空或格式损坏）: $(github_prefix_label "${prefix}")" >&2
+        return 1
+    fi
+    return 0
+}
 
-    die "下载失败: ${description}"
+download_release_from_source() {
+    # 从单个候选源下载压缩包与 .sha256 并当场校验；任一环节失败即返回 1，由调用方回退下一来源。
+    local prefix="$1"
+    local version="$2"
+    local target="$3"
+    local tmp_dir="$4"
+    local package="$5"
+    local archive="$6"
+    local raw_url="$7"
+
+    download_github_file_from_source "${prefix}" "${raw_url}" "${tmp_dir}/${archive}" "${archive}" || return 1
+    download_github_file_from_source "${prefix}" "${raw_url}.sha256" "${tmp_dir}/${archive}.sha256" "${archive}.sha256" || return 1
+    if ! (cd "${tmp_dir}" && sha256sum -c "${archive}.sha256" >/dev/null 2>&1); then
+        echo "SHA-256 校验失败，该源内容无效: $(github_prefix_label "${prefix}")" >&2
+        return 1
+    fi
+    return 0
 }
 
 install_deps() {
@@ -1888,10 +1856,24 @@ download_release() {
     local package="qq-maid-bot-${version}-${target}"
     local archive="${package}.tar.gz"
     local raw_url="${RELEASES_URL}/download/${version}/${archive}"
+    local prefix downloaded=0
 
     echo "下载 Release: ${version} (${target})" >&2
-    download_github_file "${raw_url}" "${tmp_dir}/${archive}" "${archive}"
-    download_github_file "${raw_url}.sha256" "${tmp_dir}/${archive}.sha256" "${archive}.sha256"
+
+    # 依次尝试官方源与全部用户代理源；只有压缩包格式有效且最终 SHA-256 校验通过才继续。
+    while IFS= read -r prefix; do
+        if download_release_from_source \
+            "${prefix}" "${version}" "${target}" "${tmp_dir}" "${package}" "${archive}" "${raw_url}"; then
+            downloaded=1
+            break
+        fi
+        echo "该来源不可用，继续尝试下一来源" >&2
+    done < <(github_accel_prefixes)
+
+    if ((downloaded != 1)); then
+        die "Release 下载失败: ${version} (${target})。所有 GitHub 下载源均不可用，已停止安装（未覆盖任何文件）。" \
+            "请检查网络后重试，也可设置 QBOT_GITHUB_PROXY（单个代理前缀）或 QBOT_GITHUB_PROXIES（空格分隔的多个代理前缀）指定可信加速源。"
+    fi
 
     (
         cd "${tmp_dir}"

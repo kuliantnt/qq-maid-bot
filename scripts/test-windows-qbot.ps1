@@ -9,6 +9,20 @@ $oldServerHost = $env:LLM_SERVER_HOST
 $oldServerPort = $env:LLM_SERVER_PORT
 $oldConsoleEnabled = $env:WEB_CONSOLE_ENABLED
 $oldInstallWeb = $env:QBOT_INSTALL_WEB_CONSOLE
+$oldGitHubProxy = $env:QBOT_GITHUB_PROXY
+$oldGitHubProxies = $env:QBOT_GITHUB_PROXIES
+
+# 执行前后用户/系统环境变量与 git 全局配置必须保持不变（严禁写 User/Machine 作用域）。
+$userProxyBefore = [Environment]::GetEnvironmentVariable("QBOT_GITHUB_PROXY", "User")
+$userProxiesBefore = [Environment]::GetEnvironmentVariable("QBOT_GITHUB_PROXIES", "User")
+$machineProxyBefore = [Environment]::GetEnvironmentVariable("QBOT_GITHUB_PROXY", "Machine")
+$machineProxiesBefore = [Environment]::GetEnvironmentVariable("QBOT_GITHUB_PROXIES", "Machine")
+$gitConfigPath = Join-Path $HOME ".gitconfig"
+$gitConfigBefore = if (Test-Path -LiteralPath $gitConfigPath -PathType Leaf) {
+    (Get-Content -LiteralPath $gitConfigPath -Raw)
+} else {
+    $null
+}
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -23,6 +37,8 @@ try {
     $env:LLM_SERVER_HOST = $null
     $env:LLM_SERVER_PORT = $null
     $env:WEB_CONSOLE_ENABLED = $null
+    $env:QBOT_GITHUB_PROXY = $null
+    $env:QBOT_GITHUB_PROXIES = $null
     . (Join-Path $repoDir "scripts\qbot.ps1")
     . (Join-Path $repoDir "scripts\lib\agent-config.ps1")
     $agentConfigMigrationMarker = Join-Path $appDir "config\.agent-config-v0.20.2"
@@ -151,11 +167,9 @@ try {
     Set-Content -LiteralPath (Join-Path $appDir "VERSION") -Value "v0.20.1" -Encoding ASCII
     Set-Content -LiteralPath (Join-Path $appDir "config\agent.toml") -Value "must-survive-full-chain" -Encoding ASCII
     function Resolve-Version { return "v0.20.2" }
-    function Save-ReleaseFile {
-        param([string]$Url, [string]$Destination)
-    }
-    function Test-ReleaseChecksum {
-        param([string]$Archive, [string]$ChecksumFile)
+    function Save-ReleaseChain {
+        param([string]$Version, [string]$ArchiveName, [string]$ArchivePath, [string]$ChecksumPath)
+        return $true
     }
     function Expand-Archive {
         param([string]$LiteralPath, [string]$DestinationPath, [switch]$Force)
@@ -179,8 +193,7 @@ try {
         $failedReplacementError = $_.Exception.Message
     } finally {
         Remove-Item Function:\Resolve-Version -ErrorAction SilentlyContinue
-        Remove-Item Function:\Save-ReleaseFile -ErrorAction SilentlyContinue
-        Remove-Item Function:\Test-ReleaseChecksum -ErrorAction SilentlyContinue
+        Remove-Item Function:\Save-ReleaseChain -ErrorAction SilentlyContinue
         Remove-Item Function:\Expand-Archive -ErrorAction SilentlyContinue
         Remove-Item Function:\Move-Item -ErrorAction SilentlyContinue
         . (Join-Path $repoDir "scripts\qbot.ps1")
@@ -270,6 +283,204 @@ try {
     Set-Content -LiteralPath $checksum -Value "$hash  fixture.zip" -Encoding ASCII
     Test-ReleaseChecksum -Archive $archive -ChecksumFile $checksum
 
+    # —— GitHub 下载候选与失败回退回归 ——
+    # 用 mock 的 Invoke-WebRequest 模拟网络：请求 URL 写入日志；按前缀规则返回失败、
+    # 空文件、损坏 ZIP 或错误校验和；正常请求从 mock-server 目录取 fixture 文件。
+    $mockServerDir = Join-Path $testRoot "mock-server"
+    $mockPackageDir = Join-Path $mockServerDir "qq-maid-bot-v9.9.9-windows-x86_64"
+    New-Item -ItemType Directory -Path (Join-Path $mockPackageDir "config") -Force | Out-Null
+    foreach ($mockFile in @("qq-maid-bot.exe", "README.md", "VERSION")) {
+        Set-Content -LiteralPath (Join-Path $mockPackageDir $mockFile) -Value "release" -Encoding ASCII
+    }
+    Set-Content -LiteralPath (Join-Path $mockPackageDir "config\.env.example") -Value "EXAMPLE=1" -Encoding ASCII
+    $mockZip = Join-Path $mockServerDir "qq-maid-bot-v9.9.9-windows-x86_64.zip"
+    Compress-Archive -Path (Join-Path $mockPackageDir "*") -DestinationPath $mockZip -Force
+    $mockHash = (Get-FileHash -LiteralPath $mockZip -Algorithm SHA256).Hash.ToLowerInvariant()
+    Set-Content -LiteralPath "${mockZip}.sha256" -Value "$mockHash  qq-maid-bot-v9.9.9-windows-x86_64.zip" -Encoding ASCII
+
+    $script:MockRequestLog = New-Object System.Collections.Generic.List[string]
+    $script:MockFailPatterns = New-Object System.Collections.Generic.List[string]
+    $script:MockEmptyPatterns = New-Object System.Collections.Generic.List[string]
+    $script:MockCorruptPatterns = New-Object System.Collections.Generic.List[string]
+    $script:MockWrongHashPatterns = New-Object System.Collections.Generic.List[string]
+
+    function Invoke-WebRequest {
+        param([string]$Uri, [string]$OutFile, [switch]$UseBasicParsing, [int]$TimeoutSec, [string]$ErrorAction)
+        $script:MockRequestLog.Add($Uri) | Out-Null
+        foreach ($pattern in $script:MockFailPatterns) {
+            if ($Uri.StartsWith($pattern, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "simulated HTTP/network failure for $Uri"
+            }
+        }
+        foreach ($pattern in $script:MockEmptyPatterns) {
+            if ($Uri.StartsWith($pattern, [StringComparison]::OrdinalIgnoreCase)) {
+                Set-Content -LiteralPath $OutFile -Value "" -Encoding ASCII
+                return $null
+            }
+        }
+        foreach ($pattern in $script:MockCorruptPatterns) {
+            if ($Uri.StartsWith($pattern, [StringComparison]::OrdinalIgnoreCase)) {
+                Set-Content -LiteralPath $OutFile -Value "not-a-zip" -Encoding ASCII
+                return $null
+            }
+        }
+        foreach ($pattern in $script:MockWrongHashPatterns) {
+            if ($Uri.StartsWith($pattern, [StringComparison]::OrdinalIgnoreCase) -and $Uri.EndsWith(".sha256")) {
+                Set-Content -LiteralPath $OutFile -Value ("0" * 64) -Encoding ASCII
+                return $null
+            }
+        }
+        $fileName = [IO.Path]::GetFileName($Uri)
+        Copy-Item -LiteralPath (Join-Path $mockServerDir $fileName) -Destination $OutFile -Force
+        return $null
+    }
+
+    $officialPrefix = "https://github.com/$($script:RepoSlug)"
+    $archiveName = "qq-maid-bot-v9.9.9-windows-x86_64.zip"
+    $downloadDir = Join-Path $testRoot "download"
+    New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+    $archivePath = Join-Path $downloadDir $archiveName
+
+    # 1) 未配置代理时只访问 GitHub 官方源，且下载成功。
+    $script:MockRequestLog.Clear()
+    $script:MockFailPatterns.Clear()
+    $script:MockEmptyPatterns.Clear()
+    $script:MockCorruptPatterns.Clear()
+    $script:MockWrongHashPatterns.Clear()
+    $env:QBOT_GITHUB_PROXY = $null
+    $env:QBOT_GITHUB_PROXIES = $null
+    $prefixes = Get-GitHubProxyPrefixes
+    Assert-True ($prefixes.Count -eq 1 -and $prefixes[0] -eq "") "no proxy should yield only the official source"
+    $ok = Save-ReleaseChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
+    Assert-True $ok "official-only download should succeed"
+    foreach ($requestUrl in $script:MockRequestLog) {
+        Assert-True ($requestUrl.StartsWith("$officialPrefix/releases/download/v9.9.9/", [StringComparison]::OrdinalIgnoreCase)) "no-proxy mode requested a non-official URL: $requestUrl"
+    }
+
+    # 2) 官方源失败时回退到单个代理源。
+    $script:MockRequestLog.Clear()
+    $script:MockFailPatterns.Add($officialPrefix)
+    $env:QBOT_GITHUB_PROXY = "https://proxy-a.example.com/"
+    $env:QBOT_GITHUB_PROXIES = $null
+    $ok = Save-ReleaseChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
+    Assert-True $ok "official failure should fall back to the single proxy"
+    $proxyArchiveUrl = "https://proxy-a.example.com/$officialPrefix/releases/download/v9.9.9/$archiveName"
+    Assert-True ($script:MockRequestLog -contains $proxyArchiveUrl) "proxy URL was not requested after official failure"
+
+    # 3) 第一个代理失败时继续尝试后续代理。
+    $script:MockRequestLog.Clear()
+    $script:MockFailPatterns.Clear()
+    $script:MockFailPatterns.Add($officialPrefix)
+    $script:MockFailPatterns.Add("https://proxy-bad.example.com")
+    $env:QBOT_GITHUB_PROXY = "https://proxy-bad.example.com"
+    $env:QBOT_GITHUB_PROXIES = "https://proxy-good.example.com"
+    $ok = Save-ReleaseChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
+    Assert-True $ok "later proxy should succeed after the first proxy failed"
+    $badIndex = -1
+    $goodIndex = -1
+    for ($i = 0; $i -lt $script:MockRequestLog.Count; $i++) {
+        if ($script:MockRequestLog[$i].StartsWith("https://proxy-bad.example.com/")) { $badIndex = $i; break }
+    }
+    for ($i = 0; $i -lt $script:MockRequestLog.Count; $i++) {
+        if ($script:MockRequestLog[$i].StartsWith("https://proxy-good.example.com/")) { $goodIndex = $i; break }
+    }
+    Assert-True ($badIndex -ge 0 -and $goodIndex -gt $badIndex) "later proxy was not tried after the first proxy failed"
+
+    # 4) HTTP 成功但文件为空 / ZIP 损坏 / checksum 无效时继续回退。
+    $script:MockRequestLog.Clear()
+    $script:MockFailPatterns.Clear()
+    $script:MockEmptyPatterns.Add($officialPrefix)
+    $env:QBOT_GITHUB_PROXY = "https://proxy-a.example.com"
+    $env:QBOT_GITHUB_PROXIES = $null
+    $ok = Save-ReleaseChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
+    Assert-True $ok "empty official file should fall back to proxy"
+
+    $script:MockEmptyPatterns.Clear()
+    $script:MockCorruptPatterns.Add($officialPrefix)
+    $ok = Save-ReleaseChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
+    Assert-True $ok "corrupt official zip should fall back to proxy"
+
+    $script:MockCorruptPatterns.Clear()
+    $script:MockWrongHashPatterns.Add($officialPrefix)
+    $ok = Save-ReleaseChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
+    Assert-True $ok "invalid official checksum should fall back to proxy"
+
+    # 5) 重复代理（含尾部斜杠差异）不产生重复请求。
+    $script:MockRequestLog.Clear()
+    $script:MockWrongHashPatterns.Clear()
+    $script:MockFailPatterns.Add($officialPrefix)
+    $env:QBOT_GITHUB_PROXY = "https://proxy-a.example.com/"
+    $env:QBOT_GITHUB_PROXIES = "https://proxy-a.example.com https://proxy-a.example.com/"
+    $ok = Save-ReleaseChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
+    Assert-True $ok "deduplicated proxy download should succeed"
+    $archiveCount = @($script:MockRequestLog | Where-Object { $_ -eq $proxyArchiveUrl }).Count
+    Assert-True ($archiveCount -eq 1) "duplicate proxies produced duplicate requests"
+
+    # 6) 所有来源失败时返回非零，且不覆盖任何程序文件。
+    $script:MockRequestLog.Clear()
+    $script:MockFailPatterns.Clear()
+    $script:MockFailPatterns.Add($officialPrefix)
+    $env:QBOT_GITHUB_PROXY = $null
+    $env:QBOT_GITHUB_PROXIES = $null
+    $ok = Save-ReleaseChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
+    Assert-True (-not $ok) "all-sources-failed chain should return false"
+    $installFailApp = Join-Path $testRoot "install-fail"
+    New-Item -ItemType Directory -Path (Join-Path $installFailApp "config") -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $installFailApp "VERSION") -Value "v0.0.0-old" -Encoding ASCII
+    $oldScriptAppDir = $script:AppDir
+    $script:AppDir = $installFailApp
+    $installFailError = $null
+    try {
+        Install-OrUpdate -Mode "install" -RequestedVersion "v9.9.9"
+    } catch {
+        $installFailError = $_.Exception.Message
+    } finally {
+        $script:AppDir = $oldScriptAppDir
+    }
+    Assert-True ($null -ne $installFailError) "all-sources-failed install did not return an error"
+    Assert-True ((Get-Content -LiteralPath (Join-Path $installFailApp "VERSION") -Raw).Contains("v0.0.0-old")) "failed install overwrote program files"
+    Assert-True ($installFailError.Contains("QBOT_GITHUB_PROXY")) "all-sources-failed error lacks proxy guidance"
+    Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+
+    # 7) 候选列表规范化与去重（与 Linux 端语义一致：官方 → 单代理 → 多代理，按序去重）。
+    $env:QBOT_GITHUB_PROXY = "https://proxy-a.example.com/"
+    $env:QBOT_GITHUB_PROXIES = "https://proxy-b.example.com https://proxy-a.example.com bad-addr"
+    $prefixes = Get-GitHubProxyPrefixes
+    Assert-True ($prefixes.Count -eq 3) "expected official plus two deduplicated proxies"
+    Assert-True ($prefixes[0] -eq "" -and $prefixes[1] -eq "https://proxy-a.example.com" -and $prefixes[2] -eq "https://proxy-b.example.com") "proxy prefix order/normalization mismatch"
+    $env:QBOT_GITHUB_PROXY = $null
+    $env:QBOT_GITHUB_PROXIES = $null
+
+    # —— qbot.cmd 参数透传与退出码 ——
+    $cmdDir = Join-Path $testRoot "cmd with spaces"
+    New-Item -ItemType Directory -Path $cmdDir -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repoDir "scripts\qbot.ps1") -Destination (Join-Path $cmdDir "qbot.ps1")
+    Copy-Item -LiteralPath (Join-Path $repoDir "scripts\qbot.cmd") -Destination (Join-Path $cmdDir "qbot.cmd")
+    & cmd.exe /d /c "`"$cmdDir\qbot.cmd`" config set CMD_BINDING_TEST=ok"
+    if ($LASTEXITCODE -ne 0) {
+        throw "qbot.cmd argument pass-through failed"
+    }
+    $values = Read-ConfigValues
+    Assert-True ($values["CMD_BINDING_TEST"] -eq "ok") "qbot.cmd did not forward config arguments"
+    & cmd.exe /d /c "`"$cmdDir\qbot.cmd`" not-a-command"
+    if ($LASTEXITCODE -eq 0) {
+        throw "qbot.cmd swallowed the PowerShell non-zero exit code"
+    }
+
+    # 执行前后用户/系统环境变量与 git 全局配置必须保持不变。
+    $userProxyAfter = [Environment]::GetEnvironmentVariable("QBOT_GITHUB_PROXY", "User")
+    $userProxiesAfter = [Environment]::GetEnvironmentVariable("QBOT_GITHUB_PROXIES", "User")
+    $machineProxyAfter = [Environment]::GetEnvironmentVariable("QBOT_GITHUB_PROXY", "Machine")
+    $machineProxiesAfter = [Environment]::GetEnvironmentVariable("QBOT_GITHUB_PROXIES", "Machine")
+    Assert-True ($userProxyAfter -eq $userProxyBefore -and $userProxiesAfter -eq $userProxiesBefore) "User-scope proxy environment changed during the test"
+    Assert-True ($machineProxyAfter -eq $machineProxyBefore -and $machineProxiesAfter -eq $machineProxiesBefore) "Machine-scope proxy environment changed during the test"
+    $gitConfigAfter = if (Test-Path -LiteralPath $gitConfigPath -PathType Leaf) {
+        (Get-Content -LiteralPath $gitConfigPath -Raw)
+    } else {
+        $null
+    }
+    Assert-True ($gitConfigAfter -eq $gitConfigBefore) "git global config changed during the test"
+
     Write-Output "PowerShell qbot regression tests passed"
 } finally {
     $env:QBOT_APP_DIR = $oldAppDir
@@ -278,5 +489,7 @@ try {
     $env:LLM_SERVER_PORT = $oldServerPort
     $env:WEB_CONSOLE_ENABLED = $oldConsoleEnabled
     $env:QBOT_INSTALL_WEB_CONSOLE = $oldInstallWeb
+    $env:QBOT_GITHUB_PROXY = $oldGitHubProxy
+    $env:QBOT_GITHUB_PROXIES = $oldGitHubProxies
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
