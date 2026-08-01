@@ -506,6 +506,10 @@ try {
     Assert-True ($gitConfigAfter -eq $gitConfigBefore) "git global config changed during the test"
 
     Write-Output "PowerShell qbot regression tests passed"
+    # 测试中曾以非零退出运行 cmd.exe（校验 qbot.cmd 退出码透传），
+    # powershell -Command 会沿用最后一条原生命令/LASTEXITCODE 作为进程退出码；
+    # 全部断言通过后显式 exit 0，避免误报失败（断言失败会先抛出，不会走到这里）。
+    exit 0
 } finally {
     $env:QBOT_APP_DIR = $oldAppDir
     $env:LLM_SERVER_URL = $oldServerUrl
