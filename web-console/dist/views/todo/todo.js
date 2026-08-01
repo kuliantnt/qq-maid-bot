@@ -9,6 +9,21 @@ let pager = initialTargetPager();
 let targetLoading = false;
 let createLoadMore = null;
 let filterLoadMore = null;
+export function filterResetDefaults() {
+    return {
+        "todo-status-filter": "all",
+        "todo-keyword-filter": "",
+        "todo-time-filter": "all",
+        "todo-recurring-filter": "all",
+        "todo-target-filter": "",
+        "todo-platform-filter": "",
+        "todo-account-filter": "",
+        "todo-user-filter": "",
+        "todo-scope-filter": "",
+        "todo-date-start": "",
+        "todo-date-end": "",
+    };
+}
 export async function initializeTodo() {
     bindTodoControls();
     await loadMoreTargets();
@@ -33,12 +48,10 @@ function bindTodoControls() {
     refresh.onclick = () => void refreshTodos("refresh");
     filter.onclick = () => void refreshTodos("filter");
     reset.onclick = () => {
-        for (const id of ["todo-status-filter", "todo-keyword-filter", "todo-time-filter", "todo-recurring-filter",
-            "todo-target-filter", "todo-platform-filter", "todo-account-filter", "todo-user-filter", "todo-scope-filter",
-            "todo-date-start", "todo-date-end"]) {
+        for (const [id, value] of Object.entries(filterResetDefaults())) {
             const field = document.getElementById(id);
             if (field instanceof HTMLInputElement || field instanceof HTMLSelectElement)
-                field.value = "";
+                field.value = value;
         }
         syncAdvancedFilterState();
         void refreshTodos("filter");
@@ -206,6 +219,47 @@ export async function loadTodoForEdit(id, get = getTodo, onError = (message) => 
     }
 }
 export async function openEditor(todo) {
+    const latest = await loadTodoForEdit(todo.id);
+    if (latest === null)
+        return;
+    const title = window.prompt("Todo 标题", latest.title);
+    if (title === null || !title.trim())
+        return;
+    const detail = window.prompt("Todo 详情（留空清除）", latest.detail ?? "");
+    if (detail === null)
+        return;
+    const dueDate = window.prompt("截止日期 YYYY-MM-DD（留空清除）", latest.dueDate ?? "");
+    if (dueDate === null)
+        return;
+    const dueAt = window.prompt("截止时间 RFC3339/本地时间（留空清除）", latest.dueAt ?? "");
+    if (dueAt === null)
+        return;
+    const reminderAt = window.prompt("提醒时间 RFC3339/本地时间（留空清除）", latest.reminderAt ?? "");
+    if (reminderAt === null)
+        return;
+    const timePrecision = window.prompt("时间精度：none/date/date_time", latest.timePrecision);
+    if (timePrecision === null)
+        return;
+    const recurrenceKind = window.prompt("重复类型：none/daily/every_n_days/weekly/every_n_weeks/monthly/every_n_months/yearly/every_n_years/every_n_minutes/every_n_hours", latest.recurrenceKind);
+    if (recurrenceKind === null)
+        return;
+    const recurrenceInterval = window.prompt("重复间隔", String(latest.recurrenceInterval || ""));
+    if (recurrenceInterval === null)
+        return;
+    const recurrenceUnit = window.prompt("重复单位：day/week/month", latest.recurrenceUnit);
+    if (recurrenceUnit === null)
+        return;
+    try {
+        await updateTodo(latest.id, {
+            title: title.trim(), detail: detail.trim() || null, due_date: dueDate.trim() || null, due_at: dueAt.trim() || null,
+            reminder_at: reminderAt.trim() || null, time_precision: timePrecision, recurrence_kind: recurrenceKind,
+            recurrence_interval: recurrenceInterval.trim() ? Number(recurrenceInterval) : null, recurrence_unit: recurrenceUnit,
+        });
+        await refreshTodos("refresh");
+    }
+    catch (cause) {
+        showResult(cause instanceof Error ? cause.message : "Todo 更新失败", true);
+    }
 }
 function renderPagination(current, totalPages) {
     const list = document.getElementById("todo-pagination");

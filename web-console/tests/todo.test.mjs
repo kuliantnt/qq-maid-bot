@@ -9,7 +9,8 @@ import {
   initialTargetPager,
   pageAfterDelete,
 } from "../dist/views/todo/todo-paging.js";
-import { loadTodoForEdit } from "../dist/views/todo/todo.js";
+import { filterResetDefaults, loadTodoForEdit } from "../dist/views/todo/todo.js";
+import { resolveTimePrecision } from "../dist/views/todo/todo-form.js";
 
 function targetOption(targetRef, overrides = {}) {
   return {
@@ -133,4 +134,58 @@ test("getTodo 失败时通过 showResult 回调显示错误且不抛出", async 
 test("getTodo 成功时返回最新 Todo 供编辑器使用", async () => {
   const todo = await loadTodoForEdit("123", async () => ({ id: "123", title: "准备周报" }), () => {});
   assert.equal(todo.title, "准备周报");
+});
+
+test("重置筛选默认值：状态/时间/重复恢复 all，其余清空", () => {
+  const defaults = filterResetDefaults();
+  assert.equal(defaults["todo-status-filter"], "all");
+  assert.equal(defaults["todo-time-filter"], "all");
+  assert.equal(defaults["todo-recurring-filter"], "all");
+  assert.equal(defaults["todo-keyword-filter"], "");
+  assert.equal(defaults["todo-target-filter"], "");
+  assert.equal(defaults["todo-scope-filter"], "");
+  assert.equal(defaults["todo-date-start"], "");
+});
+
+test("时间精度决策：截止时间非空强制 date_time，否则保留用户选择", () => {
+  assert.equal(resolveTimePrecision("2026-08-01T10:00", "none"), "date_time");
+  assert.equal(resolveTimePrecision("2026-08-01T10:00", "date"), "date_time");
+  assert.equal(resolveTimePrecision(null, "none"), "none");
+  assert.equal(resolveTimePrecision(null, "date"), "date");
+  assert.equal(resolveTimePrecision(null, "date_time"), "date_time");
+});
+
+test("Todo 卡片操作按钮顺序：删除恒为最后，且查看/编辑已接线", async () => {
+  const { installDomGlobals, createFakeDom, flushMicrotasks } = await import("./helpers/fake-dom.mjs");
+  installDomGlobals(createFakeDom());
+  const { todoCard } = await import("../dist/views/todo/todo-card.js");
+  const previousPrompt = globalThis.window.prompt;
+  globalThis.window.prompt = () => null;
+  try {
+    const card = todoCard({
+      id: "t-1",
+      title: "测试",
+      detail: null,
+      dueDate: null,
+      dueAt: null,
+      reminderAt: null,
+      timePrecision: "none",
+      recurrenceKind: "none",
+      recurrenceInterval: 0,
+      recurrenceUnit: "day",
+      status: "pending",
+      createdAt: "",
+      updatedAt: "",
+      completedAt: null,
+      target: { targetRef: "r", platform: "p", scopeType: "private", userId: "u", groupId: null, accountId: null, reminderSupported: false, diagnostic: null },
+    });
+    const buttons = [...card.querySelectorAll("button")].map((button) => button.textContent);
+    assert.deepEqual(buttons, ["标记完成", "查看 / 编辑", "删除"]);
+    const editButton = card.querySelectorAll("button")[1];
+    assert.equal(typeof editButton.onclick, "function");
+    editButton.onclick();
+    await flushMicrotasks();
+  } finally {
+    globalThis.window.prompt = previousPrompt;
+  }
 });

@@ -1,6 +1,10 @@
 import { createTodo } from "../../api.js";
 import { refreshTodos, showResult, valueOf, numberValue } from "./todo.js";
 
+export function resolveTimePrecision(dueAt: string | null, selected: string): string {
+  return dueAt !== null ? "date_time" : selected;
+}
+
 export async function submitTodo(form: HTMLFormElement, dialog: HTMLDialogElement): Promise<void> {
   const title = valueOf("todo-create-title").trim();
   const targetRef = valueOf("todo-create-target");
@@ -14,15 +18,17 @@ export async function submitTodo(form: HTMLFormElement, dialog: HTMLDialogElemen
   }
   const button = form.querySelector<HTMLButtonElement>("button[type=submit]");
   if (button) button.disabled = true;
+  const dueDate = valueOf("todo-create-due-date") || null;
   const dueAt = valueOf("todo-create-due-at") || null;
   const reminderAt = valueOf("todo-create-reminder-at") || null;
-  const timePrecision = dueAt !== null ? "date_time" : valueOf("todo-create-time-precision");
+  const selectedPrecision = valueOf("todo-create-time-precision");
+  const timePrecision = resolveTimePrecision(dueAt, selectedPrecision);
   try {
     await createTodo({
       title,
       target_ref: targetRef,
       detail: valueOf("todo-create-detail").trim() || null,
-      due_date: null,
+      due_date: dueDate,
       due_at: dueAt,
       reminder_at: reminderAt,
       time_precision: timePrecision,
