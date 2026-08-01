@@ -294,8 +294,9 @@ try {
     }
     Set-Content -LiteralPath (Join-Path $mockPackageDir "config\.env.example") -Value "EXAMPLE=1" -Encoding ASCII
     $mockZip = Join-Path $mockServerDir "qq-maid-bot-v9.9.9-windows-x86_64.zip"
-    # 压缩包目录本身，使 ZIP 包含与真实 Release 一致的顶层包目录（结构校验依赖该约定）。
-    Compress-Archive -Path $mockPackageDir -DestinationPath $mockZip -Force
+    # 用 .NET ZipFile 打包，确保 ZIP 顶层是包目录本身（与真实 Release 的 zip -rq 布局一致；
+    # Windows PowerShell 5.1 的 Compress-Archive 直接传目录时不含顶层目录名，不能用于 mock）。
+    [IO.Compression.ZipFile]::CreateFromDirectory($mockPackageDir, $mockZip)
     $mockHash = (Get-FileHash -LiteralPath $mockZip -Algorithm SHA256).Hash.ToLowerInvariant()
     Set-Content -LiteralPath "${mockZip}.sha256" -Value "$mockHash  qq-maid-bot-v9.9.9-windows-x86_64.zip" -Encoding ASCII
     # 结构损坏产物：ZIP 容器有效但缺少预期的顶层包目录，用于验证深度校验回退。
