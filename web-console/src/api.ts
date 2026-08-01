@@ -1,3 +1,12 @@
+import {
+  AUTH_ROUTES,
+  CONFIGURATION_ROUTES,
+  MARKDOWN_RENDER_ROUTE,
+  RESTART_ROUTE,
+  STATUS_ROUTE,
+  TODO_ROUTES,
+  USER_DATA_ROUTES,
+} from "./api-routes.js";
 import type {
   CapabilityStatus,
   CapabilityScopeStatus,
@@ -38,7 +47,7 @@ export function setCsrfToken(value: string): void {
 }
 
 export async function fetchSession(): Promise<AdminSession> {
-  const payload = record(await fetchJson("/api/v1/console/session", {
+  const payload = record(await fetchJson(AUTH_ROUTES.session, {
     headers: { Accept: "application/json" },
   }));
   const session = parseSession(payload.session);
@@ -47,14 +56,14 @@ export async function fetchSession(): Promise<AdminSession> {
 }
 
 export async function fetchBootstrap(): Promise<BootstrapStatus> {
-  const payload = record(await fetchJson("/api/v1/console/auth/bootstrap", {
+  const payload = record(await fetchJson(AUTH_ROUTES.bootstrap, {
     headers: { Accept: "application/json" },
   }));
   return parseBootstrapStatus(payload.bootstrap);
 }
 
 export async function issuePreAuth(): Promise<string> {
-  const payload = record(await mutatingJson("/api/v1/console/auth/preauth", "POST"));
+  const payload = record(await mutatingJson(AUTH_ROUTES.preauth, "POST"));
   const token = string(payload.csrf_token, "");
   if (!token) throw new ConsoleApiError("认证服务未返回 CSRF token", "invalid_response");
   setCsrfToken(token);
@@ -62,7 +71,7 @@ export async function issuePreAuth(): Promise<string> {
 }
 
 export async function initializeAdmin(username: string, password: string, bootstrapToken: string): Promise<AdminSession> {
-  const payload = record(await mutatingJson("/api/v1/console/auth/initialize", "POST", {
+  const payload = record(await mutatingJson(AUTH_ROUTES.initialize, "POST", {
     username,
     password,
     bootstrap_token: bootstrapToken,
@@ -73,12 +82,12 @@ export async function initializeAdmin(username: string, password: string, bootst
 }
 
 export async function requestPasswordReset(): Promise<BootstrapStatus> {
-  const payload = record(await mutatingJson("/api/v1/console/auth/password-reset/bootstrap", "POST"));
+  const payload = record(await mutatingJson(AUTH_ROUTES.passwordResetBootstrap, "POST"));
   return parseBootstrapStatus(payload.bootstrap);
 }
 
 export async function resetAdminPassword(password: string, bootstrapToken: string): Promise<AdminSession> {
-  const payload = record(await mutatingJson("/api/v1/console/auth/password-reset", "POST", {
+  const payload = record(await mutatingJson(AUTH_ROUTES.passwordReset, "POST", {
     password,
     bootstrap_token: bootstrapToken,
   }));
@@ -88,19 +97,19 @@ export async function resetAdminPassword(password: string, bootstrapToken: strin
 }
 
 export async function loginAdmin(username: string, password: string): Promise<AdminSession> {
-  const payload = record(await mutatingJson("/api/v1/console/auth/login", "POST", { username, password }));
+  const payload = record(await mutatingJson(AUTH_ROUTES.login, "POST", { username, password }));
   const session = parseSession(payload.session);
   setCsrfToken(session.csrfToken);
   return session;
 }
 
 export async function logoutAdmin(): Promise<void> {
-  await mutatingJson("/api/v1/console/auth/logout", "POST", undefined, true);
+  await mutatingJson(AUTH_ROUTES.logout, "POST", undefined, true);
   setCsrfToken("");
 }
 
 export async function fetchUserPreferences(): Promise<UserPreferences> {
-  const payload = record(await mutatingJson("/api/v1/console/user-preferences/get", "POST", {}));
+  const payload = record(await mutatingJson(USER_DATA_ROUTES.preferencesGet, "POST", {}));
   return parseUserPreferences(payload.data);
 }
 
@@ -111,7 +120,7 @@ export async function updateUserPreferences(patch: {
   readonly backgroundMode?: "default" | "special";
   readonly kuliantnt?: boolean;
 }): Promise<UserPreferences> {
-  const payload = record(await mutatingJson("/api/v1/console/user-preferences/update", "POST", {
+  const payload = record(await mutatingJson(USER_DATA_ROUTES.preferencesUpdate, "POST", {
     ...(patch.customColors === undefined ? {} : { custom_colors: patch.customColors }),
     ...(patch.backgroundFileIds === undefined ? {} : { background_file_ids: patch.backgroundFileIds }),
     ...(patch.activeBackgroundFileId === undefined ? {} : { active_background_file_id: patch.activeBackgroundFileId }),
@@ -146,7 +155,7 @@ export async function collectAllUserFiles(
 
 export async function listUserFiles(): Promise<readonly UserFile[]> {
   return collectAllUserFiles(async (page) => {
-    const payload = record(await mutatingJson("/api/v1/console/files/list", "POST", {
+    const payload = record(await mutatingJson(USER_DATA_ROUTES.filesList, "POST", {
       page,
       page_size: 100,
     }));
@@ -162,7 +171,7 @@ export async function listUserFiles(): Promise<readonly UserFile[]> {
 }
 
 export async function uploadUserFile(file: File): Promise<UserFile> {
-  const response = await fetch("/api/v1/console/files/upload", {
+  const response = await fetch(USER_DATA_ROUTES.filesUpload, {
     method: "POST",
     credentials: "same-origin",
     headers: { Accept: "application/json", "X-CSRF-Token": csrfToken },
@@ -184,18 +193,18 @@ export async function readUserFile(file: UserFile): Promise<Blob> {
 }
 
 export async function deleteUserFile(fileId: string): Promise<void> {
-  await mutatingJson("/api/v1/console/files/delete", "POST", { file_id: fileId });
+  await mutatingJson(USER_DATA_ROUTES.filesDelete, "POST", { file_id: fileId });
 }
 
 export async function fetchConfiguration(): Promise<ConfigurationSnapshot> {
-  const payload = record(await fetchJson("/api/v1/console/configuration", {
+  const payload = record(await fetchJson(CONFIGURATION_ROUTES.get, {
     headers: { Accept: "application/json" },
   }));
   return parseConfigurationPayload(payload);
 }
 
 export async function updateRuntimeConfiguration(expectedRevision: string, changes: unknown[]): Promise<ConfigurationSnapshot> {
-  const payload = record(await mutatingJson("/api/v1/console/configuration/runtime", "PATCH", {
+  const payload = record(await mutatingJson(CONFIGURATION_ROUTES.runtime, "PATCH", {
     expected_revision: expectedRevision,
     changes,
   }));
@@ -203,12 +212,12 @@ export async function updateRuntimeConfiguration(expectedRevision: string, chang
 }
 
 export async function updateSecretConfiguration(changes: unknown[]): Promise<ConfigurationSnapshot> {
-  const payload = record(await mutatingJson("/api/v1/console/configuration/secrets", "PATCH", { changes }));
+  const payload = record(await mutatingJson(CONFIGURATION_ROUTES.secrets, "PATCH", { changes }));
   return parseConfigurationPayload(payload);
 }
 
 export async function updateAgentConfiguration(expectedRevision: string, changes: unknown[]): Promise<ConfigurationSnapshot> {
-  const payload = record(await mutatingJson("/api/v1/console/configuration/agent", "PATCH", {
+  const payload = record(await mutatingJson(CONFIGURATION_ROUTES.agent, "PATCH", {
     expected_revision: expectedRevision,
     changes,
   }));
@@ -216,18 +225,18 @@ export async function updateAgentConfiguration(expectedRevision: string, changes
 }
 
 export async function requestRestart(): Promise<string> {
-  const payload = record(await mutatingJson("/api/v1/console/restart", "POST", {}));
+  const payload = record(await mutatingJson(RESTART_ROUTE, "POST", {}));
   return string(payload.message, "重启命令已提交");
 }
 
 export async function validateConfiguration(): Promise<{ valid: boolean; message: string }> {
-  const payload = record(await mutatingJson("/api/v1/console/configuration/validate", "POST", {}));
+  const payload = record(await mutatingJson(CONFIGURATION_ROUTES.validate, "POST", {}));
   const validation = record(payload.validation);
   return { valid: validation.valid === true, message: string(validation.message, "配置校验已完成") };
 }
 
 export async function fetchConsoleStatus(): Promise<ConsoleStatus> {
-  const value = await fetchJson("/api/v1/console/status", { headers: { Accept: "application/json" } });
+  const value = await fetchJson(STATUS_ROUTE, { headers: { Accept: "application/json" } });
   const root = record(value);
   return {
     runtime: parseRuntime(root.runtime),
@@ -239,7 +248,7 @@ export async function fetchConsoleStatus(): Promise<ConsoleStatus> {
 }
 
 export async function renderMarkdown(markdown: string): Promise<string> {
-  const value = await fetchJson("/api/v1/markdown/render", {
+  const value = await fetchJson(MARKDOWN_RENDER_ROUTE, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify({ markdown }),
@@ -252,7 +261,7 @@ export async function renderMarkdown(markdown: string): Promise<string> {
 }
 
 export async function listTodos(filters: Record<string, unknown> = {}): Promise<TodoPage> {
-  const payload = record(await mutatingJson("/api/v1/console/todo/list", "POST", {
+  const payload = record(await mutatingJson(TODO_ROUTES.list, "POST", {
     page: 1,
     page_size: 50,
     ...filters,
@@ -261,7 +270,7 @@ export async function listTodos(filters: Record<string, unknown> = {}): Promise<
 }
 
 export async function listTodoTargets(page = 1, pageSize = 100): Promise<TodoTargetPage> {
-  const payload = record(await mutatingJson("/api/v1/console/todo/targets", "POST", {
+  const payload = record(await mutatingJson(TODO_ROUTES.targets, "POST", {
     page,
     page_size: pageSize,
   }));
@@ -269,22 +278,22 @@ export async function listTodoTargets(page = 1, pageSize = 100): Promise<TodoTar
 }
 
 export async function createTodo(input: Record<string, unknown>): Promise<TodoItem> {
-  const payload = record(await mutatingJson("/api/v1/console/todo/create", "POST", input));
+  const payload = record(await mutatingJson(TODO_ROUTES.create, "POST", input));
   return parseTodoItem(payload.data);
 }
 
 export async function getTodo(id: string): Promise<TodoItem> {
-  const payload = record(await mutatingJson("/api/v1/console/todo/get", "POST", { id }));
+  const payload = record(await mutatingJson(TODO_ROUTES.get, "POST", { id }));
   return parseTodoItem(payload.data);
 }
 
 export async function updateTodo(id: string, changes: Record<string, unknown>): Promise<TodoItem> {
-  const payload = record(await mutatingJson("/api/v1/console/todo/update", "POST", { id, ...changes }));
+  const payload = record(await mutatingJson(TODO_ROUTES.update, "POST", { id, ...changes }));
   return parseTodoItem(payload.data);
 }
 
 export async function deleteTodo(id: string): Promise<void> {
-  await mutatingJson("/api/v1/console/todo/delete", "POST", { id });
+  await mutatingJson(TODO_ROUTES.delete, "POST", { id });
 }
 
 function parseTodoPage(value: unknown): TodoPage {
