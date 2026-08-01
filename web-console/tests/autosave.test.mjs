@@ -11,7 +11,7 @@ import {
 } from "./helpers/fake-dom.mjs";
 import { createThemeController } from "../dist/theme.js";
 import { createBackgroundController } from "../dist/background.js";
-import { initializeConfiguration, resetConfigurationStateForTests } from "../dist/views/configuration.js";
+import { initializeConfiguration, resetConfigurationStateForTests } from "../dist/views/configuration/configuration.js";
 
 function makeField({
   key,

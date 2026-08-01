@@ -6,13 +6,13 @@ import {
   configurationBusinessGroup,
   configurationBusinessGroups,
   publicConfigurationChanges,
-} from "../dist/views/configuration.js";
+} from "../dist/views/configuration/configuration.js";
 
 test("构建产物不再包含 Provider 连接测试面板或请求入口", async () => {
   const [html, api, configuration] = await Promise.all([
     readFile(new URL("../dist/index.html", import.meta.url), "utf8"),
     readFile(new URL("../dist/api.js", import.meta.url), "utf8"),
-    readFile(new URL("../dist/views/configuration.js", import.meta.url), "utf8"),
+    readFile(new URL("../dist/views/configuration/configuration.js", import.meta.url), "utf8"),
   ]);
   for (const content of [html, api, configuration]) {
     assert.doesNotMatch(content, /Provider 连接测试|READ-ONLY TEST|test-provider-connection|configuration\/test-connection/);

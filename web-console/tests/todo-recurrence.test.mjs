@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { todoRecurrenceKind } from "../dist/views/todo.js";
+import { todoRecurrenceKind } from "../dist/views/todo/todo.js";
 
 test("Todo 间隔重复按单位转换为后端支持的枚举", () => {
   assert.equal(todoRecurrenceKind("none", "day"), "none");

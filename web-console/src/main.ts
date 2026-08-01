@@ -21,11 +21,11 @@ import { renderDashboard } from "./views/dashboard.js";
 import { bindMarkdownPreview } from "./views/markdown.js";
 import { renderPlatforms } from "./views/platforms.js";
 import { renderStorage } from "./views/storage.js";
-import { initializeConfiguration } from "./views/configuration.js";
+import { initializeConfiguration } from "./views/configuration/configuration.js";
 import type { BootstrapStatus } from "./types.js";
 import { createThemeController } from "./theme.js";
 import { bindConsoleNavigation } from "./console-shell.js";
-import { initializeTodo } from "./views/todo.js";
+import { initializeTodo } from "./views/todo/todo.js";
 import { createBackgroundController, installBackgroundConsoleUnlock, unlockPreferencePatch, type BackgroundFile } from "./background.js";
 import { cacheFileBlob, clearFileBlobCache, deleteCachedFileBlob, readCachedFileBlob } from "./file-cache.js";
 
@@ -76,7 +76,7 @@ let authMode: "initialize" | "login" | "password-reset" = "login";
 let appBound = false;
 let autoRefreshTimer: number | undefined;
 let refreshInFlight = false;
-let userDataController: import("./views/configuration.js").UserDataController | null = null;
+let userDataController: import("./views/configuration/configuration.js").UserDataController | null = null;
 
 const AUTO_REFRESH_INTERVAL_MS = 30_000;
 
@@ -256,7 +256,7 @@ async function hydrateUserData(): Promise<void> {
     }, files);
     let currentPreferences = preferences;
     let currentFiles = files;
-    const dataController: import("./views/configuration.js").UserDataController = {
+    const dataController: import("./views/configuration/configuration.js").UserDataController = {
       get preferences() { return currentPreferences; },
       get files() { return currentFiles; },
       updatePreferences: async (patch) => {

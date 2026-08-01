@@ -1,4 +1,4 @@
-import type { TodoTargetOption, TodoTargetPage } from "../types.js";
+import type { TodoTargetOption, TodoTargetPage } from "../../types.js";
 
 export const TARGET_PAGE_SIZE = 100;
 

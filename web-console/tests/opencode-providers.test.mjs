@@ -8,7 +8,7 @@ import {
   openCodeProviderWarning,
   readOpenCodeProviders,
   readPreservedCustomProviders,
-} from "../dist/opencode-providers.js";
+} from "../dist/views/configuration/opencode-providers.js";
 
 test("OpenCode 三个预设使用固定 ID、协议、官方 Base URL 和共享 Key", () => {
   const presets = openCodeProviderPresets();

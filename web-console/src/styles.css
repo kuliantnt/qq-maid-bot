@@ -88,9 +88,7 @@ body { min-width: 320px; margin: 0; background: var(--paper); }
    背景功能仅在用户显式选择特殊九宫格或上传自定义图片时启用。 */
 .console-background--special { display: none; }
 .console-background--custom { display: none; background-position: center; background-size: cover; }
-.console-background-grid { display: grid; width: 100%; height: 100%; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(0, 1fr)); opacity: .72; filter: saturate(.82) contrast(.92); }
-/* 9 宫格共用一张 special.webp 拼图：background-size 300% 让每个切片恰好占满一格，
-   nth-child 按 3×3 顺序定位对应区域（0% / 50% / 100%），减少包体只保留一张图。 */
+.console-background-grid { display: grid; width: min(100vw, 100vh); height: min(100vw, 100vh); margin: auto; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(0, 1fr)); opacity: .72; filter: saturate(.82) contrast(.92); }
 .console-background-grid-cell { display: block; width: 100%; height: 100%; min-width: 0; min-height: 0; background-image: url("/console/background/special.webp"); background-size: 300% 300%; background-repeat: no-repeat; }
 .console-background-grid-cell:nth-child(1) { background-position: 0% 0%; }
 .console-background-grid-cell:nth-child(2) { background-position: 50% 0%; }
@@ -101,7 +99,8 @@ body { min-width: 320px; margin: 0; background: var(--paper); }
 .console-background-grid-cell:nth-child(7) { background-position: 0% 100%; }
 .console-background-grid-cell:nth-child(8) { background-position: 50% 100%; }
 .console-background-grid-cell:nth-child(9) { background-position: 100% 100%; }
-:root[data-background="special"] .console-background--special { display: block; }
+:root[data-background="special"] .console-background--default { display: none; }
+:root[data-background="special"] .console-background--special { display: grid; place-items: center; }
 :root[data-background="custom"] .console-background--custom { display: block; }
 .console-transition { position: fixed; inset: 0; z-index: 35; overflow: hidden; pointer-events: none; }
 .console-transition[hidden] { display: none; }
@@ -461,4 +460,63 @@ textarea { width: 100%; min-height: 25rem; flex: 1; resize: vertical; padding: v
 @media (prefers-reduced-motion: reduce) {
   html, .console-content { scroll-behavior: auto; }
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
+
+/* ---- 模型候选路线 Chip 编辑器 ---- */
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+.model-route-editor { display: grid; gap: .45rem; min-width: 0; }
+.model-route-label { margin: 0; color: var(--ink); font-size: .76rem; font-weight: 650; }
+.model-route-chips { display: flex; flex-wrap: wrap; gap: .3rem; min-width: 0; padding: .4rem; border: 1px solid var(--line); background: color-mix(in srgb, var(--console-glass-raised) 78%, transparent); }
+.model-route-chip { display: inline-flex; align-items: center; gap: .2rem; max-width: 100%; padding: .18rem .4rem; border: 1px solid var(--console-line); background: var(--console-glass-muted); color: var(--console-text); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .7rem; line-height: 1.3; }
+.model-route-chip--dragging { opacity: .45; }
+.model-route-chip--drag-over { border-color: var(--console-accent-strong); box-shadow: 0 0 0 2px var(--console-focus); }
+.model-route-chip-text { overflow-wrap: anywhere; min-width: 0; }
+.model-route-chip-handle { color: var(--muted); cursor: grab; user-select: none; }
+.model-route-chip-move, .model-route-chip-remove { padding: 0 .2rem; border: 0; background: transparent; color: var(--muted); font-size: .72rem; line-height: 1; cursor: pointer; }
+.model-route-chip-move:hover, .model-route-chip-remove:hover { color: var(--accent-strong); }
+.model-route-add-row { display: flex; gap: .35rem; min-width: 0; }
+.model-route-add-row input { flex: 1; min-width: 0; padding: .4rem .5rem; }
+.model-route-status { min-height: 1.1rem; margin: 0; }
+/* ---- OpenCode 模板折叠区 ---- */
+.route-hints-disclosure { margin-top: .6rem; border: 1px solid var(--line); background: var(--console-glass-muted); }
+.route-hints-disclosure > summary { padding: .5rem .6rem; color: var(--ink); font-size: .72rem; font-weight: 700; cursor: pointer; }
+.route-hints-disclosure > .hint { margin: 0; padding: 0 .6rem .5rem; font-size: .66rem; }
+.route-hints-disclosure .route-example-list { padding: 0 .6rem .6rem; }
+.route-template-row { display: grid; grid-template-columns: minmax(10rem, 1fr) auto auto; align-items: center; gap: .5rem; padding: .4rem 0; border-top: 1px solid var(--console-line); }
+.route-template-row:first-child { border-top: 0; }
+.route-template-row code { overflow-wrap: anywhere; color: var(--console-accent-strong); font-size: .68rem; }
+.route-template-state { color: var(--console-status-good); font-size: .64rem; font-weight: 700; }
+.route-template-state--pending { color: var(--console-status-warn); }
+.route-template-actions { display: inline-flex; align-items: center; flex-wrap: wrap; gap: .3rem; }
+.route-template-chooser { display: inline-flex; flex-wrap: wrap; gap: .3rem; }
+@media (max-width: 767px) {
+  .route-template-row { grid-template-columns: 1fr; }
+  .model-route-add-row { flex-direction: column; align-items: stretch; }
+}
+
+/* ---- Todo 页面：常用筛选 + 高级筛选折叠 ---- */
+.todo-page-actions { display: flex; align-items: center; gap: var(--console-space-2); }
+.todo-page-actions button { padding-block: .5rem; }
+.todo-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: .6rem; margin-bottom: .5rem; }
+.todo-advanced-toggle--active { border-color: var(--console-accent-strong); color: var(--accent-strong); background: var(--accent-soft); }
+.todo-advanced-filter { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: .5rem; padding: .6rem; margin-bottom: .5rem; border: 1px solid var(--line); background: var(--console-glass-muted); }
+.todo-advanced-filter[hidden] { display: none; }
+.todo-advanced-filter label { display: grid; gap: .2rem; margin: 0; color: var(--muted); font-size: .7rem; font-weight: 700; }
+.todo-advanced-filter input, .todo-advanced-filter select { width: 100%; padding: .42rem .5rem; }
+/* ---- Todo 创建弹窗 ---- */
+.todo-create-dialog { width: min(34rem, calc(100% - 2rem)); padding: 0; border: 1px solid var(--console-line); background: var(--console-glass-raised); color: var(--console-glass-primary); box-shadow: var(--console-shadow); }
+.todo-create-dialog::backdrop { background: color-mix(in srgb, var(--console-dark) 55%, transparent); backdrop-filter: blur(3px); }
+.todo-create-dialog .todo-create-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; padding: var(--console-space-4); margin: 0; }
+.todo-create-heading { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin-bottom: .2rem; }
+.todo-create-heading h3 { margin: 0; font-size: 1rem; }
+.todo-create-heading button { padding: .2rem .5rem; line-height: 1; }
+.todo-create-form label { display: grid; gap: .25rem; margin: 0; color: var(--muted); font-size: .7rem; font-weight: 700; }
+.todo-create-form label.todo-create-detail { grid-column: 1 / -1; }
+.todo-create-form .error { grid-column: 1 / -1; margin: 0; min-height: 1.1rem; }
+.todo-create-form > button[type="submit"] { grid-column: 1 / -1; justify-self: end; min-width: 8rem; }
+@media (max-width: 767px) {
+  .todo-create-dialog .todo-create-form { grid-template-columns: 1fr; }
+  .todo-create-form label.todo-create-detail { grid-column: auto; }
+  .todo-create-form .error { grid-column: auto; }
+  .todo-create-form > button[type="submit"] { grid-column: auto; width: 100%; }
 }

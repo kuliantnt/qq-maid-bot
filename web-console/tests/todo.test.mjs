@@ -8,8 +8,8 @@ import {
   initialRefreshPage,
   initialTargetPager,
   pageAfterDelete,
-} from "../dist/views/todo-paging.js";
-import { loadTodoForEdit } from "../dist/views/todo.js";
+} from "../dist/views/todo/todo-paging.js";
+import { loadTodoForEdit } from "../dist/views/todo/todo.js";
 
 function targetOption(targetRef, overrides = {}) {
   return {
