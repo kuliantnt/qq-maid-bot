@@ -55,7 +55,9 @@ pub(crate) use chat_tool_loop::{
 };
 pub(crate) use configured::ConfiguredResponsesProvider;
 pub(crate) use stream::is_openai_responses_done_sentinel;
-pub(crate) use transport::{openai_responses_url, send_openai_responses_request};
+pub(crate) use transport::{
+    ResponsesTransportContext, openai_responses_url, send_openai_responses_request,
+};
 
 struct OpenAiChatFallbackRequest<'a> {
     api_mode: OpenAiApiMode,
@@ -835,6 +837,94 @@ mod tests {
         assert_eq!(request["messages"][1]["content"][0]["type"], "text");
         assert_eq!(request["messages"][1]["content"][0]["text"], "old reply");
         assert!(request.get("input").is_none());
+    }
+
+    #[tokio::test]
+    async fn openai_chat_falls_back_after_responses_incompatible_status() {
+        for responses_status in [
+            AxumStatusCode::NOT_FOUND,
+            AxumStatusCode::UNPROCESSABLE_ENTITY,
+        ] {
+            let (base_url, state) = spawn_mock_openai(MockOpenAiState {
+                responses_status,
+                responses_body: serde_json::json!({"error": {"message": "Responses API is incompatible"}}),
+                chat_body: mock_chat_response("chat fallback ok"),
+                responses_calls: 0,
+                chat_calls: 0,
+                chat_requests: Vec::new(),
+            })
+            .await;
+            let http_client = qq_maid_common::http_client::client();
+            let chat_client =
+                ChatCompletionsClient::new("test-key", Some(&base_url), http_client.clone());
+
+            let outcome = openai_chat_with_chat_fallback(OpenAiChatFallbackRequest {
+                api_mode: OpenAiApiMode::Auto,
+                stream: false,
+                responses_client: &http_client,
+                chat_client: &chat_client,
+                api_key: "test-key",
+                base_url: Some(&base_url),
+                responses_auth: None,
+                provider: "openai",
+                model: "gpt-5.5",
+                media_max_bytes: 10 * 1024 * 1024,
+                max_output_tokens: 1200,
+                reasoning_effort: None,
+                messages: &[ChatMessage::user("hi")],
+                image_generation_enabled: false,
+            })
+            .await
+            .unwrap();
+
+            assert_eq!(outcome.reply, "chat fallback ok");
+            let state = state.lock().await;
+            assert_eq!(state.responses_calls, 1, "status={responses_status}");
+            assert_eq!(state.chat_calls, 1, "status={responses_status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_chat_does_not_fallback_after_responses_authentication_status() {
+        for responses_status in [AxumStatusCode::UNAUTHORIZED, AxumStatusCode::FORBIDDEN] {
+            let (base_url, state) = spawn_mock_openai(MockOpenAiState {
+                responses_status,
+                responses_body: serde_json::json!({"error": {"message": "authentication rejected"}}),
+                chat_body: mock_chat_response("must not run"),
+                responses_calls: 0,
+                chat_calls: 0,
+                chat_requests: Vec::new(),
+            })
+            .await;
+            let http_client = qq_maid_common::http_client::client();
+            let chat_client =
+                ChatCompletionsClient::new("test-key", Some(&base_url), http_client.clone());
+
+            let error = openai_chat_with_chat_fallback(OpenAiChatFallbackRequest {
+                api_mode: OpenAiApiMode::Auto,
+                stream: false,
+                responses_client: &http_client,
+                chat_client: &chat_client,
+                api_key: "test-key",
+                base_url: Some(&base_url),
+                responses_auth: None,
+                provider: "openai",
+                model: "gpt-5.5",
+                media_max_bytes: 10 * 1024 * 1024,
+                max_output_tokens: 1200,
+                reasoning_effort: None,
+                messages: &[ChatMessage::user("hi")],
+                image_generation_enabled: false,
+            })
+            .await
+            .unwrap_err();
+
+            assert_eq!(error.code, "authentication_failed");
+            assert_eq!(error.upstream_status, Some(responses_status.as_u16()));
+            let state = state.lock().await;
+            assert_eq!(state.responses_calls, 1, "status={responses_status}");
+            assert_eq!(state.chat_calls, 0, "status={responses_status}");
+        }
     }
 
     #[tokio::test]

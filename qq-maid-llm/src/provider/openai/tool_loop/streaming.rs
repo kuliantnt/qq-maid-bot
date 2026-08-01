@@ -162,7 +162,8 @@ pub(super) async fn collect_responses_tool_loop_stream(
             Err(err) => {
                 set_streaming_fallback_reason(&diagnostics, "http_sse_parse_error");
                 return Err(stream_transport_error(
-                    format!("OpenAI tool loop stream failed: {err}"),
+                    err,
+                    "OpenAI tool loop stream failed",
                     &answer,
                 ));
             }

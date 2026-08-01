@@ -18,6 +18,7 @@ use crate::{
 };
 
 use super::{
+    ResponsesTransportContext,
     extract::{
         extract_response_output_parts, extract_response_output_text, extract_response_usage,
     },
@@ -103,17 +104,19 @@ pub(crate) async fn openai_responses_non_stream_chat(
         req.client,
         req.api_key,
         req.base_url,
-        req.provider,
         req.auth,
         &payload,
-        false,
+        ResponsesTransportContext {
+            provider: req.provider,
+            model: req.model,
+            stream: false,
+        },
     )
     .await?;
 
-    let body: Value = response
-        .json()
-        .await
-        .map_err(|err| LlmError::provider(format!("invalid OpenAI chat JSON: {err}"), "json"))?;
+    let body: Value = response.json().await.map_err(|err| {
+        LlmError::from_response_source(&err, "failed to read OpenAI Responses JSON")
+    })?;
     let output_parts = extract_response_output_parts(&body);
     let reply = extract_response_output_text(&body).unwrap_or_default();
     if reply.trim().is_empty() && output_parts.is_empty() {
@@ -160,10 +163,13 @@ pub(crate) async fn openai_responses_chat_stream(
         req.client,
         req.api_key,
         req.base_url,
-        req.provider,
         req.auth,
         &payload,
-        true,
+        ResponsesTransportContext {
+            provider: req.provider,
+            model: req.model,
+            stream: true,
+        },
     )
     .await?;
 
@@ -346,7 +352,8 @@ async fn next_responses_stream_event(
             }
             Err(err) => {
                 return Some(Err(stream_transport_error(
-                    format!("OpenAI chat stream failed: {err}"),
+                    err,
+                    "OpenAI chat stream failed",
                     &state.answer,
                 )));
             }
@@ -363,13 +370,17 @@ pub(crate) fn incomplete_stream_eof_error(message: &str, answer: &str) -> LlmErr
     LlmError::provider(message, stage)
 }
 
-pub(crate) fn stream_transport_error(message: String, answer: &str) -> LlmError {
+pub(crate) fn stream_transport_error(
+    error: reqwest::Error,
+    context: &str,
+    answer: &str,
+) -> LlmError {
     let stage = if answer.trim().is_empty() {
-        "http"
+        "stream_read"
     } else {
-        "stream_after_delta"
+        "stream_read_after_delta"
     };
-    LlmError::new("http_error", message, stage)
+    LlmError::from_error_source(&error, crate::error::LlmErrorKind::Network, stage, context)
 }
 
 #[cfg(test)]
@@ -443,6 +454,24 @@ mod tests {
 
     async fn spawn_never_closing_completed_response() -> String {
         let app = Router::new().route("/v1/responses", post(never_closing_completed_handler));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}/v1")
+    }
+
+    async fn stalled_stream_handler() -> Response<Body> {
+        let body = Body::from_stream(stream::pending::<Result<Bytes, Infallible>>());
+        Response::builder()
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .body(body)
+            .unwrap()
+    }
+
+    async fn spawn_stalled_stream_response() -> String {
+        let app = Router::new().route("/v1/responses", post(stalled_stream_handler));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -532,6 +561,24 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome.reply, "prompt completion");
+    }
+
+    #[tokio::test]
+    async fn responses_stream_read_timeout_keeps_timeout_classification() {
+        let base_url = spawn_stalled_stream_response().await;
+        let client = qq_maid_common::http_client::try_builder()
+            .unwrap()
+            .timeout(Duration::from_millis(30))
+            .build()
+            .unwrap();
+        let messages = [ChatMessage::user("hi")];
+        let req = stream_req(&client, &base_url, &messages);
+
+        let error = openai_responses_stream_chat(&req).await.unwrap_err();
+
+        assert_eq!(error.code, "timeout");
+        assert_eq!(error.kind(), crate::error::LlmErrorKind::Timeout);
+        assert_eq!(error.stage, "stream_read");
     }
 
     #[tokio::test]

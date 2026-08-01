@@ -768,7 +768,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configured_responses_maps_upstream_401_to_provider_unavailable() {
+    async fn configured_responses_keeps_upstream_401_as_authentication() {
         let (base_url, state) = spawn_mock(vec![MockReply {
             status: StatusCode::UNAUTHORIZED,
             content_type: "application/json",
@@ -790,8 +790,9 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(error.code, "provider_error");
-        assert_eq!(error.stage, "provider_unavailable");
+        assert_eq!(error.code, "authentication_failed");
+        assert_eq!(error.kind(), crate::error::LlmErrorKind::Authentication);
+        assert_eq!(error.upstream_status, Some(401));
         assert!(error.message.contains("HTTP 401"));
         assert_eq!(state.lock().await.requests.len(), 1);
     }

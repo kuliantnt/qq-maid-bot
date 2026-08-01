@@ -17,6 +17,13 @@ fn provider_errors_are_fallback_eligible() {
         "bad local request",
         "request"
     )));
+    for status in [404, 422] {
+        assert!(should_try_next_model(&LlmError::from_upstream_status(
+            status,
+            "Responses API is incompatible",
+            "http"
+        )));
+    }
 }
 
 #[tokio::test]
@@ -481,6 +488,28 @@ async fn model_route_provider_falls_back_on_eligible_error() {
 }
 
 #[tokio::test]
+async fn model_route_provider_tries_next_candidate_after_responses_incompatible_status() {
+    for status in [404, 422] {
+        let (provider, openai, deepseek) = route_provider(
+            "openai:gpt-a,deepseek:deepseek-chat",
+            vec![Err(LlmError::from_upstream_status(
+                status,
+                "Responses API is incompatible",
+                "http",
+            ))],
+            vec![Ok(outcome("fallback"))],
+        );
+
+        let result = provider.chat(request()).await.unwrap();
+
+        assert_eq!(result.reply, "fallback", "status={status}");
+        assert!(result.fallback_used, "status={status}");
+        assert_eq!(openai.calls(), 1, "status={status}");
+        assert_eq!(deepseek.calls(), 1, "status={status}");
+    }
+}
+
+#[tokio::test]
 async fn model_route_provider_falls_back_after_mimo_rate_limit() {
     let mimo_id = ModelProvider::Custom("mimo".to_owned());
     let mimo = Arc::new(MockProvider::new(
@@ -634,11 +663,36 @@ async fn model_route_provider_aggregates_all_candidate_failures() {
     let err = provider.chat(request()).await.unwrap_err();
 
     assert_eq!(err.code, "provider_error");
-    assert_eq!(err.stage, "provider_route");
+    assert_eq!(err.stage, "provider");
     assert!(err.message.contains("#0 openai:gpt-a -> timeout@provider"));
     assert!(
         err.message
             .contains("#1 deepseek:deepseek-chat -> provider_error@provider")
+    );
+    assert_eq!(openai.calls(), 1);
+    assert_eq!(deepseek.calls(), 1);
+}
+
+#[tokio::test]
+async fn model_route_timeout_exhaustion_keeps_terminal_timeout() {
+    let (provider, openai, deepseek) = route_provider(
+        "openai:gpt-a,deepseek:deepseek-chat",
+        vec![Err(LlmError::timeout("http_request_timeout"))],
+        vec![Err(LlmError::timeout("stream_read"))],
+    );
+
+    let err = provider.chat(request()).await.unwrap_err();
+
+    assert_eq!(err.code, "timeout");
+    assert_eq!(err.kind(), crate::error::LlmErrorKind::Timeout);
+    assert_eq!(err.stage, "stream_read");
+    assert!(
+        err.message
+            .contains("#0 openai:gpt-a -> timeout@http_request_timeout")
+    );
+    assert!(
+        err.message
+            .contains("#1 deepseek:deepseek-chat -> timeout@stream_read")
     );
     assert_eq!(openai.calls(), 1);
     assert_eq!(deepseek.calls(), 1);

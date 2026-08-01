@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::{
     config::LlmConfig,
-    error::LlmError,
+    error::{LlmError, LlmErrorKind},
     metrics::duration_ms,
     provider::types::{ModelId, ModelProvider},
 };
@@ -98,11 +98,28 @@ impl WebSearchExecutor for GeminiWebSearchExecutor {
             .send()
             .await
             .map_err(|err| {
-                if err.is_timeout() {
-                    LlmError::timeout("http")
+                let stage = if err.is_timeout() {
+                    "http_request_timeout"
                 } else {
-                    LlmError::http(format!("Gemini web query request failed: {err}"))
-                }
+                    "http_request"
+                };
+                let mapped = LlmError::from_error_source(
+                    &err,
+                    LlmErrorKind::Network,
+                    stage,
+                    "Gemini web query request failed",
+                );
+                tracing::warn!(
+                    provider = "gemini",
+                    model,
+                    stream = false,
+                    timeout_stage = mapped.stage.as_str(),
+                    elapsed_ms = started.elapsed().as_millis(),
+                    error_kind = mapped.kind().as_str(),
+                    error = %err,
+                    "Gemini web search transport failed"
+                );
+                mapped
             })?;
 
         let status = response.status();
@@ -111,7 +128,7 @@ impl WebSearchExecutor for GeminiWebSearchExecutor {
         }
 
         let body: Value = response.json().await.map_err(|err| {
-            LlmError::provider(format!("invalid Gemini query JSON: {err}"), "json")
+            LlmError::from_response_source(&err, "failed to read Gemini web query JSON")
         })?;
         let answer = extract_gemini_output_text(&body).ok_or_else(|| {
             LlmError::provider("Gemini web query returned empty text output", "provider")
@@ -237,15 +254,7 @@ async fn gemini_status_error(status: StatusCode, response: reqwest::Response) ->
             status.as_u16()
         )
     };
-    let error = match status.as_u16() {
-        400 => LlmError::new("upstream_bad_request", message, "http"),
-        401 => LlmError::new("authentication_failed", message, "http"),
-        403 => LlmError::new("permission_denied", message, "http"),
-        429 => LlmError::new("rate_limited", message, "http"),
-        500..=599 => LlmError::new("upstream_unavailable", message, "http"),
-        _ => LlmError::http(message),
-    };
-    error.with_upstream_status(status.as_u16())
+    LlmError::from_upstream_status(status.as_u16(), message, "http")
 }
 
 fn extract_gemini_output_text(body: &Value) -> Option<String> {

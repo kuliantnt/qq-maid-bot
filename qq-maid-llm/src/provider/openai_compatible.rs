@@ -5,15 +5,12 @@
 
 use std::time::Duration;
 
-use async_trait::async_trait;
-use futures::StreamExt;
-
 use crate::{
-    agent_loop::{AgentSessionRequest, AgentStep, AgentStepSession, AgentToolResult},
+    agent_loop::{AgentSessionRequest, AgentStepSession},
     config::OpenAiCompatibleProviderConfig,
     error::LlmError,
     provider::{
-        ChatOutcome, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol,
+        ChatOutcome, LlmProvider, LlmStream, ToolCallingProtocol,
         openai::{
             ChatCompletionsClient, begin_chat_completions_session, chat_completions_stream,
             chat_completions_with_stream_fallback, provider_chat_completions_tool_calling_protocol,
@@ -22,6 +19,7 @@ use crate::{
         types::{ChatRequest, ModelId, ModelProvider},
     },
 };
+use async_trait::async_trait;
 
 /// 配置驱动的 OpenAI-compatible provider。
 pub struct OpenAiCompatibleProvider {
@@ -116,7 +114,6 @@ impl LlmProvider for OpenAiCompatibleProvider {
             &req.messages,
         )
         .await
-        .map_err(map_auth_error_to_unavailable)
     }
 
     async fn stream_chat(&self, req: ChatRequest) -> Result<LlmStream, LlmError> {
@@ -131,8 +128,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 req.max_output_tokens.unwrap_or(self.max_output_tokens),
                 &req.messages,
             )
-            .await
-            .map_err(map_auth_error_to_unavailable)?;
+            .await?;
             return Ok(outcome_to_stream(outcome));
         }
         let stream = chat_completions_stream(
@@ -144,9 +140,8 @@ impl LlmProvider for OpenAiCompatibleProvider {
             &req.messages,
             true,
         )
-        .await
-        .map_err(map_auth_error_to_unavailable)?;
-        Ok(map_stream_errors(stream))
+        .await?;
+        Ok(stream)
     }
 
     async fn begin_agent_session(
@@ -167,12 +162,11 @@ impl LlmProvider for OpenAiCompatibleProvider {
             req.chat.max_output_tokens.unwrap_or(self.max_output_tokens),
             |value, _| self.effective_model(value),
         )
-        .await
-        .map_err(map_auth_error_to_unavailable)?
+        .await?
         else {
             return Ok(None);
         };
-        Ok(Some(Box::new(AuthMappingAgentSession { inner: session })))
+        Ok(Some(session))
     }
 
     fn tool_calling_protocol(&self, model: Option<&str>) -> Option<ToolCallingProtocol> {
@@ -198,47 +192,6 @@ impl LlmProvider for OpenAiCompatibleProvider {
     fn stream_enabled(&self) -> bool {
         self.stream
     }
-}
-
-struct AuthMappingAgentSession {
-    inner: Box<dyn AgentStepSession + Send>,
-}
-
-#[async_trait]
-impl AgentStepSession for AuthMappingAgentSession {
-    fn provider(&self) -> &str {
-        self.inner.provider()
-    }
-
-    fn model(&self) -> &str {
-        self.inner.model()
-    }
-
-    async fn advance(
-        &mut self,
-        results: &[AgentToolResult],
-        allow_tool_calls: bool,
-    ) -> Result<AgentStep, LlmError> {
-        self.inner
-            .advance(results, allow_tool_calls)
-            .await
-            .map_err(map_auth_error_to_unavailable)
-    }
-}
-
-fn map_stream_errors(stream: LlmStream) -> LlmStream {
-    Box::pin(stream.map(|event: Result<LlmStreamEvent, LlmError>| {
-        event.map_err(map_auth_error_to_unavailable)
-    }))
-}
-
-fn map_auth_error_to_unavailable(err: LlmError) -> LlmError {
-    if err.code == "config"
-        && (err.message.contains("HTTP 401") || err.message.contains("HTTP 403"))
-    {
-        return LlmError::provider(err.message, "provider_unavailable");
-    }
-    err
 }
 
 #[cfg(test)]
@@ -618,7 +571,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn custom_provider_maps_auth_failure_to_candidate_unavailable() {
+    async fn custom_provider_keeps_auth_failure_classification() {
         let (base_url, _state) = spawn_mock_chat(StatusCode::UNAUTHORIZED).await;
         let provider = OpenAiCompatibleProvider::new(
             &mimo_config(base_url),
@@ -643,8 +596,9 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err.code, "provider_error");
-        assert_eq!(err.stage, "provider_unavailable");
+        assert_eq!(err.code, "authentication_failed");
+        assert_eq!(err.kind(), crate::error::LlmErrorKind::Authentication);
+        assert_eq!(err.upstream_status, Some(401));
         assert!(err.message.contains("HTTP 401"));
     }
 

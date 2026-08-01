@@ -29,6 +29,7 @@ use super::{
     streaming::collect_responses_tool_loop_stream,
 };
 use crate::provider::openai::{
+    ResponsesTransportContext,
     extract::{
         extract_response_output_parts, extract_response_output_text, extract_response_usage,
     },
@@ -213,14 +214,17 @@ impl AgentStepSession for ResponsesAgentSession {
             &self.client,
             &self.api_key,
             self.base_url.as_deref(),
-            &self.provider,
             self.auth.as_ref(),
             &payload,
-            false,
+            ResponsesTransportContext {
+                provider: &self.provider,
+                model: &self.model,
+                stream: false,
+            },
         )
         .await?;
         let body: Value = response.json().await.map_err(|err| {
-            LlmError::provider(format!("invalid OpenAI tool loop JSON: {err}"), "json")
+            LlmError::from_response_source(&err, "failed to read OpenAI tool loop JSON")
         })?;
         let step_usage = extract_response_usage(&body);
         let calls = extract_function_calls(&body)?;
@@ -295,10 +299,13 @@ impl AgentStepSession for ResponsesAgentSession {
             &self.client,
             &self.api_key,
             self.base_url.as_deref(),
-            &self.provider,
             self.auth.as_ref(),
             &payload,
-            true,
+            ResponsesTransportContext {
+                provider: &self.provider,
+                model: &self.model,
+                stream: true,
+            },
         )
         .await?;
         let step = collect_responses_tool_loop_stream(

@@ -730,7 +730,7 @@ fn respond_error_info_to_qq_text(code: &str, stage: &str, message: &str) -> Stri
     let stage = stage.trim();
     let safe_message = sanitize_visible_error_message(message);
     match code {
-        "timeout" => "LLM 服务处理超时，请稍后再试".to_owned(),
+        "timeout" => "LLM 请求超时，请稍后重试。".to_owned(),
         "config" => "LLM 服务配置未完成，请联系维护者处理".to_owned(),
         "safety_blocked" => {
             "这条消息触发了上游安全拦截，我没法按原样继续。可以换个说法再试。".to_owned()
@@ -745,7 +745,12 @@ fn respond_error_info_to_qq_text(code: &str, stage: &str, message: &str) -> Stri
             .map(|message| format!("没有找到相关结果：{message}"))
             .unwrap_or_else(|| "没有找到相关结果，请换个说法再试".to_owned()),
         "io_error" => "服务存储暂时不可用，请稍后再试".to_owned(),
-        "provider_error" | "http_error" => "上游服务暂时不可用，请稍后再试".to_owned(),
+        "authentication_failed" => "LLM 服务鉴权失败，请联系维护者处理。".to_owned(),
+        "rate_limited" => "LLM 请求受到限流，请稍后重试。".to_owned(),
+        "network_error" | "http_error" => "LLM 网络连接失败，请稍后重试。".to_owned(),
+        "upstream_unavailable" | "provider_error" => {
+            "上游服务暂时不可用，请稍后再试".to_owned()
+        }
         _ => safe_message
             .map(|message| format!("处理失败：{message}"))
             .unwrap_or_else(|| format!("处理失败（阶段：{stage}，错误码：{code}）")),
@@ -1502,6 +1507,19 @@ mod tests {
 
         assert_eq!(text, "请求格式有误，请调整后再试");
         assert!(!text.contains("sk-secret"));
+    }
+
+    #[test]
+    fn timeout_error_is_not_rendered_as_service_unavailable() {
+        let text = respond_error_to_qq_text(&RespondError::Core(CoreError::new(
+            "timeout",
+            "stream_read",
+            "internal timeout detail",
+        )));
+
+        assert_eq!(text, "LLM 请求超时，请稍后重试。");
+        assert!(text.contains("超时"));
+        assert!(!text.contains("不可用"));
     }
 
     /// 群聊寻址前缀下的污染检测：raw.content 包含 @机器人 前缀，
