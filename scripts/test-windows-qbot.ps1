@@ -487,6 +487,9 @@ try {
     if ($LASTEXITCODE -eq 0) {
         throw "qbot.cmd swallowed the PowerShell non-zero exit code"
     }
+    # 上一条 cmd.exe 故意以非零退出；清掉 LASTEXITCODE，避免 powershell -Command
+    # 把“最后一条原生命令”的退出码当成整个测试进程的退出码，误报失败。
+    $LASTEXITCODE = 0
 
     # 执行前后用户/系统环境变量与 git 全局配置必须保持不变。
     $userProxyAfter = [Environment]::GetEnvironmentVariable("QBOT_GITHUB_PROXY", "User")
