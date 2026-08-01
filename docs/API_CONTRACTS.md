@@ -27,7 +27,7 @@
 
 `status` 页面数据是安全摘要，不包含 token、secret、API key、cookie、authorization 或绝对敏感路径。配置 snapshot 对 secret 只返回配置状态，不返回原文。配置写入使用 revision，发生冲突时必须刷新并由用户重新确认，不得覆盖未知修改。
 
-配置交互的完整状态协议见 `docs/INTERACTION_CONTRACTS.md`。特别约束：runtime 和 agent 使用 expected revision；secret 每项 replace/clear 使用自己的 expected revision；空 secret 不产生请求；409 或 `config_conflict` 不得自动重试；成功必须以服务端返回的 snapshot 为准。
+配置交互的完整状态协议见 [`INTERACTION_CONTRACTS.md`](./INTERACTION_CONTRACTS.md)。特别约束：runtime 和 agent 使用 expected revision；secret 每项 replace/clear 使用自己的 expected revision；空 secret 不产生请求；409 或 `config_conflict` 不得自动重试；成功必须以服务端返回的 snapshot 为准。
 
 ## Errors
 
@@ -37,7 +37,7 @@
 
 ## Future slots
 
-Memory、日志、消息调试和附件管理目前没有可消费的后端 endpoint。它们只能作为页面 registry 的未来元数据，不得注册 fetch、静态假数据或假的成功状态。Memory 还需要身份绑定、权限、版本、审计和脱敏 DTO，见仓库 `docs/design/memory-webui-auth-api.md`。
+Memory、日志、消息调试和附件管理目前没有可消费的后端 endpoint。它们只能作为页面 registry 的未来元数据，不得注册 fetch、静态假数据或假的成功状态。Memory 还需要身份绑定、权限、版本、审计和脱敏 DTO，见仓库 [`design/memory-webui-auth-api.md`](./design/memory-webui-auth-api.md)。
 
 ## Adding an API consumer
 

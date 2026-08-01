@@ -2,6 +2,8 @@
 
 8787 部署管理控制台的原生 TypeScript 源码。这套 Console 是仓库原有前端的替代实现，页面复用 Rust 侧部署管理员服务端会话、CSRF、配置中心和业务管理 API，仍只适合本机或受控内网，不应将端口裸露到公网。
 
+前端契约文档已统一放在仓库根目录 [`docs/`](../docs/README.md)，本文件只保留源码、构建和增量修改流程。
+
 ```bash
 npm ci
 npm run check
@@ -64,10 +66,10 @@ git diff --exit-code -- web-console/dist
 | 文档 | 用途 |
 |---|---|
 | [DESIGN.md](DESIGN.md) | 生产设计系统、token、组件层和目标页面领域 |
-| [COMPONENT_REGISTRY.md](docs/COMPONENT_REGISTRY.md) | 可复用组件的结构、状态和扩展规则 |
-| [THEME.md](docs/THEME.md) | 语义主题 token、预设和 localStorage 持久化协议 |
-| [API_CONTRACTS.md](docs/API_CONTRACTS.md) | 当前 API、认证边界和未来接口槽位 |
-| [INTERACTION_CONTRACTS.md](docs/INTERACTION_CONTRACTS.md) | 配置保存、修改、冲突、密钥和重启交互协议 |
+| [COMPONENT_REGISTRY.md](../docs/COMPONENT_REGISTRY.md) | 可复用组件的结构、状态和扩展规则 |
+| [THEME.md](../docs/THEME.md) | 语义主题 token、预设和 localStorage 持久化协议 |
+| [API_CONTRACTS.md](../docs/API_CONTRACTS.md) | 当前 API、认证边界和未来接口槽位 |
+| [INTERACTION_CONTRACTS.md](../docs/INTERACTION_CONTRACTS.md) | 配置保存、修改、冲突、密钥和重启交互协议 |
 | [ADDING_A_PAGE.md](ADDING_A_PAGE.md) | 新增页面、组件、主题和 API 消费者的步骤 |
 
 当前顶层信息架构包含 Overview、Platforms、Todo、Configuration、Storage、Tools。Configuration 在原页面内按模型与供应商、模型路由、联网与工具、记忆与知识库、回复与语音、平台接入、待办与通知、系统与安全组织；runtime、Secret 和 Agent 只是保存边界，不再作为用户的主导航结构。
