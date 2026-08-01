@@ -52,7 +52,10 @@ function bindTodoControls(): void {
     throw new Error("Todo 页面缺少必要控件");
   }
   refresh.onclick = () => void refreshTodos("refresh");
-  filter.onclick = () => void refreshTodos("filter");
+  filter.onclick = () => {
+    syncAdvancedFilterState();
+    void refreshTodos("filter");
+  };
   reset.onclick = () => {
     for (const [id, value] of Object.entries(filterResetDefaults())) {
       const field = document.getElementById(id);
