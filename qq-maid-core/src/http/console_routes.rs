@@ -86,9 +86,19 @@ const CONSOLE_ASSET_CACHE_CONTROL: &str = "public, max-age=0, must-revalidate";
 // dist 新增前端模块时必须同步登记；下方测试会校验构建产物与静态 import 均已覆盖。
 const CONSOLE_ASSETS: &[(&str, &str, &str)] = &[
     (
-        "styles.css",
-        include_str!("../../../web-console/dist/styles.css"),
-        "text/css; charset=utf-8",
+        "agent-tools.js",
+        include_str!("../../../web-console/dist/agent-tools.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "api-routes.js",
+        include_str!("../../../web-console/dist/api-routes.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "api.js",
+        include_str!("../../../web-console/dist/api.js"),
+        "text/javascript; charset=utf-8",
     ),
     (
         "app.js",
@@ -96,23 +106,13 @@ const CONSOLE_ASSETS: &[(&str, &str, &str)] = &[
         "text/javascript; charset=utf-8",
     ),
     (
-        "theme.js",
-        include_str!("../../../web-console/dist/theme.js"),
+        "background.js",
+        include_str!("../../../web-console/dist/background.js"),
         "text/javascript; charset=utf-8",
     ),
     (
         "console-shell.js",
         include_str!("../../../web-console/dist/console-shell.js"),
-        "text/javascript; charset=utf-8",
-    ),
-    (
-        "agent-tools.js",
-        include_str!("../../../web-console/dist/agent-tools.js"),
-        "text/javascript; charset=utf-8",
-    ),
-    (
-        "api.js",
-        include_str!("../../../web-console/dist/api.js"),
         "text/javascript; charset=utf-8",
     ),
     (
@@ -126,13 +126,88 @@ const CONSOLE_ASSETS: &[(&str, &str, &str)] = &[
         "text/javascript; charset=utf-8",
     ),
     (
-        "opencode-providers.js",
-        include_str!("../../../web-console/dist/opencode-providers.js"),
+        "styles.css",
+        include_str!("../../../web-console/dist/styles.css"),
+        "text/css; charset=utf-8",
+    ),
+    (
+        "theme.js",
+        include_str!("../../../web-console/dist/theme.js"),
         "text/javascript; charset=utf-8",
     ),
     (
         "types.js",
         include_str!("../../../web-console/dist/types.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/configuration/agent-fields.js",
+        include_str!("../../../web-console/dist/views/configuration/agent-fields.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/configuration/autosave.js",
+        include_str!("../../../web-console/dist/views/configuration/autosave.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/configuration/configuration.js",
+        include_str!("../../../web-console/dist/views/configuration/configuration.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/configuration/fields.js",
+        include_str!("../../../web-console/dist/views/configuration/fields.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/configuration/model-route-editor.js",
+        include_str!("../../../web-console/dist/views/configuration/model-route-editor.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/configuration/navigation.js",
+        include_str!("../../../web-console/dist/views/configuration/navigation.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/configuration/opencode-providers.js",
+        include_str!("../../../web-console/dist/views/configuration/opencode-providers.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/configuration/public-fields.js",
+        include_str!("../../../web-console/dist/views/configuration/public-fields.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/configuration/secret-fields.js",
+        include_str!("../../../web-console/dist/views/configuration/secret-fields.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/configuration/state.js",
+        include_str!("../../../web-console/dist/views/configuration/state.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/configuration/theme-selector.js",
+        include_str!("../../../web-console/dist/views/configuration/theme-selector.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/configuration/tts.js",
+        include_str!("../../../web-console/dist/views/configuration/tts.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/configuration/ui.js",
+        include_str!("../../../web-console/dist/views/configuration/ui.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/configuration/web-search.js",
+        include_str!("../../../web-console/dist/views/configuration/web-search.js"),
         "text/javascript; charset=utf-8",
     ),
     (
@@ -156,28 +231,23 @@ const CONSOLE_ASSETS: &[(&str, &str, &str)] = &[
         "text/javascript; charset=utf-8",
     ),
     (
-        "views/configuration.js",
-        include_str!("../../../web-console/dist/views/configuration.js"),
+        "views/todo/todo-card.js",
+        include_str!("../../../web-console/dist/views/todo/todo-card.js"),
         "text/javascript; charset=utf-8",
     ),
     (
-        "views/theme-selector.js",
-        include_str!("../../../web-console/dist/views/theme-selector.js"),
+        "views/todo/todo-form.js",
+        include_str!("../../../web-console/dist/views/todo/todo-form.js"),
         "text/javascript; charset=utf-8",
     ),
     (
-        "views/todo-paging.js",
-        include_str!("../../../web-console/dist/views/todo-paging.js"),
+        "views/todo/todo-paging.js",
+        include_str!("../../../web-console/dist/views/todo/todo-paging.js"),
         "text/javascript; charset=utf-8",
     ),
     (
-        "views/todo.js",
-        include_str!("../../../web-console/dist/views/todo.js"),
-        "text/javascript; charset=utf-8",
-    ),
-    (
-        "background.js",
-        include_str!("../../../web-console/dist/background.js"),
+        "views/todo/todo.js",
+        include_str!("../../../web-console/dist/views/todo/todo.js"),
         "text/javascript; charset=utf-8",
     ),
 ];
