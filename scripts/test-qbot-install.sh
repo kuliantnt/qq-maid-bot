@@ -393,14 +393,23 @@ done
 
 # 校验用户 shell、Git 与系统全局配置在测试前后没有变化。
 for snapshot_file in .bashrc .zshrc .profile .gitconfig; do
-    if [[ -f "${HOME}/${snapshot_file}" ]]; then
-        cmp -s "${HOME}/${snapshot_file}" "${config_snapshot}/${snapshot_file}" || {
-            echo "用户配置文件在测试期间被修改: ${HOME}/${snapshot_file}" >&2
+    if [[ -f "${config_snapshot}/${snapshot_file}" ]]; then
+        # 快照时文件存在：结束时必须仍存在且内容一致。
+        if [[ -f "${HOME}/${snapshot_file}" ]]; then
+            cmp -s "${HOME}/${snapshot_file}" "${config_snapshot}/${snapshot_file}" || {
+                echo "用户配置文件在测试期间被修改: ${HOME}/${snapshot_file}" >&2
+                exit 1
+            }
+        else
+            echo "用户配置文件在测试期间被删除: ${HOME}/${snapshot_file}" >&2
             exit 1
-        }
-    elif [[ -f "${config_snapshot}/${snapshot_file}.absent" ]]; then
-        echo "测试期间不应创建用户配置文件: ${HOME}/${snapshot_file}" >&2
-        exit 1
+        fi
+    else
+        # 快照时文件不存在：结束时也不应出现。
+        if [[ -f "${HOME}/${snapshot_file}" ]]; then
+            echo "测试期间不应创建用户配置文件: ${HOME}/${snapshot_file}" >&2
+            exit 1
+        fi
     fi
 done
 git config --global --list > "${config_snapshot}/git-global-config.after" 2>/dev/null || true

@@ -270,7 +270,8 @@ function Invoke-DownloadFile {
     param([string]$Prefix, [string]$Url, [string]$Destination, [string]$Description)
     # 从单个候选源下载一个文件；网络/HTTP 失败或空文件时返回 $false，由调用方继续尝试下一来源。
     $downloadUrl = Get-DownloadUrl -Prefix $Prefix -RawUrl $Url
-    Write-Output "正在从 $(Get-SourceLabel $Prefix) 下载: $Description"
+    # 状态信息用 Write-Host 输出，避免污染成功流导致链函数布尔返回值被捕获成数组。
+    Write-Host "正在从 $(Get-SourceLabel $Prefix) 下载: $Description"
     Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
     try {
         Invoke-WebRequest -Uri $downloadUrl -OutFile $Destination -UseBasicParsing -TimeoutSec $script:DownloadTimeoutSec
@@ -329,7 +330,7 @@ function Save-ReleaseFromSource {
     )
     # 从单个候选源下载 ZIP 与 .sha256 并当场校验；任一环节失败返回 $false，由调用方回退下一来源。
     $rawUrl = "$($script:ReleasesUrl)/download/$Version/$ArchiveName"
-    Write-Output "尝试下载源: $(Get-SourceLabel $Prefix)"
+    Write-Host "尝试下载源: $(Get-SourceLabel $Prefix)"
 
     if (-not (Invoke-DownloadFile -Prefix $Prefix -Url $rawUrl -Destination $ArchivePath -Description $ArchiveName)) {
         return $false
@@ -347,7 +348,7 @@ function Save-ReleaseFromSource {
         Write-Warning "SHA-256 校验失败，该源内容无效: $($_.Exception.Message)"
         return $false
     }
-    Write-Output "SHA-256 校验通过: $ArchiveName"
+    Write-Host "SHA-256 校验通过: $ArchiveName"
     return $true
 }
 

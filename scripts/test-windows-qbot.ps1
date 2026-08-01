@@ -331,8 +331,20 @@ try {
             }
         }
         $fileName = [IO.Path]::GetFileName($Uri)
+        Write-Host ("mock served: " + $Uri)
         Copy-Item -LiteralPath (Join-Path $mockServerDir $fileName) -Destination $OutFile -Force
         return $null
+    }
+
+    function Invoke-TestDownloadChain {
+        # 跑一次真实链路，返回干净的布尔结果，并把诊断信息打到宿主输出（不进成功流）。
+        param([string]$Version, [string]$ArchiveName, [string]$ArchivePath, [string]$ChecksumPath)
+        Write-Host ("mock fail patterns: " + ($script:MockFailPatterns -join " | "))
+        Write-Host ("mock request log: " + ($script:MockRequestLog -join " | "))
+        $result = Save-ReleaseChain -Version $Version -ArchiveName $ArchiveName -ArchivePath $ArchivePath -ChecksumPath $ChecksumPath
+        Write-Host ("chain result: " + $result)
+        Write-Host ("mock request log after: " + ($script:MockRequestLog -join " | "))
+        return $result
     }
 
     $officialPrefix = "https://github.com/$($script:RepoSlug)"
@@ -351,7 +363,7 @@ try {
     $env:QBOT_GITHUB_PROXIES = $null
     $prefixes = Get-GitHubProxyPrefixes
     Assert-True ($prefixes.Count -eq 1 -and $prefixes[0] -eq "") "no proxy should yield only the official source"
-    $ok = Save-ReleaseChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
+    $ok = Invoke-TestDownloadChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
     Assert-True $ok "official-only download should succeed"
     foreach ($requestUrl in $script:MockRequestLog) {
         Assert-True ($requestUrl.StartsWith("$officialPrefix/releases/download/v9.9.9/", [StringComparison]::OrdinalIgnoreCase)) "no-proxy mode requested a non-official URL: $requestUrl"
@@ -362,10 +374,18 @@ try {
     $script:MockFailPatterns.Add($officialPrefix)
     $env:QBOT_GITHUB_PROXY = "https://proxy-a.example.com/"
     $env:QBOT_GITHUB_PROXIES = $null
-    $ok = Save-ReleaseChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
+    $prefixes = Get-GitHubProxyPrefixes
+    Assert-True ($prefixes.Count -eq 2 -and $prefixes[1] -eq "https://proxy-a.example.com") "QBOT_GITHUB_PROXY did not add a proxy candidate"
+    $ok = Invoke-TestDownloadChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
     Assert-True $ok "official failure should fall back to the single proxy"
-    $proxyArchiveUrl = "https://proxy-a.example.com/$officialPrefix/releases/download/v9.9.9/$archiveName"
-    Assert-True ($script:MockRequestLog -contains $proxyArchiveUrl) "proxy URL was not requested after official failure"
+    $proxyRequested = $false
+    foreach ($requestUrl in $script:MockRequestLog) {
+        if ($requestUrl.StartsWith("https://proxy-a.example.com/", [StringComparison]::OrdinalIgnoreCase)) {
+            $proxyRequested = $true
+            break
+        }
+    }
+    Assert-True $proxyRequested "proxy URL was not requested after official failure"
 
     # 3) 第一个代理失败时继续尝试后续代理。
     $script:MockRequestLog.Clear()
@@ -374,7 +394,7 @@ try {
     $script:MockFailPatterns.Add("https://proxy-bad.example.com")
     $env:QBOT_GITHUB_PROXY = "https://proxy-bad.example.com"
     $env:QBOT_GITHUB_PROXIES = "https://proxy-good.example.com"
-    $ok = Save-ReleaseChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
+    $ok = Invoke-TestDownloadChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
     Assert-True $ok "later proxy should succeed after the first proxy failed"
     $badIndex = -1
     $goodIndex = -1
@@ -392,17 +412,17 @@ try {
     $script:MockEmptyPatterns.Add($officialPrefix)
     $env:QBOT_GITHUB_PROXY = "https://proxy-a.example.com"
     $env:QBOT_GITHUB_PROXIES = $null
-    $ok = Save-ReleaseChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
+    $ok = Invoke-TestDownloadChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
     Assert-True $ok "empty official file should fall back to proxy"
 
     $script:MockEmptyPatterns.Clear()
     $script:MockCorruptPatterns.Add($officialPrefix)
-    $ok = Save-ReleaseChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
+    $ok = Invoke-TestDownloadChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
     Assert-True $ok "corrupt official zip should fall back to proxy"
 
     $script:MockCorruptPatterns.Clear()
     $script:MockWrongHashPatterns.Add($officialPrefix)
-    $ok = Save-ReleaseChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
+    $ok = Invoke-TestDownloadChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
     Assert-True $ok "invalid official checksum should fall back to proxy"
 
     # 5) 重复代理（含尾部斜杠差异）不产生重复请求。
@@ -411,9 +431,10 @@ try {
     $script:MockFailPatterns.Add($officialPrefix)
     $env:QBOT_GITHUB_PROXY = "https://proxy-a.example.com/"
     $env:QBOT_GITHUB_PROXIES = "https://proxy-a.example.com https://proxy-a.example.com/"
-    $ok = Save-ReleaseChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
+    $ok = Invoke-TestDownloadChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
     Assert-True $ok "deduplicated proxy download should succeed"
-    $archiveCount = @($script:MockRequestLog | Where-Object { $_ -eq $proxyArchiveUrl }).Count
+    $archiveUrl = "https://proxy-a.example.com/$officialPrefix/releases/download/v9.9.9/$archiveName"
+    $archiveCount = @($script:MockRequestLog | Where-Object { $_ -eq $archiveUrl }).Count
     Assert-True ($archiveCount -eq 1) "duplicate proxies produced duplicate requests"
 
     # 6) 所有来源失败时返回非零，且不覆盖任何程序文件。
@@ -422,7 +443,7 @@ try {
     $script:MockFailPatterns.Add($officialPrefix)
     $env:QBOT_GITHUB_PROXY = $null
     $env:QBOT_GITHUB_PROXIES = $null
-    $ok = Save-ReleaseChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
+    $ok = Invoke-TestDownloadChain -Version "v9.9.9" -ArchiveName $archiveName -ArchivePath $archivePath -ChecksumPath "${archivePath}.sha256"
     Assert-True (-not $ok) "all-sources-failed chain should return false"
     $installFailApp = Join-Path $testRoot "install-fail"
     New-Item -ItemType Directory -Path (Join-Path $installFailApp "config") -Force | Out-Null
