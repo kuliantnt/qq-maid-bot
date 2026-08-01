@@ -6,6 +6,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# Test-ZipArchive 需要 System.IO.Compression；Add-Type 在程序集已加载时是幂等操作。
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 function Get-EnvironmentValue {
     param([string]$Name, [string]$DefaultValue)
@@ -72,6 +75,12 @@ $script:InstallerPath = [IO.Path]::GetFullPath($MyInvocation.MyCommand.Path)
 $script:RepoSlug = Get-EnvironmentValue "QBOT_REPO_SLUG" "kuliantnt/qq-maid-bot"
 $script:ReleasesUrl = "https://github.com/$($script:RepoSlug)/releases"
 $script:LatestApiUrl = "https://api.github.com/repos/$($script:RepoSlug)/releases/latest"
+$script:DownloadTimeoutSec = 300
+$timeoutRaw = Get-EnvironmentValue "QBOT_GITHUB_DOWNLOAD_TIMEOUT_SEC" ""
+$timeoutValue = 0
+if (-not [string]::IsNullOrWhiteSpace($timeoutRaw) -and [int]::TryParse($timeoutRaw, [ref]$timeoutValue) -and $timeoutValue -gt 0) {
+    $script:DownloadTimeoutSec = $timeoutValue
+}
 $script:ObsoleteEnvKeys = @(
     "LLM_PROVIDER", "OPENAI_MODEL", "LLM_MODEL", "PRIVATE_LLM_MODEL", "GROUP_LLM_MODEL",
     "OPENAI_SEARCH_MODEL", "PRIVATE_OPENAI_SEARCH_MODEL", "GROUP_OPENAI_SEARCH_MODEL",
@@ -106,7 +115,9 @@ Commands:
 Environment overrides:
   QBOT_APP_DIR            Install directory (default: %USERPROFILE%\qq-maid-bot)
   QBOT_REPO_SLUG          GitHub repository (default: kuliantnt/qq-maid-bot)
-  QBOT_GITHUB_PROXY       Optional trusted download URL prefix
+  QBOT_GITHUB_PROXY       Optional trusted download URL prefix (single proxy)
+  QBOT_GITHUB_PROXIES     Optional whitespace-separated download URL prefixes
+  QBOT_GITHUB_DOWNLOAD_TIMEOUT_SEC  Per-request download timeout (default: 300)
   QBOT_INSTALL_WEB_CONSOLE  Web choice for non-interactive install (true/false)
 "@
 }
@@ -189,36 +200,201 @@ function Resolve-Version {
     return $normalized
 }
 
-function Get-DownloadUrl {
-    param([string]$RawUrl)
-    $prefix = [Environment]::GetEnvironmentVariable("QBOT_GITHUB_PROXY")
-    if ([string]::IsNullOrWhiteSpace($prefix)) {
-        return $RawUrl
+function Normalize-ProxyPrefix {
+    param([AllowEmptyString()][string]$RawValue)
+    # 规范化代理前缀：去首尾空白、去尾部斜杠；只接受 http/https 绝对地址，否则视为无效并返回 $null。
+    if ([string]::IsNullOrWhiteSpace($RawValue)) {
+        return $null
     }
-    return "$($prefix.TrimEnd('/'))/$RawUrl"
+    $value = $RawValue.Trim().TrimEnd('/')
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return $null
+    }
+    $uri = $null
+    if (-not [Uri]::TryCreate($value, [UriKind]::Absolute, [ref]$uri) -or
+        ($uri.Scheme -ne "http" -and $uri.Scheme -ne "https")) {
+        Write-Warning "忽略无效代理前缀（仅支持 http/https 绝对地址）: $RawValue"
+        return $null
+    }
+    return $value
 }
 
-function Save-ReleaseFile {
-    param([string]$Url, [string]$Destination)
-    $downloadUrl = Get-DownloadUrl $Url
-    Invoke-WebRequest -Uri $downloadUrl -OutFile $Destination -UseBasicParsing
+function Get-GitHubProxyPrefixes {
+    # 候选源顺序：官方直连（空串）→ QBOT_GITHUB_PROXY（单代理）→ QBOT_GITHUB_PROXIES（空格分隔多代理）。
+    # 与 Linux 端 qbot.sh 的 github_accel_prefixes 语义一致：规范化、去重，且不内置任何第三方镜像。
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    $candidates.Add("") | Out-Null
+    $null = $seen.Add("")
+
+    $single = Get-EnvironmentValue "QBOT_GITHUB_PROXY" ""
+    if (-not [string]::IsNullOrWhiteSpace($single)) {
+        $normalized = Normalize-ProxyPrefix $single
+        if ($null -ne $normalized -and $seen.Add($normalized)) {
+            $candidates.Add($normalized) | Out-Null
+        }
+    }
+
+    $multi = Get-EnvironmentValue "QBOT_GITHUB_PROXIES" ""
+    if (-not [string]::IsNullOrWhiteSpace($multi)) {
+        foreach ($entry in ($multi -split '\s+')) {
+            if ([string]::IsNullOrWhiteSpace($entry)) {
+                continue
+            }
+            $normalized = Normalize-ProxyPrefix $entry
+            if ($null -ne $normalized -and $seen.Add($normalized)) {
+                $candidates.Add($normalized) | Out-Null
+            }
+        }
+    }
+    return ,$candidates.ToArray()
+}
+
+function Get-SourceLabel {
+    param([string]$Prefix)
+    if ([string]::IsNullOrWhiteSpace($Prefix)) {
+        return "GitHub 官方源"
+    }
+    return "代理源 $($Prefix.TrimEnd('/'))"
+}
+
+function Get-DownloadUrl {
+    param([string]$Prefix, [string]$RawUrl)
+    if ([string]::IsNullOrWhiteSpace($Prefix)) {
+        return $RawUrl
+    }
+    return "$($Prefix.TrimEnd('/'))/$RawUrl"
+}
+
+function Invoke-DownloadFile {
+    param([string]$Prefix, [string]$Url, [string]$Destination, [string]$Description)
+    # 从单个候选源下载一个文件；网络/HTTP 失败或空文件时返回 $false，由调用方继续尝试下一来源。
+    $downloadUrl = Get-DownloadUrl -Prefix $Prefix -RawUrl $Url
+    # 状态信息用 Write-Host 输出，避免污染成功流导致链函数布尔返回值被捕获成数组。
+    Write-Host "正在从 $(Get-SourceLabel $Prefix) 下载: $Description"
+    Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+    try {
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $Destination -UseBasicParsing -TimeoutSec $script:DownloadTimeoutSec
+    } catch {
+        Write-Warning "下载失败: $Description （$($_.Exception.Message)）"
+        return $false
+    }
     if (-not (Test-Path -LiteralPath $Destination -PathType Leaf) -or
         (Get-Item -LiteralPath $Destination).Length -eq 0) {
-        throw "download returned an empty file: $Url"
+        Write-Warning "下载结果为空文件: $Description"
+        return $false
+    }
+    return $true
+}
+
+function Test-ZipArchive {
+    param([string]$Archive)
+    # 用 .NET ZipArchive 打开验证 ZIP 结构，避免把损坏文件带到后续校验。
+    try {
+        $stream = [IO.File]::OpenRead($Archive)
+        try {
+            $zip = New-Object IO.Compression.ZipArchive($stream, [IO.Compression.ZipArchiveMode]::Read)
+            $zip.Dispose()
+        } finally {
+            $stream.Dispose()
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Test-ZipPackageDirectory {
+    param([string]$Archive, [string]$PackageName)
+    # 用 .NET ZipArchive 读取条目，确认 ZIP 包含预期的顶层包目录；
+    # 容器有效但结构损坏（缺少包目录）时返回 $false，由调用方回退下一来源。
+    try {
+        $stream = [IO.File]::OpenRead($Archive)
+        $zip = $null
+        try {
+            $zip = New-Object IO.Compression.ZipArchive($stream, [IO.Compression.ZipArchiveMode]::Read)
+            foreach ($entry in $zip.Entries) {
+                if ($entry.FullName.StartsWith("$PackageName/", [StringComparison]::OrdinalIgnoreCase) -or
+                    $entry.FullName.StartsWith("$PackageName\", [StringComparison]::OrdinalIgnoreCase)) {
+                    return $true
+                }
+            }
+            return $false
+        } finally {
+            if ($null -ne $zip) { $zip.Dispose() }
+            $stream.Dispose()
+        }
+    } catch {
+        return $false
     }
 }
 
 function Test-ReleaseChecksum {
     param([string]$Archive, [string]$ChecksumFile)
     $checksumText = (Get-Content -LiteralPath $ChecksumFile -Raw).Trim()
+    if ([string]::IsNullOrWhiteSpace($checksumText)) {
+        throw "SHA-256 校验文件无效（内容为空）: $ChecksumFile"
+    }
     $expected = ($checksumText -split '\s+')[0]
     if ($expected -notmatch '^[0-9a-fA-F]{64}$') {
-        throw "invalid SHA-256 file: $ChecksumFile"
+        throw "SHA-256 校验文件无效: $ChecksumFile"
     }
     $actual = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash
     if (-not $actual.Equals($expected, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "SHA-256 mismatch for $(Split-Path -Leaf $Archive)"
+        throw "SHA-256 校验失败: $(Split-Path -Leaf $Archive)（期望 $($expected.ToLowerInvariant())，实际 $($actual.ToLowerInvariant())）"
     }
+}
+
+function Save-ReleaseFromSource {
+    param(
+        [string]$Prefix,
+        [string]$Version,
+        [string]$ArchiveName,
+        [string]$ArchivePath,
+        [string]$ChecksumPath
+    )
+    # 从单个候选源下载 ZIP 与 .sha256 并当场校验；任一环节失败返回 $false，由调用方回退下一来源。
+    $rawUrl = "$($script:ReleasesUrl)/download/$Version/$ArchiveName"
+    Write-Host "尝试下载源: $(Get-SourceLabel $Prefix)"
+
+    if (-not (Invoke-DownloadFile -Prefix $Prefix -Url $rawUrl -Destination $ArchivePath -Description $ArchiveName)) {
+        return $false
+    }
+    if (-not (Test-ZipArchive -Archive $ArchivePath)) {
+        Write-Warning "ZIP 格式无效，该源内容不可用: $ArchiveName"
+        return $false
+    }
+    if (-not (Invoke-DownloadFile -Prefix $Prefix -Url "${rawUrl}.sha256" -Destination $ChecksumPath -Description "$ArchiveName.sha256")) {
+        return $false
+    }
+    try {
+        Test-ReleaseChecksum -Archive $ArchivePath -ChecksumFile $ChecksumPath
+    } catch {
+        Write-Warning "SHA-256 校验失败，该源内容无效: $($_.Exception.Message)"
+        return $false
+    }
+    # ZIP 深度校验：确认归档包含预期的顶层包目录，使容器有效但结构损坏的来源也能回退下一来源。
+    $packageName = $ArchiveName -replace '\.zip$', ''
+    if (-not (Test-ZipPackageDirectory -Archive $ArchivePath -PackageName $packageName)) {
+        Write-Warning "ZIP 结构无效（缺少预期包目录 $packageName），该源内容不可用: $ArchiveName"
+        return $false
+    }
+    Write-Host "SHA-256 校验通过: $ArchiveName"
+    return $true
+}
+
+function Save-ReleaseChain {
+    param([string]$Version, [string]$ArchiveName, [string]$ArchivePath, [string]$ChecksumPath)
+    # 依次尝试官方源与全部用户代理源；某来源失败（连接/超时/HTTP/内容无效）时自动回退下一来源。
+    # 注意：函数返回的是“单个数组对象”，直接 foreach 命令输出会把整个数组当作一个迭代项，
+    # 导致 [string] 参数把候选数组强制转成带前导空格的字符串；必须先赋值再遍历。
+    $prefixes = Get-GitHubProxyPrefixes
+    foreach ($prefix in $prefixes) {
+        if (Save-ReleaseFromSource -Prefix $prefix -Version $Version -ArchiveName $ArchiveName -ArchivePath $ArchivePath -ChecksumPath $ChecksumPath) {
+            return $true
+        }
+    }
+    return $false
 }
 
 function Get-LocalVersion {
@@ -331,9 +507,18 @@ function Install-ReleasePayload {
     }
     $installedWrapper = Join-Path $script:AppDir "qbot.cmd"
     if (-not (Test-Path -LiteralPath (Join-Path $ReleaseDir "qbot.cmd") -PathType Leaf)) {
+        # 与 scripts/qbot.cmd 保持一致的轻量入口：只转发参数，不复制下载逻辑。
         Write-Utf8Lines -Path $installedWrapper -Lines @(
             "@echo off",
+            'rem qq-maid-bot Windows 便捷入口：只负责把参数原样转发给 qbot.ps1，',
+            'rem 所有安装/更新/下载逻辑都在 PowerShell 端实现，本文件不复制任何逻辑。',
             "setlocal",
+            'if not exist "%~dp0qbot.ps1" (',
+            "    echo qbot.ps1 not found next to qbot.cmd: %~dp0qbot.ps1",
+            "    exit /b 1",
+            ")",
+            'rem %* 完整透传参数；引号保证 qbot.ps1 路径含空格时可用；',
+            'rem 直接以 PowerShell 的退出码返回，保证失败时调用方拿到相同非零值。',
             'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0qbot.ps1" %*',
             "exit /b %errorlevel%"
         )
@@ -539,11 +724,13 @@ function Install-OrUpdate {
     try {
         $archive = Join-Path $tempDir $archiveName
         $checksum = "${archive}.sha256"
-        $rawUrl = "$($script:ReleasesUrl)/download/${version}/${archiveName}"
-        Write-Output "downloading Release: $version (windows-x86_64)"
-        Save-ReleaseFile -Url $rawUrl -Destination $archive
-        Save-ReleaseFile -Url "${rawUrl}.sha256" -Destination $checksum
-        Test-ReleaseChecksum -Archive $archive -ChecksumFile $checksum
+        Write-Output "下载 Release: $version (windows-x86_64)"
+        if (-not (Save-ReleaseChain -Version $version -ArchiveName $archiveName -ArchivePath $archive -ChecksumPath $checksum)) {
+            throw ("所有 GitHub 下载源均失败，已停止安装/更新（未覆盖任何文件）。" +
+                   "请检查网络后重试，或在当前 PowerShell 中设置代理后重试：" + [Environment]::NewLine +
+                   "  `$env:QBOT_GITHUB_PROXY = 'https://你的可信GitHub代理前缀'" + [Environment]::NewLine +
+                   "  或 `$env:QBOT_GITHUB_PROXIES = 'https://代理A https://代理B'")
+        }
         Expand-Archive -LiteralPath $archive -DestinationPath $tempDir -Force
         $releaseDir = Join-Path $tempDir $package
         $agentConfigModule = Join-Path $releaseDir "lib\agent-config.ps1"
