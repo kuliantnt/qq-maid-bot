@@ -228,17 +228,14 @@ function Get-GitHubProxyPrefixes {
     $null = $seen.Add("")
 
     $single = Get-EnvironmentValue "QBOT_GITHUB_PROXY" ""
-    Write-Host ("[diag] raw single=<" + $single + ">")
     if (-not [string]::IsNullOrWhiteSpace($single)) {
         $normalized = Normalize-ProxyPrefix $single
-        Write-Host ("[diag] normalized single=<" + $normalized + ">")
         if ($null -ne $normalized -and $seen.Add($normalized)) {
             $candidates.Add($normalized) | Out-Null
         }
     }
 
     $multi = Get-EnvironmentValue "QBOT_GITHUB_PROXIES" ""
-    Write-Host ("[diag] raw multi=<" + $multi + ">")
     if (-not [string]::IsNullOrWhiteSpace($multi)) {
         foreach ($entry in ($multi -split '\s+')) {
             if ([string]::IsNullOrWhiteSpace($entry)) {
@@ -250,7 +247,6 @@ function Get-GitHubProxyPrefixes {
             }
         }
     }
-    Write-Host ("[diag] candidates=<" + ($candidates -join ",") + ">")
     return ,$candidates.ToArray()
 }
 
@@ -359,7 +355,10 @@ function Save-ReleaseFromSource {
 function Save-ReleaseChain {
     param([string]$Version, [string]$ArchiveName, [string]$ArchivePath, [string]$ChecksumPath)
     # 依次尝试官方源与全部用户代理源；某来源失败（连接/超时/HTTP/内容无效）时自动回退下一来源。
-    foreach ($prefix in Get-GitHubProxyPrefixes) {
+    # 注意：函数返回的是“单个数组对象”，直接 foreach 命令输出会把整个数组当作一个迭代项，
+    # 导致 [string] 参数把候选数组强制转成带前导空格的字符串；必须先赋值再遍历。
+    $prefixes = Get-GitHubProxyPrefixes
+    foreach ($prefix in $prefixes) {
         if (Save-ReleaseFromSource -Prefix $prefix -Version $Version -ArchiveName $ArchiveName -ArchivePath $ArchivePath -ChecksumPath $ChecksumPath) {
             return $true
         }
