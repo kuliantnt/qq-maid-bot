@@ -228,14 +228,17 @@ function Get-GitHubProxyPrefixes {
     $null = $seen.Add("")
 
     $single = Get-EnvironmentValue "QBOT_GITHUB_PROXY" ""
+    Write-Host ("[diag] raw single=<" + $single + ">")
     if (-not [string]::IsNullOrWhiteSpace($single)) {
         $normalized = Normalize-ProxyPrefix $single
+        Write-Host ("[diag] normalized single=<" + $normalized + ">")
         if ($null -ne $normalized -and $seen.Add($normalized)) {
             $candidates.Add($normalized) | Out-Null
         }
     }
 
     $multi = Get-EnvironmentValue "QBOT_GITHUB_PROXIES" ""
+    Write-Host ("[diag] raw multi=<" + $multi + ">")
     if (-not [string]::IsNullOrWhiteSpace($multi)) {
         foreach ($entry in ($multi -split '\s+')) {
             if ([string]::IsNullOrWhiteSpace($entry)) {
@@ -247,6 +250,7 @@ function Get-GitHubProxyPrefixes {
             }
         }
     }
+    Write-Host ("[diag] candidates=<" + ($candidates -join ",") + ">")
     return ,$candidates.ToArray()
 }
 
