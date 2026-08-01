@@ -11,7 +11,7 @@ import {
   pageAfterDelete,
 } from "../dist/views/todo/todo-paging.js";
 import { filterResetDefaults, loadTodoForEdit } from "../dist/views/todo/todo.js";
-import { todoDeadlineFields } from "../dist/views/todo/todo-form.js";
+import { todoDeadlineFields, todoDeadlineFromParts } from "../dist/views/todo/todo-form.js";
 
 function targetOption(targetRef, overrides = {}) {
   return {
@@ -166,10 +166,25 @@ test("单个截止日期时间同步生成一致的后端日期、时间和精�
   });
 });
 
-test("创建表单只保留一个截止日期与时间控件", async () => {
+test("创建表单的可选时间支持仅日期与日期时间两种语义", () => {
+  assert.deepEqual(todoDeadlineFromParts("2026-08-01", ""), {
+    dueDate: "2026-08-01",
+    dueAt: null,
+    timePrecision: "date",
+  });
+  assert.deepEqual(todoDeadlineFromParts("2026-08-01", "10:30"), {
+    dueDate: "2026-08-01",
+    dueAt: "2026-08-01T10:30",
+    timePrecision: "date_time",
+  });
+});
+
+test("创建表单把截止日期与可选时间收拢在同一字段组", async () => {
   const html = await readFile(new URL("../dist/index.html", import.meta.url), "utf8");
-  assert.match(html, /截止日期与时间<input id="todo-create-deadline"[^>]*type="datetime-local">/);
-  assert.doesNotMatch(html, /todo-create-due-date|todo-create-due-at|todo-create-time-precision/);
+  assert.match(html, /todo-create-deadline-fields/);
+  assert.match(html, /id="todo-create-due-date"[^>]*type="date"/);
+  assert.match(html, /id="todo-create-due-time"[^>]*type="time"/);
+  assert.doesNotMatch(html, /todo-create-due-at|todo-create-time-precision/);
 });
 
 test("Todo 卡片操作按钮顺序：删除恒为最后，且查看/编辑已接线", async () => {
