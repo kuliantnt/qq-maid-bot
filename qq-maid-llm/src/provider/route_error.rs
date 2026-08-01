@@ -51,6 +51,11 @@ impl ModelAttemptFailure {
 /// 这里只接收上游传输、限流、超时、空响应和 provider 协议类失败；配置错误、
 /// 本地请求构造错误和业务参数错误会直接返回，避免把本地问题放大成多次计费请求。
 pub(crate) fn should_try_next_model(err: &LlmError) -> bool {
+    if matches!(err.upstream_status, Some(404 | 422)) {
+        // Responses 端点不存在或拒绝其协议载荷时，当前 Provider 可能没有可用链路，
+        // 但结构化状态可证明这不是本地参数错误，因此允许继续候选链。
+        return true;
+    }
     matches!(
         err.code.as_str(),
         "timeout"

@@ -17,6 +17,13 @@ fn provider_errors_are_fallback_eligible() {
         "bad local request",
         "request"
     )));
+    for status in [404, 422] {
+        assert!(should_try_next_model(&LlmError::from_upstream_status(
+            status,
+            "Responses API is incompatible",
+            "http"
+        )));
+    }
 }
 
 #[tokio::test]
@@ -478,6 +485,28 @@ async fn model_route_provider_falls_back_on_eligible_error() {
         deepseek.requests()[0].model.as_deref(),
         Some("deepseek:deepseek-chat")
     );
+}
+
+#[tokio::test]
+async fn model_route_provider_tries_next_candidate_after_responses_incompatible_status() {
+    for status in [404, 422] {
+        let (provider, openai, deepseek) = route_provider(
+            "openai:gpt-a,deepseek:deepseek-chat",
+            vec![Err(LlmError::from_upstream_status(
+                status,
+                "Responses API is incompatible",
+                "http",
+            ))],
+            vec![Ok(outcome("fallback"))],
+        );
+
+        let result = provider.chat(request()).await.unwrap();
+
+        assert_eq!(result.reply, "fallback", "status={status}");
+        assert!(result.fallback_used, "status={status}");
+        assert_eq!(openai.calls(), 1, "status={status}");
+        assert_eq!(deepseek.calls(), 1, "status={status}");
+    }
 }
 
 #[tokio::test]
