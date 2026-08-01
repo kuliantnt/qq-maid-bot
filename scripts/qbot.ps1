@@ -314,7 +314,8 @@ function Test-ZipPackageDirectory {
         try {
             $zip = New-Object IO.Compression.ZipArchive($stream, [IO.Compression.ZipArchiveMode]::Read)
             foreach ($entry in $zip.Entries) {
-                if ($entry.FullName.StartsWith("$PackageName/", [StringComparison]::OrdinalIgnoreCase)) {
+                if ($entry.FullName.StartsWith("$PackageName/", [StringComparison]::OrdinalIgnoreCase) -or
+                    $entry.FullName.StartsWith("$PackageName\", [StringComparison]::OrdinalIgnoreCase)) {
                     return $true
                 }
             }
