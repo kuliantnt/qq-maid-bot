@@ -515,11 +515,14 @@ textarea { width: 100%; min-height: 25rem; flex: 1; resize: vertical; padding: v
 .todo-create-heading button { padding: .2rem .5rem; line-height: 1; }
 .todo-create-form label { display: grid; gap: .25rem; margin: 0; color: var(--muted); font-size: .7rem; font-weight: 700; }
 .todo-create-form label.todo-create-detail { grid-column: 1 / -1; }
+.todo-create-deadline-fields { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: .4rem; }
+.todo-create-deadline-fields input { min-width: 0; width: 100%; }
 .todo-create-form .error { grid-column: 1 / -1; margin: 0; min-height: 1.1rem; }
 .todo-create-form > button[type="submit"] { grid-column: 1 / -1; justify-self: end; min-width: 8rem; }
 @media (max-width: 767px) {
   .todo-create-dialog .todo-create-form { grid-template-columns: 1fr; }
   .todo-create-form label.todo-create-detail { grid-column: auto; }
+  .todo-create-deadline-fields { grid-template-columns: 1fr; }
   .todo-create-form .error { grid-column: auto; }
   .todo-create-form > button[type="submit"] { grid-column: auto; width: 100%; }
 }

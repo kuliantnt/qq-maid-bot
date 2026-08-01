@@ -21,6 +21,14 @@ export function todoDeadlineFields(value: string | null): TodoDeadlineFields {
   return { dueDate, dueAt: deadline, timePrecision: "date_time" };
 }
 
+/** 创建表单把同一字段组内的日期与可选时间合成统一截止值。 */
+export function todoDeadlineFromParts(dateValue: string, timeValue: string): TodoDeadlineFields {
+  const dueDate = dateValue.trim();
+  const dueTime = timeValue.trim();
+  if (!dueDate) return todoDeadlineFields(null);
+  return todoDeadlineFields(dueTime ? `${dueDate}T${dueTime}` : dueDate);
+}
+
 export async function submitTodo(form: HTMLFormElement, dialog: HTMLDialogElement): Promise<void> {
   const title = valueOf("todo-create-title").trim();
   const targetRef = valueOf("todo-create-target");
@@ -32,9 +40,15 @@ export async function submitTodo(form: HTMLFormElement, dialog: HTMLDialogElemen
     if (error) error.textContent = "标题和目标不能为空";
     return showResult("标题和目标不能为空", true);
   }
+  const dueDate = valueOf("todo-create-due-date");
+  const dueTime = valueOf("todo-create-due-time");
+  if (!dueDate && dueTime) {
+    if (error) error.textContent = "设置截止时间前请先选择截止日期";
+    return showResult("设置截止时间前请先选择截止日期", true);
+  }
   const button = form.querySelector<HTMLButtonElement>("button[type=submit]");
   if (button) button.disabled = true;
-  const deadline = todoDeadlineFields(valueOf("todo-create-deadline"));
+  const deadline = todoDeadlineFromParts(dueDate, dueTime);
   const reminderAt = valueOf("todo-create-reminder-at") || null;
   try {
     await createTodo({
