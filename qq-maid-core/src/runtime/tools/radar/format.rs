@@ -148,7 +148,7 @@ fn append_codex_detail_card(render: &mut CommandRender, summary: &CodexRadarSumm
     if !ranked_models.is_empty() {
         has_model_data = true;
         render.blank();
-        render.paragraph("IQ 前五配置：");
+        render.tertiary_title("IQ 前五配置：");
         for (index, model) in ranked_models.into_iter().enumerate() {
             render.paragraph(&format!(
                 "{}. {}",
@@ -161,7 +161,7 @@ fn append_codex_detail_card(render: &mut CommandRender, summary: &CodexRadarSumm
     if !ranked_ratings.is_empty() {
         has_model_data = true;
         render.blank();
-        render.paragraph("24h 社区评分前五：");
+        render.tertiary_title("24h 社区评分前五：");
         for (index, model) in ranked_ratings.into_iter().enumerate() {
             if let Some(line) = codex_rating_line(Some(model)) {
                 render.paragraph(&format!("{}. {line}", index + 1));

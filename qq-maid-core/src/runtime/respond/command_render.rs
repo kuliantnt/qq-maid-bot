@@ -27,6 +27,10 @@ impl CommandRender {
         self.push_pair(text.to_owned(), format!("## {}", escape_inline(text)));
     }
 
+    pub(crate) fn tertiary_title(&mut self, text: &str) {
+        self.push_pair(text.to_owned(), format!("### {}", escape_inline(text)));
+    }
+
     pub(crate) fn paragraph(&mut self, text: &str) {
         let text = text.trim().to_owned();
         self.push_pair(text.clone(), escape_text(&text));

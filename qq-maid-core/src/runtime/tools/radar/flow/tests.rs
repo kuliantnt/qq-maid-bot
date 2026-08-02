@@ -193,6 +193,9 @@ fn format_codex_detail_shows_ranked_iq_quota_and_cross_vendor_ratings() {
             .contains("最高模型：GPT-5.4 xhigh · IQ 90 · 略低 · 6/10")
     );
     assert!(body.text.contains("IQ 前五配置："));
+    let markdown = body.markdown.as_deref().unwrap();
+    assert!(markdown.contains("### IQ 前五配置"));
+    assert!(markdown.contains("### 24h 社区评分前五"));
     assert!(
         body.text
             .contains("模型与社区体感\n模型体感：GPT-5.5 xhigh · IQ 60 · 偏低 · 4/10")
