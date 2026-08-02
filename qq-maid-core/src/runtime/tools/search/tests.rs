@@ -794,5 +794,6 @@ async fn web_search_tool_rejects_invalid_options() {
     }
 }
 
+mod agent_loop;
 mod argument_validation;
 mod research;

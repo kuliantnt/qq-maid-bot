@@ -102,7 +102,7 @@ async fn invalid_argument_log_has_field_diagnostics_without_search_content() {
             json!({
                 "query": "private query content",
                 "raw_question": "private prompt body",
-                "topic": "medical",
+                "topic": "health",
             }),
         )
         .await
@@ -123,7 +123,9 @@ async fn invalid_argument_log_has_field_diagnostics_without_search_content() {
     ] {
         assert!(logs.contains(field), "missing log field {field}: {logs}");
     }
-    assert!(logs.contains("medical"));
+    assert!(logs.contains("safe_value=Some(\"health\")"));
+    assert!(logs.contains("query_chars=None"));
+    assert!(!logs.contains("query_chars=0"));
     assert!(logs.contains("task-argument-diagnostics"));
     assert!(!logs.contains("private query content"));
     assert!(!logs.contains("private prompt body"));

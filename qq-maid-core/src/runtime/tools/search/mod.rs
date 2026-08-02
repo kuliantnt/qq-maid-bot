@@ -597,7 +597,7 @@ fn log_web_search_attempt(
 
 /// 参数校验失败发生在请求构造前，单独记录字段级诊断，避免被上游请求日志的
 /// `duration_ms=0` 和通用 `invalid_arguments` 淹没。这里不记录 query/raw_question
-/// 或完整参数；查询只保留字符数，枚举和数字才允许保留短 safe_value。
+/// 或完整参数；查询只保留字符数，受限参数才允许保留短 safe_value。
 fn log_web_search_argument_error(
     tool: &WebSearchTool,
     context: &ToolContext,
@@ -614,7 +614,7 @@ fn log_web_search_argument_error(
         message = error.message.as_str(),
         value_kind = error.value_kind,
         safe_value = ?error.safe_value,
-        query_chars = error.query_chars.unwrap_or(0),
+        query_chars = ?error.query_chars,
         task_id = context.task_id.as_str(),
         tool_call_id = context.tool_call_id.as_deref().unwrap_or("direct"),
         tool_round = ?context.tool_round,

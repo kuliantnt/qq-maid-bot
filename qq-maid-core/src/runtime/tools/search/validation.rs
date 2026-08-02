@@ -283,7 +283,10 @@ fn argument_value_kind(value: Option<&Value>) -> &'static str {
     }
 }
 
-/// 仅返回数字或已知短枚举候选，避免把模型偶然放入枚举字段的正文写入日志。
+/// 受限参数只保留短、低敏的标量候选，避免把模型偶然放入枚举字段的正文写入日志。
+///
+/// 调用方必须仅限于 `topic`、`time_range`、`context_size`、`max_results` 等受限
+/// 参数；query、raw_question 和研究正文不得复用此投影。
 fn low_sensitivity_safe_value(value: Option<&Value>) -> Option<String> {
     let text = match value {
         Some(Value::String(value)) => value.trim().to_owned(),
@@ -298,28 +301,7 @@ fn low_sensitivity_safe_value(value: Option<&Value>) -> Option<String> {
     {
         return None;
     }
-    if text.chars().all(|character| character.is_ascii_digit()) {
-        return Some(text);
-    }
-    matches!(
-        text.to_ascii_lowercase().as_str(),
-        "low"
-            | "medium"
-            | "high"
-            | "general"
-            | "news"
-            | "finance"
-            | "medical"
-            | "sports"
-            | "day"
-            | "week"
-            | "month"
-            | "year"
-            | "quarter"
-            | "all"
-            | "full"
-    )
-    .then_some(text)
+    Some(text)
 }
 
 pub(super) fn optional_string_field(arguments: &Value, key: &str) -> Option<String> {
