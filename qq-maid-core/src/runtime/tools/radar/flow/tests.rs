@@ -193,6 +193,18 @@ fn format_codex_detail_shows_ranked_iq_quota_and_cross_vendor_ratings() {
             .contains("最高模型：GPT-5.4 xhigh · IQ 90 · 略低 · 6/10")
     );
     assert!(body.text.contains("IQ 前五配置："));
+    assert!(
+        body.text
+            .contains("模型与社区体感\n模型体感：GPT-5.5 xhigh · IQ 60 · 偏低 · 4/10")
+    );
+    assert!(!body.text.contains("· 模型体感："));
+    assert!(body.text.contains(
+        "最高模型：GPT-5.4 xhigh · IQ 90 · 略低 · 6/10\n\nIQ 前五配置：\n1. GPT-5.4 xhigh"
+    ));
+    assert!(
+        body.text
+            .contains("24h 社区评分前五：\n1. GPT-5.6 Sol ultra")
+    );
     assert!(body.text.contains("GPT-5.5 xhigh · IQ 60 · 偏低 · 4/10"));
     assert!(body.text.contains("GPT-5.4 xhigh · IQ 90 · 略低 · 6/10"));
     assert!(body.text.contains("Plus · 7d 84.66 · 估算"));

@@ -135,29 +135,36 @@ fn append_codex_detail_card(render: &mut CommandRender, summary: &CodexRadarSumm
     render.blank();
     render.subtitle("模型与社区体感");
     let mut has_model_data = false;
+    // 两个摘要字段来自不同数据语义，即使当前模型相同也要分别保留。
     if let Some(line) = codex_model_line(summary) {
         has_model_data = true;
-        render.bullet(&line);
+        render.paragraph(&line);
     }
     if let Some(line) = codex_top_iq_line(summary) {
         has_model_data = true;
-        render.bullet(&line);
+        render.paragraph(&line);
     }
     let ranked_models = codex_ranked_iq_models(&summary.iq_models, 5);
     if !ranked_models.is_empty() {
         has_model_data = true;
-        render.bullet("IQ 前五配置：");
-        for model in ranked_models {
-            render.bullet(&codex_model_metric_line(model));
+        render.blank();
+        render.paragraph("IQ 前五配置：");
+        for (index, model) in ranked_models.into_iter().enumerate() {
+            render.paragraph(&format!(
+                "{}. {}",
+                index + 1,
+                codex_model_metric_line(model)
+            ));
         }
     }
     let ranked_ratings = codex_ranked_ratings(&summary.rating_models, 5);
     if !ranked_ratings.is_empty() {
         has_model_data = true;
-        render.bullet("24h 社区评分前五：");
-        for model in ranked_ratings {
+        render.blank();
+        render.paragraph("24h 社区评分前五：");
+        for (index, model) in ranked_ratings.into_iter().enumerate() {
             if let Some(line) = codex_rating_line(Some(model)) {
-                render.bullet(&line);
+                render.paragraph(&format!("{}. {line}", index + 1));
             }
         }
     }
