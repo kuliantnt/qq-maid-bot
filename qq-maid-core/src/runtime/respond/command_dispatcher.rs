@@ -14,7 +14,7 @@ use super::{
         respond_meta, session_pending_visible_to_user, shared_session_turn_actor,
         should_try_todo_flow,
     },
-    memory_flow, radar_flow, rss_flow, search_flow, session_flow,
+    memory_flow, rss_flow, search_flow, session_flow,
     set_flow::{parse_set_command, parse_unset_command},
     train_flow, translation_flow, weather_flow,
 };
@@ -66,7 +66,7 @@ impl RegisteredSlashCommand {
         if let Some(command) = train_flow::parse_train_command(text) {
             return Some(Self::Train(command));
         }
-        if let Some(command) = radar_flow::parse_radar_command(text) {
+        if let Some(command) = crate::runtime::tools::radar::flow::parse_radar_command(text) {
             return Some(Self::Radar(command));
         }
         if let Some(command) = search_flow::parse_web_search_command(text) {

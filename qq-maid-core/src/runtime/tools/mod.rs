@@ -8,7 +8,7 @@ pub(crate) mod agent_turn;
 pub mod knowledge;
 pub mod memory;
 pub mod ops;
-mod radar;
+pub(crate) mod radar;
 pub mod rss;
 pub(crate) mod search;
 pub(crate) mod status;
@@ -25,9 +25,10 @@ pub(crate) use agent_turn::{
 pub use knowledge::{KNOWLEDGE_SEARCH_TOOL_NAME, KnowledgeSearchTool};
 pub use memory::SaveMemoryTool;
 pub use radar::{
-    ClaudeModelMetric, ClaudeRadarSummary, CodexModelMetric, CodexRadarSummary, DynRadarExecutor,
-    RadarExecutor, RadarIssueTarget, RadarSnapshot, RadarSourceFailure, RadarSourceKind,
-    RadarTarget, build_radar_executor, radar_feedback_url, radar_site_url,
+    ClaudeModelMetric, ClaudeRadarSummary, CodexModelMetric, CodexQuotaMetric, CodexRadarSummary,
+    CodexRatingMetric, DynRadarExecutor, RadarExecutor, RadarIssueTarget, RadarSnapshot,
+    RadarSourceFailure, RadarSourceKind, RadarTarget, build_radar_executor, radar_feedback_url,
+    radar_site_url,
 };
 pub use rss::{RssManageSubscriptionsTool, RssRecentItemsTool};
 pub(crate) use search::{WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME, WebSearchDeltaHandler};
