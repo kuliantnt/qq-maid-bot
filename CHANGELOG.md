@@ -2,6 +2,27 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.23.4] - 2026-08-02
+
+### Release Focus
+
+* **发布下载链路与 AI Radar 数据升级**：本版本一边收口 Linux / Windows Release 安装器的多来源下载与校验，一边升级 Codex Radar 的公开数据读取、展示和领域模块边界，让发布安装与 `/radar` 日常查询都更容易诊断和维护。
+
+### Added
+
+* **Release 多代理候选下载与校验**（PR #633）：Linux、Windows 安装器统一支持 `QBOT_GITHUB_PROXY` 与 `QBOT_GITHUB_PROXIES`，按官方源和代理候选顺序回退；每个候选都必须通过归档格式、预期顶层目录和 SHA-256 校验后才允许安装，并补齐代理前缀、损坏归档、Windows ZIP 和失败退出码回归测试。
+* **Codex Radar 公开指标**（PR #636）：补充预测摘要、24h / 48h 概率、额度明细、模型 IQ 排名和 24h 社区评分等可选字段；`/radar` 会按真实更新时间展示可用指标，缺失的公开字段继续隐藏，不用空文案伪造数据。
+
+### Changed
+
+* **Radar 领域模块收口**（PR #636）：将公开数据客户端、字段解析、命令 Flow、格式化展示、类型和测试集中到 `qq-maid-core/src/runtime/tools/radar/`，`respond` 层只保留跨域调度与服务装配；时间展示、三级榜单标题和部分数据源失败后的局部结果展示同步统一。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.23.4`；本次修改的 `qq-maid-core` 提升到 `0.1.19`，其他内部 crate 版本保持不变。
+* 本版本无 SQLite migration 和必需配置迁移；`QBOT_GITHUB_PROXY` / `QBOT_GITHUB_PROXIES` 只是安装器可选环境变量，不影响已有运行配置、数据库、主密钥和运行目录。升级前仍建议按常规备份。
+* `/radar`、`/rader`、`/雷达` 及 `issue` 反馈入口保持兼容；公开 Radar 接口或网络不可用时仍按真实失败与部分结果返回，不能保证所有可选指标始终存在。
+
 ## [v0.23.3] - 2026-08-01
 
 ### Release Focus
