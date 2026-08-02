@@ -13,11 +13,6 @@ use tokio::{
     time::{Instant, sleep_until},
 };
 
-#[cfg(test)]
-use qq_maid_common::identity_context::{
-    ConversationKind, ExecutionActorContext, ExecutionConversationContext,
-};
-use qq_maid_common::text::truncate_chars_with_ellipsis_trimmed;
 use qq_maid_llm::{
     tool::{
         DEFAULT_TOOL_OUTPUT_MAX_CHARS, Tool, ToolContext, ToolEffect, ToolMetadata, ToolOutput,
@@ -25,7 +20,7 @@ use qq_maid_llm::{
     },
     web_search::{
         DEFAULT_MAX_RESULTS, DynWebSearchExecutor, WebSearchBackend, WebSearchOutcome,
-        WebSearchRequest, WebSearchSource,
+        WebSearchRequest,
     },
 };
 
@@ -76,7 +71,18 @@ impl Default for WebSearchTimeouts {
 
 pub(crate) mod agent_turn;
 mod ops;
+mod output;
 pub(crate) mod status;
+mod validation;
+
+#[cfg(test)]
+use output::serialized_value_chars;
+use output::{web_search_failure_output, web_search_outcome_has_evidence, web_search_tool_output};
+use validation::{
+    WebSearchArgumentError, WebSearchToolError, normalize_dedup_text, optional_string_field,
+    parse_context_size, parse_max_results, parse_query, parse_time_range, parse_topic,
+    request_from_arguments,
+};
 
 pub(crate) type WebSearchDeltaHandler<'a> = Box<
     dyn FnMut(String) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send>> + Send + 'a,
@@ -151,6 +157,18 @@ impl WebSearchTool {
         self.backend_override
             .map(WebSearchBackend::as_str)
             .unwrap_or("configured_default")
+    }
+
+    fn handle_argument_error(
+        &self,
+        context: &ToolContext,
+        error: WebSearchArgumentError,
+    ) -> Result<ToolOutput, LlmError> {
+        log_web_search_argument_error(self, context, &error);
+        if context.tool_call_id.is_some() {
+            return Ok(ToolOutput::json(error.agent_output(self.backend_label())));
+        }
+        Err(error.into_llm_error())
     }
 
     pub async fn query(&self, req: WebSearchToolRequest) -> Result<WebSearchOutcome, LlmError> {
@@ -393,7 +411,17 @@ impl Tool for WebSearchTool {
     }
 
     fn deduplication_key(&self, arguments: &Value) -> Option<String> {
-        if let Ok(Some(targets)) = ops::parse_research_targets(arguments.get("research_targets")) {
+        if arguments
+            .get("research_targets")
+            .is_some_and(|value| !value.is_null())
+        {
+            let Some(targets) =
+                ops::parse_research_targets(arguments.get("research_targets")).ok()?
+            else {
+                // 研究参数校验失败时不能退回单实体 query 的去重键，否则同一无效
+                // Tool Call 会被当作终态失败缓存，模型就没有机会修正参数。
+                return None;
+            };
             return serde_json::to_string(&json!({
                 "research_targets": targets.iter().map(|target| json!({
                     "entity": normalize_dedup_text(&target.entity),
@@ -440,8 +468,19 @@ impl Tool for WebSearchTool {
         context: ToolContext,
         arguments: Value,
     ) -> Result<ToolOutput, LlmError> {
-        if let Some(targets) = ops::parse_research_targets(arguments.get("research_targets"))? {
-            let output = ops::execute_research(self, &context, &arguments, targets).await?;
+        let research_targets = match ops::parse_research_targets(arguments.get("research_targets"))
+        {
+            Ok(targets) => targets,
+            Err(error) => return self.handle_argument_error(&context, error),
+        };
+        if let Some(targets) = research_targets {
+            let output = match ops::execute_research(self, &context, &arguments, targets).await {
+                Ok(output) => output,
+                Err(WebSearchToolError::Argument(error)) => {
+                    return self.handle_argument_error(&context, error);
+                }
+                Err(WebSearchToolError::Execution(error)) => return Err(error),
+            };
             log_web_search_execution(&context, &arguments, &output.value, true);
             return Ok(output);
         }
@@ -452,10 +491,7 @@ impl Tool for WebSearchTool {
             self.model_override.clone(),
         ) {
             Ok(request) => request,
-            Err(err) => {
-                log_web_search_attempt(self, &context, 1, Duration::ZERO, &Err(err.clone()));
-                return Err(err);
-            }
+            Err(error) => return self.handle_argument_error(&context, error),
         };
         // Issue #361 诊断：联网查询前后只记录尺寸/计数与内存，不记录查询正文。
         // 进程内存采样放进 DEBUG 门控，默认级别不触碰 /proc 读取。
@@ -497,41 +533,6 @@ impl Tool for WebSearchTool {
     }
 }
 
-fn normalize_dedup_text(value: &str) -> String {
-    value
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
-}
-
-fn request_from_arguments(
-    context: &ToolContext,
-    arguments: &Value,
-    server_backend_override: Option<WebSearchBackend>,
-    server_model_override: Option<String>,
-) -> Result<WebSearchToolRequest, LlmError> {
-    // 搜索模型路由只允许 `/查` 等服务端直接执行入口注入；模型 Tool Loop 调用
-    // 会带稳定 tool_call_id，此时忽略任何伪造的 model_override 参数。
-    let model_override = server_model_override.or_else(|| {
-        context
-            .tool_call_id
-            .is_none()
-            .then(|| optional_string_field(arguments, "model_override"))
-            .flatten()
-    });
-    Ok(WebSearchToolRequest {
-        query: parse_query(arguments)?,
-        raw_question: optional_string_field(arguments, "raw_question"),
-        max_results: parse_max_results(arguments.get("max_results"))?,
-        context_size: parse_context_size(arguments.get("context_size"))?,
-        topic: parse_topic(arguments.get("topic"))?,
-        time_range: parse_time_range(arguments.get("time_range"))?,
-        backend_override: server_backend_override,
-        model_override,
-    })
-}
-
 fn web_search_timeout_error(phase: &str, message: &str) -> LlmError {
     LlmError::new("timeout", message, format!("web_search_{phase}"))
 }
@@ -547,327 +548,6 @@ fn web_search_request(req: WebSearchToolRequest) -> WebSearchRequest {
         backend_override: req.backend_override,
         model_override: req.model_override,
     }
-}
-
-fn parse_query(arguments: &Value) -> Result<String, LlmError> {
-    let query = arguments
-        .get("query")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            LlmError::new(
-                "bad_tool_arguments",
-                "web_search requires non-empty query",
-                "tool",
-            )
-        })?;
-    if query.chars().count() > WEB_SEARCH_QUERY_MAX_LENGTH {
-        return Err(LlmError::new(
-            "bad_tool_arguments",
-            "query is too long",
-            "tool",
-        ));
-    }
-    Ok(query.to_owned())
-}
-
-fn parse_max_results(value: Option<&Value>) -> Result<Option<u8>, LlmError> {
-    match value {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(number)) if !number.is_f64() => match number.as_u64() {
-            Some(value) if (1..=WEB_SEARCH_MAX_RESULTS_LIMIT as u64).contains(&value) => {
-                Ok(Some(value as u8))
-            }
-            _ => reject_invalid_max_results(),
-        },
-        _ => reject_invalid_max_results(),
-    }
-}
-
-fn reject_invalid_max_results() -> Result<Option<u8>, LlmError> {
-    tracing::warn!(
-        tool = WEB_SEARCH_TOOL_NAME,
-        error_code = "bad_tool_arguments",
-        argument = "max_results",
-        "invalid web search max_results argument rejected",
-    );
-    Err(LlmError::new(
-        "bad_tool_arguments",
-        "max_results must be an integer between 1 and 10 or null",
-        "tool",
-    ))
-}
-
-fn parse_context_size(value: Option<&Value>) -> Result<Option<String>, LlmError> {
-    match value {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) => {
-            let text = text.trim();
-            if matches!(text, "low" | "medium" | "high") {
-                Ok(Some(text.to_owned()))
-            } else {
-                reject_invalid_context_size()
-            }
-        }
-        _ => reject_invalid_context_size(),
-    }
-}
-
-fn reject_invalid_context_size() -> Result<Option<String>, LlmError> {
-    tracing::warn!(
-        tool = WEB_SEARCH_TOOL_NAME,
-        error_code = "bad_tool_arguments",
-        argument = "context_size",
-        "invalid web search context_size argument rejected",
-    );
-    Err(LlmError::new(
-        "bad_tool_arguments",
-        "context_size must be low, medium, high, or null",
-        "tool",
-    ))
-}
-
-fn parse_topic(value: Option<&Value>) -> Result<Option<String>, LlmError> {
-    parse_optional_enum(value, "topic", &["general", "news", "finance"])
-}
-
-fn parse_time_range(value: Option<&Value>) -> Result<Option<String>, LlmError> {
-    parse_optional_enum(value, "time_range", &["day", "week", "month", "year"])
-}
-
-fn parse_optional_enum(
-    value: Option<&Value>,
-    name: &str,
-    allowed: &[&str],
-) -> Result<Option<String>, LlmError> {
-    match value {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) => {
-            let text = text.trim().to_ascii_lowercase();
-            if allowed.contains(&text.as_str()) {
-                Ok(Some(text))
-            } else {
-                Err(LlmError::new(
-                    "bad_tool_arguments",
-                    format!("{name} must be one of {} or null", allowed.join(", ")),
-                    "tool",
-                ))
-            }
-        }
-        _ => Err(LlmError::new(
-            "bad_tool_arguments",
-            format!("{name} must be a string or null"),
-            "tool",
-        )),
-    }
-}
-
-fn optional_string_field(arguments: &Value, key: &str) -> Option<String> {
-    match arguments.get(key) {
-        Some(Value::String(value)) => {
-            let value = value.trim();
-            (!value.is_empty()).then(|| value.to_owned())
-        }
-        _ => None,
-    }
-}
-
-fn web_search_tool_output(
-    outcome: &WebSearchOutcome,
-    backend: &str,
-    output_max_chars: usize,
-) -> Value {
-    let result_count = outcome
-        .sources
-        .iter()
-        .filter(|source| web_search_source_has_evidence(source))
-        .count();
-    if !web_search_outcome_has_evidence(outcome) {
-        return json!({
-            "ok": false,
-            "execution_succeeded": true,
-            "backend": backend,
-            "provider": outcome.provider,
-            "answer": "",
-            "sources": [],
-            "result_count": 0,
-            "elapsed_ms": outcome.elapsed_ms,
-            "error": {
-                "code": "empty_result",
-                "stage": "web_search",
-                "message": WEB_SEARCH_EMPTY_RESULT_MODEL_MESSAGE,
-            },
-        });
-    }
-
-    let output = json!({
-        "ok": true,
-        "execution_succeeded": true,
-        "backend": backend,
-        "provider": outcome.provider,
-        "answer": outcome.answer,
-        "sources": outcome.sources.iter().map(web_search_source_json).collect::<Vec<_>>(),
-        "result_count": result_count,
-        "elapsed_ms": outcome.elapsed_ms,
-    });
-    if serialized_value_chars(&output) <= output_max_chars {
-        return output;
-    }
-
-    compact_web_search_tool_output(outcome, backend, result_count, output_max_chars)
-}
-
-/// Tool Registry 对超限输出只能保留通用 preview，搜索投影将因此失去结构化证据。
-/// 搜索领域先压缩重复的来源摘要，并在剩余预算内尽量保留 answer，确保事实卡仍可验真。
-fn compact_web_search_tool_output(
-    outcome: &WebSearchOutcome,
-    backend: &str,
-    result_count: usize,
-    output_max_chars: usize,
-) -> Value {
-    let source_candidates = outcome
-        .sources
-        .iter()
-        .filter(|source| web_search_source_has_evidence(source))
-        .take(WEB_SEARCH_TOOL_SOURCE_LIMIT)
-        .collect::<Vec<_>>();
-    let sources = compact_web_search_sources(
-        outcome,
-        backend,
-        result_count,
-        output_max_chars,
-        &source_candidates,
-    );
-
-    let answer_chars = outcome.answer.trim().chars().collect::<Vec<_>>();
-    let mut low = 0usize;
-    let mut high = answer_chars.len();
-    while low < high {
-        let mid = low + (high - low).div_ceil(2);
-        let answer = answer_chars[..mid].iter().collect::<String>();
-        let candidate =
-            successful_web_search_output(outcome, backend, result_count, &answer, &sources);
-        if serialized_value_chars(&candidate) <= output_max_chars {
-            low = mid;
-        } else {
-            high = mid - 1;
-        }
-    }
-    let answer = answer_chars[..low].iter().collect::<String>();
-    successful_web_search_output(outcome, backend, result_count, &answer, &sources)
-}
-
-fn successful_web_search_output(
-    outcome: &WebSearchOutcome,
-    backend: &str,
-    result_count: usize,
-    answer: &str,
-    sources: &[Value],
-) -> Value {
-    json!({
-        "ok": true,
-        "execution_succeeded": true,
-        "backend": backend,
-        "provider": outcome.provider,
-        "answer": answer,
-        "sources": sources,
-        "result_count": result_count,
-        "elapsed_ms": outcome.elapsed_ms,
-    })
-}
-
-fn compact_web_search_sources(
-    outcome: &WebSearchOutcome,
-    backend: &str,
-    result_count: usize,
-    output_max_chars: usize,
-    candidates: &[&WebSearchSource],
-) -> Vec<Value> {
-    let fits = |sources: &[Value]| {
-        serialized_value_chars(&successful_web_search_output(
-            outcome,
-            backend,
-            result_count,
-            "",
-            sources,
-        )) <= output_max_chars
-    };
-    let with_snippets =
-        compact_web_search_source_jsons(candidates, WEB_SEARCH_TOOL_SOURCE_SNIPPET_MAX_CHARS);
-    if fits(&with_snippets) {
-        return with_snippets;
-    }
-
-    // URL 必须保持完整；预算不足时先压缩摘要，仍放不下才减少来源。
-    let without_snippets = compact_web_search_source_jsons(candidates, 0);
-    if fits(&without_snippets) {
-        return without_snippets;
-    }
-
-    let mut retained = Vec::new();
-    for source in candidates {
-        let mut candidate = retained.clone();
-        candidate.push(*source);
-        if fits(&compact_web_search_source_jsons(&candidate, 0)) {
-            retained = candidate;
-        }
-    }
-    compact_web_search_source_jsons(&retained, 0)
-}
-
-fn compact_web_search_source_jsons(
-    sources: &[&WebSearchSource],
-    snippet_max_chars: usize,
-) -> Vec<Value> {
-    sources
-        .iter()
-        .map(|source| compact_web_search_source_json(source, snippet_max_chars))
-        .collect()
-}
-
-fn compact_web_search_source_json(source: &WebSearchSource, snippet_max_chars: usize) -> Value {
-    let snippet = if snippet_max_chars == 0 {
-        String::new()
-    } else {
-        truncate_chars_with_ellipsis_trimmed(&source.snippet, snippet_max_chars)
-    };
-    json!({
-        "title": truncate_chars_with_ellipsis_trimmed(
-            &source.title,
-            WEB_SEARCH_TOOL_SOURCE_TITLE_MAX_CHARS,
-        ),
-        "url": source.url,
-        "snippet": snippet,
-    })
-}
-
-fn serialized_value_chars(value: &Value) -> usize {
-    serde_json::to_string(value)
-        .map(|serialized| serialized.chars().count())
-        .unwrap_or(usize::MAX)
-}
-
-fn web_search_failure_output(backend: &str, attempts: usize, error: &LlmError) -> Value {
-    json!({
-        "ok": false,
-        "execution_succeeded": false,
-        "backend": backend,
-        "provider": error.upstream_provider().unwrap_or("unknown"),
-        "model": error.upstream_model().unwrap_or("configured_default"),
-        "answer": "",
-        "sources": [],
-        "result_count": 0,
-        "attempts": attempts,
-        "error": {
-            "code": error.code,
-            "message": error.message,
-            "stage": error.stage,
-            "kind": error.error_kind(),
-            "retriable": error.retriable(),
-            "upstream_status": error.upstream_status,
-        },
-    })
 }
 
 fn log_web_search_attempt(
@@ -913,6 +593,33 @@ fn log_web_search_attempt(
             "web search attempt failed"
         ),
     }
+}
+
+/// 参数校验失败发生在请求构造前，单独记录字段级诊断，避免被上游请求日志的
+/// `duration_ms=0` 和通用 `invalid_arguments` 淹没。这里不记录 query/raw_question
+/// 或完整参数；查询只保留字符数，枚举和数字才允许保留短 safe_value。
+fn log_web_search_argument_error(
+    tool: &WebSearchTool,
+    context: &ToolContext,
+    error: &WebSearchArgumentError,
+) {
+    tracing::warn!(
+        tool = WEB_SEARCH_TOOL_NAME,
+        backend = tool.backend_label(),
+        error_code = "invalid_arguments",
+        failure_layer = "tool",
+        duration_ms = 0_u64,
+        argument = error.field.as_str(),
+        reason = error.reason,
+        message = error.message.as_str(),
+        value_kind = error.value_kind,
+        safe_value = ?error.safe_value,
+        query_chars = error.query_chars.unwrap_or(0),
+        task_id = context.task_id.as_str(),
+        tool_call_id = context.tool_call_id.as_deref().unwrap_or("direct"),
+        tool_round = ?context.tool_round,
+        "web search argument validation failed"
+    );
 }
 
 /// 搜索诊断只保留可定位重试的结构化字段；不记录 query、raw_question、聊天历史或上游正文。
@@ -997,24 +704,6 @@ fn log_web_search_execution(
         retry_of = ?context.retry_of,
         "web search tool execution completed"
     );
-}
-
-pub(super) fn web_search_outcome_has_evidence(outcome: &WebSearchOutcome) -> bool {
-    !outcome.answer.trim().is_empty() || outcome.sources.iter().any(web_search_source_has_evidence)
-}
-
-fn web_search_source_has_evidence(source: &WebSearchSource) -> bool {
-    !source.title.trim().is_empty()
-        || !source.url.trim().is_empty()
-        || !source.snippet.trim().is_empty()
-}
-
-fn web_search_source_json(source: &WebSearchSource) -> Value {
-    json!({
-        "title": source.title,
-        "url": source.url,
-        "snippet": source.snippet,
-    })
 }
 
 #[cfg(test)]
