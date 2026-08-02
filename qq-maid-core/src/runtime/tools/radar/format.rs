@@ -1,145 +1,25 @@
-//! `/rader` / `/radar` / `/雷达` 指令处理。
+//! Radar 用户可见卡片渲染。
 //!
-//! slash 层只解析命令、调用雷达执行器并负责展示；公开数据源读取和字段兼容在
-//! `runtime::tools::radar` 中维护，避免把外部看板接入细节散落到 respond 主流程。
+//! 具体指标选择、排序、兼容文案和来源标注属于 Radar 领域规则，Respond 层只消费
+//! 已渲染的双通道命令正文。
 
 use qq_maid_common::markdown::{escape_inline, escape_text};
-use serde_json::json;
 
 use crate::{
     error::LlmError,
-    runtime::{
-        command::{ParsedCommand, parse_slash_command},
-        session::SessionRecord,
-        tools::{
-            ClaudeModelMetric, ClaudeRadarSummary, CodexModelMetric, CodexRadarSummary,
-            RadarIssueTarget, RadarSnapshot, RadarSourceFailure, RadarSourceKind, RadarTarget,
-            radar_feedback_url, radar_site_url,
-        },
+    runtime::respond::{
+        command_render::CommandRender,
+        common::{CommandBody, truncate_chars},
     },
 };
 
 use super::{
-    RespondResponse, RustRespondService,
-    command_render::CommandRender,
-    common::{CommandBody, command_response, session_error, truncate_chars},
+    ClaudeModelMetric, ClaudeRadarSummary, CodexModelMetric, CodexQuotaMetric, CodexRadarSummary,
+    CodexRatingMetric, RadarIssueTarget, RadarSnapshot, RadarSourceFailure, RadarSourceKind,
+    RadarTarget, radar_feedback_url, radar_site_url,
 };
 
-const RADAR_USAGE_REPLY: &str = "用法：/rader [codex|claude]，或 /rader issue [codex|claude]
-别名：/radar、/雷达";
 const RADAR_SUMMARY_MAX_CHARS: usize = 110;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum RadarCommand {
-    Show(RadarTarget),
-    Issue(RadarIssueTarget),
-    Usage,
-}
-
-impl RustRespondService {
-    pub(super) async fn handle_radar_command(
-        &self,
-        command: ParsedCommand,
-        user_text: &str,
-        session: &mut SessionRecord,
-    ) -> Result<RespondResponse, LlmError> {
-        match parse_radar_action(&command.argument) {
-            RadarCommand::Usage => Ok(command_response(
-                RADAR_USAGE_REPLY,
-                Some(session.session_id.clone()),
-                Some(command.action),
-            )),
-            RadarCommand::Issue(target) => {
-                let body = format_radar_issue_reply(target);
-                self.session_store
-                    .append_exchange(session, user_text, &body.text)
-                    .map_err(session_error)?;
-                Ok(command_response(
-                    body,
-                    Some(session.session_id.clone()),
-                    Some(command.action),
-                ))
-            }
-            RadarCommand::Show(target) => {
-                let outcome = match self.radar_executor.radar(target).await {
-                    Ok(outcome) => outcome,
-                    Err(err) => {
-                        tracing::warn!(
-                            error_code = %err.code,
-                            error_stage = %err.stage,
-                            radar_provider = self.radar_executor.provider_name(),
-                            "radar command failed"
-                        );
-                        let body = format_radar_total_failure(&err);
-                        self.session_store
-                            .append_exchange(session, user_text, &body.text)
-                            .map_err(session_error)?;
-                        let mut response = command_response(
-                            body,
-                            Some(session.session_id.clone()),
-                            Some(command.action),
-                        );
-                        response.diagnostics = Some(json!({
-                            "backend": "rust",
-                            "session_backend": "rust",
-                            "used_memory": false,
-                            "used_search": false,
-                            "used_weather": false,
-                            "used_radar": true,
-                            "radar_provider": self.radar_executor.provider_name(),
-                            "radar_error_code": err.code,
-                            "radar_error_stage": err.stage,
-                        }));
-                        return Ok(response);
-                    }
-                };
-                let body = format_radar_reply(&outcome, target);
-                self.session_store
-                    .append_exchange(session, user_text, &body.text)
-                    .map_err(session_error)?;
-                let mut response =
-                    command_response(body, Some(session.session_id.clone()), Some(command.action));
-                response.diagnostics = Some(json!({
-                    "backend": "rust",
-                    "session_backend": "rust",
-                    "used_memory": false,
-                    "used_search": false,
-                    "used_weather": false,
-                    "used_radar": true,
-                    "radar_provider": self.radar_executor.provider_name(),
-                    "radar_target": radar_target_label(target),
-                    "radar_codex_ok": outcome.codex.is_some(),
-                    "radar_claude_ok": outcome.claude.is_some(),
-                    "radar_failure_count": outcome.failures.len(),
-                }));
-                Ok(response)
-            }
-        }
-    }
-}
-
-pub(super) fn parse_radar_command(text: &str) -> Option<ParsedCommand> {
-    let command = parse_slash_command(text)?;
-    (command.action == "radar").then_some(command)
-}
-
-pub(super) fn parse_radar_action(argument: &str) -> RadarCommand {
-    let mut parts = argument.split_whitespace();
-    let Some(first) = parts.next() else {
-        return RadarCommand::Show(RadarTarget::All);
-    };
-    let first = first.to_ascii_lowercase();
-    if first == "issue" || first == "反馈" {
-        return parts
-            .next()
-            .and_then(parse_issue_target)
-            .map(RadarCommand::Issue)
-            .unwrap_or(RadarCommand::Usage);
-    }
-    parse_show_target(&first)
-        .map(RadarCommand::Show)
-        .unwrap_or(RadarCommand::Usage)
-}
 
 pub(super) fn format_radar_reply(snapshot: &RadarSnapshot, target: RadarTarget) -> CommandBody {
     let mut render = CommandRender::new();
@@ -189,7 +69,7 @@ fn append_radar_overview(render: &mut CommandRender, snapshot: &RadarSnapshot) {
     append_overview_sources(render, snapshot);
 }
 
-fn format_radar_issue_reply(target: RadarIssueTarget) -> CommandBody {
+pub(super) fn format_radar_issue_reply(target: RadarIssueTarget) -> CommandBody {
     let (name, markdown_name) = match target {
         RadarIssueTarget::Codex => ("Codex Radar", "Codex Radar"),
         RadarIssueTarget::Claude => ("Claude Code Radar", "Claude Code Radar"),
@@ -205,7 +85,7 @@ fn format_radar_issue_reply(target: RadarIssueTarget) -> CommandBody {
     CommandBody::dual(text, markdown)
 }
 
-fn format_radar_total_failure(err: &LlmError) -> CommandBody {
+pub(super) fn format_radar_total_failure(err: &LlmError) -> CommandBody {
     let message = match err.code.as_str() {
         "timeout" => "雷达数据读取超时了，请稍后再试。",
         "http_error" => "雷达公开数据源暂时不可用，可能是上游接口或网络异常。",
@@ -229,10 +109,20 @@ fn append_codex_detail_card(render: &mut CommandRender, summary: &CodexRadarSumm
         hidden = true;
         render.paragraph("短线概率当前数据不足。");
     }
+    if let Some(prediction) = display_optional(summary.prediction_summary.as_deref()) {
+        render.paragraph(&prediction);
+    }
 
     render.blank();
     render.subtitle("额度估算");
-    if let Some(line) = codex_quota_line(summary) {
+    if !summary.quota_rows.is_empty() {
+        for quota in &summary.quota_rows {
+            render.bullet(&codex_quota_metric_line(quota));
+        }
+        if summary.quota_policy_5h.as_deref() == Some("temporarily_paused_hidden") {
+            render.bullet("5h 限制当前暂停，站点暂不展示该档额度。");
+        }
+    } else if let Some(line) = codex_quota_line(summary) {
         render.bullet(&line);
     } else {
         hidden = true;
@@ -240,7 +130,7 @@ fn append_codex_detail_card(render: &mut CommandRender, summary: &CodexRadarSumm
     }
 
     render.blank();
-    render.subtitle("模型体感");
+    render.subtitle("模型与社区体感");
     let mut has_model_data = false;
     if let Some(line) = codex_model_line(summary) {
         has_model_data = true;
@@ -250,11 +140,22 @@ fn append_codex_detail_card(render: &mut CommandRender, summary: &CodexRadarSumm
         has_model_data = true;
         render.bullet(&line);
     }
-    if !summary.iq_models.is_empty() {
+    let ranked_models = codex_ranked_iq_models(&summary.iq_models, 5);
+    if !ranked_models.is_empty() {
         has_model_data = true;
-        render.bullet("完整模型列表：");
-        for model in &summary.iq_models {
+        render.bullet("IQ 前五配置：");
+        for model in ranked_models {
             render.bullet(&codex_model_metric_line(model));
+        }
+    }
+    let ranked_ratings = codex_ranked_ratings(&summary.rating_models, 5);
+    if !ranked_ratings.is_empty() {
+        has_model_data = true;
+        render.bullet("24h 社区评分前五：");
+        for model in ranked_ratings {
+            if let Some(line) = codex_rating_line(Some(model)) {
+                render.bullet(&line);
+            }
         }
     }
     if !has_model_data {
@@ -265,9 +166,15 @@ fn append_codex_detail_card(render: &mut CommandRender, summary: &CodexRadarSumm
     render.blank();
     render.subtitle("更新 / 来源");
     if let Some(updated) = display_optional(summary.updated_at.as_deref()) {
-        render.bullet(&format!("更新时间：{updated}"));
+        render.bullet(&format!("模型数据：{updated}"));
     }
-    append_link(render, "来源", &summary.source_url);
+    if let Some(updated) = display_optional(summary.quota_updated_at.as_deref()) {
+        render.bullet(&format!("额度数据：{updated}"));
+    }
+    if let Some(updated) = display_optional(summary.rating_updated_at.as_deref()) {
+        render.bullet(&format!("社区评分：{updated}"));
+    }
+    append_link(render, "数据来自 Codex 雷达", &summary.source_url);
     if hidden {
         render.bullet("部分指标当前公开接口未返回，已隐藏空字段。");
     }
@@ -352,6 +259,9 @@ fn codex_key_metrics(summary: &CodexRadarSummary) -> Option<String> {
     }
     if let Some(top) = codex_top_iq_line(summary).or_else(|| codex_model_line(summary)) {
         parts.push(top);
+    }
+    if let Some(rating) = codex_rating_line(codex_top_rating_model(&summary.rating_models)) {
+        parts.push(format!("24h 社区评分 {rating}"));
     }
     if let Some(prediction) = codex_prediction_line(summary) {
         parts.push(prediction);
@@ -438,7 +348,32 @@ fn codex_prediction_line(summary: &CodexRadarSummary) -> Option<String> {
     if let Some(probability) = format_probability(summary.probability_24h) {
         parts.push(format!("24h {probability}"));
     }
+    if let Some(probability) = format_probability(summary.probability_48h) {
+        parts.push(format!("48h {probability}"));
+    }
     (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+fn codex_quota_metric_line(quota: &CodexQuotaMetric) -> String {
+    let mut parts = vec![quota.tier.clone()];
+    if let Some(five_h) = format_number(quota.five_h) {
+        parts.push(format!("5h {five_h}"));
+    }
+    if let Some(seven_d) = format_number(quota.seven_d) {
+        parts.push(format!("7d {seven_d}"));
+    }
+    if let Some(basis) = display_optional(quota.basis.as_deref()) {
+        parts.push(codex_quota_basis_label(&basis).to_owned());
+    }
+    parts.join(" · ")
+}
+
+fn codex_quota_basis_label(value: &str) -> &str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "distributed radar" => "分布式雷达实测",
+        "estimated" => "估算",
+        _ => value,
+    }
 }
 
 fn codex_quota_line(summary: &CodexRadarSummary) -> Option<String> {
@@ -503,6 +438,20 @@ fn codex_top_iq_models(models: &[CodexModelMetric]) -> Vec<&CodexModelMetric> {
         .collect()
 }
 
+fn codex_ranked_iq_models(models: &[CodexModelMetric], limit: usize) -> Vec<&CodexModelMetric> {
+    let mut ranked = models.iter().collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .score
+            .unwrap_or(f64::NEG_INFINITY)
+            .partial_cmp(&left.score.unwrap_or(f64::NEG_INFINITY))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    ranked.truncate(limit);
+    ranked
+}
+
 fn codex_model_metric_line(model: &CodexModelMetric) -> String {
     let mut parts = vec![model.label.clone()];
     if let Some(score) = format_number(model.score) {
@@ -515,6 +464,45 @@ fn codex_model_metric_line(model: &CodexModelMetric) -> String {
         parts.push(format!("{passed}/{tasks}"));
     }
     parts.join(" · ")
+}
+
+fn codex_rating_line(model: Option<&CodexRatingMetric>) -> Option<String> {
+    let model = model?;
+    let mut parts = vec![model.label.clone()];
+    if let Some(score) = format_number(model.average) {
+        parts.push(format!("{score}/10"));
+    }
+    if let Some(count) = model.count {
+        parts.push(format!("{count} 票"));
+    }
+    Some(parts.join(" · "))
+}
+
+fn codex_ranked_ratings(models: &[CodexRatingMetric], limit: usize) -> Vec<&CodexRatingMetric> {
+    let mut ranked = models.iter().collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .average
+            .unwrap_or(f64::NEG_INFINITY)
+            .partial_cmp(&left.average.unwrap_or(f64::NEG_INFINITY))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.count.cmp(&left.count))
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    ranked.truncate(limit);
+    ranked
+}
+
+fn codex_top_rating_model(models: &[CodexRatingMetric]) -> Option<&CodexRatingMetric> {
+    models
+        .iter()
+        .max_by(|left, right| compare_optional_rating(left.average, right.average))
+}
+
+fn compare_optional_rating(left: Option<f64>, right: Option<f64>) -> std::cmp::Ordering {
+    left.unwrap_or(f64::NEG_INFINITY)
+        .partial_cmp(&right.unwrap_or(f64::NEG_INFINITY))
+        .unwrap_or(std::cmp::Ordering::Equal)
 }
 
 fn claude_quota_line(summary: &ClaudeRadarSummary) -> Option<String> {
@@ -574,32 +562,6 @@ fn format_failure(failure: &RadarSourceFailure) -> String {
     };
     format!("{source}：{reason}（{}）", failure.stage)
 }
-
-fn parse_show_target(token: &str) -> Option<RadarTarget> {
-    match token {
-        "all" | "全部" => Some(RadarTarget::All),
-        "codex" | "code" => Some(RadarTarget::Codex),
-        "claude" | "cc" | "claude-code" => Some(RadarTarget::Claude),
-        _ => None,
-    }
-}
-
-fn parse_issue_target(token: &str) -> Option<RadarIssueTarget> {
-    match token.to_ascii_lowercase().as_str() {
-        "codex" | "code" => Some(RadarIssueTarget::Codex),
-        "claude" | "cc" | "claude-code" => Some(RadarIssueTarget::Claude),
-        _ => None,
-    }
-}
-
-fn radar_target_label(target: RadarTarget) -> &'static str {
-    match target {
-        RadarTarget::All => "all",
-        RadarTarget::Codex => "codex",
-        RadarTarget::Claude => "claude",
-    }
-}
-
 fn display_optional(value: Option<&str>) -> Option<String> {
     value
         .map(|value| truncate_chars(value, RADAR_SUMMARY_MAX_CHARS))
@@ -648,201 +610,5 @@ fn format_number(value: Option<f64>) -> Option<String> {
         Some(format!("{value:.0}"))
     } else {
         Some(format!("{value:.2}"))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::runtime::tools::{
-        ClaudeRadarSummary, CodexModelMetric, CodexRadarSummary, RadarSnapshot, RadarSourceFailure,
-        RadarSourceKind,
-    };
-
-    use super::*;
-
-    #[test]
-    fn parse_radar_action_accepts_required_variants() {
-        assert_eq!(parse_radar_action(""), RadarCommand::Show(RadarTarget::All));
-        assert_eq!(
-            parse_radar_action("codex"),
-            RadarCommand::Show(RadarTarget::Codex)
-        );
-        assert_eq!(
-            parse_radar_action("claude"),
-            RadarCommand::Show(RadarTarget::Claude)
-        );
-        assert_eq!(
-            parse_radar_action("issue codex"),
-            RadarCommand::Issue(RadarIssueTarget::Codex)
-        );
-        assert_eq!(
-            parse_radar_action("issue claude"),
-            RadarCommand::Issue(RadarIssueTarget::Claude)
-        );
-        assert_eq!(parse_radar_action("unknown"), RadarCommand::Usage);
-    }
-
-    #[test]
-    fn format_radar_reply_hides_missing_fields_and_surfaces_partial_failure() {
-        let body = format_radar_reply(
-            &RadarSnapshot {
-                codex: Some(CodexRadarSummary {
-                    status: None,
-                    updated_at: None,
-                    action: None,
-                    window_message: None,
-                    prediction_level: None,
-                    probability_24h: None,
-                    model_score: None,
-                    model_status: None,
-                    model_passed: None,
-                    model_tasks: None,
-                    model_label: None,
-                    iq_models: Vec::new(),
-                    quota_5h_20x: None,
-                    quota_7d_20x: None,
-                    source_url: "https://codexradar.com/".to_owned(),
-                    feedback_url: "https://codexradar.com/".to_owned(),
-                }),
-                claude: None,
-                failures: vec![RadarSourceFailure {
-                    source: RadarSourceKind::Claude,
-                    code: "timeout".to_owned(),
-                    stage: "radar_claude_data".to_owned(),
-                }],
-            },
-            RadarTarget::All,
-        );
-
-        assert!(body.text.contains("AI 雷达速览"));
-        assert!(body.text.contains("Codex Radar 当前只有部分公开数据可读。"));
-        assert!(!body.text.contains("额度：未返回"));
-        assert!(!body.text.contains("IQ：未返回"));
-        assert!(!body.text.contains("状态未返回"));
-        assert!(body.text.contains("Claude Code Radar：读取超时"));
-        assert!(body.markdown.unwrap().contains("## 读取提示"));
-    }
-
-    #[test]
-    fn format_codex_detail_adds_single_hidden_field_hint() {
-        let body = format_radar_reply(
-            &RadarSnapshot {
-                codex: Some(CodexRadarSummary {
-                    status: Some("community_confirmed".to_owned()),
-                    updated_at: Some("2026-06-30T18:39:12+08:00".to_owned()),
-                    action: Some("reset_completed".to_owned()),
-                    window_message: Some("社区反馈已完成重置".to_owned()),
-                    prediction_level: Some("high".to_owned()),
-                    probability_24h: Some(0.36),
-                    model_score: None,
-                    model_status: None,
-                    model_passed: None,
-                    model_tasks: None,
-                    model_label: None,
-                    iq_models: Vec::new(),
-                    quota_5h_20x: None,
-                    quota_7d_20x: None,
-                    source_url: "https://codexradar.com/".to_owned(),
-                    feedback_url: "https://codexradar.com/".to_owned(),
-                }),
-                claude: None,
-                failures: Vec::new(),
-            },
-            RadarTarget::Codex,
-        );
-
-        assert!(body.text.contains("Codex：社区确认 · 重置已完成"));
-        assert!(body.text.contains("短线概率：偏高 · 24h 36%"));
-        assert!(
-            body.text
-                .contains("部分指标当前公开接口未返回，已隐藏空字段。")
-        );
-        assert!(!body.text.contains("community_confirmed"));
-        assert!(!body.text.contains("reset_completed"));
-        assert!(!body.text.contains("额度：未返回"));
-        assert!(!body.text.contains("IQ：未返回"));
-    }
-
-    #[test]
-    fn format_codex_detail_shows_top_model_and_complete_current_list() {
-        let body = format_radar_reply(
-            &RadarSnapshot {
-                codex: Some(CodexRadarSummary {
-                    status: Some("community_confirmed".to_owned()),
-                    updated_at: Some("2026-06-30T18:39:12+08:00".to_owned()),
-                    action: Some("reset_completed".to_owned()),
-                    window_message: None,
-                    prediction_level: None,
-                    probability_24h: None,
-                    model_score: Some(60.0),
-                    model_status: Some("red".to_owned()),
-                    model_passed: Some(4),
-                    model_tasks: Some(10),
-                    model_label: Some("GPT-5.5 xhigh".to_owned()),
-                    iq_models: vec![
-                        CodexModelMetric {
-                            label: "GPT-5.5 xhigh".to_owned(),
-                            score: Some(60.0),
-                            status: Some("red".to_owned()),
-                            passed: Some(4),
-                            tasks: Some(10),
-                        },
-                        CodexModelMetric {
-                            label: "GPT-5.4 xhigh".to_owned(),
-                            score: Some(90.0),
-                            status: Some("yellow".to_owned()),
-                            passed: Some(6),
-                            tasks: Some(10),
-                        },
-                    ],
-                    quota_5h_20x: None,
-                    quota_7d_20x: None,
-                    source_url: "https://codexradar.com/".to_owned(),
-                    feedback_url: "https://codexradar.com/".to_owned(),
-                }),
-                claude: None,
-                failures: Vec::new(),
-            },
-            RadarTarget::Codex,
-        );
-
-        assert!(
-            body.text
-                .contains("最高模型：GPT-5.4 xhigh · IQ 90 · 略低 · 6/10")
-        );
-        assert!(body.text.contains("完整模型列表："));
-        assert!(body.text.contains("GPT-5.5 xhigh · IQ 60 · 偏低 · 4/10"));
-        assert!(body.text.contains("GPT-5.4 xhigh · IQ 90 · 略低 · 6/10"));
-    }
-
-    #[test]
-    fn format_claude_detail_uses_trial_copy_when_metrics_are_missing() {
-        let body = format_radar_reply(
-            &RadarSnapshot {
-                codex: None,
-                claude: Some(ClaudeRadarSummary {
-                    status: Some("ok".to_owned()),
-                    updated_at: Some("2026-07-05T09:37:50+08:00".to_owned()),
-                    quota_updated_at: None,
-                    quota_5h: None,
-                    quota_7d: None,
-                    usage_5h: None,
-                    usage_7d: None,
-                    top_iq_model: None,
-                    top_rating_model: None,
-                    source_url: "https://claudecoderadar.com/".to_owned(),
-                    feedback_url: "https://claudecoderadar.com/".to_owned(),
-                }),
-                failures: Vec::new(),
-            },
-            RadarTarget::Claude,
-        );
-
-        assert!(body.text.contains("状态：🧪 试运行中"));
-        assert!(body.text.contains("额度雷达：等待真实数据"));
-        assert!(body.text.contains("降智雷达：等待真实数据"));
-        assert!(body.text.contains("社区体感分：正在读取"));
-        assert!(!body.text.contains("额度：未返回"));
-        assert!(!body.text.contains("IQ：未返回"));
     }
 }

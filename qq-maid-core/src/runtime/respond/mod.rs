@@ -51,7 +51,6 @@ mod memory_flow;
 mod ops_flow;
 mod pending;
 mod pending_dispatch;
-mod radar_flow;
 mod router;
 mod rss_flow;
 pub(crate) mod search_flow;
@@ -272,7 +271,7 @@ pub struct RustRespondService {
     /// 列车时刻查询执行器
     train_executor: DynTrainExecutor,
     /// Codex / Claude Code Radar 公开数据读取执行器
-    radar_executor: DynRadarExecutor,
+    pub(crate) radar_executor: DynRadarExecutor,
     /// 长期记忆存储
     pub(crate) memory_store: MemoryStore,
     /// 会话记录存储

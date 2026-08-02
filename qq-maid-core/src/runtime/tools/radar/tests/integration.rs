@@ -3,7 +3,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use super::support::*;
+use crate::runtime::respond::tests::support::*;
 
 #[tokio::test]
 async fn radar_command_accepts_rader_alias_and_returns_overview() {
@@ -77,7 +77,9 @@ async fn radar_command_can_show_only_codex() {
     assert!(text.contains("额度：20x Pro 5h 281.91 / 7d 1691.46"));
     assert!(text.contains("模型体感：GPT-5.5 xhigh · IQ 60 · 偏低 · 4/10"));
     assert!(text.contains("最高模型：GPT-5.4 xhigh · IQ 90 · 略低 · 6/10"));
-    assert!(text.contains("完整模型列表："));
+    assert!(text.contains("IQ 前五配置："));
+    assert!(text.contains("24h 社区评分前五："));
+    assert!(text.contains("DeepSeek V4 Flash max · 8.10/10 · 57 票"));
     assert!(!text.contains("community_confirmed"));
     assert!(!text.contains("reset_completed"));
     assert!(!text.contains("red"));
