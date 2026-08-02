@@ -206,6 +206,9 @@ fn format_codex_detail_shows_ranked_iq_quota_and_cross_vendor_ratings() {
         body.text
             .contains("数据来自 Codex 雷达：https://codexradar.com/")
     );
+    assert!(body.text.contains("模型数据：2026-06-30 18:39:12"));
+    assert!(body.text.contains("额度数据：2026-07-30 16:20:35"));
+    assert!(body.text.contains("社区评分：2026-08-02 20:42:22"));
 }
 
 #[test]
@@ -237,4 +240,5 @@ fn format_claude_detail_uses_trial_copy_when_metrics_are_missing() {
     assert!(body.text.contains("社区体感分：正在读取"));
     assert!(!body.text.contains("额度：未返回"));
     assert!(!body.text.contains("IQ：未返回"));
+    assert!(body.text.contains("更新时间：2026-07-05 09:37:50"));
 }

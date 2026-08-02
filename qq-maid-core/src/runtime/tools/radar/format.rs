@@ -3,7 +3,10 @@
 //! 具体指标选择、排序、兼容文案和来源标注属于 Radar 领域规则，Respond 层只消费
 //! 已渲染的双通道命令正文。
 
-use qq_maid_common::markdown::{escape_inline, escape_text};
+use qq_maid_common::{
+    markdown::{escape_inline, escape_text},
+    time_context::format_local_time_for_display,
+};
 
 use crate::{
     error::LlmError,
@@ -165,13 +168,13 @@ fn append_codex_detail_card(render: &mut CommandRender, summary: &CodexRadarSumm
 
     render.blank();
     render.subtitle("更新 / 来源");
-    if let Some(updated) = display_optional(summary.updated_at.as_deref()) {
+    if let Some(updated) = display_timestamp(summary.updated_at.as_deref()) {
         render.bullet(&format!("模型数据：{updated}"));
     }
-    if let Some(updated) = display_optional(summary.quota_updated_at.as_deref()) {
+    if let Some(updated) = display_timestamp(summary.quota_updated_at.as_deref()) {
         render.bullet(&format!("额度数据：{updated}"));
     }
-    if let Some(updated) = display_optional(summary.rating_updated_at.as_deref()) {
+    if let Some(updated) = display_timestamp(summary.rating_updated_at.as_deref()) {
         render.bullet(&format!("社区评分：{updated}"));
     }
     append_link(render, "数据来自 Codex 雷达", &summary.source_url);
@@ -212,10 +215,10 @@ fn append_claude_detail_card(render: &mut CommandRender, summary: &ClaudeRadarSu
 
     render.blank();
     render.subtitle("更新 / 来源");
-    if let Some(updated) = display_optional(summary.updated_at.as_deref()) {
+    if let Some(updated) = display_timestamp(summary.updated_at.as_deref()) {
         render.bullet(&format!("更新时间：{updated}"));
     }
-    if let Some(updated) = display_optional(summary.quota_updated_at.as_deref()) {
+    if let Some(updated) = display_timestamp(summary.quota_updated_at.as_deref()) {
         render.bullet(&format!("额度更新时间：{updated}"));
     }
     append_link(render, "来源", &summary.source_url);
@@ -565,6 +568,15 @@ fn format_failure(failure: &RadarSourceFailure) -> String {
 fn display_optional(value: Option<&str>) -> Option<String> {
     value
         .map(|value| truncate_chars(value, RADAR_SUMMARY_MAX_CHARS))
+        .filter(|value| !value.trim().is_empty())
+}
+
+/// 统一把上游时间戳转成本地可读时间，避免 Radar 卡片直接暴露 RFC3339 的 `T`/`Z`。
+/// 无法解析的值仍保留原文，便于排查上游字段格式变化。
+fn display_timestamp(value: Option<&str>) -> Option<String> {
+    value
+        .map(format_local_time_for_display)
+        .map(|value| truncate_chars(&value, RADAR_SUMMARY_MAX_CHARS))
         .filter(|value| !value.trim().is_empty())
 }
 
