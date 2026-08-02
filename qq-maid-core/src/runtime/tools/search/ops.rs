@@ -17,8 +17,9 @@ use crate::error::LlmError;
 
 use super::{
     WEB_SEARCH_EMPTY_RESULT_MODEL_MESSAGE, WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME,
-    WebSearchTool, WebSearchToolRequest, optional_string_field, parse_context_size,
-    parse_max_results, parse_time_range, parse_topic, web_search_outcome_has_evidence,
+    WebSearchArgumentError, WebSearchTool, WebSearchToolError, WebSearchToolRequest,
+    optional_string_field, parse_context_size, parse_max_results, parse_time_range, parse_topic,
+    web_search_outcome_has_evidence,
 };
 
 pub(super) const WEB_SEARCH_RESEARCH_MAX_TARGETS: usize = 5;
@@ -40,7 +41,7 @@ pub(super) async fn execute_research(
     context: &ToolContext,
     arguments: &Value,
     targets: Vec<ResearchTarget>,
-) -> Result<ToolOutput, LlmError> {
+) -> Result<ToolOutput, WebSearchToolError> {
     let dimensions = parse_comparison_dimensions(arguments.get("comparison_dimensions"))?;
     let raw_question = optional_string_field(arguments, "raw_question");
     let max_results = parse_max_results(arguments.get("max_results"))?;
@@ -146,7 +147,7 @@ pub(super) async fn execute_research(
 
 pub(super) fn parse_research_targets(
     value: Option<&Value>,
-) -> Result<Option<Vec<ResearchTarget>>, LlmError> {
+) -> Result<Option<Vec<ResearchTarget>>, WebSearchArgumentError> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -154,19 +155,25 @@ pub(super) fn parse_research_targets(
         return Ok(None);
     }
     let items = value.as_array().ok_or_else(|| {
-        LlmError::new(
-            "bad_tool_arguments",
+        WebSearchArgumentError::new(
+            "research_targets",
+            "invalid_type",
             "research_targets must be an array or null",
-            "tool",
+            Some(value),
+            None,
+            None,
         )
     })?;
     if !(2..=WEB_SEARCH_RESEARCH_MAX_TARGETS).contains(&items.len()) {
-        return Err(LlmError::new(
-            "bad_tool_arguments",
+        return Err(WebSearchArgumentError::new(
+            "research_targets",
+            "out_of_range",
             format!(
                 "research_targets must contain between 2 and {WEB_SEARCH_RESEARCH_MAX_TARGETS} items"
             ),
-            "tool",
+            Some(value),
+            None,
+            None,
         ));
     }
     items
@@ -185,7 +192,9 @@ pub(super) fn parse_research_targets(
         .map(Some)
 }
 
-pub(super) fn parse_comparison_dimensions(value: Option<&Value>) -> Result<Vec<String>, LlmError> {
+pub(super) fn parse_comparison_dimensions(
+    value: Option<&Value>,
+) -> Result<Vec<String>, WebSearchArgumentError> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
@@ -193,17 +202,23 @@ pub(super) fn parse_comparison_dimensions(value: Option<&Value>) -> Result<Vec<S
         return Ok(Vec::new());
     }
     let items = value.as_array().ok_or_else(|| {
-        LlmError::new(
-            "bad_tool_arguments",
+        WebSearchArgumentError::new(
+            "comparison_dimensions",
+            "invalid_type",
             "comparison_dimensions must be an array or null",
-            "tool",
+            Some(value),
+            None,
+            None,
         )
     })?;
     if items.len() > 8 {
-        return Err(LlmError::new(
-            "bad_tool_arguments",
+        return Err(WebSearchArgumentError::new(
+            "comparison_dimensions",
+            "out_of_range",
             "comparison_dimensions must not contain more than 8 items",
-            "tool",
+            Some(value),
+            None,
+            None,
         ));
     }
     items
@@ -212,34 +227,80 @@ pub(super) fn parse_comparison_dimensions(value: Option<&Value>) -> Result<Vec<S
             let text = item.as_str().map(str::trim).filter(|text| !text.is_empty());
             match text {
                 Some(text) if text.chars().count() <= 80 => Ok(text.to_owned()),
-                _ => Err(LlmError::new(
-                    "bad_tool_arguments",
+                Some(_text) => Err(WebSearchArgumentError::new(
+                    "comparison_dimensions",
+                    "too_long",
                     "comparison dimension must be a non-empty string up to 80 characters",
-                    "tool",
+                    Some(item),
+                    None,
+                    None,
+                )),
+                None => Err(WebSearchArgumentError::new(
+                    "comparison_dimensions",
+                    if item.is_null() || item.as_str().is_some() {
+                        "missing_or_empty"
+                    } else {
+                        "invalid_type"
+                    },
+                    "comparison dimension must be a non-empty string up to 80 characters",
+                    Some(item),
+                    None,
+                    None,
                 )),
             }
         })
         .collect()
 }
 
-fn required_bounded_string(value: &Value, key: &str, max_chars: usize) -> Result<String, LlmError> {
-    let text = value
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .ok_or_else(|| {
-            LlmError::new(
-                "bad_tool_arguments",
-                format!("research target requires non-empty {key}"),
-                "tool",
-            )
-        })?;
+fn required_bounded_string(
+    value: &Value,
+    key: &str,
+    max_chars: usize,
+) -> Result<String, WebSearchArgumentError> {
+    let field = format!("research_targets.{key}");
+    let Some(raw_value) = value.get(key) else {
+        return Err(WebSearchArgumentError::new(
+            field,
+            "missing_or_empty",
+            format!("research target requires non-empty {key}"),
+            None,
+            None,
+            (key == "query").then_some(0),
+        ));
+    };
+    let Some(text) = raw_value.as_str() else {
+        return Err(WebSearchArgumentError::new(
+            field,
+            if raw_value.is_null() {
+                "missing_or_empty"
+            } else {
+                "invalid_type"
+            },
+            format!("research target requires non-empty {key}"),
+            Some(raw_value),
+            None,
+            None,
+        ));
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(WebSearchArgumentError::new(
+            field,
+            "missing_or_empty",
+            format!("research target requires non-empty {key}"),
+            Some(raw_value),
+            None,
+            (key == "query").then_some(0),
+        ));
+    }
     if text.chars().count() > max_chars {
-        return Err(LlmError::new(
-            "bad_tool_arguments",
+        return Err(WebSearchArgumentError::new(
+            field,
+            "too_long",
             format!("research target {key} is too long"),
-            "tool",
+            Some(raw_value),
+            None,
+            (key == "query").then_some(text.chars().count()),
         ));
     }
     Ok(text.to_owned())
@@ -249,7 +310,7 @@ fn optional_bounded_string(
     value: &Value,
     key: &str,
     max_chars: usize,
-) -> Result<Option<String>, LlmError> {
+) -> Result<Option<String>, WebSearchArgumentError> {
     let Some(value) = value.get(key) else {
         return Ok(None);
     };
@@ -257,20 +318,26 @@ fn optional_bounded_string(
         return Ok(None);
     }
     let text = value.as_str().map(str::trim).ok_or_else(|| {
-        LlmError::new(
-            "bad_tool_arguments",
+        WebSearchArgumentError::new(
+            format!("research_targets.{key}"),
+            "invalid_type",
             format!("research target {key} must be a string or null"),
-            "tool",
+            Some(value),
+            None,
+            None,
         )
     })?;
     if text.is_empty() {
         return Ok(None);
     }
     if text.chars().count() > max_chars {
-        return Err(LlmError::new(
-            "bad_tool_arguments",
+        return Err(WebSearchArgumentError::new(
+            format!("research_targets.{key}"),
+            "too_long",
             format!("research target {key} is too long"),
-            "tool",
+            Some(value),
+            None,
+            None,
         ));
     }
     Ok(Some(text.to_owned()))
