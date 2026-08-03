@@ -236,3 +236,50 @@ export interface TodoTargetPage {
   total: number;
   totalPages: number;
 }
+
+export type KnowledgeFileStatus = "pending" | "processing" | "ready" | "failed";
+
+export type KnowledgeFileSource = "managed" | "directory";
+
+export interface KnowledgeFileItem {
+  readonly file_id: string | null;
+  readonly filename: string;
+  readonly content_type: string;
+  readonly size: number | null;
+  readonly source: KnowledgeFileSource;
+  readonly source_label: string;
+  readonly status: KnowledgeFileStatus;
+  readonly uploaded_at: string | null;
+  readonly processing_started_at: string | null;
+  readonly processed_at: string | null;
+  readonly updated_at: string;
+  readonly error_code: string | null;
+  readonly error_summary: string | null;
+  readonly chunk_count: number | null;
+  readonly embedding_count: number | null;
+  readonly downloadable: boolean;
+  readonly download_url: string | null;
+}
+
+export interface KnowledgeFilePage {
+  items: KnowledgeFileItem[];
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+}
+
+export interface KnowledgeFileCapabilities {
+  supported_extensions: string[];
+  max_file_bytes: number;
+  max_filename_chars: number;
+}
+
+export interface KnowledgeFileListParams {
+  page: number;
+  page_size: number;
+  search: string;
+  status: KnowledgeFileStatus | "all";
+  sort: "uploaded_at" | "updated_at";
+  order: "asc" | "desc";
+}

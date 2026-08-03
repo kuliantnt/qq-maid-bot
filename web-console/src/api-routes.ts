@@ -43,6 +43,15 @@ export const USER_DATA_ROUTES = {
   filesGet: (fileId: string): string => `/api/v1/console/files/get/${fileId}`,
 } as const;
 
+export const KNOWLEDGE_ROUTES = {
+  capabilities: "/api/v1/console/knowledge/files/capabilities",
+  list: "/api/v1/console/knowledge/files/list",
+  upload: "/api/v1/console/knowledge/files/upload",
+  delete: "/api/v1/console/knowledge/files/delete",
+  retry: "/api/v1/console/knowledge/files/retry",
+  get: (fileId: string): string => `/api/v1/console/knowledge/files/get/${fileId}`,
+} as const;
+
 export const STATUS_ROUTE = "/api/v1/console/status";
 export const RESTART_ROUTE = "/api/v1/console/restart";
 export const MARKDOWN_RENDER_ROUTE = "/api/v1/markdown/render";
