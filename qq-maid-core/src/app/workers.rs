@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crate::runtime::{
     notification::{NotificationWorker, NotificationWorkerConfig},
     push::PushSink,
+    tools::knowledge::{KnowledgeFileService, KnowledgeFileWorker},
     tools::memory::{MemoryConsolidationConfig, MemoryConsolidationWorker},
     tools::rss::{RssScheduler, RssSchedulerConfig},
     tools::{TodoReminderScheduler, TodoReminderSchedulerConfig, TodoReminderSentHook},
@@ -22,12 +23,14 @@ pub struct CoreWorkers {
     pub rss_scheduler: Option<RssScheduler>,
     pub notification_worker: Option<NotificationWorker>,
     pub todo_reminder_scheduler: Option<TodoReminderScheduler>,
+    pub knowledge_file_worker: Option<KnowledgeFileWorker>,
 }
 
 impl CoreWorkers {
     pub fn from_runtime_state(
         state: &CoreRuntimeState,
         push_sink: Option<Arc<dyn PushSink>>,
+        knowledge_file_service: Option<KnowledgeFileService>,
     ) -> anyhow::Result<Self> {
         let config = &state.config;
         let memory_consolidation_worker = config.memory_consolidation_enabled.then(|| {
@@ -103,12 +106,16 @@ impl CoreWorkers {
         } else {
             None
         };
+        let knowledge_file_worker = knowledge_file_service
+            .map(KnowledgeFileWorker::new)
+            .transpose()?;
 
         Ok(Self {
             memory_consolidation_worker,
             rss_scheduler,
             notification_worker,
             todo_reminder_scheduler,
+            knowledge_file_worker,
         })
     }
 
@@ -124,6 +131,9 @@ impl CoreWorkers {
         }
         if let Some(scheduler) = self.todo_reminder_scheduler.clone() {
             scheduler.spawn();
+        }
+        if let Some(worker) = self.knowledge_file_worker.clone() {
+            worker.spawn();
         }
     }
 }

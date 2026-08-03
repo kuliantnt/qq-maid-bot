@@ -16,3 +16,4 @@ pub use user_data::{
     ConsoleUserDataService, MAX_CONSOLE_FILE_BYTES, PreferenceValuePatch, UserFile,
     UserFileContent, UserFilePage, UserPreferences, UserPreferencesPatch,
 };
+pub(crate) use user_data::{MAX_ORIGINAL_FILENAME_CHARS, StagedFileDeletion};

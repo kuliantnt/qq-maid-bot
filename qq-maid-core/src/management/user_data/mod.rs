@@ -12,6 +12,8 @@ use crate::storage::database::{SqliteDatabase, SqliteMigration};
 mod files;
 mod preferences;
 
+pub(crate) use files::StagedFileDeletion;
+
 pub const MAX_CONSOLE_FILE_BYTES: usize = 10 * 1024 * 1024;
 pub(crate) const MAX_CUSTOM_COLORS: usize = 32;
 pub(crate) const MAX_CUSTOM_COLOR_CHARS: usize = 64;

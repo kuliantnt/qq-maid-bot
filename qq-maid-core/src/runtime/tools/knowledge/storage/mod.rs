@@ -3,7 +3,7 @@
 //! 知识库复用项目级 `APP_DB_FILE`，只保存自动扫描得到的文档与分段索引。
 //! 这里不读取文件系统、不理解 Markdown 结构，避免 storage 层承载运行时扫描语义。
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::storage::{
     database::{DatabaseError, SqliteDatabase, SqliteMigration},
@@ -78,10 +78,39 @@ pub const KNOWLEDGE_SCHEMA_V3: SqliteMigration = SqliteMigration {
             ON knowledge_chunk_embeddings(model, embedding_version, dimensions);",
 };
 
+/// 控制台托管文件的来源、处理状态和安全失败摘要；历史目录文档不写入此表。
+pub const KNOWLEDGE_SCHEMA_V4: SqliteMigration = SqliteMigration {
+    name: "knowledge_schema_v4_managed_files",
+    sql: "ALTER TABLE knowledge_documents
+            ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'directory'
+            CHECK(source_kind IN ('directory', 'managed'));
+        CREATE TABLE IF NOT EXISTS knowledge_managed_files (
+            file_id TEXT PRIMARY KEY,
+            document_key TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'processing', 'ready', 'failed')),
+            uploaded_at TEXT NOT NULL,
+            processing_started_at TEXT,
+            processed_at TEXT,
+            updated_at TEXT NOT NULL,
+            content_hash TEXT,
+            error_code TEXT,
+            error_summary TEXT,
+            chunk_count INTEGER NOT NULL DEFAULT 0 CHECK(chunk_count >= 0),
+            embedding_count INTEGER NOT NULL DEFAULT 0 CHECK(embedding_count >= 0),
+            FOREIGN KEY(file_id) REFERENCES console_user_files(file_id) ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS idx_knowledge_managed_status_updated
+            ON knowledge_managed_files(status, updated_at, file_id);
+        CREATE INDEX IF NOT EXISTS idx_knowledge_managed_document_key
+            ON knowledge_managed_files(document_key);",
+};
+
 pub const KNOWLEDGE_MIGRATIONS: &[SqliteMigration] = &[
     KNOWLEDGE_SCHEMA_V1,
     KNOWLEDGE_SCHEMA_V2,
     KNOWLEDGE_SCHEMA_V3,
+    KNOWLEDGE_SCHEMA_V4,
 ];
 
 /// 待写入数据库的知识片段。
@@ -163,6 +192,10 @@ impl KnowledgeStore {
         Self { database }
     }
 
+    pub(crate) fn database(&self) -> &SqliteDatabase {
+        &self.database
+    }
+
     #[cfg(test)]
     pub(crate) fn database_for_test(&self) -> &SqliteDatabase {
         &self.database
@@ -214,6 +247,25 @@ impl KnowledgeStore {
             .map_err(DatabaseError::from_sql)
     }
 
+    /// 启动目录同步只处理没有托管关联的历史文档，不能误删控制台上传的索引。
+    pub(crate) fn list_directory_document_paths(&self) -> Result<Vec<String>, DatabaseError> {
+        let conn = self.database.connection()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT d.relative_path
+                 FROM knowledge_documents d
+                 LEFT JOIN knowledge_managed_files m ON m.document_key = d.relative_path
+                 WHERE d.source_kind = 'directory' AND m.file_id IS NULL
+                 ORDER BY d.relative_path",
+            )
+            .map_err(DatabaseError::from_sql)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(DatabaseError::from_sql)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(DatabaseError::from_sql)
+    }
+
     pub fn replace_document(
         &self,
         relative_path: &str,
@@ -221,8 +273,72 @@ impl KnowledgeStore {
         modified_at: Option<&str>,
         chunks: &[KnowledgeChunkDraft],
     ) -> Result<(), DatabaseError> {
+        self.replace_document_with_kind(relative_path, file_hash, modified_at, chunks, "directory")
+    }
+
+    pub(crate) fn replace_managed_document(
+        &self,
+        relative_path: &str,
+        file_hash: &str,
+        modified_at: Option<&str>,
+        chunks: &[KnowledgeChunkDraft],
+    ) -> Result<(), DatabaseError> {
+        self.replace_document_with_kind(relative_path, file_hash, modified_at, chunks, "managed")
+    }
+
+    fn replace_document_with_kind(
+        &self,
+        relative_path: &str,
+        file_hash: &str,
+        modified_at: Option<&str>,
+        chunks: &[KnowledgeChunkDraft],
+        source_kind: &str,
+    ) -> Result<(), DatabaseError> {
         let mut conn = self.database.connection()?;
         let tx = conn.transaction().map_err(DatabaseError::from_sql)?;
+        Self::replace_document_in_transaction(
+            &tx,
+            relative_path,
+            file_hash,
+            modified_at,
+            chunks,
+            None,
+            source_kind,
+        )?;
+        tx.commit().map_err(DatabaseError::from_sql)
+    }
+
+    pub(crate) fn replace_document_with_embeddings(
+        &self,
+        relative_path: &str,
+        file_hash: &str,
+        modified_at: Option<&str>,
+        chunks: &[KnowledgeChunkDraft],
+        embedding_batch: (&str, i64, &[KnowledgeEmbeddingRecord]),
+    ) -> Result<(), DatabaseError> {
+        let mut conn = self.database.connection()?;
+        let tx = conn.transaction().map_err(DatabaseError::from_sql)?;
+        Self::replace_document_in_transaction(
+            &tx,
+            relative_path,
+            file_hash,
+            modified_at,
+            chunks,
+            Some(embedding_batch),
+            "managed",
+        )?;
+        tx.commit().map_err(DatabaseError::from_sql)
+    }
+
+    fn replace_document_in_transaction(
+        tx: &Transaction<'_>,
+        relative_path: &str,
+        file_hash: &str,
+        modified_at: Option<&str>,
+        chunks: &[KnowledgeChunkDraft],
+        embeddings: Option<(&str, i64, &[KnowledgeEmbeddingRecord])>,
+        source_kind: &str,
+    ) -> Result<(), DatabaseError> {
         let indexed_at = now_iso_cn();
         let chunking_version = chunks
             .first()
@@ -230,19 +346,21 @@ impl KnowledgeStore {
             .unwrap_or(2);
         tx.execute(
             "INSERT INTO knowledge_documents (
-                relative_path, file_hash, modified_at, indexed_at, chunking_version
+                relative_path, file_hash, modified_at, indexed_at, source_kind, chunking_version
              )
-             VALUES (?1, ?2, ?3, ?4, ?5)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(relative_path) DO UPDATE SET
                 file_hash = excluded.file_hash,
                 modified_at = excluded.modified_at,
                 indexed_at = excluded.indexed_at,
+                source_kind = excluded.source_kind,
                 chunking_version = excluded.chunking_version",
             params![
                 relative_path,
                 file_hash,
                 modified_at,
                 indexed_at,
+                source_kind,
                 chunking_version
             ],
         )
@@ -320,12 +438,40 @@ impl KnowledgeStore {
             .map_err(DatabaseError::from_sql)?;
         }
 
-        tx.commit().map_err(DatabaseError::from_sql)
+        if let Some((model, embedding_version, embeddings)) = embeddings {
+            for embedding in embeddings {
+                tx.execute(
+                    "INSERT INTO knowledge_chunk_embeddings (
+                        chunk_id, model, dimensions, embedding_version,
+                        content_hash, vector, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        embedding.chunk_id,
+                        model,
+                        embedding.vector.len() as i64,
+                        embedding_version,
+                        embedding.content_hash,
+                        encode_vector(&embedding.vector),
+                        indexed_at,
+                    ],
+                )
+                .map_err(DatabaseError::from_sql)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn delete_document(&self, relative_path: &str) -> Result<(), DatabaseError> {
         let mut conn = self.database.connection()?;
         let tx = conn.transaction().map_err(DatabaseError::from_sql)?;
+        Self::delete_document_in_transaction(&tx, relative_path)?;
+        tx.commit().map_err(DatabaseError::from_sql)
+    }
+
+    pub(crate) fn delete_document_in_transaction(
+        tx: &Transaction<'_>,
+        relative_path: &str,
+    ) -> Result<(), DatabaseError> {
         let mut stmt = tx
             .prepare(
                 "SELECT c.row_id
@@ -364,7 +510,7 @@ impl KnowledgeStore {
             params![relative_path],
         )
         .map_err(DatabaseError::from_sql)?;
-        tx.commit().map_err(DatabaseError::from_sql)
+        Ok(())
     }
 
     pub fn chunk_count(&self) -> Result<usize, DatabaseError> {
@@ -405,7 +551,10 @@ impl KnowledgeStore {
                     bm25(knowledge_chunks_fts) AS rank
                  FROM knowledge_chunks_fts
                  JOIN knowledge_chunks c ON c.row_id = knowledge_chunks_fts.rowid
+                 JOIN knowledge_documents d ON d.id = c.document_id
+                 LEFT JOIN knowledge_managed_files m ON m.document_key = d.relative_path
                  WHERE knowledge_chunks_fts MATCH ?1
+                   AND (d.source_kind = 'directory' OR m.status = 'ready')
                  ORDER BY rank
                  LIMIT ?2",
             )
@@ -449,22 +598,25 @@ impl KnowledgeStore {
         let mut stmt = conn
             .prepare(
                 "SELECT
-                    chunk_id,
-                    document_id,
-                    relative_path,
-                    document_title,
-                    heading_path,
-                    chunk_index,
-                    chunk_type,
-                    body,
-                    start_line,
-                    end_line,
-                    code_language,
-                    search_text
-                 FROM knowledge_chunks
-                 WHERE document_id = ?1
-                   AND ((?2 IS NULL AND heading_path IS NULL) OR heading_path = ?2)
-                 ORDER BY chunk_index",
+                    c.chunk_id,
+                    c.document_id,
+                    c.relative_path,
+                    c.document_title,
+                    c.heading_path,
+                    c.chunk_index,
+                    c.chunk_type,
+                    c.body,
+                    c.start_line,
+                    c.end_line,
+                    c.code_language,
+                    c.search_text
+                 FROM knowledge_chunks c
+                 JOIN knowledge_documents d ON d.id = c.document_id
+                 LEFT JOIN knowledge_managed_files m ON m.document_key = d.relative_path
+                 WHERE c.document_id = ?1
+                   AND (d.source_kind = 'directory' OR m.status = 'ready')
+                   AND ((?2 IS NULL AND c.heading_path IS NULL) OR c.heading_path = ?2)
+                 ORDER BY c.chunk_index",
             )
             .map_err(DatabaseError::from_sql)?;
         let rows = stmt
@@ -504,12 +656,16 @@ impl KnowledgeStore {
         let conn = self.database.connection()?;
         let mut stmt = conn
             .prepare(
-                "SELECT chunk_id, document_id, relative_path, document_title,
-                        heading_path, chunk_index, chunk_type, body, start_line,
-                        end_line, code_language, search_text
-                 FROM knowledge_chunks
-                 WHERE document_id = ?1 AND chunk_index IN (?2, ?3)
-                 ORDER BY chunk_index",
+                "SELECT c.chunk_id, c.document_id, c.relative_path, c.document_title,
+                        c.heading_path, c.chunk_index, c.chunk_type, c.body, c.start_line,
+                        c.end_line, c.code_language, c.search_text
+                 FROM knowledge_chunks c
+                 JOIN knowledge_documents d ON d.id = c.document_id
+                 LEFT JOIN knowledge_managed_files m ON m.document_key = d.relative_path
+                 WHERE c.document_id = ?1
+                   AND (d.source_kind = 'directory' OR m.status = 'ready')
+                   AND c.chunk_index IN (?2, ?3)
+                 ORDER BY c.chunk_index",
             )
             .map_err(DatabaseError::from_sql)?;
         let rows = stmt
@@ -564,7 +720,10 @@ impl KnowledgeStore {
                   AND e.model = ?1
                   AND e.embedding_version = ?2
                   AND e.content_hash = c.content_hash
+                 JOIN knowledge_documents d ON d.id = c.document_id
+                 LEFT JOIN knowledge_managed_files m ON m.document_key = d.relative_path
                  WHERE e.chunk_id IS NULL
+                   AND (d.source_kind = 'directory' OR m.status = 'ready')
                  ORDER BY c.document_id, c.chunk_index
                  LIMIT ?3",
             )
@@ -602,10 +761,13 @@ impl KnowledgeStore {
                  FROM knowledge_chunks c
                  LEFT JOIN knowledge_chunk_embeddings e
                    ON e.chunk_id = c.chunk_id
-                  AND e.model = ?1
+                 AND e.model = ?1
                   AND e.embedding_version = ?2
                   AND e.content_hash = c.content_hash
-                 WHERE e.chunk_id IS NULL",
+                 JOIN knowledge_documents d ON d.id = c.document_id
+                 LEFT JOIN knowledge_managed_files m ON m.document_key = d.relative_path
+                 WHERE e.chunk_id IS NULL
+                   AND (d.source_kind = 'directory' OR m.status = 'ready')",
                 params![model, embedding_version],
                 |row| row.get::<_, i64>(0),
             )
@@ -672,10 +834,13 @@ impl KnowledgeStore {
                     c.start_line, c.end_line, c.code_language, c.search_text, e.vector
                  FROM knowledge_chunk_embeddings e
                  JOIN knowledge_chunks c ON c.chunk_id = e.chunk_id
+                 JOIN knowledge_documents d ON d.id = c.document_id
+                 LEFT JOIN knowledge_managed_files m ON m.document_key = d.relative_path
                  WHERE e.model = ?1
                    AND e.embedding_version = ?2
                    AND e.dimensions = ?3
-                   AND e.content_hash = c.content_hash",
+                   AND e.content_hash = c.content_hash
+                   AND (d.source_kind = 'directory' OR m.status = 'ready')",
             )
             .map_err(DatabaseError::from_sql)?;
         let rows = stmt
@@ -776,96 +941,4 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> f64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::storage::database::SqliteDatabase;
-
-    fn test_store() -> KnowledgeStore {
-        KnowledgeStore::new(
-            SqliteDatabase::open_temp("qq-maid-knowledge", KNOWLEDGE_MIGRATIONS).unwrap(),
-        )
-    }
-
-    #[test]
-    fn replace_search_and_delete_document() {
-        let store = test_store();
-        store.ensure_fts5_available().unwrap();
-        store
-            .replace_document(
-                "example.md",
-                "file-hash",
-                Some("2026-06-26T00:00:00Z"),
-                &[KnowledgeChunkDraft {
-                    chunk_id: "example-md-0001-abcd".to_owned(),
-                    relative_path: "example.md".to_owned(),
-                    document_title: Some("知识示例".to_owned()),
-                    heading_path: Some("知识示例 / 中文检索".to_owned()),
-                    chunk_index: 0,
-                    chunk_type: "text".to_owned(),
-                    body: "编号 RAG-407 用于验证中文知识检索。".to_owned(),
-                    content_hash: "chunk-hash".to_owned(),
-                    file_hash: "file-hash".to_owned(),
-                    modified_at: Some("2026-06-26T00:00:00Z".to_owned()),
-                    start_line: Some(3),
-                    end_line: Some(3),
-                    code_language: None,
-                    chunking_version: 2,
-                    search_text: "编号 rag 407 中文 检索 知识".to_owned(),
-                }],
-            )
-            .unwrap();
-
-        assert_eq!(store.chunk_count().unwrap(), 1);
-        assert_eq!(
-            store
-                .document_state("example.md")
-                .unwrap()
-                .unwrap()
-                .file_hash,
-            "file-hash"
-        );
-        let results = store.search("rag 407", 5).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].relative_path, "example.md");
-        assert_eq!(results[0].chunk_index, 0);
-        assert_eq!(results[0].start_line, Some(3));
-
-        let missing = store
-            .missing_embedding_sources("fixture-model", 1, 1)
-            .unwrap();
-        assert_eq!(missing.len(), 1);
-        store
-            .upsert_embeddings(
-                "fixture-model",
-                1,
-                &[KnowledgeEmbeddingRecord {
-                    chunk_id: missing[0].chunk_id.clone(),
-                    content_hash: missing[0].content_hash.clone(),
-                    vector: vec![1.0, 0.0],
-                }],
-            )
-            .unwrap();
-        assert!(
-            store
-                .missing_embedding_sources("fixture-model", 1, 1)
-                .unwrap()
-                .is_empty()
-        );
-        let semantic = store
-            .semantic_search("fixture-model", 1, &[1.0, 0.0], 5)
-            .unwrap();
-        assert_eq!(semantic.len(), 1);
-        assert_eq!(semantic[0].origin, KnowledgeSearchOrigin::Semantic);
-        assert!((semantic[0].score - 1.0).abs() < f64::EPSILON);
-
-        store.delete_document("example.md").unwrap();
-        assert_eq!(store.chunk_count().unwrap(), 0);
-        assert!(store.search("rag 407", 5).unwrap().is_empty());
-        assert!(
-            store
-                .semantic_search("fixture-model", 1, &[1.0, 0.0], 5)
-                .unwrap()
-                .is_empty()
-        );
-    }
-}
+mod tests;

@@ -4,6 +4,7 @@
 //! Todo、后续 Memory 等资源仍各自维护领域 DTO、权限规则和业务服务。
 
 pub(crate) mod common;
+pub(crate) mod knowledge;
 pub(crate) mod todo;
 pub(crate) mod user_data;
 

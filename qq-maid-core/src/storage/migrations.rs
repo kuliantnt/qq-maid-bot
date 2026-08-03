@@ -8,7 +8,9 @@ use crate::{
     management::{
         CONSOLE_ADMIN_SCHEMA_V1, CONSOLE_USER_DATA_SCHEMA_V1, CONSOLE_USER_DATA_SCHEMA_V2,
     },
-    runtime::tools::knowledge::{KNOWLEDGE_SCHEMA_V1, KNOWLEDGE_SCHEMA_V2, KNOWLEDGE_SCHEMA_V3},
+    runtime::tools::knowledge::{
+        KNOWLEDGE_SCHEMA_V1, KNOWLEDGE_SCHEMA_V2, KNOWLEDGE_SCHEMA_V3, KNOWLEDGE_SCHEMA_V4,
+    },
     runtime::tools::memory::{
         MEMORY_CONSOLIDATION_SCHEMA_V4, MEMORY_DOMAIN_SCHEMA_V3, MEMORY_SCHEMA_V1,
         MEMORY_SCOPE_SCHEMA_V2,
@@ -71,6 +73,7 @@ pub const APP_MIGRATIONS: &[SqliteMigration] = &[
     KNOWLEDGE_SCHEMA_V1,
     KNOWLEDGE_SCHEMA_V2,
     KNOWLEDGE_SCHEMA_V3,
+    KNOWLEDGE_SCHEMA_V4,
 ];
 
 #[cfg(test)]

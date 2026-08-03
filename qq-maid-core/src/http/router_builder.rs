@@ -6,7 +6,7 @@ use axum::{
 };
 
 use super::{
-    api::{todo, user_data},
+    api::{knowledge, todo, user_data},
     console_routes::{
         console_asset, console_configuration, console_index, console_status, healthz,
         markdown_render, markdown_render_preflight,
@@ -30,6 +30,7 @@ pub fn build_router(state: OpsHttpState) -> Router {
                 post(markdown_render).options(markdown_render_preflight),
             )
             .merge(user_data::router())
+            .merge(knowledge::router(state.config.knowledge_max_file_bytes))
             .merge(todo::router())
             .merge(management_router())
     } else {

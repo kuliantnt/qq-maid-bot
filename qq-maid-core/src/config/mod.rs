@@ -51,6 +51,10 @@ pub const DEFAULT_SERVER_PORT: u16 = 8787; // 监听端口
 pub const DEFAULT_APP_DB_FILE: &str = "data/storage/app.db"; // 项目通用 SQLite 文件
 pub const DEFAULT_PROMPT_DIR: &str = "config/prompts"; // 提示词模板目录
 pub const DEFAULT_KNOWLEDGE_DIR: &str = "config/knowledge"; // Markdown 知识目录
+/// 控制台托管知识库的独立单文件上限；不改变通用文件的 10 MiB 上限。
+pub const DEFAULT_KNOWLEDGE_MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
+pub const MIN_KNOWLEDGE_MAX_FILE_BYTES: u64 = 16 * 1024;
+pub const MAX_KNOWLEDGE_MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
 const REMOVED_MEMBER_ID_MAPPING_FILE: &str = "config/member_id_mapping.json";
 static RESOLVED_ENVIRONMENT: OnceLock<HashMap<String, String>> = OnceLock::new();
 thread_local! {
@@ -254,6 +258,8 @@ pub struct AppConfig {
     pub prompt_dir_uses_builtin_defaults: bool,
     /// Markdown 知识目录；普通聊天会从已同步索引中按需检索相关片段。
     pub knowledge_dir: String,
+    /// 控制台托管知识库的独立单文件大小上限（字节）。
+    pub knowledge_max_file_bytes: u64,
     /// 和风天气 API 密钥；为空时天气能力关闭。
     pub qweather_api_key: String,
     /// 和风天气 API 主机地址
@@ -281,6 +287,8 @@ pub struct ManagementBootstrapConfig {
     pub web_console_allowed_origins: Vec<String>,
     pub web_console_trusted_proxy_ips: Vec<IpAddr>,
     pub web_console_secure_cookies: bool,
+    /// 管理恢复态也需要使用同一知识库 multipart body limit。
+    pub knowledge_max_file_bytes: u64,
 }
 
 impl AppConfig {
@@ -470,6 +478,12 @@ impl AppConfig {
                 .unwrap_or_else(default_prompt_dir),
             prompt_dir_uses_builtin_defaults: configured_prompt_dir.is_none(),
             knowledge_dir: env_optional("KNOWLEDGE_DIR").unwrap_or_else(default_knowledge_dir),
+            knowledge_max_file_bytes: env_u64_bounded_range(
+                "KNOWLEDGE_MAX_FILE_BYTES",
+                DEFAULT_KNOWLEDGE_MAX_FILE_BYTES,
+                MIN_KNOWLEDGE_MAX_FILE_BYTES,
+                MAX_KNOWLEDGE_MAX_FILE_BYTES,
+            )?,
             qweather_api_key,
             qweather_api_host,
             qweather_geo_host,
@@ -621,6 +635,12 @@ pub fn management_bootstrap_from_environment(
         web_console_allowed_origins: env_list("WEB_CONSOLE_ALLOWED_ORIGINS"),
         web_console_trusted_proxy_ips: env_ip_list("WEB_CONSOLE_TRUSTED_PROXY_IPS")?,
         web_console_secure_cookies: env_bool("WEB_CONSOLE_SECURE_COOKIES", false)?,
+        knowledge_max_file_bytes: env_u64_bounded_range(
+            "KNOWLEDGE_MAX_FILE_BYTES",
+            DEFAULT_KNOWLEDGE_MAX_FILE_BYTES,
+            MIN_KNOWLEDGE_MAX_FILE_BYTES,
+            MAX_KNOWLEDGE_MAX_FILE_BYTES,
+        )?,
     })
 }
 

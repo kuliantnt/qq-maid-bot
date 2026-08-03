@@ -4,7 +4,7 @@ use std::{
     path::{Component, Path},
 };
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::{
     ConsoleUserDataError, ConsoleUserDataService, MAX_CONSOLE_FILE_BYTES, MAX_CONTENT_TYPE_CHARS,
@@ -20,7 +20,25 @@ impl ConsoleUserDataService {
         content_type: String,
         bytes: Vec<u8>,
     ) -> Result<UserFile, ConsoleUserDataError> {
-        validate_upload(&filename, &content_type, bytes.len())?;
+        self.create_file_with_limit(
+            admin_id,
+            filename,
+            content_type,
+            bytes,
+            MAX_CONSOLE_FILE_BYTES,
+        )
+    }
+
+    /// 知识库复用同一套安全文件落盘流程，但由调用方传入独立大小上限。
+    pub(crate) fn create_file_with_limit(
+        &self,
+        admin_id: i64,
+        filename: String,
+        content_type: String,
+        bytes: Vec<u8>,
+        max_bytes: usize,
+    ) -> Result<UserFile, ConsoleUserDataError> {
+        validate_upload(&filename, &content_type, bytes.len(), max_bytes)?;
         ensure_file_root(&self.file_root)?;
 
         let file_id = uuid::Uuid::new_v4().hyphenated().to_string();
@@ -178,6 +196,92 @@ impl ConsoleUserDataService {
         }
         Ok(())
     }
+
+    /// 在调用方自己的 SQLite 事务内暂存原始文件，供知识库删除流程同时清理关联和派生数据。
+    /// 暂存名不带文件 ID，且不再通过任何 API 可达；事务失败时必须调用恢复方法。
+    pub(crate) fn stage_owned_file_deletion(
+        &self,
+        transaction: &Transaction<'_>,
+        admin_id: i64,
+        file_id: &str,
+    ) -> Result<StagedFileDeletion, ConsoleUserDataError> {
+        let metadata = find_owned_file(transaction, admin_id, file_id)?
+            .ok_or_else(|| ConsoleUserDataError::not_found("file not found"))?;
+        let original_path = storage_path(&self.file_root, &metadata.storage_filename)?;
+        let tombstone_path = self
+            .file_root
+            .join(format!(".delete-{}.tmp", uuid::Uuid::new_v4().hyphenated()));
+        fs::rename(&original_path, &tombstone_path).map_err(|error| {
+            ConsoleUserDataError::storage(format!("failed to stage stored file deletion: {error}"))
+        })?;
+        Ok(StagedFileDeletion {
+            original_path,
+            tombstone_path,
+        })
+    }
+
+    pub(crate) fn finish_staged_file_deletion(
+        &self,
+        staged: &StagedFileDeletion,
+    ) -> Result<(), ConsoleUserDataError> {
+        fs::remove_file(&staged.tombstone_path).map_err(|error| {
+            ConsoleUserDataError::storage(format!("failed to remove staged stored file: {error}"))
+        })
+    }
+
+    pub(crate) fn restore_staged_file_deletion(
+        &self,
+        staged: &StagedFileDeletion,
+    ) -> Result<(), ConsoleUserDataError> {
+        fs::rename(&staged.tombstone_path, &staged.original_path).map_err(|error| {
+            ConsoleUserDataError::storage(format!("failed to restore staged stored file: {error}"))
+        })
+    }
+
+    /// 知识库删除也必须清理可能被控制台偏好引用的同一文件 ID，保持通用文件删除不变量。
+    pub(crate) fn clean_file_references_in_transaction(
+        &self,
+        transaction: &Transaction<'_>,
+        admin_id: i64,
+        file_id: &str,
+    ) -> Result<(), ConsoleUserDataError> {
+        let cleaned_preferences = read_preferences(transaction, admin_id)?.map(|mut value| {
+            value
+                .background_file_ids
+                .retain(|background_id| background_id != file_id);
+            if value.active_background_file_id.as_deref() == Some(file_id) {
+                value.active_background_file_id = None;
+            }
+            value
+        });
+        if let Some(preferences) = cleaned_preferences.as_ref() {
+            write_cleaned_preferences(transaction, admin_id, preferences)?;
+        }
+        Ok(())
+    }
+
+    /// 知识库删除只有在没有其他已知业务引用时才能连带删除通用文件。
+    /// 当前通用文件的业务引用是用户偏好中的背景图列表；未来新增引用时必须在这里扩展。
+    pub(crate) fn has_other_file_references_in_transaction(
+        &self,
+        transaction: &Transaction<'_>,
+        admin_id: i64,
+        file_id: &str,
+    ) -> Result<bool, ConsoleUserDataError> {
+        let Some(preferences) = read_preferences(transaction, admin_id)? else {
+            return Ok(false);
+        };
+        Ok(preferences
+            .background_file_ids
+            .iter()
+            .any(|background_id| background_id == file_id)
+            || preferences.active_background_file_id.as_deref() == Some(file_id))
+    }
+}
+
+pub(crate) struct StagedFileDeletion {
+    original_path: std::path::PathBuf,
+    tombstone_path: std::path::PathBuf,
 }
 
 fn insert_file(
@@ -250,6 +354,7 @@ fn validate_upload(
     filename: &str,
     content_type: &str,
     size: usize,
+    max_bytes: usize,
 ) -> Result<(), ConsoleUserDataError> {
     if filename.is_empty() || filename.chars().count() > MAX_ORIGINAL_FILENAME_CHARS {
         return Err(ConsoleUserDataError::invalid(format!(
@@ -269,9 +374,9 @@ fn validate_upload(
     if axum::http::HeaderValue::from_str(content_type).is_err() {
         return Err(ConsoleUserDataError::invalid("content_type is invalid"));
     }
-    if size > MAX_CONSOLE_FILE_BYTES {
+    if size > max_bytes {
         return Err(ConsoleUserDataError::invalid(format!(
-            "file must not exceed {MAX_CONSOLE_FILE_BYTES} bytes"
+            "file must not exceed {max_bytes} bytes"
         )));
     }
     Ok(())

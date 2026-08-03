@@ -27,6 +27,7 @@ pub struct OpsHttpConfig {
     pub web_console_allowed_origins: Vec<String>,
     pub web_console_trusted_proxy_ips: Vec<std::net::IpAddr>,
     pub web_console_secure_cookies: bool,
+    pub knowledge_max_file_bytes: u64,
 }
 
 impl From<&AppConfig> for OpsHttpConfig {
@@ -36,6 +37,7 @@ impl From<&AppConfig> for OpsHttpConfig {
             web_console_allowed_origins: value.web_console_allowed_origins.clone(),
             web_console_trusted_proxy_ips: value.web_console_trusted_proxy_ips.clone(),
             web_console_secure_cookies: value.web_console_secure_cookies,
+            knowledge_max_file_bytes: value.knowledge_max_file_bytes,
         }
     }
 }
@@ -60,6 +62,8 @@ pub struct OpsHttpState {
     pub(crate) todo_management: Option<TodoManagementService>,
     /// 控制台用户私有偏好与通用文件领域门面。
     pub(crate) console_user_data: Option<ConsoleUserDataService>,
+    /// 知识库托管文件领域门面；与通用文件服务共享原始文件存储。
+    pub(crate) knowledge_files: Option<crate::runtime::tools::knowledge::KnowledgeFileService>,
     /// 当前进程真实注册的 Tool 元数据，供 WebUI 动态展示白名单选项。
     pub registered_tools: Arc<Vec<ConsoleToolMetadata>>,
     /// 仅复用部署目录中的受控 botctl 脚本，不直接操作 systemd 或 Docker。
@@ -81,6 +85,14 @@ impl OpsHttpState {
 
     pub(crate) fn with_console_user_data(mut self, service: ConsoleUserDataService) -> Self {
         self.console_user_data = Some(service);
+        self
+    }
+
+    pub(crate) fn with_knowledge_files(
+        mut self,
+        service: crate::runtime::tools::knowledge::KnowledgeFileService,
+    ) -> Self {
+        self.knowledge_files = Some(service);
         self
     }
 
@@ -108,6 +120,7 @@ impl OpsHttpState {
             admin_auth: None,
             todo_management: None,
             console_user_data: None,
+            knowledge_files: None,
             registered_tools: Arc::new(Vec::new()),
             restart_controller: ConsoleRestartController::default(),
             setup_required: false,
@@ -151,6 +164,7 @@ impl OpsHttpState {
             admin_auth,
             todo_management: None,
             console_user_data: None,
+            knowledge_files: None,
             registered_tools: Arc::new(Vec::new()),
             restart_controller: ConsoleRestartController::from_current_dir(),
             setup_required: false,
@@ -173,6 +187,7 @@ impl OpsHttpState {
             admin_auth,
             todo_management: None,
             console_user_data: None,
+            knowledge_files: None,
             registered_tools: Arc::new(Vec::new()),
             restart_controller: ConsoleRestartController::from_current_dir(),
             setup_required: true,
