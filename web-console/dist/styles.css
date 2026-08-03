@@ -384,19 +384,21 @@ textarea { width: 100%; min-height: 25rem; flex: 1; resize: vertical; padding: v
 }
 
 @media (max-width: 700px) {
-  .platform-table-wrap, .capability-table-wrap, .storage-table-wrap { overflow: visible; }
+  .platform-table-wrap, .capability-table-wrap, .storage-table-wrap, .knowledge-list { overflow: visible; }
   .platform-table-wrap table, .capability-table-wrap table, .storage-table-wrap table,
   .platform-table-wrap thead, .capability-table-wrap thead, .storage-table-wrap thead,
   .platform-table-wrap tbody, .capability-table-wrap tbody, .storage-table-wrap tbody,
   .platform-table-wrap tr, .capability-table-wrap tr, .storage-table-wrap tr,
   .platform-table-wrap th, .capability-table-wrap th, .storage-table-wrap th,
-  .platform-table-wrap td, .capability-table-wrap td, .storage-table-wrap td { display: block; }
-  .platform-table-wrap thead, .capability-table-wrap thead, .storage-table-wrap thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+  .platform-table-wrap td, .capability-table-wrap td, .storage-table-wrap td,
+  .knowledge-table, .knowledge-table thead, .knowledge-table tbody, .knowledge-table tr, .knowledge-table th, .knowledge-table td { display: block; }
+  .platform-table-wrap thead, .capability-table-wrap thead, .storage-table-wrap thead, .knowledge-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
   .platform-table-wrap tbody, .capability-table-wrap tbody, .storage-table-wrap tbody { padding: .25rem; }
-  .platform-table-wrap tr, .capability-table-wrap tr, .storage-table-wrap tr { margin-bottom: .55rem; padding: .65rem; border: 1px solid var(--console-line); background: var(--console-glass-muted); }
-  .platform-table-wrap td, .capability-table-wrap td, .storage-table-wrap td { display: grid; grid-template-columns: minmax(6.5rem, 34%) minmax(0, 1fr); gap: .7rem; padding: .45rem 0; border: 0; border-bottom: 1px solid var(--console-line); background: transparent; font-size: .76rem; }
-  .platform-table-wrap td:last-child, .capability-table-wrap td:last-child, .storage-table-wrap td:last-child { border-bottom: 0; }
-  .platform-table-wrap td::before, .capability-table-wrap td::before, .storage-table-wrap td::before { color: var(--muted); font-size: .62rem; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
+  .knowledge-table tbody { padding: .25rem; }
+  .platform-table-wrap tr, .capability-table-wrap tr, .storage-table-wrap tr, .knowledge-table tr { margin-bottom: .55rem; padding: .65rem; border: 1px solid var(--console-line); background: var(--console-glass-muted); }
+  .platform-table-wrap td, .capability-table-wrap td, .storage-table-wrap td, .knowledge-table td { display: grid; grid-template-columns: minmax(6.5rem, 34%) minmax(0, 1fr); gap: .7rem; padding: .45rem 0; border: 0; border-bottom: 1px solid var(--console-line); background: transparent; font-size: .76rem; }
+  .platform-table-wrap td:last-child, .capability-table-wrap td:last-child, .storage-table-wrap td:last-child, .knowledge-table td:last-child { border-bottom: 0; }
+  .platform-table-wrap td::before, .capability-table-wrap td::before, .storage-table-wrap td::before, .knowledge-table td::before { color: var(--muted); font-size: .62rem; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
   .platform-table-wrap td:nth-child(1)::before, .capability-table-wrap td:nth-child(1)::before { content: "平台"; }
   .platform-table-wrap td:nth-child(2)::before { content: "已配置"; }
   .platform-table-wrap td:nth-child(3)::before { content: "已启用"; }
@@ -419,6 +421,15 @@ textarea { width: 100%; min-height: 25rem; flex: 1; resize: vertical; padding: v
   .storage-table-wrap td:nth-child(6)::before { content: "可写"; }
   .storage-table-wrap td:nth-child(7)::before { content: "错误"; }
   .storage-table-wrap td:nth-child(8)::before { content: "Schema"; }
+  .knowledge-table td:nth-child(1)::before { content: "文件名"; }
+  .knowledge-table td:nth-child(2)::before { content: "类型"; }
+  .knowledge-table td:nth-child(3)::before { content: "大小"; }
+  .knowledge-table td:nth-child(4)::before { content: "上传时间"; }
+  .knowledge-table td:nth-child(5)::before { content: "最近处理"; }
+  .knowledge-table td:nth-child(6)::before { content: "状态"; }
+  .knowledge-table td:nth-child(7)::before { content: "失败原因"; }
+  .knowledge-table td:nth-child(8)::before { content: "操作"; }
+  .knowledge-actions { flex-wrap: wrap; }
 }
 
 @media (max-width: 520px) {
@@ -495,6 +506,33 @@ textarea { width: 100%; min-height: 25rem; flex: 1; resize: vertical; padding: v
   .route-template-row { grid-template-columns: 1fr; }
   .model-route-field-group .config-field-group-grid { grid-template-columns: minmax(0, 1fr); }
   .model-route-add-row { flex-direction: column; align-items: stretch; }
+}
+
+/* ---- 知识库页面：文件处理状态与管理列表 ---- */
+.knowledge-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: .6rem; margin-bottom: .5rem; }
+.knowledge-toolbar label { display: grid; gap: .2rem; margin: 0; color: var(--muted); font-size: .7rem; font-weight: 700; }
+.knowledge-search input { width: 100%; }
+.knowledge-list { min-width: 0; }
+.knowledge-table { width: 100%; }
+.knowledge-table td:nth-child(1), .knowledge-table td:nth-child(7) { overflow-wrap: anywhere; }
+.knowledge-table td:nth-child(6), .knowledge-table td:nth-child(8) { white-space: nowrap; }
+.knowledge-source-badge { display: inline-flex; align-items: center; width: fit-content; padding: .2rem .4rem; border: 1px solid var(--console-line); border-radius: var(--console-radius); color: var(--accent-strong); background: var(--accent-soft); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .6rem; font-weight: 800; letter-spacing: .04em; }
+.knowledge-status { display: inline-flex; align-items: center; gap: .4rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .68rem; font-weight: 800; letter-spacing: .04em; }
+.knowledge-status-dot { display: inline-block; width: .55rem; height: .55rem; flex: 0 0 .55rem; border: 1px solid currentColor; background: currentColor; }
+.knowledge-status--pending, .knowledge-status--processing { color: var(--console-status-warn); }
+.knowledge-status--pending .knowledge-status-dot, .knowledge-status--processing .knowledge-status-dot { transform: rotate(45deg) scale(.82); }
+.knowledge-status--ready { color: var(--console-status-good); }
+.knowledge-status--failed { color: var(--console-status-error); }
+.knowledge-status--failed .knowledge-status-dot { border: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+.knowledge-status--processing .knowledge-status-dot { animation: knowledge-processing-pulse 1.5s ease-in-out infinite; }
+.knowledge-error-summary { max-width: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.knowledge-actions { white-space: nowrap; }
+.knowledge-action { padding: .35rem .55rem; }
+.knowledge-action--danger { color: var(--console-error); }
+.knowledge-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: .7rem; margin-top: var(--console-space-5); color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .72rem; }
+@keyframes knowledge-processing-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) {
+  .knowledge-status--processing .knowledge-status-dot { animation: none; }
 }
 
 /* ---- Todo 页面：常用筛选 + 高级筛选折叠 ---- */
