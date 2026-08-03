@@ -99,6 +99,7 @@
 - **Overview signal board**：`StatusCard` 作为唯一视觉焦点；`MetricCard` 组成紧凑指标 rail；Provider 与 upstream 作为 edge readout。数据模块可 hover 提升 2px，表示可扫描的交互层次。
 - **Platform identity / capability matrix**：平台状态使用动态 table body 保持 API 兼容，桌面端以身份行呈现，窄屏转为逐行 card；能力矩阵保留方向与能力语义，但视觉上与平台状态分离。
 - **Storage resource list**：`#storage-body` 保持 table renderer 和移动 card fallback；路径使用 mono metadata，状态与 schema/migration 作为同一资源行的健康信号。
+- **Knowledge file management**：知识库文件管理负责查看、上传、下载、删除和重试。`pending`（等待处理）与 `processing`（处理中）使用警告菱形，`ready`（已完成）使用成功方形，`failed`（处理失败）使用错误三角形，四者均保留文字；managed 文件可操作，directory 来源只读。仅在页面可见且存在非终态行时轮询，页面隐藏即暂停，全部终态即停止。删除使用原生 dialog，不允许背板关闭，取消为初始焦点，关闭后焦点回收至触发按钮。窄屏以逐行 card 替代表格；所有操作、状态和反馈满足 WCAG 2.2 AA，`prefers-reduced-motion: reduce` 下关闭处理状态的非必要动效。
 - **Configuration workbench**：顶部为校验、摘要和重启后的控制 strip；主体按模型与供应商、模型路由、联网与工具、记忆与知识库、回复与语音、平台接入、待办与通知、系统与安全切换。runtime、Secret、Agent 与 Interface 仍是内部保存来源，但不作为用户主导航；单次只显示当前业务域的配置卡片。
 - **MarkdownEditor**：左侧编辑、右侧后端清理预览。安全预览标签与“后端清理结果”始终可见，编辑器获得主导宽度。
 

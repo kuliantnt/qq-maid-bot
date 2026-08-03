@@ -72,4 +72,4 @@ git diff --exit-code -- web-console/dist
 | [INTERACTION_CONTRACTS.md](../docs/INTERACTION_CONTRACTS.md) | 配置保存、修改、冲突、密钥和重启交互协议 |
 | [ADDING_A_PAGE.md](ADDING_A_PAGE.md) | 新增页面、组件、主题和 API 消费者的步骤 |
 
-当前顶层信息架构包含 Overview、Platforms、Todo、Configuration、Storage、Tools。Configuration 在原页面内按模型与供应商、模型路由、联网与工具、记忆与知识库、回复与语音、平台接入、待办与通知、系统与安全组织；runtime、Secret 和 Agent 只是保存边界，不再作为用户的主导航结构。
+当前顶层信息架构包含 Overview、Platforms、Todo、知识库、Configuration、Storage、Tools。知识库页面管理托管文件的查看、上传、下载、删除和失败重试；目录来源文件只读。Configuration 在原页面内按模型与供应商、模型路由、联网与工具、记忆与知识库、回复与语音、平台接入、待办与通知、系统与安全组织；runtime、Secret 和 Agent 只是保存边界，不再作为用户的主导航结构。

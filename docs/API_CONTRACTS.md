@@ -24,8 +24,16 @@
 | POST | `/api/v1/console/configuration/validate` | 本地配置预检 | admin + CSRF |
 | POST | `/api/v1/console/restart` | 提交受控重启 | admin + CSRF |
 | POST | `/api/v1/markdown/render` | 服务端 Markdown 安全预览 | 只读 |
+| POST | `/api/v1/console/knowledge/files/capabilities` | 读取知识库文件能力和限制 | admin + CSRF |
+| POST | `/api/v1/console/knowledge/files/list` | 分页查询知识库文件 | admin + CSRF |
+| POST | `/api/v1/console/knowledge/files/upload` | 上传托管知识库文件 | admin + CSRF |
+| POST | `/api/v1/console/knowledge/files/get/{file_id}` | 下载原始知识库文件 | admin，成功返回 raw Blob |
+| POST | `/api/v1/console/knowledge/files/delete` | 删除托管文件及其派生数据 | admin + CSRF |
+| POST | `/api/v1/console/knowledge/files/retry` | 重新处理失败的托管文件 | admin + CSRF |
 
 `status` 页面数据是安全摘要，不包含 token、secret、API key、cookie、authorization 或绝对敏感路径。配置 snapshot 对 secret 只返回配置状态，不返回原文。配置写入使用 revision，发生冲突时必须刷新并由用户重新确认，不得覆盖未知修改。
+
+知识库 JSON 接口使用统一的 `{ok,data,request_id}` 包络；`get/{file_id}` 成功时返回原始文件字节，错误仍使用 JSON 包络。所有会改变状态的接口必须携带 CSRF；错误保留 HTTP `status`、服务端 `code` 和安全 `message`。
 
 配置交互的完整状态协议见 [`INTERACTION_CONTRACTS.md`](./INTERACTION_CONTRACTS.md)。特别约束：runtime 和 agent 使用 expected revision；secret 每项 replace/clear 使用自己的 expected revision；空 secret 不产生请求；409 或 `config_conflict` 不得自动重试；成功必须以服务端返回的 snapshot 为准。
 
