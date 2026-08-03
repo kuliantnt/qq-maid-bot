@@ -1,9 +1,12 @@
-import { fetchKnowledgeCapabilities, listKnowledgeFiles } from "../../api.js";
+import { deleteKnowledgeFile, downloadKnowledgeFile, fetchKnowledgeCapabilities, listKnowledgeFiles, retryKnowledgeFile, uploadKnowledgeFile } from "../../api.js";
 import { requiredElement, setText } from "../../dom.js";
 import { renderKnowledgeEmpty, renderKnowledgeList } from "./knowledge-list.js";
+import { createKnowledgeActionHandlers, triggerBrowserDownload } from "./knowledge-actions.js";
 import { appendKnowledgePage, hasMoreKnowledgePages, initialKnowledgePager } from "./knowledge-paging.js";
+import { KnowledgePollingController } from "./knowledge-polling.js";
 import type { KnowledgeFileCapabilities, KnowledgeFileItem, KnowledgeFileListParams } from "../../types.js";
 import type { KnowledgePager } from "./knowledge-paging.js";
+import { installKnowledgeUpload } from "./knowledge-upload.js";
 
 type KnowledgeRefreshReason = "refresh" | "upload" | "retry" | "delete" | "filter";
 
@@ -11,7 +14,32 @@ let capabilities: KnowledgeFileCapabilities | null = null;
 let pager: KnowledgePager = initialKnowledgePager();
 let loadedItems: KnowledgeFileItem[] = [];
 let currentParams: KnowledgeFileListParams = defaultKnowledgeParams();
-let uploadHandler: (() => void) | null = null;
+let uploadFlowInstalled = false;
+
+const polling = new KnowledgePollingController({
+  isVisible: () => typeof document === "undefined" || document.visibilityState !== "hidden",
+  setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+  clearTimeout: (id) => window.clearTimeout(id),
+  fetchPage: (params) => listKnowledgeFiles({ ...params, page: 1 }),
+  onUpdate: (page) => {
+    currentParams = { ...currentParams, page: page.page };
+    pager = appendKnowledgePage(initialKnowledgePager(), page);
+    loadedItems = [...page.items];
+    renderKnowledgeContent();
+  },
+  onTransientError: (message) => setText("knowledge-result", message),
+  onTerminalTransition: (message) => setText("knowledge-result", message),
+});
+
+const actions = createKnowledgeActionHandlers({
+  setStatus: (text) => setText("knowledge-result", text),
+  download: downloadKnowledgeFile,
+  triggerDownload: triggerBrowserDownload,
+  deleteFile: deleteKnowledgeFile,
+  retryFile: retryKnowledgeFile,
+  refresh: (reason) => void refreshKnowledgeList(reason),
+  getItems: () => loadedItems,
+});
 
 export async function initializeKnowledge(): Promise<void> {
   bindKnowledgeControls();
@@ -20,11 +48,27 @@ export async function initializeKnowledge(): Promise<void> {
   } catch (cause) {
     showKnowledgeError(cause, "知识库能力加载失败");
   }
+  if (!uploadFlowInstalled) {
+    installKnowledgeUpload({
+      inputId: "knowledge-upload-input",
+      buttonId: "knowledge-upload-open",
+      setStatus: (text) => setText("knowledge-result", text),
+      getCapabilities: getKnowledgeCapabilities,
+      upload: uploadKnowledgeFile,
+      onUploaded: () => void refreshKnowledgeList("upload"),
+    });
+    uploadFlowInstalled = true;
+  }
   await refreshKnowledgeList("refresh");
-}
-
-export function setKnowledgeUploadHandler(handler: () => void): void {
-  uploadHandler = handler;
+  polling.start(currentParams);
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState !== "hidden" && polling.hasActive()) polling.notifyChange();
+    });
+  }
+  if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    window.addEventListener("pagehide", () => polling.stop());
+  }
 }
 
 export function getKnowledgeCapabilities(): KnowledgeFileCapabilities | null {
@@ -44,6 +88,8 @@ export async function refreshKnowledgeList(reason: KnowledgeRefreshReason): Prom
     currentParams = { ...currentParams, page: page.page };
     pager = appendKnowledgePage(initialKnowledgePager(), page);
     loadedItems = [...page.items];
+    polling.setPages(loadedItems);
+    polling.notifyChange();
     renderKnowledgeContent();
   } catch (cause) {
     showKnowledgeError(cause, "知识库列表加载失败");
@@ -56,12 +102,10 @@ function bindKnowledgeControls(): void {
   const submit = requiredElement("knowledge-filter-submit", HTMLButtonElement);
   const reset = requiredElement("knowledge-filter-reset", HTMLButtonElement);
   const refresh = requiredElement("knowledge-refresh", HTMLButtonElement);
-  const upload = requiredElement("knowledge-upload-open", HTMLButtonElement);
   const apply = () => { syncKnowledgeFilters(search, status); void refreshKnowledgeList("filter"); };
   submit.onclick = apply;
   reset.onclick = () => { search.value = ""; status.value = "all"; syncKnowledgeFilters(search, status); void refreshKnowledgeList("filter"); };
   refresh.onclick = () => void refreshKnowledgeList("refresh");
-  upload.onclick = () => uploadHandler?.();
   search.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); apply(); } });
 }
 
@@ -80,7 +124,7 @@ function renderKnowledgeLoading(): void {
 function renderKnowledgeContent(): void {
   const target = requiredElement("knowledge-list", HTMLElement);
   if (loadedItems.length === 0) renderKnowledgeEmpty(target);
-  else renderKnowledgeList(target, loadedItems, {});
+  else renderKnowledgeList(target, loadedItems, actions);
   renderKnowledgePagination();
 }
 
@@ -103,6 +147,8 @@ async function loadMoreKnowledgeFiles(): Promise<void> {
     const page = await listKnowledgeFiles(currentParams);
     pager = appendKnowledgePage(pager, page);
     loadedItems = [...loadedItems, ...page.items];
+    polling.setPages(loadedItems);
+    polling.notifyChange();
     renderKnowledgeContent();
   } catch (cause) {
     showKnowledgeError(cause, "知识库列表加载失败");
