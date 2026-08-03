@@ -99,7 +99,7 @@ new_instance() {
     local directory="${TEST_DIR}/${name}"
     mkdir -p "${directory}/runtime/config" "${directory}/runtime/data" "${directory}/runtime/media"
     cp "${ROOT_DIR}/scripts/docker-deploy.sh" "${directory}/docker-deploy.sh"
-    cp "${ROOT_DIR}/compose.yaml" "${directory}/compose.yaml"
+    cp "${ROOT_DIR}/docker/compose.yaml" "${directory}/compose.yaml"
     cat > "${directory}/compose.env" <<EOF
 COMPOSE_PROJECT_NAME=${name}
 QQ_MAID_ENV_FILE=${directory}/runtime/config/.env

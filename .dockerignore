@@ -1,3 +1,4 @@
+# 构建上下文是仓库根目录，即使 Dockerfile 位于 docker/，此文件也必须保留在根目录。
 .git
 .github
 .agents

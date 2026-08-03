@@ -20,7 +20,7 @@ compose_for() {
     docker compose \
         --project-directory "$(dirname -- "${env_file}")" \
         --env-file "${env_file}" \
-        -f "${ROOT_DIR}/compose.yaml" \
+        -f "${ROOT_DIR}/docker/compose.yaml" \
         "$@"
 }
 
