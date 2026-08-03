@@ -4,6 +4,9 @@ Docker 是服务器推荐部署方式。GitHub Actions 在固定的 Debian 13/Ru
 服务器只拉取并运行镜像，不安装 Rust、Cargo、Node.js，也不现场编译。现有 Release 包、
 `qbot` / `botctl` 和源码部署继续保留。
 
+Docker/Compose 文件已从仓库根目录迁移到 `docker/`；从源码仓库执行 Compose 命令时需要显式使用
+`-f docker/compose.yaml`。远程部署 bundle 仍保留根级 `compose.yaml`，现有远程部署脚本兼容性不变。
+
 ## 运行模型
 
 - `docker/Dockerfile` 使用固定版本及 digest 的 Rust builder 和 Debian runtime；构建命令为
@@ -278,7 +281,7 @@ label。未传 `--release` 时会显示 `unrecorded` / `unreleased`，不会把 
 | 现象 | 检查 |
 | --- | --- |
 | `permission denied` | bind mount 的目录和文件是否允许 UID/GID 10001 读写；不要改成 root 运行 |
-| 容器长期 `unhealthy` | `docker compose logs bot`；确认 `LLM_SERVER_PORT` 与 healthcheck 一致，进程未在启动前退出 |
+| 容器长期 `unhealthy` | `docker compose --project-directory . --env-file compose.env -f docker/compose.yaml logs bot`；确认 `LLM_SERVER_PORT` 与 healthcheck 一致，进程未在启动前退出 |
 | 控制台端口连不上 | 是否加载 `docker/compose.console.yaml`，且 `.env` 中 `LLM_SERVER_HOST=0.0.0.0` |
 | 微信/OneBot 连不上 | 是否只加载对应 override、设置容器内 bind host、配置防火墙/反向代理 |
 | GHCR `unauthorized` | 包可见性与服务器只读 `docker login`；不要把 token 写进 Compose |

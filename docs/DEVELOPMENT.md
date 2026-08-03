@@ -47,6 +47,14 @@ QQ、OneBot、微信等入口接入相关能力优先在 gateway 的平台 adapt
 │   ├── analysis/
 │   └── tasks/
 │       └── archive/
+├── .dockerignore
+├── docker/
+│   ├── Dockerfile
+│   ├── compose.yaml
+│   ├── compose.console.yaml   # Compose override
+│   ├── compose.onebot.yaml    # Compose override
+│   ├── compose.wechat.yaml    # Compose override
+│   └── compose.env.example    # Compose 环境示例
 ├── LICENSE
 ├── scripts/
 │   ├── deploy-remote.sh
