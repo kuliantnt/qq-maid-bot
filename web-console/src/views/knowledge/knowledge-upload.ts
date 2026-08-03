@@ -4,6 +4,12 @@ import type { KnowledgeFileCapabilities, KnowledgeFileItem } from "../../types.j
 
 export type UploadValidation = { ok: true; file: File } | { ok: false; reason: string };
 
+export function formatFileSizeLimit(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${Number((bytes / (1024 * 1024)).toFixed(1))} MB`;
+  if (bytes >= 1024) return `${Number((bytes / 1024).toFixed(1))} KB`;
+  return `${bytes} B`;
+}
+
 type KnowledgeUploadDependencies = {
   readonly inputId: string;
   readonly buttonId: string;
@@ -19,7 +25,7 @@ export function validateKnowledgeFile(file: File, capabilities: KnowledgeFileCap
     return { ok: false, reason: `仅支持 ${capabilities.supported_extensions.join(" / ")} 文件` };
   }
   if (file.size > capabilities.max_file_bytes) {
-    return { ok: false, reason: `文件大小超过上限（${capabilities.max_file_bytes / 1024 / 1024} MB）` };
+    return { ok: false, reason: `文件大小超过上限（${formatFileSizeLimit(capabilities.max_file_bytes)}）` };
   }
   if (file.name.length > capabilities.max_filename_chars) return { ok: false, reason: "文件名过长" };
   return { ok: true, file };

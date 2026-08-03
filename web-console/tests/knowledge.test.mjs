@@ -11,7 +11,7 @@ import {
 import { renderKnowledgeList } from "../dist/views/knowledge/knowledge-list.js";
 import { initializeKnowledge, refreshKnowledgeList } from "../dist/views/knowledge/knowledge.js";
 import { ConsoleApiError } from "../dist/api.js";
-import { installKnowledgeUpload, validateKnowledgeFile } from "../dist/views/knowledge/knowledge-upload.js";
+import { formatFileSizeLimit, installKnowledgeUpload, validateKnowledgeFile } from "../dist/views/knowledge/knowledge-upload.js";
 import { createFakeDom, installDomGlobals } from "./helpers/fake-dom.mjs";
 
 function knowledgeItem(overrides = {}) {
@@ -144,9 +144,15 @@ test("知识库上传预检覆盖格式、大小、文件名和大小写边界",
   assert.equal(validResult.ok, true);
   if (validResult.ok) assert.equal(validResult.file, validFile);
   assert.equal(validateKnowledgeFile(file("guide.txt", 100), capabilities).reason, "仅支持 .md / .markdown 文件");
-  assert.equal(validateKnowledgeFile(file("guide.md", 1025), capabilities).ok, false);
+  assert.equal(validateKnowledgeFile(file("guide.md", 1025), capabilities).reason, "文件大小超过上限（1 KB）");
   assert.equal(validateKnowledgeFile(file("a".repeat(14) + ".md", 100), capabilities).reason, "文件名过长");
   assert.equal(validateKnowledgeFile(file("GUIDE.MARKDOWN", 100), capabilities).ok, true);
+});
+
+test("知识库上传大小上限格式化保持可读", () => {
+  assert.equal(formatFileSizeLimit(50 * 1024 * 1024), "50 MB");
+  assert.equal(formatFileSizeLimit(1536 * 1024), "1.5 MB");
+  assert.equal(formatFileSizeLimit(1024), "1 KB");
 });
 
 test("知识库上传禁用按钮至成功并按能力生成 accept", async () => {

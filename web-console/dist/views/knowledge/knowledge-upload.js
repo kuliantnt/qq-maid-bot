@@ -1,12 +1,19 @@
 import { ConsoleApiError } from "../../api.js";
 import { requiredElement } from "../../dom.js";
+export function formatFileSizeLimit(bytes) {
+    if (bytes >= 1024 * 1024)
+        return `${Number((bytes / (1024 * 1024)).toFixed(1))} MB`;
+    if (bytes >= 1024)
+        return `${Number((bytes / 1024).toFixed(1))} KB`;
+    return `${bytes} B`;
+}
 export function validateKnowledgeFile(file, capabilities) {
     const extensions = capabilities.supported_extensions.map((extension) => extension.toLowerCase());
     if (!extensions.some((extension) => file.name.toLowerCase().endsWith(extension))) {
         return { ok: false, reason: `仅支持 ${capabilities.supported_extensions.join(" / ")} 文件` };
     }
     if (file.size > capabilities.max_file_bytes) {
-        return { ok: false, reason: `文件大小超过上限（${capabilities.max_file_bytes / 1024 / 1024} MB）` };
+        return { ok: false, reason: `文件大小超过上限（${formatFileSizeLimit(capabilities.max_file_bytes)}）` };
     }
     if (file.name.length > capabilities.max_filename_chars)
         return { ok: false, reason: "文件名过长" };
