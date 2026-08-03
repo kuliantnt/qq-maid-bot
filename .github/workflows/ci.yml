@@ -21,11 +21,13 @@ permissions:
 
 jobs:
   changes:
-    name: Detect script changes
+    name: Detect affected checks
     runs-on: ubuntu-latest
     outputs:
       shell: ${{ steps.filter.outputs.shell }}
       windows: ${{ steps.filter.outputs.windows }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      rust: ${{ steps.filter.outputs.rust }}
 
     steps:
       - name: Checkout
@@ -33,7 +35,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Detect affected script checks
+      - name: Detect affected checks
         id: filter
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -56,14 +58,24 @@ jobs:
 
           shell=false
           windows=false
+          frontend=false
+          rust=false
           if grep -Eq '(^|/)scripts/.*\.sh$|^\.github/workflows/ci\.yml$' "${changed_files}"; then
             shell=true
           fi
           if grep -Eq '(^|/)scripts/.*\.(ps1|cmd)$|^scripts/(botctl|test-windows-botctl)\.sh$|^scripts/tests/windows-smoke\.cs$|^\.github/workflows/ci\.yml$' "${changed_files}"; then
             windows=true
           fi
+          if grep -Eq '^web-console/(src|tests|scripts)/|^web-console/(package\.json|package-lock\.json|tsconfig\.json)$|^web-console/dist/|^assets/(favicon\.png|special-sprite\.webp)$|^\.github/workflows/ci\.yml$' "${changed_files}"; then
+            frontend=true
+          fi
+          if grep -Eq '\.rs$|^Cargo\.(toml|lock)$|^rust-toolchain|^runtime/|^Makefile|^\.github/workflows/ci\.yml$' "${changed_files}"; then
+            rust=true
+          fi
           echo "shell=${shell}" >> "${GITHUB_OUTPUT}"
           echo "windows=${windows}" >> "${GITHUB_OUTPUT}"
+          echo "frontend=${frontend}" >> "${GITHUB_OUTPUT}"
+          echo "rust=${rust}" >> "${GITHUB_OUTPUT}"
 
   shell:
     name: Shell checks
@@ -127,8 +139,46 @@ jobs:
         shell: powershell
         run: .\scripts\test-windows-qbot.ps1
 
+  frontend:
+    name: Web Console checks
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web-console/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web-console
+        run: npm ci
+
+      - name: Type-check frontend
+        working-directory: web-console
+        run: npm run check
+
+      - name: Build frontend
+        working-directory: web-console
+        run: npm run build
+
+      - name: Run frontend tests
+        working-directory: web-console
+        run: npm test
+
+      - name: Verify committed dist is reproducible
+        run: git diff --exit-code -- web-console/dist
+
   rust:
     name: Rust checks
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -137,40 +187,22 @@ jobs:
         with:
           fetch-depth: 0  # PR 时需要历史记录做 diff
 
-      - name: Check if Rust files changed (PR only)
-        id: rust_changes
-        if: github.event_name == 'pull_request'
-        run: |
-          # Shell 脚本由 shell / windows-botctl job 独立验证，不应触发耗时的 Rust 全量检查。
-          if git diff --name-only "origin/${{ github.base_ref }}..." | grep -qE '(\.rs$|^Cargo\.(toml|lock)$|^rust-toolchain|^runtime/|^Makefile)'; then
-            echo "has_rust=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_rust=false" >> "$GITHUB_OUTPUT"
-            echo "纯文档变更，跳过 Rust 编译测试步骤"
-          fi
-
       - name: Install Rust stable
-        if: steps.rust_changes.outputs.has_rust != 'false'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
       - name: Cache Cargo artifacts
-        if: steps.rust_changes.outputs.has_rust != 'false'
         uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
-        if: steps.rust_changes.outputs.has_rust != 'false'
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        if: steps.rust_changes.outputs.has_rust != 'false'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Run tests
-        if: steps.rust_changes.outputs.has_rust != 'false'
         run: cargo test --workspace --all-features
 
       - name: Build release binaries
-        if: steps.rust_changes.outputs.has_rust != 'false'
         run: cargo build --workspace --release --all-features
