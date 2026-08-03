@@ -8,6 +8,7 @@ import { initializeConfiguration } from "./views/configuration/configuration.js"
 import { createThemeController } from "./theme.js";
 import { bindConsoleNavigation } from "./console-shell.js";
 import { initializeTodo } from "./views/todo/todo.js";
+import { initializeKnowledge } from "./views/knowledge/knowledge.js";
 import { createBackgroundController, installBackgroundConsoleUnlock, unlockPreferencePatch } from "./background.js";
 import { cacheFileBlob, clearFileBlobCache, deleteCachedFileBlob, readCachedFileBlob } from "./file-cache.js";
 let localStorage = null;
@@ -218,6 +219,7 @@ async function showConsole(username) {
     await Promise.all([refreshStatus(), hydrateUserData()]);
     await refreshConfiguration();
     await initializeTodo();
+    await initializeKnowledge();
 }
 async function hydrateUserData() {
     try {

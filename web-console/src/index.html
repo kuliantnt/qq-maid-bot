@@ -237,6 +237,38 @@
         </section>
       </div>
 
+      <!-- 知识库页面用于查看、筛选和上传由后端处理的知识库文件。 -->
+      <div class="console-page" data-console-page="knowledge" hidden>
+        <header class="product-page-heading">
+          <div>
+            <p class="eyebrow">KNOWLEDGE / FILES</p>
+            <h2>知识库管理</h2>
+            <p class="product-page-lede">查看、筛选和上传知识库文件，处理状态与文件信息均来自管理 API。</p>
+          </div>
+          <div class="knowledge-page-actions">
+            <button id="knowledge-upload-open" type="button">上传文件</button>
+          </div>
+        </header>
+        <section class="panel knowledge-panel" aria-labelledby="knowledge-heading">
+          <header class="section-heading">
+            <div>
+              <h2 id="knowledge-heading">知识库文件</h2>
+            </div>
+            <span class="section-meta">文件 · 处理状态</span>
+          </header>
+          <div class="knowledge-toolbar">
+            <label class="knowledge-search">搜索文件名<input id="knowledge-search" type="search" placeholder="搜索文件名"></label>
+            <label>状态<select id="knowledge-status-filter"><option value="all">全部</option><option value="pending">等待处理</option><option value="processing">处理中</option><option value="ready">已完成</option><option value="failed">处理失败</option></select></label>
+            <button id="knowledge-filter-submit" type="button">应用筛选</button>
+            <button id="knowledge-filter-reset" type="button" class="secondary">重置</button>
+            <button id="knowledge-refresh" type="button" class="secondary">刷新</button>
+          </div>
+          <p id="knowledge-result" class="status-message" role="status" aria-live="polite"></p>
+          <div id="knowledge-list" class="knowledge-list" aria-live="polite"><p class="hint">正在加载知识库…</p></div>
+          <div id="knowledge-pagination" class="knowledge-pagination"></div>
+        </section>
+      </div>
+
       <dialog id="todo-create-dialog" class="todo-create-dialog">
         <form id="todo-create-form" class="todo-create-form" method="dialog">
           <div class="todo-create-heading">
