@@ -274,7 +274,7 @@ ghcr.io/kuliantnt/qq-maid-bot@sha256:abc123...
 ```bash
 scp \
   -i ~/.ssh/qq-maid-test-deploy \
-  compose.yaml \
+  docker/compose.yaml \
   scripts/docker-deploy.sh \
   qqmaid@<阿里云IP>:/opt/qq-maid-bot-test/
 ```
@@ -502,7 +502,7 @@ LLM_SERVER_PORT=8787
 ```bash
 scp \
   -i ~/.ssh/qq-maid-test-deploy \
-  compose.console.yaml \
+  docker/compose.console.yaml \
   qqmaid@<阿里云IP>:/opt/qq-maid-bot-test/
 ```
 

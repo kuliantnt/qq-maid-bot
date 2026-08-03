@@ -104,16 +104,17 @@ test-gateway: common-fmt gateway-fmt common-test gateway-test common-check gatew
 
 docker-build:
 	docker build \
+		-f docker/Dockerfile \
 		--build-arg QQ_MAID_BUILD_COMMIT="$$(git rev-parse HEAD)" \
 		--build-arg QQ_MAID_BUILD_VERSION="dev" \
 		--build-arg QQ_MAID_BUILD_DATE="$$(git show -s --format=%cI HEAD)" \
 		-t qq-maid-bot:dev .
 
 docker-config:
-	QQ_MAID_ENV_FILE=./runtime/config/.env.example docker compose --env-file compose.env.example config --quiet
-	QQ_MAID_ENV_FILE=./runtime/config/.env.example docker compose --env-file compose.env.example -f compose.yaml -f compose.console.yaml config --quiet
-	QQ_MAID_ENV_FILE=./runtime/config/.env.example docker compose --env-file compose.env.example -f compose.yaml -f compose.wechat.yaml config --quiet
-	QQ_MAID_ENV_FILE=./runtime/config/.env.example docker compose --env-file compose.env.example -f compose.yaml -f compose.onebot.yaml config --quiet
+	QQ_MAID_ENV_FILE=./runtime/config/.env.example docker compose --project-directory . --env-file docker/compose.env.example -f docker/compose.yaml config --quiet
+	QQ_MAID_ENV_FILE=./runtime/config/.env.example docker compose --project-directory . --env-file docker/compose.env.example -f docker/compose.yaml -f docker/compose.console.yaml config --quiet
+	QQ_MAID_ENV_FILE=./runtime/config/.env.example docker compose --project-directory . --env-file docker/compose.env.example -f docker/compose.yaml -f docker/compose.wechat.yaml config --quiet
+	QQ_MAID_ENV_FILE=./runtime/config/.env.example docker compose --project-directory . --env-file docker/compose.env.example -f docker/compose.yaml -f docker/compose.onebot.yaml config --quiet
 
 test-docker: docker-config
 	bash scripts/tests/test-docker-deploy.sh

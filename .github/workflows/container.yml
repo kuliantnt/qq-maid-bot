@@ -12,10 +12,8 @@ on:
       - "qq-maid-gateway-rs/**"
       - "runtime/**"
       - "web-console/dist/**"
-      - "Dockerfile"
+      - "docker/**"
       - ".dockerignore"
-      - "compose*.yaml"
-      - "compose.env.example"
       - "scripts/docker-*.sh"
       - "scripts/tests/test-docker-deploy.sh"
       - "scripts/verify-container-release.sh"
@@ -57,10 +55,10 @@ jobs:
         env:
           QQ_MAID_ENV_FILE: ./runtime/config/.env.example
         run: |
-          docker compose --env-file compose.env.example config --quiet
-          docker compose --env-file compose.env.example -f compose.yaml -f compose.console.yaml config --quiet
-          docker compose --env-file compose.env.example -f compose.yaml -f compose.wechat.yaml config --quiet
-          docker compose --env-file compose.env.example -f compose.yaml -f compose.onebot.yaml config --quiet
+          docker compose --project-directory . --env-file docker/compose.env.example -f docker/compose.yaml config --quiet
+          docker compose --project-directory . --env-file docker/compose.env.example -f docker/compose.yaml -f docker/compose.console.yaml config --quiet
+          docker compose --project-directory . --env-file docker/compose.env.example -f docker/compose.yaml -f docker/compose.wechat.yaml config --quiet
+          docker compose --project-directory . --env-file docker/compose.env.example -f docker/compose.yaml -f docker/compose.onebot.yaml config --quiet
 
   build-platform:
     name: Build ${{ matrix.platform }}
@@ -133,7 +131,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile
+          file: docker/Dockerfile
           platforms: ${{ matrix.platform }}
           push: ${{ github.event_name == 'push' }}
           # PR 使用原生架构 runner，将单架构结果载入本机 Docker 做真实运行验证。
@@ -313,7 +311,7 @@ jobs:
             -o BatchMode=yes \
             -o IdentitiesOnly=yes \
             -o UserKnownHostsFile="${ssh_dir}/known_hosts" \
-            compose.yaml "${TEST_DEPLOY_USER}@${TEST_DEPLOY_HOST}:${TEST_DEPLOY_DIR}/compose.yaml.new"
+            docker/compose.yaml "${TEST_DEPLOY_USER}@${TEST_DEPLOY_HOST}:${TEST_DEPLOY_DIR}/compose.yaml.new"
           scp -P "${TEST_DEPLOY_PORT}" \
             -i "${ssh_dir}/id_key" \
             -o BatchMode=yes \

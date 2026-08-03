@@ -6,7 +6,7 @@ Docker 是服务器推荐部署方式。GitHub Actions 在固定的 Debian 13/Ru
 
 ## 运行模型
 
-- `Dockerfile` 使用固定版本及 digest 的 Rust builder 和 Debian runtime；构建命令为
+- `docker/Dockerfile` 使用固定版本及 digest 的 Rust builder 和 Debian runtime；构建命令为
   `cargo build --workspace --release --all-features --locked`。
 - runtime 只包含统一 `qq-maid-bot`、CA、时区、C++ 运行库和 `/healthz` 所需的 curl，
   不包含 Rust、Cargo 或 Node.js。
@@ -47,7 +47,7 @@ SCP 与 SSH 调用，启用前应在独立测试账号验证；不要直接把�
 从仓库根目录准备实例目录：
 
 ```bash
-cp compose.env.example compose.env
+cp docker/compose.env.example compose.env
 mkdir -p runtime/config/secrets runtime/data/storage runtime/media/inbound
 touch runtime/config/.env
 chmod 700 runtime/config/secrets
@@ -69,10 +69,10 @@ QQ_MAID_IMAGE=ghcr.io/kuliantnt/qq-maid-bot@sha256:<64位digest>
 校验并启动：
 
 ```bash
-docker compose --env-file compose.env config --quiet
-docker compose --env-file compose.env up -d --wait --wait-timeout 140
-docker compose --env-file compose.env ps
-docker compose --env-file compose.env logs -f bot
+docker compose --project-directory . --env-file compose.env -f docker/compose.yaml config --quiet
+docker compose --project-directory . --env-file compose.env -f docker/compose.yaml up -d --wait --wait-timeout 140
+docker compose --project-directory . --env-file compose.env -f docker/compose.yaml ps
+docker compose --project-directory . --env-file compose.env -f docker/compose.yaml logs -f bot
 ```
 
 `/healthz` 返回 HTTP 200 表示进程可服务；未完成配置时 JSON 中会是
@@ -80,20 +80,20 @@ docker compose --env-file compose.env logs -f bot
 
 ## 端口与监听地址
 
-基础 `compose.yaml` 不映射任何宿主机端口。按实际入口叠加一个或多个小型 override：
+基础 `docker/compose.yaml` 不映射任何宿主机端口。按实际入口叠加一个或多个小型 override：
 
 ```bash
 # 本机控制台，默认映射到宿主机 127.0.0.1:8787
-docker compose --env-file compose.env \
-  -f compose.yaml -f compose.console.yaml up -d
+docker compose --project-directory . --env-file compose.env \
+  -f docker/compose.yaml -f docker/compose.console.yaml up -d
 
 # 微信回调
-docker compose --env-file compose.env \
-  -f compose.yaml -f compose.wechat.yaml up -d
+docker compose --project-directory . --env-file compose.env \
+  -f docker/compose.yaml -f docker/compose.wechat.yaml up -d
 
 # OneBot 反向 WebSocket
-docker compose --env-file compose.env \
-  -f compose.yaml -f compose.onebot.yaml up -d
+docker compose --project-directory . --env-file compose.env \
+  -f docker/compose.yaml -f docker/compose.onebot.yaml up -d
 ```
 
 映射端口时，容器内相应监听地址必须改为 `0.0.0.0`：控制台使用
@@ -136,7 +136,7 @@ docker compose --env-file compose.env \
 ```
 
 两个 `compose.env` 分别设置不同的 `COMPOSE_PROJECT_NAME` 和绝对 `QQ_MAID_*_DIR`。需要
-映射入口时再设置不同宿主机端口，并复用仓库中的同一 `compose.yaml` 与入口 override。
+映射入口时再设置不同宿主机端口，并复用仓库中的同一 `docker/compose.yaml` 与入口 override。
 
 ## Registry 标签与发布流程
 
@@ -234,7 +234,7 @@ GitHub Environment 创建 `test`，配置 Secrets：
 `master` 镜像的两个架构发布成功且 `TEST_DEPLOY_ENABLED=true` 后，工作流：
 
 1. 合成并记录不可变 commit manifest digest。
-2. 通过专用 SSH key 上传 `compose.yaml` 与 `docker-deploy.sh`。
+2. 通过专用 SSH key 上传 `docker/compose.yaml` 与 `docker-deploy.sh`（远端保存为 `compose.yaml`）。
 3. 把完整 `仓库@digest` 和 commit 交给服务器。
 4. 校验仓库和 digest 格式，拉取镜像并检查 OCI revision label。
 5. 已有实例先用目标镜像对当前卷创建 `data/backups/pre-upgrade-*` 数据库与配置恢复包。
@@ -279,7 +279,7 @@ label。未传 `--release` 时会显示 `unrecorded` / `unreleased`，不会把 
 | --- | --- |
 | `permission denied` | bind mount 的目录和文件是否允许 UID/GID 10001 读写；不要改成 root 运行 |
 | 容器长期 `unhealthy` | `docker compose logs bot`；确认 `LLM_SERVER_PORT` 与 healthcheck 一致，进程未在启动前退出 |
-| 控制台端口连不上 | 是否加载 `compose.console.yaml`，且 `.env` 中 `LLM_SERVER_HOST=0.0.0.0` |
+| 控制台端口连不上 | 是否加载 `docker/compose.console.yaml`，且 `.env` 中 `LLM_SERVER_HOST=0.0.0.0` |
 | 微信/OneBot 连不上 | 是否只加载对应 override、设置容器内 bind host、配置防火墙/反向代理 |
 | GHCR `unauthorized` | 包可见性与服务器只读 `docker login`；不要把 token 写进 Compose |
 | 拉取后 revision 不一致 | 拒绝部署，检查 tag/digest 是否来自本仓库的 Container workflow |
