@@ -20,16 +20,6 @@ pub(crate) const MAX_CUSTOM_COLOR_CHARS: usize = 64;
 pub(crate) const MAX_BACKGROUND_FILES: usize = 64;
 pub(crate) const MAX_ORIGINAL_FILENAME_CHARS: usize = 255;
 pub(crate) const MAX_CONTENT_TYPE_CHARS: usize = 255;
-pub(crate) const SUPPORTED_BACKGROUND_CONTENT_TYPES: &[&str] = &[
-    "image/avif",
-    "image/bmp",
-    "image/gif",
-    "image/jpeg",
-    "image/png",
-    "image/svg+xml",
-    "image/webp",
-];
-
 pub const CONSOLE_USER_DATA_SCHEMA_V1: SqliteMigration = SqliteMigration {
     name: "console_user_data_schema_v1",
     sql: "CREATE TABLE IF NOT EXISTS console_user_files (

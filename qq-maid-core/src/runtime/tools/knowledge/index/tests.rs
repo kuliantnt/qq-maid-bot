@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::chunking::chunk_markdown;
+use super::chunking::{ChunkingError, chunk_markdown, chunk_markdown_with_limit};
 use super::text::build_index_text;
 use super::*;
 use crate::storage::{APP_MIGRATIONS, database::SqliteDatabase};
@@ -77,6 +77,64 @@ fn managed_chunking_rejects_excessive_chunk_count_before_index_write() {
             .unwrap(),
         0
     );
+}
+
+#[test]
+fn fenced_code_single_line_is_split_by_character_limit() {
+    let content = format!("```text\n{}\n```", "x".repeat(5_000));
+
+    let chunks = chunk_markdown("long-code.md", &content);
+
+    assert!(chunks.len() > 1);
+    assert!(
+        chunks
+            .iter()
+            .all(|chunk| chunk.body.chars().count() <= 1_400)
+    );
+}
+
+#[test]
+fn fenced_code_single_line_honors_chunk_count_limit_before_splitting() {
+    let content = format!("```text\n{}", "x".repeat(5_000));
+
+    let result = chunk_markdown_with_limit("long-code.md", &content, 2);
+
+    assert!(matches!(result, Err(ChunkingError::TooManyChunks)));
+}
+
+#[test]
+fn managed_chunks_search_by_original_filename_without_internal_key_terms() {
+    let index = test_index(Path::new("managed-filename"));
+    let file_id = "00000000-0000-4000-8000-000000000642";
+    let document_key = managed_document_key(file_id);
+
+    index
+        .process_managed_file(
+            file_id,
+            "deployment-handbook-642.md",
+            "# 运维手册\n\n正文只包含中文说明。".as_bytes(),
+            1024,
+            None,
+        )
+        .unwrap();
+
+    let search_text: String = index
+        .database()
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT c.search_text
+             FROM knowledge_chunks c
+             JOIN knowledge_documents d ON d.id = c.document_id
+             WHERE d.relative_path = ?1",
+            [&document_key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(search_text.contains("deployment"));
+    assert!(search_text.contains("handbook"));
+    assert!(!search_text.contains("managed"));
+    assert!(!search_text.contains(&document_key["managed/".len()..]));
 }
 
 #[test]

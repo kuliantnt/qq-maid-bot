@@ -227,26 +227,34 @@ impl ConsoleUserDataService {
 
     /// 在调用方自己的 SQLite 事务内暂存原始文件，供知识库删除流程同时清理关联和派生数据。
     /// 暂存名不带文件 ID，且不再通过任何 API 可达；事务失败时必须调用恢复方法。
+    /// 元数据存在但原文件已缺失时返回 `None`，让调用方继续清理数据库。
     pub(crate) fn stage_owned_file_deletion(
         &self,
         transaction: &Transaction<'_>,
         admin_id: i64,
         file_id: &str,
         module: UserFileModule,
-    ) -> Result<StagedFileDeletion, ConsoleUserDataError> {
+    ) -> Result<Option<StagedFileDeletion>, ConsoleUserDataError> {
         let metadata = find_owned_file(transaction, admin_id, file_id, module)?
             .ok_or_else(|| ConsoleUserDataError::not_found("file not found"))?;
         let original_path = storage_path(&self.file_root, &metadata.storage_filename)?;
         let tombstone_path = self
             .file_root
             .join(format!(".delete-{}.tmp", uuid::Uuid::new_v4().hyphenated()));
-        fs::rename(&original_path, &tombstone_path).map_err(|error| {
-            ConsoleUserDataError::storage(format!("failed to stage stored file deletion: {error}"))
-        })?;
-        Ok(StagedFileDeletion {
+        match fs::rename(&original_path, &tombstone_path) {
+            Ok(()) => {}
+            // 原文件可能已因磁盘故障或人工恢复丢失；元数据与派生索引仍必须可清理。
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(ConsoleUserDataError::storage(format!(
+                    "failed to stage stored file deletion: {error}"
+                )));
+            }
+        }
+        Ok(Some(StagedFileDeletion {
             original_path,
             tombstone_path,
-        })
+        }))
     }
 
     pub(crate) fn finish_staged_file_deletion(

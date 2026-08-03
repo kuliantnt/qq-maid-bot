@@ -189,7 +189,7 @@ async fn managed_file_becomes_searchable_and_delete_cleans_derived_data() {
         .service
         .upload(
             fixture.admin_id,
-            "managed.md".to_owned(),
+            "deployment-handbook-642.md".to_owned(),
             "text/markdown".to_owned(),
             b"# Managed\n\nmanaged-lifecycle-marker".to_vec(),
         )
@@ -215,7 +215,25 @@ async fn managed_file_becomes_searchable_and_delete_cleans_derived_data() {
             .status,
         KnowledgeEvidenceStatus::Ok
     );
+    assert_eq!(
+        fixture
+            .index
+            .search_evidence("deployment-handbook-642")
+            .status,
+        KnowledgeEvidenceStatus::Ok
+    );
     insert_test_embedding(&fixture, file_id);
+    let listed = fixture
+        .service
+        .list(fixture.admin_id, &Fixture::query())
+        .unwrap();
+    let listed_file = listed
+        .items
+        .iter()
+        .find(|entry| entry.file_id.as_deref() == Some(file_id))
+        .unwrap();
+    // 托管表初始记录为 0 时，后续回填的 embedding 也应从派生表实时统计。
+    assert_eq!(listed_file.embedding_count, Some(1));
     let indexed_counts = derived_index_counts(&fixture, file_id);
     assert!(indexed_counts.documents > 0);
     assert!(indexed_counts.chunks > 0);
@@ -317,6 +335,88 @@ fn background_and_knowledge_file_domains_are_isolated() {
             .code(),
         "not_found"
     );
+}
+
+#[test]
+fn legacy_background_mime_remains_selectable() {
+    let fixture = Fixture::new();
+    let legacy = fixture
+        .files
+        .create_file(
+            fixture.admin_id,
+            "legacy-background.heic".to_owned(),
+            "application/octet-stream".to_owned(),
+            b"legacy-background".to_vec(),
+        )
+        .unwrap();
+
+    fixture
+        .files
+        .update_preferences(
+            fixture.admin_id,
+            UserPreferencesPatch {
+                background_file_ids: Some(vec![legacy.file_id.clone()]),
+                active_background_file_id: PreferenceValuePatch::Set(legacy.file_id.clone()),
+                ..UserPreferencesPatch::default()
+            },
+        )
+        .unwrap();
+
+    let preferences = fixture.files.get_preferences(fixture.admin_id).unwrap();
+    assert_eq!(
+        preferences.background_file_ids,
+        vec![legacy.file_id.clone()]
+    );
+    assert_eq!(
+        preferences.active_background_file_id.as_deref(),
+        Some(legacy.file_id.as_str())
+    );
+}
+
+#[test]
+fn knowledge_file_sort_compares_rfc3339_instants_across_offsets() {
+    let fixture = Fixture::new();
+    let earlier = fixture
+        .service
+        .upload(
+            fixture.admin_id,
+            "earlier.md".to_owned(),
+            "text/markdown".to_owned(),
+            b"# Earlier".to_vec(),
+        )
+        .unwrap();
+    let later = fixture
+        .service
+        .upload(
+            fixture.admin_id,
+            "later.md".to_owned(),
+            "text/markdown".to_owned(),
+            b"# Later".to_vec(),
+        )
+        .unwrap();
+    let connection = fixture._database.connection().unwrap();
+    connection
+        .execute(
+            "UPDATE knowledge_managed_files SET updated_at = ?1 WHERE file_id = ?2",
+            params![
+                "2026-01-01T17:00:00+08:00",
+                earlier.file_id.as_deref().unwrap()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE knowledge_managed_files SET updated_at = ?1 WHERE file_id = ?2",
+            params!["2026-01-01T10:00:00Z", later.file_id.as_deref().unwrap()],
+        )
+        .unwrap();
+
+    let page = fixture
+        .service
+        .list(fixture.admin_id, &Fixture::query())
+        .unwrap();
+    assert_eq!(page.items[0].filename, "later.md");
+    assert_eq!(page.items[1].filename, "earlier.md");
 }
 
 #[tokio::test]
@@ -654,6 +754,19 @@ async fn invalid_managed_files_fail_with_safe_codes_and_can_retry() {
         .unwrap()
         .unwrap();
     assert_eq!(missing_failed.error_code.as_deref(), Some("source_missing"));
+    let missing_file_id = missing.file_id.as_deref().unwrap();
+    fixture
+        .service
+        .delete(fixture.admin_id, missing_file_id)
+        .unwrap();
+    assert!(
+        fixture
+            .service
+            .store
+            .find_owned(fixture.admin_id, missing_file_id)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

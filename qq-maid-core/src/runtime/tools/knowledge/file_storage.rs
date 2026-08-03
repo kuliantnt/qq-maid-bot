@@ -198,10 +198,11 @@ impl KnowledgeFileStore {
             ))
         })?;
         let order = match (query.sort, query.descending) {
-            (KnowledgeFileSort::UploadedAt, false) => "uploaded_at ASC",
-            (KnowledgeFileSort::UploadedAt, true) => "uploaded_at DESC",
-            (KnowledgeFileSort::UpdatedAt, false) => "updated_at ASC",
-            (KnowledgeFileSort::UpdatedAt, true) => "updated_at DESC",
+            (KnowledgeFileSort::UploadedAt, false) => "julianday(uploaded_at) ASC",
+            (KnowledgeFileSort::UploadedAt, true) => "julianday(uploaded_at) DESC",
+            // 旧库可能同时含 UTC `Z` 和北京时间 `+08:00`，不能按 RFC3339 文本直接排序。
+            (KnowledgeFileSort::UpdatedAt, false) => "julianday(updated_at) ASC",
+            (KnowledgeFileSort::UpdatedAt, true) => "julianday(updated_at) DESC",
         };
         let cte = knowledge_file_cte();
         let total_count = connection
@@ -533,7 +534,12 @@ fn managed_file_select(filter: &str) -> String {
         "SELECT m.file_id, f.original_filename, f.content_type, f.size,
                 m.status, m.uploaded_at, m.processing_started_at, m.processed_at,
                 m.updated_at, m.content_hash, m.error_code, m.error_summary,
-                m.chunk_count, m.embedding_count, m.document_key
+                m.chunk_count,
+                (SELECT COUNT(*) FROM knowledge_chunk_embeddings e
+                 JOIN knowledge_chunks c ON c.chunk_id = e.chunk_id
+                 JOIN knowledge_documents d ON d.id = c.document_id
+                 WHERE d.relative_path = m.document_key) AS embedding_count,
+                m.document_key
          FROM knowledge_managed_files m
          JOIN console_user_files f ON f.file_id = m.file_id
          {filter}"
@@ -618,7 +624,12 @@ fn knowledge_file_cte() -> String {
     "SELECT m.file_id, f.original_filename AS filename, f.content_type, f.size,
             m.status, m.uploaded_at, m.processing_started_at, m.processed_at,
             m.updated_at, m.content_hash, m.error_code, m.error_summary,
-            m.chunk_count, m.embedding_count, 'managed' AS source_kind,
+            m.chunk_count,
+            (SELECT COUNT(*) FROM knowledge_chunk_embeddings e
+             JOIN knowledge_chunks c ON c.chunk_id = e.chunk_id
+             JOIN knowledge_documents md ON md.id = c.document_id
+             WHERE md.relative_path = m.document_key) AS embedding_count,
+            'managed' AS source_kind,
             f.original_filename AS source_label, m.document_key
      FROM knowledge_managed_files m
      JOIN console_user_files f ON f.file_id = m.file_id

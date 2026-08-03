@@ -636,13 +636,18 @@ async fn backgrounds_validate_ownership_switch_active_and_clean_up_on_delete() {
         )
         .await;
     assert_eq!(foreign_gallery.status, StatusCode::UNPROCESSABLE_ENTITY);
-    let non_image_gallery = api
+    let legacy_mime_gallery = api
         .post(
             "/api/v1/console/user-preferences/update",
             json!({"background_file_ids": [&non_image]}),
         )
         .await;
-    assert_eq!(non_image_gallery.status, StatusCode::UNPROCESSABLE_ENTITY);
+    // 历史上上传接口允许非白名单 MIME；用途隔离后仍应保留这些背景的选择能力。
+    assert_eq!(legacy_mime_gallery.status, StatusCode::OK);
+    assert_eq!(
+        data(&legacy_mime_gallery)["background_file_ids"],
+        json!([non_image])
+    );
 
     let removed_active = data(
         &api.post(

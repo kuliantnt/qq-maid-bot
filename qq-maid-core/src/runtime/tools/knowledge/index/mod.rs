@@ -33,7 +33,10 @@ use crate::{error::LlmError, storage::database::DatabaseError};
 
 use super::storage::{KnowledgeChunkDraft, KnowledgeStore};
 
-use chunking::{CHUNKING_VERSION, ChunkingError, chunk_markdown_with_limit};
+use chunking::{
+    CHUNKING_VERSION, ChunkingError, chunk_markdown_for_source_with_limit,
+    chunk_markdown_with_limit,
+};
 use diagnostics::summarize_chunks;
 use scan::{ScannedMarkdown, scan_markdown_files};
 use search::{KnowledgeSearchProfile, build_evidence, query_diagnostics, query_text};
@@ -150,8 +153,13 @@ impl KnowledgeIndex {
 
         let document_key = managed_document_key(file_id);
         let file_hash = hash_text(content);
-        let chunks = chunk_markdown_with_limit(&document_key, content, MAX_MANAGED_CHUNKS)
-            .map_err(map_chunking_error)?;
+        let chunks = chunk_markdown_for_source_with_limit(
+            &document_key,
+            filename,
+            content,
+            MAX_MANAGED_CHUNKS,
+        )
+        .map_err(map_chunking_error)?;
         if chunks.is_empty() {
             return Err(LlmError::new(
                 "empty_document",

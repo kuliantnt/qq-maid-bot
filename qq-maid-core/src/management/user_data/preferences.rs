@@ -4,9 +4,8 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use super::{
     BackgroundMode, ConsoleUserDataError, ConsoleUserDataService, MAX_BACKGROUND_FILES,
-    MAX_CUSTOM_COLOR_CHARS, MAX_CUSTOM_COLORS, PreferenceValuePatch,
-    SUPPORTED_BACKGROUND_CONTENT_TYPES, UserFileModule, UserPreferences, UserPreferencesPatch,
-    now_rfc3339, validate_file_id,
+    MAX_CUSTOM_COLOR_CHARS, MAX_CUSTOM_COLORS, PreferenceValuePatch, UserFileModule,
+    UserPreferences, UserPreferencesPatch, now_rfc3339, validate_file_id,
 };
 
 impl ConsoleUserDataService {
@@ -35,9 +34,9 @@ impl ConsoleUserDataService {
         }
         if let Some(background_file_ids) = patch.background_file_ids {
             for file_id in &background_file_ids {
-                if !is_supported_background_file(&transaction, admin_id, file_id)? {
+                if !is_owned_background_file(&transaction, admin_id, file_id)? {
                     return Err(ConsoleUserDataError::invalid(
-                        "every background_file_id must identify a supported background image owned by the current user",
+                        "every background_file_id must identify a background file owned by the current user",
                     ));
                 }
             }
@@ -52,9 +51,9 @@ impl ConsoleUserDataService {
             PreferenceValuePatch::Unchanged => preferences.active_background_file_id,
             PreferenceValuePatch::Clear => None,
             PreferenceValuePatch::Set(file_id) => {
-                if !is_supported_background_file(&transaction, admin_id, &file_id)? {
+                if !is_owned_background_file(&transaction, admin_id, &file_id)? {
                     return Err(ConsoleUserDataError::invalid(
-                        "active_background_file_id must identify a supported background image owned by the current user",
+                        "active_background_file_id must identify a background file owned by the current user",
                     ));
                 }
                 Some(file_id)
@@ -132,11 +131,11 @@ pub(super) fn read_preferences(
         .map_err(storage_error)?;
     let stored_background_file_ids: Vec<String> =
         serde_json::from_str(&background_file_ids).map_err(storage_error)?;
-    // 迁移前的中间态可能把知识托管文件写进背景偏好；读取时按服务端模块和图片 MIME
-    // 再收敛一次，避免旧状态让背景 API 重新暴露 Markdown 文件。
+    // 迁移前的中间态可能把知识托管文件写进背景偏好；读取时按服务端模块
+    // 再收敛一次。不追溯检查 MIME，以保留历史上已接受的 octet-stream/TIFF/HEIC 背景。
     let mut valid_background_file_ids = Vec::with_capacity(stored_background_file_ids.len());
     for file_id in stored_background_file_ids {
-        if is_supported_background_file(connection, admin_id, &file_id)? {
+        if is_owned_background_file(connection, admin_id, &file_id)? {
             valid_background_file_ids.push(file_id);
         }
     }
@@ -245,29 +244,22 @@ fn validate_patch(patch: &UserPreferencesPatch) -> Result<(), ConsoleUserDataErr
     Ok(())
 }
 
-fn is_supported_background_file(
+fn is_owned_background_file(
     connection: &Connection,
     admin_id: i64,
     file_id: &str,
 ) -> Result<bool, ConsoleUserDataError> {
-    let metadata = connection
+    let exists = connection
         .query_row(
-            "SELECT content_type
+            "SELECT 1
              FROM console_user_files
              WHERE admin_id = ?1 AND file_id = ?2 AND module = ?3",
             params![admin_id, file_id, UserFileModule::Background.as_str()],
-            |row| row.get::<_, String>(0),
+            |_| Ok(()),
         )
         .optional()
         .map_err(storage_error)?;
-    Ok(metadata.is_some_and(|content_type| {
-        let content_type = content_type
-            .split_once(';')
-            .map_or(content_type.as_str(), |(value, _)| value)
-            .trim()
-            .to_ascii_lowercase();
-        SUPPORTED_BACKGROUND_CONTENT_TYPES.contains(&content_type.as_str())
-    }))
+    Ok(exists.is_some())
 }
 
 fn storage_error(error: impl std::fmt::Display) -> ConsoleUserDataError {

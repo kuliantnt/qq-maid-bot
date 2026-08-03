@@ -235,7 +235,7 @@ impl KnowledgeFileService {
             file_id,
             UserFileModule::Knowledge,
         ) {
-            Ok(staged) => Some(staged),
+            Ok(staged) => staged,
             Err(error) => return Err(map_user_data_error(error)),
         };
         let transaction_result = (|| {

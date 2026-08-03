@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use super::text::{build_index_text, hash_text};
 
 // 修改分块正文语义时必须提升版本，确保 file_hash 未变的已索引知识文件也会重建。
-pub(super) const CHUNKING_VERSION: i64 = 4;
+pub(super) const CHUNKING_VERSION: i64 = 5;
 
 const TARGET_CHUNK_CHARS: usize = 900;
 const SOFT_CHUNK_CHARS: usize = 1200;
@@ -75,9 +75,19 @@ pub(super) fn chunk_markdown_with_limit(
     content: &str,
     max_chunks: usize,
 ) -> Result<Vec<MarkdownChunk>, ChunkingError> {
+    chunk_markdown_for_source_with_limit(relative_path, relative_path, content, max_chunks)
+}
+
+pub(super) fn chunk_markdown_for_source_with_limit(
+    relative_path: &str,
+    search_source_name: &str,
+    content: &str,
+    max_chunks: usize,
+) -> Result<Vec<MarkdownChunk>, ChunkingError> {
     let parsed = strip_frontmatter(content);
     ChunkEmitter::new(
         relative_path,
+        search_source_name,
         parsed.metadata.search_terms,
         parsed.metadata.title,
         max_chunks,
@@ -497,6 +507,7 @@ impl CodeFence {
 
 struct ChunkEmitter<'a> {
     relative_path: &'a str,
+    search_source_name: &'a str,
     frontmatter_terms: Vec<String>,
     frontmatter_title: Option<String>,
     chunks: Vec<MarkdownChunk>,
@@ -506,12 +517,14 @@ struct ChunkEmitter<'a> {
 impl<'a> ChunkEmitter<'a> {
     fn new(
         relative_path: &'a str,
+        search_source_name: &'a str,
         frontmatter_terms: Vec<String>,
         frontmatter_title: Option<String>,
         max_chunks: usize,
     ) -> Self {
         Self {
             relative_path,
+            search_source_name,
             frontmatter_terms,
             frontmatter_title,
             chunks: Vec::new(),
@@ -614,7 +627,7 @@ impl<'a> ChunkEmitter<'a> {
             stable_path_id(self.relative_path),
         );
         let mut searchable = String::new();
-        searchable.push_str(self.relative_path);
+        searchable.push_str(self.search_source_name);
         searchable.push('\n');
         let include_frontmatter_terms = should_attach_frontmatter_terms(block, kind);
         let document_title = block
@@ -693,7 +706,7 @@ fn combined_kind(blocks: &[MarkdownBlock]) -> BlockKind {
 
 fn split_code_block(block: &MarkdownBlock) -> Vec<MarkdownBlock> {
     let lines = block.text.lines().collect::<Vec<_>>();
-    if lines.len() <= 2 {
+    if lines.len() < 2 {
         return vec![block.clone()];
     }
     let opener = lines[0];
@@ -702,6 +715,9 @@ fn split_code_block(block: &MarkdownBlock) -> Vec<MarkdownBlock> {
     };
     let last_line = lines[lines.len() - 1];
     let closed = fence.closes(last_line.trim());
+    if closed && lines.len() == 2 {
+        return vec![block.clone()];
+    }
     // 未闭合 fenced code block 到 EOF 时，最后一行仍是真实代码内容；
     // 不能把它当作 closer，否则会被复制进每个切片并污染检索索引。
     let closer = if closed {
@@ -714,42 +730,131 @@ fn split_code_block(block: &MarkdownBlock) -> Vec<MarkdownBlock> {
     } else {
         &lines[1..]
     };
+    let content_char_limit = code_content_char_limit(opener, &closer);
     let mut blocks = Vec::new();
-    let mut start = 0;
-    while start < content.len() {
-        let mut chars = opener.chars().count() + closer.chars().count() + 2;
-        let mut end = start;
-        while end < content.len() && end - start < CODE_CHUNK_LINES {
-            let line_chars = content[end].chars().count() + 1;
-            if end > start && chars + line_chars > CODE_CHUNK_CHARS {
-                break;
-            }
-            chars += line_chars;
-            end += 1;
+    let mut pending = Vec::new();
+    let mut pending_chars = opener.chars().count() + closer.chars().count() + 2;
+    let mut pending_start = 0;
+
+    for (line_index, line) in content.iter().enumerate() {
+        let mut rest = *line;
+        let mut rest_chars = rest.chars().count();
+        // 单行也必须按字符上限切开；否则后续 ASCII n-gram 会对整行产生巨量字符串。
+        while rest_chars > content_char_limit {
+            flush_code_lines(
+                &mut blocks,
+                &mut pending,
+                block,
+                opener,
+                &closer,
+                pending_start,
+                line_index,
+            );
+            pending_chars = opener.chars().count() + closer.chars().count() + 2;
+            let cut = char_boundary_at(rest, content_char_limit);
+            let (fragment, tail) = rest.split_at(cut);
+            blocks.push(code_block_fragment(
+                block,
+                opener,
+                &closer,
+                fragment.to_owned(),
+                line_index,
+                line_index + 1,
+            ));
+            rest = tail;
+            rest_chars -= content_char_limit;
         }
-        let mut text = String::new();
-        text.push_str(opener);
-        text.push('\n');
-        text.push_str(&content[start..end].join("\n"));
-        text.push('\n');
-        text.push_str(&closer);
-        blocks.push(MarkdownBlock {
-            text,
-            start_line: block.start_line + start,
-            end_line: block.start_line + end + 1,
-            ..block.clone()
-        });
-        start = end;
+
+        let line_chars = rest_chars + 1;
+        if !pending.is_empty()
+            && (pending.len() >= CODE_CHUNK_LINES || pending_chars + line_chars > CODE_CHUNK_CHARS)
+        {
+            flush_code_lines(
+                &mut blocks,
+                &mut pending,
+                block,
+                opener,
+                &closer,
+                pending_start,
+                line_index,
+            );
+            pending_chars = opener.chars().count() + closer.chars().count() + 2;
+        }
+        if pending.is_empty() {
+            pending_start = line_index;
+        }
+        pending.push(rest);
+        pending_chars += line_chars;
     }
+    flush_code_lines(
+        &mut blocks,
+        &mut pending,
+        block,
+        opener,
+        &closer,
+        pending_start,
+        content.len(),
+    );
     blocks
+}
+
+fn flush_code_lines(
+    blocks: &mut Vec<MarkdownBlock>,
+    pending: &mut Vec<&str>,
+    block: &MarkdownBlock,
+    opener: &str,
+    closer: &str,
+    start: usize,
+    end: usize,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    blocks.push(code_block_fragment(
+        block,
+        opener,
+        closer,
+        pending.join("\n"),
+        start,
+        end,
+    ));
+    pending.clear();
+}
+
+fn code_block_fragment(
+    block: &MarkdownBlock,
+    opener: &str,
+    closer: &str,
+    body: String,
+    start: usize,
+    end: usize,
+) -> MarkdownBlock {
+    let mut text = String::with_capacity(opener.len() + body.len() + closer.len() + 2);
+    text.push_str(opener);
+    text.push('\n');
+    text.push_str(&body);
+    text.push('\n');
+    text.push_str(closer);
+    MarkdownBlock {
+        text,
+        start_line: block.start_line + start,
+        end_line: block.start_line + end + 1,
+        ..block.clone()
+    }
+}
+
+fn code_content_char_limit(opener: &str, closer: &str) -> usize {
+    CODE_CHUNK_CHARS
+        .saturating_sub(opener.chars().count() + closer.chars().count() + 2)
+        .max(1)
 }
 
 fn oversized_code_block(block: &MarkdownBlock) -> bool {
     block.text.chars().count() > CODE_CHUNK_CHARS || block.text.lines().count() > CODE_CHUNK_LINES
 }
 
-/// `split_code_block` 每个结果至少消耗一行代码；先用不分配 Vec 的上界拒绝过大的代码块，
-/// 避免为了随后才失败的切片上限检查，先在内存中构造完整的代码切片列表。
+/// `split_code_block` 每个结果至少消耗一行或一个超长行片段；先用不分配 Vec 的上界
+/// 拒绝过大代码块，避免先构造大量切片再因数量上限失败。
 fn estimated_code_chunk_count(block: &MarkdownBlock) -> usize {
     let mut lines = block.text.lines();
     let Some(opener) = lines.next() else {
@@ -759,16 +864,37 @@ fn estimated_code_chunk_count(block: &MarkdownBlock) -> usize {
         return 1;
     };
     let line_count = block.text.lines().count();
-    if line_count <= 2 {
+    if line_count <= 1 {
         return 1;
     }
     let last_line = block.text.lines().last().unwrap_or_default();
-    let content_lines = if fence.closes(last_line.trim()) {
+    let closed = fence.closes(last_line.trim());
+    let content_lines = if closed {
         line_count.saturating_sub(2)
     } else {
         line_count.saturating_sub(1)
     };
-    content_lines.max(1)
+    let closer = if closed {
+        last_line
+    } else {
+        fence.marker.as_str()
+    };
+    let content_char_limit = code_content_char_limit(opener, closer);
+    block
+        .text
+        .lines()
+        .skip(1)
+        .take(content_lines)
+        .fold(0usize, |count, line| {
+            let chars = line.chars().count();
+            let fragments = chars
+                .saturating_add(content_char_limit - 1)
+                .checked_div(content_char_limit)
+                .unwrap_or(usize::MAX)
+                .max(1);
+            count.saturating_add(fragments)
+        })
+        .max(1)
 }
 
 fn best_cut(text: &str, max_chars: usize) -> Option<usize> {
