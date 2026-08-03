@@ -28,6 +28,11 @@ export class KnowledgePollingController {
     this.resetTimer();
   }
 
+  updateParams(params: KnowledgeFileListParams): void {
+    this.params = { ...params };
+    this.resetTimer();
+  }
+
   stop(): void {
     this.generation += 1;
     if (this.timerId !== null) this.deps.clearTimeout(this.timerId);

@@ -1,6 +1,7 @@
 import { ConsoleApiError } from "../../api.js";
 import type { KnowledgeFileItem } from "../../types.js";
 
+/** 知识库行操作集中处理下载、重试和删除，避免展示层绕过文件状态与权限边界。 */
 type KnowledgeActionDeps = {
   readonly setStatus: (text: string) => void;
   readonly download: (item: KnowledgeFileItem) => Promise<{ blob: Blob; filename: string }>;
@@ -27,6 +28,7 @@ export function triggerBrowserDownload(blob: Blob, filename: string): void {
 }
 
 export function createKnowledgeActionHandlers(deps: KnowledgeActionDeps): KnowledgeActionHandlers {
+  // 操作锁按按钮实例隔离，避免重复点击同一行，同时不阻塞其他文件的独立操作。
   const activeButtons = new WeakSet<HTMLButtonElement>();
   return {
     onDownload: (item) => void download(item, deps, activeButtons),
@@ -94,6 +96,7 @@ function openDeleteDialog(item: KnowledgeFileItem, deps: KnowledgeActionDeps, ac
   confirm.textContent = "删除";
   dialog.append(title, message, cancel, confirm);
   if (document.body) document.body.append(dialog);
+  // 对话框无论取消、成功还是冲突都归还焦点，键盘用户能回到触发删除的那一行。
   const close = () => {
     if (typeof dialog.close === "function") dialog.close();
     else dialog.removeAttribute("open");
@@ -108,6 +111,7 @@ function openDeleteDialog(item: KnowledgeFileItem, deps: KnowledgeActionDeps, ac
 }
 
 async function confirmDelete(fileId: string, button: HTMLButtonElement, close: () => void, deps: KnowledgeActionDeps, active: WeakSet<HTMLButtonElement>): Promise<void> {
+  // 确认按钮也单独加锁，避免删除请求尚未完成时重复提交同一文件。
   if (active.has(button)) return;
   active.add(button);
   button.disabled = true;

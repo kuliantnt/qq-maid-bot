@@ -15,6 +15,10 @@ export class KnowledgePollingController {
         this.failures = 0;
         this.resetTimer();
     }
+    updateParams(params) {
+        this.params = { ...params };
+        this.resetTimer();
+    }
     stop() {
         this.generation += 1;
         if (this.timerId !== null)

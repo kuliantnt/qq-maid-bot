@@ -225,6 +225,43 @@ test("知识库刷新展示加载和空态，筛选 all 不发送 status", async
   delete globalThis.fetch;
 });
 
+test("知识库状态筛选同步到轮询请求且不会覆盖筛选结果", async () => {
+  setupKnowledgePage();
+  const timers = new Map();
+  const requests = [];
+  let nextTimerId = 1;
+  window.setTimeout = (callback) => {
+    const timerId = nextTimerId++;
+    timers.set(timerId, callback);
+    return timerId;
+  };
+  window.clearTimeout = (timerId) => timers.delete(timerId);
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init.body));
+    requests.push(body);
+    if (requests.length === 1) return new Response(JSON.stringify({ ok: true, data: knowledgeCapabilities() }));
+    if (body.status === "processing") return new Response(JSON.stringify(knowledgeResponse([knowledgeItem({ filename: "processing.md", status: "processing" })])));
+    return new Response(JSON.stringify(knowledgeResponse([knowledgeItem({ filename: "pending.md", status: "pending" })])));
+  };
+
+  await initializeKnowledge();
+  const status = document.getElementById("knowledge-status-filter");
+  status.value = "processing";
+  document.getElementById("knowledge-filter-submit").onclick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const scheduled = timers.entries().next().value;
+  assert.ok(scheduled, "筛选后的待处理列表应启动轮询");
+  timers.delete(scheduled[0]);
+  scheduled[1]();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(requests[2].status, "processing");
+  assert.equal(requests[3].status, "processing");
+  assert.equal(document.getElementById("knowledge-list").children[0].children[1].children[0].children[0].textContent, "processing.md");
+  delete globalThis.fetch;
+});
+
 test("知识库刷新失败保留现有列表并显示安全错误", async () => {
   setupKnowledgePage();
   globalThis.fetch = async () => new Response(JSON.stringify(knowledgeResponse([knowledgeItem()])), { status: 200 });

@@ -8,6 +8,7 @@ import type { KnowledgeFileCapabilities, KnowledgeFileItem, KnowledgeFileListPar
 import type { KnowledgePager } from "./knowledge-paging.js";
 import { installKnowledgeUpload } from "./knowledge-upload.js";
 
+/** 知识库页面负责筛选、分页和文件操作编排，轮询只消费这里维护的当前列表状态。 */
 type KnowledgeRefreshReason = "refresh" | "upload" | "retry" | "delete" | "filter";
 
 let capabilities: KnowledgeFileCapabilities | null = null;
@@ -76,6 +77,7 @@ export function getKnowledgeCapabilities(): KnowledgeFileCapabilities | null {
 }
 
 export async function refreshKnowledgeList(reason: KnowledgeRefreshReason): Promise<void> {
+  // 各入口共用此刷新边界：筛选和手动刷新从第一页替换，其余操作保留当前筛选条件。
   const reset = reason === "refresh" || reason === "filter";
   if (reset) {
     currentParams = { ...currentParams, page: 1 };
@@ -88,6 +90,8 @@ export async function refreshKnowledgeList(reason: KnowledgeRefreshReason): Prom
     currentParams = { ...currentParams, page: page.page };
     pager = appendKnowledgePage(initialKnowledgePager(), page);
     loadedItems = [...page.items];
+    // 筛选成功后立即替换轮询参数，防止旧条件的异步结果覆盖当前视图。
+    polling.updateParams(currentParams);
     polling.setPages(loadedItems);
     polling.notifyChange();
     renderKnowledgeContent();
@@ -147,6 +151,8 @@ async function loadMoreKnowledgeFiles(): Promise<void> {
     const page = await listKnowledgeFiles(currentParams);
     pager = appendKnowledgePage(pager, page);
     loadedItems = [...loadedItems, ...page.items];
+    // 分页也保持控制器快照与页面条件一致；轮询请求仍固定拉取第一页的状态。
+    polling.updateParams(currentParams);
     polling.setPages(loadedItems);
     polling.notifyChange();
     renderKnowledgeContent();

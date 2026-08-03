@@ -8,6 +8,7 @@ export function triggerBrowserDownload(blob, filename) {
     URL.revokeObjectURL(href);
 }
 export function createKnowledgeActionHandlers(deps) {
+    // 操作锁按按钮实例隔离，避免重复点击同一行，同时不阻塞其他文件的独立操作。
     const activeButtons = new WeakSet();
     return {
         onDownload: (item) => void download(item, deps, activeButtons),
@@ -83,6 +84,7 @@ function openDeleteDialog(item, deps, active) {
     dialog.append(title, message, cancel, confirm);
     if (document.body)
         document.body.append(dialog);
+    // 对话框无论取消、成功还是冲突都归还焦点，键盘用户能回到触发删除的那一行。
     const close = () => {
         if (typeof dialog.close === "function")
             dialog.close();
@@ -101,6 +103,7 @@ function openDeleteDialog(item, deps, active) {
     cancel.focus();
 }
 async function confirmDelete(fileId, button, close, deps, active) {
+    // 确认按钮也单独加锁，避免删除请求尚未完成时重复提交同一文件。
     if (active.has(button))
         return;
     active.add(button);

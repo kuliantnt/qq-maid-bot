@@ -106,3 +106,25 @@ test("notifyChange clears the prior poll timer", () => {
   assert.equal(fixture.timers.has(first), false);
   assert.equal(fixture.timers.size, 1);
 });
+
+test("updateParams replaces the next polling request and resets its timer", async () => {
+  const requests = [];
+  const fixture = pollingFixture({
+    fetchPage: async (params) => {
+      requests.push(params);
+      return page([item("pending")]);
+    },
+  });
+  const initialParams = { page: 1, page_size: 20, search: "", status: "all", sort: "updated_at", order: "desc" };
+  const filteredParams = { ...initialParams, search: "失败文件", status: "failed" };
+  fixture.controller.setPages([item("pending")]);
+  fixture.controller.start(initialParams);
+  const initialTimer = [...fixture.timers.keys()][0];
+
+  fixture.controller.updateParams(filteredParams);
+
+  assert.equal(fixture.timers.has(initialTimer), false);
+  assert.equal(fixture.timers.size, 1);
+  await runTimer(fixture.timers);
+  assert.deepEqual(requests, [filteredParams]);
+});
