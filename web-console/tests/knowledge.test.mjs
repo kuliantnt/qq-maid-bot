@@ -10,6 +10,8 @@ import {
 } from "../dist/views/knowledge/knowledge-paging.js";
 import { renderKnowledgeList } from "../dist/views/knowledge/knowledge-list.js";
 import { initializeKnowledge, refreshKnowledgeList } from "../dist/views/knowledge/knowledge.js";
+import { ConsoleApiError } from "../dist/api.js";
+import { installKnowledgeUpload, validateKnowledgeFile } from "../dist/views/knowledge/knowledge-upload.js";
 import { createFakeDom, installDomGlobals } from "./helpers/fake-dom.mjs";
 
 function knowledgeItem(overrides = {}) {
@@ -91,6 +93,7 @@ test("知识库列表按来源和状态展示安全操作并触发回调", () =>
 function setupKnowledgePage() {
   const fake = createFakeDom();
   installDomGlobals(fake);
+  document.body = document.createElement("div");
   document.registerStaticId("knowledge-search", "input");
   document.registerStaticId("knowledge-status-filter", "select");
   document.registerStaticId("knowledge-filter-submit", "button");
@@ -101,6 +104,87 @@ function setupKnowledgePage() {
   document.registerStaticId("knowledge-list", "div");
   document.registerStaticId("knowledge-pagination", "div");
 }
+
+function knowledgeCapabilities() {
+  return { supported_extensions: [".md", ".markdown"], max_file_bytes: 1024, max_filename_chars: 16 };
+}
+
+function file(name, size) {
+  return new File(["x".repeat(size)], name, { type: "text/markdown" });
+}
+
+function setupUpload(upload) {
+  const fake = createFakeDom();
+  installDomGlobals(fake);
+  document.body = document.createElement("div");
+  const button = document.registerStaticId("knowledge-upload-open", "button");
+  const statuses = [];
+  let uploaded = 0;
+  installKnowledgeUpload({
+    inputId: "knowledge-upload-input",
+    buttonId: "knowledge-upload-open",
+    setStatus: (text) => statuses.push(text),
+    getCapabilities: knowledgeCapabilities,
+    upload,
+    onUploaded: () => { uploaded += 1; },
+  });
+  const input = document.getElementById("knowledge-upload-input");
+  return { button, input, statuses, uploaded: () => uploaded };
+}
+
+function triggerInputChange(input, selectedFile) {
+  input.files = [selectedFile];
+  for (const listener of input.listeners.get("change")) listener();
+}
+
+test("知识库上传预检覆盖格式、大小、文件名和大小写边界", () => {
+  const capabilities = knowledgeCapabilities();
+  const validFile = file("guide.md", 100);
+  const validResult = validateKnowledgeFile(validFile, capabilities);
+  assert.equal(validResult.ok, true);
+  if (validResult.ok) assert.equal(validResult.file, validFile);
+  assert.equal(validateKnowledgeFile(file("guide.txt", 100), capabilities).reason, "仅支持 .md / .markdown 文件");
+  assert.equal(validateKnowledgeFile(file("guide.md", 1025), capabilities).ok, false);
+  assert.equal(validateKnowledgeFile(file("a".repeat(14) + ".md", 100), capabilities).reason, "文件名过长");
+  assert.equal(validateKnowledgeFile(file("GUIDE.MARKDOWN", 100), capabilities).ok, true);
+});
+
+test("知识库上传禁用按钮至成功并按能力生成 accept", async () => {
+  let resolveUpload;
+  const flow = setupUpload(() => new Promise((resolve) => { resolveUpload = resolve; }));
+  let clicked = false;
+  flow.input.click = () => { clicked = true; };
+  flow.button.onclick();
+  assert.equal(clicked, true);
+  assert.equal(flow.input.accept, ".md,.markdown");
+  triggerInputChange(flow.input, file("guide.md", 100));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(flow.button.disabled, true);
+  assert.equal(flow.statuses.at(-1), "上传中…");
+  resolveUpload(knowledgeItem({ status: "pending" }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(flow.statuses.at(-1), "文件已上传，正在等待处理");
+  assert.equal(flow.uploaded(), 1);
+  assert.equal(flow.button.disabled, false);
+});
+
+test("知识库上传失败显示安全代码并恢复按钮", async () => {
+  const flow = setupUpload(async () => { throw new ConsoleApiError("文件过大", "knowledge_file_too_large", 413); });
+  triggerInputChange(flow.input, file("guide.md", 100));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.match(flow.statuses.at(-1), /knowledge_file_too_large/);
+  assert.equal(flow.uploaded(), 0);
+  assert.equal(flow.button.disabled, false);
+});
+
+test("知识库上传格式预警仍提交给服务端", async () => {
+  const files = [];
+  const flow = setupUpload(async (selectedFile) => { files.push(selectedFile); return knowledgeItem({ status: "pending" }); });
+  triggerInputChange(flow.input, file("guide.txt", 100));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(files[0].name, "guide.txt");
+  assert.equal(flow.statuses.includes("警告：仅支持 .md / .markdown 文件，服务端可能拒绝"), true);
+});
 
 function knowledgeResponse(items = []) {
   return { ok: true, data: { items, page: 1, page_size: 20, total: items.length, total_pages: 1 }, request_id: "test" };
