@@ -3,12 +3,10 @@ use std::sync::Arc;
 use super::chunking::chunk_markdown;
 use super::text::build_index_text;
 use super::*;
-use crate::storage::database::SqliteDatabase;
-
-use super::super::storage::KNOWLEDGE_MIGRATIONS;
+use crate::storage::{APP_MIGRATIONS, database::SqliteDatabase};
 
 fn test_index(base: &Path) -> KnowledgeIndex {
-    let db = SqliteDatabase::open_temp("qq-maid-knowledge-runtime", KNOWLEDGE_MIGRATIONS).unwrap();
+    let db = SqliteDatabase::open_temp("qq-maid-knowledge-runtime", APP_MIGRATIONS).unwrap();
     KnowledgeIndex::new(KnowledgeStore::new(db), base)
 }
 

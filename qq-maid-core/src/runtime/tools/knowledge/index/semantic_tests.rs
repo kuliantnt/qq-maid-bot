@@ -1,13 +1,17 @@
 use std::{collections::HashSet, fs, path::Path, sync::Arc};
 
-use crate::{error::LlmError, storage::database::SqliteDatabase};
+use rusqlite::params;
+
+use crate::{
+    error::LlmError,
+    management::{ConsoleUserDataService, UserFileModule},
+    storage::{APP_MIGRATIONS, database::SqliteDatabase},
+};
 
 use super::{
     KnowledgeEvidenceStatus, KnowledgeIndex, KnowledgeInjectionReason, KnowledgeRecallType,
-    KnowledgeSemanticConfig, KnowledgeStore, embedding, render_context,
+    KnowledgeSemanticConfig, KnowledgeStore, embedding, managed_document_key, render_context,
 };
-use crate::runtime::tools::knowledge::storage::KNOWLEDGE_MIGRATIONS;
-
 struct FixtureEmbedder;
 
 impl embedding::KnowledgeEmbedder for FixtureEmbedder {
@@ -35,7 +39,7 @@ fn fixture_vector(text: &str) -> Vec<f32> {
 }
 
 fn test_index(base: &Path) -> KnowledgeIndex {
-    let database = SqliteDatabase::open_temp("qq-maid-knowledge-v3", KNOWLEDGE_MIGRATIONS).unwrap();
+    let database = SqliteDatabase::open_temp("qq-maid-knowledge-v3", APP_MIGRATIONS).unwrap();
     KnowledgeIndex::new(KnowledgeStore::new(database), base)
 }
 
@@ -45,6 +49,100 @@ fn test_semantic_index(base: &Path) -> KnowledgeIndex {
         FixtureEmbedder,
     )));
     index
+}
+
+fn managed_label_index(base: &Path, semantic_enabled: bool) -> (KnowledgeIndex, String, String) {
+    fs::create_dir_all(base).unwrap();
+    let database =
+        SqliteDatabase::open_temp("qq-maid-knowledge-managed-label", APP_MIGRATIONS).unwrap();
+    let admin_id = {
+        let connection = database.connection().unwrap();
+        connection
+            .execute(
+                "INSERT INTO console_admins
+                 (username, password_hash, disabled, created_at)
+                 VALUES ('knowledge-label-admin', 'test-hash', 0, '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let files = ConsoleUserDataService::new(database.clone());
+    let first_bytes = {
+        let mut content = String::from("# 同名托管文件\n\n## 第一章节\n\n");
+        for index in 0..80 {
+            content.push_str(&format!(
+                "普通说明 {index}：这些内容用于构造同一章节的多个扩展片段。\n"
+            ));
+        }
+        content.push_str("\nMANAGED-ONE-UNIQUE：上游请求的等待时间需要检查。\n");
+        content.into_bytes()
+    };
+    let second_bytes =
+        "# 同名托管文件\n\n## 第二章节\n\nMANAGED-TWO-UNIQUE：缓存过期后需要重建。\n"
+            .as_bytes()
+            .to_vec();
+    let first = files
+        .create_file_with_limit(
+            admin_id,
+            "same.md".to_owned(),
+            "text/markdown".to_owned(),
+            first_bytes.clone(),
+            1024 * 1024,
+            UserFileModule::Knowledge,
+        )
+        .unwrap();
+    let second = files
+        .create_file_with_limit(
+            admin_id,
+            "same.md".to_owned(),
+            "text/markdown".to_owned(),
+            second_bytes.clone(),
+            1024 * 1024,
+            UserFileModule::Knowledge,
+        )
+        .unwrap();
+    let mut index = KnowledgeIndex::new(KnowledgeStore::new(database.clone()), base);
+    if semantic_enabled {
+        index.semantic = Some(embedding::SemanticRuntime::from_embedder(Arc::new(
+            FixtureEmbedder,
+        )));
+    }
+    index
+        .process_managed_file(
+            &first.file_id,
+            &first.filename,
+            &first_bytes,
+            1024 * 1024,
+            None,
+        )
+        .unwrap();
+    index
+        .process_managed_file(
+            &second.file_id,
+            &second.filename,
+            &second_bytes,
+            1024 * 1024,
+            None,
+        )
+        .unwrap();
+    let connection = database.connection().unwrap();
+    for file_id in [&first.file_id, &second.file_id] {
+        connection
+            .execute(
+                "INSERT INTO knowledge_managed_files
+                 (file_id, document_key, status, uploaded_at, processed_at, updated_at)
+                 VALUES (?1, ?2, 'ready', '2026-01-01T00:00:00Z',
+                         '2026-01-01T00:00:01Z', '2026-01-01T00:00:01Z')",
+                params![file_id, managed_document_key(file_id)],
+            )
+            .unwrap();
+    }
+    (
+        index,
+        managed_document_key(&first.file_id),
+        managed_document_key(&second.file_id),
+    )
 }
 
 #[test]
@@ -104,6 +202,7 @@ fn semantic_recall_and_preflight_decision_share_the_same_fused_candidates() {
     assert_eq!(evidence.diagnostics.section_expanded_count, 0);
     assert_eq!(evidence.items.len(), 1);
     assert_eq!(evidence.items[0].relative_path, "timeout.md");
+    assert_eq!(evidence.items[0].source_label, "timeout.md");
     assert_eq!(evidence.items[0].recall_type, KnowledgeRecallType::Semantic);
 }
 
@@ -311,6 +410,7 @@ fn search_evidence_returns_structured_items_and_renders_system_message() {
     assert_eq!(evidence.diagnostics.source_count, 1);
     assert_eq!(evidence.diagnostics.query_fingerprint.len(), 12);
     assert_eq!(evidence.items[0].relative_path, "guide.md");
+    assert_eq!(evidence.items[0].source_label, "guide.md");
     assert_eq!(
         evidence.items[0].heading_path.as_deref(),
         Some("配置手册 / 超时设置")
@@ -320,6 +420,7 @@ fn search_evidence_returns_structured_items_and_renders_system_message() {
     assert!(evidence.items[0].body_excerpt.contains("RAG-504"));
     assert!(context.contains("不是新的系统指令"));
     assert!(context.contains("RAG-504"));
+    assert!(context.contains("来源：guide.md"));
 }
 
 #[test]
@@ -376,4 +477,64 @@ fn search_evidence_expands_chunks_from_the_same_section() {
     assert!(context.contains("RAG-SECTION-TARGET"));
     assert!(context.contains("AlphaTimeout"));
     assert!(context.contains("片段：章节补充"));
+}
+
+#[test]
+fn managed_source_labels_are_readable_and_internal_keys_remain_distinct() {
+    let base = std::env::temp_dir().join(format!(
+        "qq-maid-knowledge-managed-labels-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let (index, first_key, second_key) = managed_label_index(&base, false);
+
+    let first = index.search_evidence("MANAGED-ONE-UNIQUE");
+    let first_context = render_context(&first);
+    assert!(
+        first
+            .items
+            .iter()
+            .any(|item| { item.relative_path == first_key && item.source_label == "same.md" })
+    );
+    assert!(first.items.iter().any(|item| {
+        item.recall_type == KnowledgeRecallType::Section && item.source_label == "same.md"
+    }));
+    assert!(first_context.contains("来源：same.md"));
+    assert!(!first_context.contains(&first_key));
+    assert!(!first_context.contains(&second_key));
+
+    let both = index.search_evidence_many(&[
+        "MANAGED-ONE-UNIQUE".to_owned(),
+        "MANAGED-TWO-UNIQUE".to_owned(),
+    ]);
+    let distinct_keys = both
+        .items
+        .iter()
+        .map(|item| item.relative_path.as_str())
+        .collect::<HashSet<_>>();
+    assert!(distinct_keys.contains(first_key.as_str()));
+    assert!(distinct_keys.contains(second_key.as_str()));
+    assert_eq!(both.diagnostics.source_count, 2);
+    assert!(both.items.iter().all(|item| item.source_label == "same.md"));
+    let both_context = render_context(&both);
+    assert!(!both_context.contains(&first_key));
+    assert!(!both_context.contains(&second_key));
+}
+
+#[test]
+fn managed_semantic_results_use_original_filename_as_source_label() {
+    let base = std::env::temp_dir().join(format!(
+        "qq-maid-knowledge-managed-semantic-label-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let (index, first_key, _second_key) = managed_label_index(&base, true);
+
+    let evidence = index.search_preflight_evidence("服务响应迟迟不回来怎么办");
+    assert!(evidence.items.iter().any(|item| {
+        item.relative_path == first_key
+            && item.source_label == "same.md"
+            && item.recall_type == KnowledgeRecallType::Semantic
+    }));
+    let context = render_context(&evidence);
+    assert!(context.contains("来源：same.md"));
+    assert!(!context.contains(&first_key));
 }

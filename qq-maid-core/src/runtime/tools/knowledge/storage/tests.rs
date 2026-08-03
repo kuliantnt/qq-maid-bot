@@ -1,10 +1,8 @@
 use super::*;
-use crate::storage::database::SqliteDatabase;
+use crate::storage::{APP_MIGRATIONS, database::SqliteDatabase};
 
 fn test_store() -> KnowledgeStore {
-    KnowledgeStore::new(
-        SqliteDatabase::open_temp("qq-maid-knowledge", KNOWLEDGE_MIGRATIONS).unwrap(),
-    )
+    KnowledgeStore::new(SqliteDatabase::open_temp("qq-maid-knowledge", APP_MIGRATIONS).unwrap())
 }
 
 #[test]

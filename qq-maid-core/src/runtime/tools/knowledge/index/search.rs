@@ -597,6 +597,7 @@ fn evidence_items_within_budget(
         let item = KnowledgeEvidenceItem {
             chunk_id: result.chunk_id,
             relative_path: result.relative_path,
+            source_label: result.source_label,
             document_title: result.document_title,
             heading_path: result.heading_path,
             start_line: result.start_line,

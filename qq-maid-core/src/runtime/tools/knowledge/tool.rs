@@ -377,8 +377,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        runtime::tools::knowledge::{KNOWLEDGE_MIGRATIONS, KnowledgeStore, render_context},
-        storage::database::SqliteDatabase,
+        runtime::tools::knowledge::{KnowledgeStore, render_context},
+        storage::{APP_MIGRATIONS, database::SqliteDatabase},
     };
 
     fn context() -> ToolContext {
@@ -413,8 +413,7 @@ mod tests {
         let knowledge_dir = base.join("knowledge");
         fs::create_dir_all(&knowledge_dir).unwrap();
         fs::write(knowledge_dir.join("guide.md"), content).unwrap();
-        let database =
-            SqliteDatabase::open_temp("qq-maid-knowledge-tool", KNOWLEDGE_MIGRATIONS).unwrap();
+        let database = SqliteDatabase::open_temp("qq-maid-knowledge-tool", APP_MIGRATIONS).unwrap();
         let index = KnowledgeIndex::new(KnowledgeStore::new(database), Path::new(&knowledge_dir));
         index.sync().unwrap();
         KnowledgeSearchTool::new(index, output_max_chars)
@@ -455,6 +454,7 @@ mod tests {
         assert!(output.value["ok"].as_bool().unwrap());
         assert_eq!(output.value["status"], "ok");
         assert_eq!(output.value["items"][0]["relative_path"], "guide.md");
+        assert_eq!(output.value["items"][0]["source_label"], "guide.md");
         assert!(
             output.value["items"][0]["body_excerpt"]
                 .as_str()
@@ -559,6 +559,7 @@ mod tests {
                 super::super::KnowledgeEvidenceItem {
                     chunk_id: "lexical".to_owned(),
                     relative_path: "guide.md".to_owned(),
+                    source_label: "guide.md".to_owned(),
                     document_title: None,
                     heading_path: None,
                     start_line: Some(1),
@@ -570,6 +571,7 @@ mod tests {
                 super::super::KnowledgeEvidenceItem {
                     chunk_id: "adjacent".to_owned(),
                     relative_path: "guide.md".to_owned(),
+                    source_label: "guide.md".to_owned(),
                     document_title: None,
                     heading_path: None,
                     start_line: Some(3),

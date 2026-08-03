@@ -139,6 +139,8 @@ pub struct KnowledgeSearchResult {
     pub document_id: i64,
     pub chunk_id: String,
     pub relative_path: String,
+    /// 面向用户展示的来源标签；`relative_path` 仍是内部唯一来源 key。
+    pub source_label: String,
     pub document_title: Option<String>,
     pub heading_path: Option<String>,
     pub chunk_index: usize,
@@ -539,6 +541,11 @@ impl KnowledgeStore {
                     c.chunk_id,
                     c.document_id,
                     c.relative_path,
+                    CASE
+                        WHEN d.source_kind = 'directory' THEN d.relative_path
+                        WHEN trim(coalesce(f.original_filename, '')) <> '' THEN f.original_filename
+                        ELSE '托管知识文件'
+                    END AS source_label,
                     c.document_title,
                     c.heading_path,
                     c.chunk_index,
@@ -553,6 +560,8 @@ impl KnowledgeStore {
                  JOIN knowledge_chunks c ON c.row_id = knowledge_chunks_fts.rowid
                  JOIN knowledge_documents d ON d.id = c.document_id
                  LEFT JOIN knowledge_managed_files m ON m.document_key = d.relative_path
+                 LEFT JOIN console_user_files f
+                    ON f.file_id = m.file_id AND f.module = 'knowledge'
                  WHERE knowledge_chunks_fts MATCH ?1
                    AND (d.source_kind = 'directory' OR m.status = 'ready')
                  ORDER BY rank
@@ -561,24 +570,25 @@ impl KnowledgeStore {
             .map_err(DatabaseError::from_sql)?;
         let rows = stmt
             .query_map(params![query, limit as i64], |row| {
-                let rank: f64 = row.get(12)?;
+                let rank: f64 = row.get(13)?;
                 Ok(KnowledgeSearchResult {
                     chunk_id: row.get(0)?,
                     document_id: row.get(1)?,
                     relative_path: row.get(2)?,
-                    document_title: row.get(3)?,
-                    heading_path: row.get(4)?,
-                    chunk_index: row.get::<_, i64>(5)?.max(0) as usize,
-                    chunk_type: row.get(6)?,
-                    body: row.get(7)?,
+                    source_label: row.get(3)?,
+                    document_title: row.get(4)?,
+                    heading_path: row.get(5)?,
+                    chunk_index: row.get::<_, i64>(6)?.max(0) as usize,
+                    chunk_type: row.get(7)?,
+                    body: row.get(8)?,
                     start_line: row
-                        .get::<_, Option<i64>>(8)?
-                        .map(|line| line.max(0) as usize),
-                    end_line: row
                         .get::<_, Option<i64>>(9)?
                         .map(|line| line.max(0) as usize),
-                    code_language: row.get(10)?,
-                    search_text: row.get(11)?,
+                    end_line: row
+                        .get::<_, Option<i64>>(10)?
+                        .map(|line| line.max(0) as usize),
+                    code_language: row.get(11)?,
+                    search_text: row.get(12)?,
                     origin: KnowledgeSearchOrigin::Lexical,
                     // bm25 越小越相关；对外转成越大越相关的分数，便于诊断理解。
                     score: -rank,
@@ -601,6 +611,11 @@ impl KnowledgeStore {
                     c.chunk_id,
                     c.document_id,
                     c.relative_path,
+                    CASE
+                        WHEN d.source_kind = 'directory' THEN d.relative_path
+                        WHEN trim(coalesce(f.original_filename, '')) <> '' THEN f.original_filename
+                        ELSE '托管知识文件'
+                    END AS source_label,
                     c.document_title,
                     c.heading_path,
                     c.chunk_index,
@@ -613,6 +628,8 @@ impl KnowledgeStore {
                  FROM knowledge_chunks c
                  JOIN knowledge_documents d ON d.id = c.document_id
                  LEFT JOIN knowledge_managed_files m ON m.document_key = d.relative_path
+                 LEFT JOIN console_user_files f
+                    ON f.file_id = m.file_id AND f.module = 'knowledge'
                  WHERE c.document_id = ?1
                    AND (d.source_kind = 'directory' OR m.status = 'ready')
                    AND ((?2 IS NULL AND c.heading_path IS NULL) OR c.heading_path = ?2)
@@ -625,19 +642,20 @@ impl KnowledgeStore {
                     chunk_id: row.get(0)?,
                     document_id: row.get(1)?,
                     relative_path: row.get(2)?,
-                    document_title: row.get(3)?,
-                    heading_path: row.get(4)?,
-                    chunk_index: row.get::<_, i64>(5)?.max(0) as usize,
-                    chunk_type: row.get(6)?,
-                    body: row.get(7)?,
+                    source_label: row.get(3)?,
+                    document_title: row.get(4)?,
+                    heading_path: row.get(5)?,
+                    chunk_index: row.get::<_, i64>(6)?.max(0) as usize,
+                    chunk_type: row.get(7)?,
+                    body: row.get(8)?,
                     start_line: row
-                        .get::<_, Option<i64>>(8)?
-                        .map(|line| line.max(0) as usize),
-                    end_line: row
                         .get::<_, Option<i64>>(9)?
                         .map(|line| line.max(0) as usize),
-                    code_language: row.get(10)?,
-                    search_text: row.get(11)?,
+                    end_line: row
+                        .get::<_, Option<i64>>(10)?
+                        .map(|line| line.max(0) as usize),
+                    code_language: row.get(11)?,
+                    search_text: row.get(12)?,
                     origin: KnowledgeSearchOrigin::Section,
                     score: 0.0,
                 })
@@ -656,12 +674,19 @@ impl KnowledgeStore {
         let conn = self.database.connection()?;
         let mut stmt = conn
             .prepare(
-                "SELECT c.chunk_id, c.document_id, c.relative_path, c.document_title,
-                        c.heading_path, c.chunk_index, c.chunk_type, c.body, c.start_line,
-                        c.end_line, c.code_language, c.search_text
+                "SELECT c.chunk_id, c.document_id, c.relative_path,
+                        CASE
+                            WHEN d.source_kind = 'directory' THEN d.relative_path
+                            WHEN trim(coalesce(f.original_filename, '')) <> '' THEN f.original_filename
+                            ELSE '托管知识文件'
+                        END AS source_label,
+                        c.document_title, c.heading_path, c.chunk_index, c.chunk_type,
+                        c.body, c.start_line, c.end_line, c.code_language, c.search_text
                  FROM knowledge_chunks c
                  JOIN knowledge_documents d ON d.id = c.document_id
                  LEFT JOIN knowledge_managed_files m ON m.document_key = d.relative_path
+                 LEFT JOIN console_user_files f
+                    ON f.file_id = m.file_id AND f.module = 'knowledge'
                  WHERE c.document_id = ?1
                    AND (d.source_kind = 'directory' OR m.status = 'ready')
                    AND c.chunk_index IN (?2, ?3)
@@ -676,19 +701,20 @@ impl KnowledgeStore {
                         chunk_id: row.get(0)?,
                         document_id: row.get(1)?,
                         relative_path: row.get(2)?,
-                        document_title: row.get(3)?,
-                        heading_path: row.get(4)?,
-                        chunk_index: row.get::<_, i64>(5)?.max(0) as usize,
-                        chunk_type: row.get(6)?,
-                        body: row.get(7)?,
+                        source_label: row.get(3)?,
+                        document_title: row.get(4)?,
+                        heading_path: row.get(5)?,
+                        chunk_index: row.get::<_, i64>(6)?.max(0) as usize,
+                        chunk_type: row.get(7)?,
+                        body: row.get(8)?,
                         start_line: row
-                            .get::<_, Option<i64>>(8)?
-                            .map(|line| line.max(0) as usize),
-                        end_line: row
                             .get::<_, Option<i64>>(9)?
                             .map(|line| line.max(0) as usize),
-                        code_language: row.get(10)?,
-                        search_text: row.get(11)?,
+                        end_line: row
+                            .get::<_, Option<i64>>(10)?
+                            .map(|line| line.max(0) as usize),
+                        code_language: row.get(11)?,
+                        search_text: row.get(12)?,
                         origin: KnowledgeSearchOrigin::Section,
                         score: 0.0,
                     })
@@ -829,13 +855,20 @@ impl KnowledgeStore {
         let mut stmt = conn
             .prepare(
                 "SELECT
-                    c.chunk_id, c.document_id, c.relative_path, c.document_title,
-                    c.heading_path, c.chunk_index, c.chunk_type, c.body,
+                    c.chunk_id, c.document_id, c.relative_path,
+                    CASE
+                        WHEN d.source_kind = 'directory' THEN d.relative_path
+                        WHEN trim(coalesce(f.original_filename, '')) <> '' THEN f.original_filename
+                        ELSE '托管知识文件'
+                    END AS source_label,
+                    c.document_title, c.heading_path, c.chunk_index, c.chunk_type, c.body,
                     c.start_line, c.end_line, c.code_language, c.search_text, e.vector
                  FROM knowledge_chunk_embeddings e
                  JOIN knowledge_chunks c ON c.chunk_id = e.chunk_id
                  JOIN knowledge_documents d ON d.id = c.document_id
                  LEFT JOIN knowledge_managed_files m ON m.document_key = d.relative_path
+                 LEFT JOIN console_user_files f
+                    ON f.file_id = m.file_id AND f.module = 'knowledge'
                  WHERE e.model = ?1
                    AND e.embedding_version = ?2
                    AND e.dimensions = ?3
@@ -847,25 +880,26 @@ impl KnowledgeStore {
             .query_map(
                 params![model, embedding_version, query_vector.len() as i64],
                 |row| {
-                    let vector = row.get::<_, Vec<u8>>(12)?;
+                    let vector = row.get::<_, Vec<u8>>(13)?;
                     Ok((
                         KnowledgeSearchResult {
                             chunk_id: row.get(0)?,
                             document_id: row.get(1)?,
                             relative_path: row.get(2)?,
-                            document_title: row.get(3)?,
-                            heading_path: row.get(4)?,
-                            chunk_index: row.get::<_, i64>(5)?.max(0) as usize,
-                            chunk_type: row.get(6)?,
-                            body: row.get(7)?,
+                            source_label: row.get(3)?,
+                            document_title: row.get(4)?,
+                            heading_path: row.get(5)?,
+                            chunk_index: row.get::<_, i64>(6)?.max(0) as usize,
+                            chunk_type: row.get(7)?,
+                            body: row.get(8)?,
                             start_line: row
-                                .get::<_, Option<i64>>(8)?
-                                .map(|line| line.max(0) as usize),
-                            end_line: row
                                 .get::<_, Option<i64>>(9)?
                                 .map(|line| line.max(0) as usize),
-                            code_language: row.get(10)?,
-                            search_text: row.get(11)?,
+                            end_line: row
+                                .get::<_, Option<i64>>(10)?
+                                .map(|line| line.max(0) as usize),
+                            code_language: row.get(11)?,
+                            search_text: row.get(12)?,
                             origin: KnowledgeSearchOrigin::Semantic,
                             score: 0.0,
                         },
