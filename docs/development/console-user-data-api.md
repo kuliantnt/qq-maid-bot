@@ -82,7 +82,9 @@
 
 ## 通用文件
 
-文件接口不包含背景专用规则，可由头像、Logo 等后续场景复用。单文件上限为 10 MiB，暂不限制文件格式。
+通用文件接口固定管理 `background` 用途文件；用途由服务端接口决定，客户端不能提交或改写
+`module`。知识库文件使用独立的知识库接口，不会出现在这里的列表、读取或删除结果中。单文件
+上限为 10 MiB，上传暂不限制文件格式；设置背景偏好时只接受服务端记录的受支持图片类型。
 
 ### 上传
 
@@ -100,6 +102,7 @@
   "file_id": "2d637334-11ea-48ea-88ba-1ac31e9a5651",
   "filename": "background.webp",
   "content_type": "image/webp",
+  "module": "background",
   "size": 123456,
   "created_at": "2026-07-31T12:00:00Z",
   "url": "/api/v1/console/files/get/2d637334-11ea-48ea-88ba-1ac31e9a5651"
@@ -121,7 +124,8 @@
 }
 ```
 
-响应 `data.items` 中每项与上传响应字段一致，并包含 `created_at` 和读取 `url`。只返回当前用户上传的文件，按创建时间倒序排列。
+响应 `data.items` 中每项与上传响应字段一致，并包含 `created_at` 和读取 `url`。只返回当前管理员
+所有且 `module=background` 的文件，按创建时间倒序排列。
 
 ### 读取内容
 
@@ -136,7 +140,7 @@
 
 该端点复用管理员 Session、同源与 CSRF 校验，并继续按管理员 ID 检查文件归属；它使用独立的
 只读认证路径，不消耗每分钟 60 次的配置修改、文件删除、Todo 等管理动作额度。接口不公开文件
-系统路径，也没有取消访问控制。
+系统路径，也没有取消访问控制；知识用途文件按用途隔离并返回 404。
 
 由于接口统一使用 `POST`，`url` 不能直接作为 `<img src>`。前端应先以带凭据和 CSRF 的 `POST` 获取 Blob，再创建页面生命周期内的 object URL，例如：
 
@@ -172,7 +176,10 @@ const objectUrl = URL.createObjectURL(await response.blob());
 }
 ```
 
-删除时先把磁盘文件原子改名为不可访问的暂存名，再在同一个 SQLite 事务内从当前用户的 `background_file_ids` 移除该 ID、按需清空 `active_background_file_id` 并删除文件记录。事务失败时尝试恢复磁盘文件；事务提交后清理暂存文件，清理失败会记录明确警告，不会伪报磁盘清理已经完成。
+删除时先把磁盘文件原子改名为不可访问的暂存名，再在同一个 SQLite 事务内从当前用户的
+`background_file_ids` 移除该 ID、按需清空 `active_background_file_id` 并删除 `module=background`
+的文件记录。事务失败时尝试恢复磁盘文件；事务提交后清理暂存文件，清理失败会记录明确警告，
+不会伪报磁盘清理已经完成。知识用途文件必须通过知识库删除接口处理。
 
 ## 持久化位置
 

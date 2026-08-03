@@ -6,6 +6,7 @@
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
+    management::UserFileModule,
     runtime::tools::knowledge::{index::managed_document_key, storage::KnowledgeStore},
     storage::{
         database::{DatabaseError, SqliteDatabase},
@@ -115,19 +116,36 @@ impl KnowledgeFileStore {
 
     pub(crate) fn insert_pending(
         &self,
+        admin_id: i64,
         file_id: &str,
         uploaded_at: &str,
     ) -> Result<(), DatabaseError> {
         let document_key = managed_document_key(file_id);
-        self.database
+        let changed = self
+            .database
             .connection()?
             .execute(
                 "INSERT INTO knowledge_managed_files
                  (file_id, document_key, status, uploaded_at, updated_at)
-                 VALUES (?1, ?2, 'pending', ?3, ?3)",
-                params![file_id, document_key, uploaded_at],
+                 SELECT ?1, ?2, 'pending', ?3, ?3
+                 WHERE EXISTS(
+                   SELECT 1 FROM console_user_files
+                   WHERE admin_id = ?4 AND file_id = ?1 AND module = ?5
+                 )",
+                params![
+                    file_id,
+                    document_key,
+                    uploaded_at,
+                    admin_id,
+                    UserFileModule::Knowledge.as_str()
+                ],
             )
             .map_err(DatabaseError::from_sql)?;
+        if changed != 1 {
+            return Err(DatabaseError::from_sql(
+                rusqlite::Error::QueryReturnedNoRows,
+            ));
+        }
         Ok(())
     }
 
@@ -147,7 +165,11 @@ impl KnowledgeFileStore {
     ) -> Result<Option<KnowledgeFileEntry>, DatabaseError> {
         connection
             .query_row(
-                &managed_file_select("WHERE f.admin_id = ?1 AND m.file_id = ?2"),
+                &managed_file_select(
+                    "WHERE f.admin_id = ?1
+                       AND f.module = 'knowledge'
+                       AND m.file_id = ?2",
+                ),
                 params![admin_id, file_id],
                 managed_entry_from_row,
             )
@@ -225,18 +247,46 @@ impl KnowledgeFileStore {
     }
 
     pub(crate) fn recover_processing(&self) -> Result<usize, DatabaseError> {
+        let mut connection = self.database.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(DatabaseError::from_sql)?;
+        let mut statement = transaction
+            .prepare(
+                "SELECT m.document_key
+                 FROM knowledge_managed_files m
+                 JOIN console_user_files f ON f.file_id = m.file_id
+                 WHERE m.status IN ('pending', 'processing', 'failed')
+                   AND f.module = 'knowledge'",
+            )
+            .map_err(DatabaseError::from_sql)?;
+        let document_keys = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(DatabaseError::from_sql)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DatabaseError::from_sql)?;
+        drop(statement);
+        // 非 ready 状态都不允许保留派生索引：这同时覆盖 worker panic、join failure、
+        // mark_ready/mark_failed 写回失败后的下一周期清理，避免用检索过滤掩盖孤立数据。
+        for document_key in &document_keys {
+            KnowledgeStore::delete_document_in_transaction(&transaction, document_key)?;
+        }
         let now = now_iso_cn();
-        let changed = self
-            .database
-            .connection()?
+        let changed = transaction
             .execute(
                 "UPDATE knowledge_managed_files
                  SET status = 'pending', processing_started_at = NULL,
                      error_code = NULL, error_summary = NULL, updated_at = ?1
-                 WHERE status = 'processing'",
+                 WHERE status = 'processing'
+                   AND EXISTS(
+                     SELECT 1 FROM console_user_files
+                     WHERE file_id = knowledge_managed_files.file_id
+                       AND module = 'knowledge'
+                   )",
                 [now],
             )
             .map_err(DatabaseError::from_sql)?;
+        transaction.commit().map_err(DatabaseError::from_sql)?;
         Ok(changed)
     }
 
@@ -247,9 +297,10 @@ impl KnowledgeFileStore {
             .map_err(DatabaseError::from_sql)?;
         let file_id = transaction
             .query_row(
-                "SELECT file_id FROM knowledge_managed_files
-                 WHERE status = 'pending'
-                 ORDER BY uploaded_at ASC, file_id ASC LIMIT 1",
+                "SELECT m.file_id FROM knowledge_managed_files m
+                 JOIN console_user_files f ON f.file_id = m.file_id
+                 WHERE m.status = 'pending' AND f.module = 'knowledge'
+                 ORDER BY m.uploaded_at ASC, m.file_id ASC LIMIT 1",
                 [],
                 |row| row.get::<_, String>(0),
             )
@@ -265,7 +316,11 @@ impl KnowledgeFileStore {
                 "UPDATE knowledge_managed_files
                  SET status = 'processing', processing_started_at = ?1,
                      error_code = NULL, error_summary = NULL, updated_at = ?1
-                 WHERE file_id = ?2 AND status = 'pending'",
+                 WHERE file_id = ?2 AND status = 'pending'
+                   AND EXISTS(
+                     SELECT 1 FROM console_user_files
+                     WHERE file_id = ?2 AND module = 'knowledge'
+                   )",
                 params![now, file_id],
             )
             .map_err(DatabaseError::from_sql)?;
@@ -278,7 +333,9 @@ impl KnowledgeFileStore {
                 "SELECT f.admin_id, m.file_id, f.original_filename, f.created_at
                  FROM knowledge_managed_files m
                  JOIN console_user_files f ON f.file_id = m.file_id
-                 WHERE m.file_id = ?1",
+                 WHERE m.file_id = ?1
+                   AND m.status = 'processing'
+                   AND f.module = 'knowledge'",
                 [file_id],
                 |row| {
                     Ok(ClaimedKnowledgeFile {
@@ -310,7 +367,11 @@ impl KnowledgeFileStore {
              SET status = 'ready', processed_at = ?1, updated_at = ?1,
                  content_hash = ?2, error_code = NULL, error_summary = NULL,
                  chunk_count = ?3, embedding_count = ?4
-             WHERE file_id = ?5 AND status = 'processing'",
+             WHERE file_id = ?5 AND status = 'processing'
+               AND EXISTS(
+                 SELECT 1 FROM console_user_files
+                 WHERE file_id = ?5 AND module = 'knowledge'
+               )",
                 params![
                     now,
                     content_hash,
@@ -321,6 +382,36 @@ impl KnowledgeFileStore {
             )
             .map_err(DatabaseError::from_sql)?;
         Ok(changed == 1)
+    }
+
+    /// mark_ready 未应用时只清理仍属于未 ready 状态的托管文档，避免并发/恢复路径已经
+    /// 成功推进到 ready 时误删新索引。事务与状态读取保持同一 SQLite 写锁。
+    pub(crate) fn cleanup_lost_claim(&self, file_id: &str) -> Result<bool, DatabaseError> {
+        let mut connection = self.database.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(DatabaseError::from_sql)?;
+        let status = transaction
+            .query_row(
+                "SELECT m.status
+                 FROM knowledge_managed_files m
+                 JOIN console_user_files f ON f.file_id = m.file_id
+                 WHERE m.file_id = ?1 AND f.module = 'knowledge'",
+                [file_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(DatabaseError::from_sql)?;
+        if status.as_deref() == Some("ready") {
+            transaction.commit().map_err(DatabaseError::from_sql)?;
+            return Ok(false);
+        }
+        KnowledgeStore::delete_document_in_transaction(
+            &transaction,
+            &managed_document_key(file_id),
+        )?;
+        transaction.commit().map_err(DatabaseError::from_sql)?;
+        Ok(true)
     }
 
     pub(crate) fn mark_failed(
@@ -337,7 +428,11 @@ impl KnowledgeFileStore {
                 "UPDATE knowledge_managed_files
              SET status = 'failed', processed_at = NULL, updated_at = ?1,
                  error_code = ?2, error_summary = ?3
-             WHERE file_id = ?4 AND status = 'processing'",
+             WHERE file_id = ?4 AND status = 'processing'
+               AND EXISTS(
+                 SELECT 1 FROM console_user_files
+                 WHERE file_id = ?4 AND module = 'knowledge'
+               )",
                 params![now, error_code, error_summary, file_id],
             )
             .map_err(DatabaseError::from_sql)?;
@@ -374,7 +469,11 @@ impl KnowledgeFileStore {
                      processed_at = NULL, updated_at = ?1, content_hash = NULL,
                      error_code = NULL, error_summary = NULL,
                      chunk_count = 0, embedding_count = 0
-                 WHERE file_id = ?2 AND status = 'failed'",
+                 WHERE file_id = ?2 AND status = 'failed'
+                   AND EXISTS(
+                     SELECT 1 FROM console_user_files
+                     WHERE file_id = ?2 AND module = 'knowledge'
+                   )",
                 params![now, file_id],
             )
             .map_err(DatabaseError::from_sql)?;
@@ -395,16 +494,27 @@ impl KnowledgeFileStore {
         };
         let document_key = entry.document_key.clone().unwrap_or_default();
         KnowledgeStore::delete_document_in_transaction(transaction, &document_key)?;
-        transaction
+        let deleted = transaction
             .execute(
-                "DELETE FROM knowledge_managed_files WHERE file_id = ?1",
+                "DELETE FROM knowledge_managed_files
+                 WHERE file_id = ?1
+                   AND EXISTS(
+                     SELECT 1 FROM console_user_files
+                     WHERE file_id = ?1 AND module = 'knowledge'
+                   )",
                 [file_id],
             )
             .map_err(DatabaseError::from_sql)?;
+        if deleted != 1 {
+            return Err(DatabaseError::from_sql(
+                rusqlite::Error::QueryReturnedNoRows,
+            ));
+        }
         if delete_source {
             let deleted = transaction
                 .execute(
-                    "DELETE FROM console_user_files WHERE admin_id = ?1 AND file_id = ?2",
+                    "DELETE FROM console_user_files
+                     WHERE admin_id = ?1 AND file_id = ?2 AND module = 'knowledge'",
                     params![admin_id, file_id],
                 )
                 .map_err(DatabaseError::from_sql)?;
@@ -512,7 +622,7 @@ fn knowledge_file_cte() -> String {
             f.original_filename AS source_label, m.document_key
      FROM knowledge_managed_files m
      JOIN console_user_files f ON f.file_id = m.file_id
-     WHERE f.admin_id = ?1
+     WHERE f.admin_id = ?1 AND f.module = 'knowledge'
      UNION ALL
      SELECT NULL AS file_id, d.relative_path AS filename, 'text/markdown' AS content_type,
             NULL AS size, 'ready' AS status, NULL AS uploaded_at,

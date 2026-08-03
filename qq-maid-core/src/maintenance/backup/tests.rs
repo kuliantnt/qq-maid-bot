@@ -4,7 +4,9 @@ use crate::{
         ConfigCenter, ConfigCenterPaths, ManagedConfigApplyMode, ManagedConfigField,
         SECRET_MISSING_REVISION,
     },
-    management::{ConsoleUserDataService, PreferenceValuePatch, UserPreferencesPatch},
+    management::{
+        ConsoleUserDataService, PreferenceValuePatch, UserFileModule, UserPreferencesPatch,
+    },
     runtime::tools::{
         memory::{CreateMemoryRequest, ListMemoryQuery, MemoryStore},
         rss::{RssFeedItem, RssStore, RssTarget, RssTargetType},
@@ -89,6 +91,17 @@ fn console_files_and_background_preferences_survive_backup_restore() {
             content.clone(),
         )
         .unwrap();
+    let knowledge_content = b"restorable-knowledge".to_vec();
+    let knowledge_file = service
+        .create_file_with_limit(
+            admin_id,
+            "knowledge.md".to_owned(),
+            "text/markdown".to_owned(),
+            knowledge_content.clone(),
+            1024 * 1024,
+            UserFileModule::Knowledge,
+        )
+        .unwrap();
     service
         .update_preferences(
             admin_id,
@@ -109,6 +122,32 @@ fn console_files_and_background_preferences_survive_backup_restore() {
             |row| row.get(0),
         )
         .unwrap();
+    let knowledge_storage_filename: String = database
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT storage_filename FROM console_user_files WHERE file_id = ?1",
+            [&knowledge_file.file_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let module_connection = database.connection().unwrap();
+    let background_module: String = module_connection
+        .query_row(
+            "SELECT module FROM console_user_files WHERE file_id = ?1",
+            [&file.file_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let knowledge_module: String = module_connection
+        .query_row(
+            "SELECT module FROM console_user_files WHERE file_id = ?1",
+            [&knowledge_file.file_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(background_module, "background");
+    assert_eq!(knowledge_module, "knowledge");
 
     let file_root = source.join(CONSOLE_FILES_DIRECTORY);
     let orphan_filename = format!("{}.blob", uuid::Uuid::new_v4().hyphenated());
@@ -136,6 +175,11 @@ fn console_files_and_background_preferences_survive_backup_restore() {
             .contains_key(&format!("console-files/{storage_filename}"))
     );
     assert!(
+        manifest
+            .files
+            .contains_key(&format!("console-files/{knowledge_storage_filename}"))
+    );
+    assert!(
         !manifest
             .files
             .contains_key(&format!("console-files/{orphan_filename}"))
@@ -143,6 +187,15 @@ fn console_files_and_background_preferences_survive_backup_restore() {
     assert_eq!(
         fs::read(bundle.join("console-files").join(&storage_filename)).unwrap(),
         content
+    );
+    assert_eq!(
+        fs::read(
+            bundle
+                .join("console-files")
+                .join(&knowledge_storage_filename)
+        )
+        .unwrap(),
+        knowledge_content
     );
 
     let target = source.join("restored");
@@ -156,6 +209,13 @@ fn console_files_and_background_preferences_survive_backup_restore() {
             .unwrap()
             .bytes,
         content
+    );
+    assert_eq!(
+        restored_service
+            .read_file_for_module(admin_id, &knowledge_file.file_id, UserFileModule::Knowledge)
+            .unwrap()
+            .bytes,
+        knowledge_content
     );
     let restored_preferences = restored_service.get_preferences(admin_id).unwrap();
     assert_eq!(

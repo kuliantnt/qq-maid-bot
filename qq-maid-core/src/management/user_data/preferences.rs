@@ -4,8 +4,9 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use super::{
     BackgroundMode, ConsoleUserDataError, ConsoleUserDataService, MAX_BACKGROUND_FILES,
-    MAX_CUSTOM_COLOR_CHARS, MAX_CUSTOM_COLORS, PreferenceValuePatch, UserPreferences,
-    UserPreferencesPatch, now_rfc3339, validate_file_id,
+    MAX_CUSTOM_COLOR_CHARS, MAX_CUSTOM_COLORS, PreferenceValuePatch,
+    SUPPORTED_BACKGROUND_CONTENT_TYPES, UserFileModule, UserPreferences, UserPreferencesPatch,
+    now_rfc3339, validate_file_id,
 };
 
 impl ConsoleUserDataService {
@@ -34,9 +35,9 @@ impl ConsoleUserDataService {
         }
         if let Some(background_file_ids) = patch.background_file_ids {
             for file_id in &background_file_ids {
-                if !file_belongs_to(&transaction, admin_id, file_id)? {
+                if !is_supported_background_file(&transaction, admin_id, file_id)? {
                     return Err(ConsoleUserDataError::invalid(
-                        "every background_file_id must identify a file owned by the current user",
+                        "every background_file_id must identify a supported background image owned by the current user",
                     ));
                 }
             }
@@ -50,7 +51,14 @@ impl ConsoleUserDataService {
         preferences.active_background_file_id = match patch.active_background_file_id {
             PreferenceValuePatch::Unchanged => preferences.active_background_file_id,
             PreferenceValuePatch::Clear => None,
-            PreferenceValuePatch::Set(file_id) => Some(file_id),
+            PreferenceValuePatch::Set(file_id) => {
+                if !is_supported_background_file(&transaction, admin_id, &file_id)? {
+                    return Err(ConsoleUserDataError::invalid(
+                        "active_background_file_id must identify a supported background image owned by the current user",
+                    ));
+                }
+                Some(file_id)
+            }
         };
         if preferences
             .active_background_file_id
@@ -122,9 +130,21 @@ pub(super) fn read_preferences(
     let background_mode = background_mode
         .parse::<BackgroundMode>()
         .map_err(storage_error)?;
+    let stored_background_file_ids: Vec<String> =
+        serde_json::from_str(&background_file_ids).map_err(storage_error)?;
+    // 迁移前的中间态可能把知识托管文件写进背景偏好；读取时按服务端模块和图片 MIME
+    // 再收敛一次，避免旧状态让背景 API 重新暴露 Markdown 文件。
+    let mut valid_background_file_ids = Vec::with_capacity(stored_background_file_ids.len());
+    for file_id in stored_background_file_ids {
+        if is_supported_background_file(connection, admin_id, &file_id)? {
+            valid_background_file_ids.push(file_id);
+        }
+    }
+    let active_background_file_id =
+        active_background_file_id.filter(|file_id| valid_background_file_ids.contains(file_id));
     Ok(Some(UserPreferences {
         custom_colors: serde_json::from_str(&custom_colors).map_err(storage_error)?,
-        background_file_ids: serde_json::from_str(&background_file_ids).map_err(storage_error)?,
+        background_file_ids: valid_background_file_ids,
         active_background_file_id,
         background_mode,
         kuliantnt,
@@ -225,20 +245,29 @@ fn validate_patch(patch: &UserPreferencesPatch) -> Result<(), ConsoleUserDataErr
     Ok(())
 }
 
-fn file_belongs_to(
+fn is_supported_background_file(
     connection: &Connection,
     admin_id: i64,
     file_id: &str,
 ) -> Result<bool, ConsoleUserDataError> {
-    connection
+    let metadata = connection
         .query_row(
-            "SELECT EXISTS(
-               SELECT 1 FROM console_user_files WHERE admin_id = ?1 AND file_id = ?2
-             )",
-            params![admin_id, file_id],
-            |row| row.get(0),
+            "SELECT content_type
+             FROM console_user_files
+             WHERE admin_id = ?1 AND file_id = ?2 AND module = ?3",
+            params![admin_id, file_id, UserFileModule::Background.as_str()],
+            |row| row.get::<_, String>(0),
         )
-        .map_err(storage_error)
+        .optional()
+        .map_err(storage_error)?;
+    Ok(metadata.is_some_and(|content_type| {
+        let content_type = content_type
+            .split_once(';')
+            .map_or(content_type.as_str(), |(value, _)| value)
+            .trim()
+            .to_ascii_lowercase();
+        SUPPORTED_BACKGROUND_CONTENT_TYPES.contains(&content_type.as_str())
+    }))
 }
 
 fn storage_error(error: impl std::fmt::Display) -> ConsoleUserDataError {

@@ -21,7 +21,7 @@ use crate::{
     http::routes::{OpsHttpConfig, OpsHttpState, build_router},
     management::{
         AdminAuth, ConsoleUserDataService, PreferenceValuePatch, SESSION_COOKIE_NAME,
-        UserPreferencesPatch,
+        UserFileModule, UserPreferencesPatch,
     },
     storage::{APP_MIGRATIONS, database::SqliteDatabase},
     util::metrics::LlmMetrics,
@@ -453,6 +453,7 @@ async fn files_upload_list_read_delete_and_isolate_users() {
     assert!(uuid::Uuid::parse_str(file_id).is_ok());
     assert_eq!(uploaded["filename"], "background.webp");
     assert_eq!(uploaded["content_type"], "image/webp");
+    assert_eq!(uploaded["module"], "background");
     assert_eq!(uploaded["size"], file_bytes.len());
     assert_eq!(
         uploaded["url"],
@@ -468,6 +469,44 @@ async fn files_upload_list_read_delete_and_isolate_users() {
     );
     assert_eq!(listed["total"], 1);
     assert_eq!(listed["items"][0]["file_id"], file_id);
+
+    // 知识库文件由知识领域入口创建；通用背景 API 必须按 module 隔离，而不是靠前端过滤。
+    let knowledge = api
+        .state
+        .console_user_data
+        .as_ref()
+        .unwrap()
+        .create_file_with_limit(
+            api.admin_id,
+            "knowledge.md".to_owned(),
+            "text/markdown".to_owned(),
+            b"knowledge-source".to_vec(),
+            1024 * 1024,
+            UserFileModule::Knowledge,
+        )
+        .unwrap();
+    let knowledge_id = knowledge.file_id.clone();
+    let listed_without_knowledge = data(
+        &api.post(
+            "/api/v1/console/files/list",
+            json!({"page": 1, "page_size": 20}),
+        )
+        .await,
+    );
+    assert_eq!(listed_without_knowledge["total"], 1);
+    assert_eq!(
+        api.get_file(&knowledge_id).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        api.post(
+            "/api/v1/console/files/delete",
+            json!({"file_id": &knowledge_id}),
+        )
+        .await
+        .status,
+        StatusCode::NOT_FOUND
+    );
 
     let read = api.get_file(file_id).await;
     assert_eq!(read.status, StatusCode::OK);
@@ -524,6 +563,13 @@ async fn backgrounds_validate_ownership_switch_active_and_clean_up_on_delete() {
     let second = upload_id(&api, "second.webp", b"second").await;
     let foreign = data(
         &api.upload_as_other("foreign.webp", "image/webp", b"foreign")
+            .await,
+    )["file_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let non_image = data(
+        &api.upload("not-an-image.md", "text/markdown", b"not an image")
             .await,
     )["file_id"]
         .as_str()
@@ -590,6 +636,13 @@ async fn backgrounds_validate_ownership_switch_active_and_clean_up_on_delete() {
         )
         .await;
     assert_eq!(foreign_gallery.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let non_image_gallery = api
+        .post(
+            "/api/v1/console/user-preferences/update",
+            json!({"background_file_ids": [&non_image]}),
+        )
+        .await;
+    assert_eq!(non_image_gallery.status, StatusCode::UNPROCESSABLE_ENTITY);
 
     let removed_active = data(
         &api.post(

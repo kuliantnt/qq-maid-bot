@@ -7,6 +7,7 @@ use crate::{
     config::center::CONFIG_SECRET_SCHEMA_V1,
     management::{
         CONSOLE_ADMIN_SCHEMA_V1, CONSOLE_USER_DATA_SCHEMA_V1, CONSOLE_USER_DATA_SCHEMA_V2,
+        CONSOLE_USER_DATA_SCHEMA_V3,
     },
     runtime::tools::knowledge::{
         KNOWLEDGE_SCHEMA_V1, KNOWLEDGE_SCHEMA_V2, KNOWLEDGE_SCHEMA_V3, KNOWLEDGE_SCHEMA_V4,
@@ -74,6 +75,8 @@ pub const APP_MIGRATIONS: &[SqliteMigration] = &[
     KNOWLEDGE_SCHEMA_V2,
     KNOWLEDGE_SCHEMA_V3,
     KNOWLEDGE_SCHEMA_V4,
+    // V3 依赖 knowledge_managed_files，用途字段必须在知识库托管表创建后补上。
+    CONSOLE_USER_DATA_SCHEMA_V3,
 ];
 
 #[cfg(test)]
@@ -264,6 +267,61 @@ mod tests {
         assert_eq!(reread.background_mode, BackgroundMode::Special);
         assert_eq!(reread.custom_colors, vec!["#112233".to_owned()]);
 
+        let _ = std::fs::remove_file(&directory);
+    }
+
+    #[test]
+    fn console_user_file_module_migration_defaults_legacy_files_and_promotes_managed_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "qq-maid-console-user-file-module-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        // 模拟 PR #644 在 module migration 之前已经存在的数据库：通用文件表没有用途列，
+        // 但知识托管关联表已经存在。V3 必须只把有托管关联的文件提升为 knowledge。
+        let legacy_migrations = APP_MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|migration| migration.name != CONSOLE_USER_DATA_SCHEMA_V3.name)
+            .collect::<Vec<_>>();
+        let legacy = SqliteDatabase::open(&directory, &legacy_migrations).unwrap();
+        legacy
+            .connection()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO console_admins (username, password_hash, disabled, created_at)
+                 VALUES ('module-admin', 'legacy-hash', 0, 1);
+                 INSERT INTO console_user_files
+                   (file_id, admin_id, original_filename, content_type, size,
+                    storage_filename, created_at)
+                 VALUES
+                   ('legacy-background-file', 1, 'background.webp', 'image/webp', 1,
+                    'legacy-background.blob', '2026-01-01T00:00:00Z'),
+                   ('legacy-knowledge-file', 1, 'knowledge.md', 'text/markdown', 1,
+                    'legacy-knowledge.blob', '2026-01-01T00:00:00Z');
+                 INSERT INTO knowledge_managed_files
+                   (file_id, document_key, status, uploaded_at, updated_at)
+                 VALUES
+                   ('legacy-knowledge-file', 'managed/legacy-knowledge', 'pending',
+                    '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        drop(legacy);
+
+        let upgraded = SqliteDatabase::open(&directory, APP_MIGRATIONS).unwrap();
+        let connection = upgraded.connection().unwrap();
+        let module = |file_id: &str| {
+            connection
+                .query_row(
+                    "SELECT module FROM console_user_files WHERE file_id = ?1",
+                    [file_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(module("legacy-background-file"), "background");
+        assert_eq!(module("legacy-knowledge-file"), "knowledge");
+        drop(connection);
+        drop(upgraded);
         let _ = std::fs::remove_file(&directory);
     }
 }

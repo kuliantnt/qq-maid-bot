@@ -51,7 +51,9 @@ pub const DEFAULT_SERVER_PORT: u16 = 8787; // 监听端口
 pub const DEFAULT_APP_DB_FILE: &str = "data/storage/app.db"; // 项目通用 SQLite 文件
 pub const DEFAULT_PROMPT_DIR: &str = "config/prompts"; // 提示词模板目录
 pub const DEFAULT_KNOWLEDGE_DIR: &str = "config/knowledge"; // Markdown 知识目录
-/// 控制台托管知识库的独立单文件上限；不改变通用文件的 10 MiB 上限。
+/// 控制台托管知识库的独立单文件上限。为保持现有部署兼容，默认仍为 50 MiB；处理阶段
+/// 会同时保留原文、切片、search_text 和可选向量记录，索引层另有限制切片数量。该策略
+/// 降低异常输入的放大风险，但不宣称整个处理链严格恒定有界。
 pub const DEFAULT_KNOWLEDGE_MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
 pub const MIN_KNOWLEDGE_MAX_FILE_BYTES: u64 = 16 * 1024;
 pub const MAX_KNOWLEDGE_MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use super::chunking::chunk_markdown;
 use super::text::build_index_text;
 use super::*;
 use crate::storage::database::SqliteDatabase;
@@ -49,6 +50,35 @@ impl embedding::KnowledgeEmbedder for FailingEmbedder {
             "knowledge",
         ))
     }
+}
+
+#[test]
+fn managed_chunking_rejects_excessive_chunk_count_before_index_write() {
+    let index = test_index(Path::new("managed-too-many-chunks"));
+    let content = (0..=MAX_MANAGED_CHUNKS)
+        .map(|index| format!("# Section {index}\n\nchunk-marker-{index}\n"))
+        .collect::<String>();
+    let error = index
+        .process_managed_file(
+            "00000000-0000-4000-8000-000000000003",
+            "too-many-chunks.md",
+            content.as_bytes(),
+            content.len() + 1,
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "too_many_chunks");
+    assert_eq!(index.store.chunk_count().unwrap(), 0);
+    assert_eq!(
+        index
+            .database()
+            .connection()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM knowledge_documents", [], |row| row
+                .get::<_, i64>(0),)
+            .unwrap(),
+        0
+    );
 }
 
 #[test]

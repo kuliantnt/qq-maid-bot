@@ -33,11 +33,15 @@ use crate::{error::LlmError, storage::database::DatabaseError};
 
 use super::storage::{KnowledgeChunkDraft, KnowledgeStore};
 
-use chunking::{CHUNKING_VERSION, chunk_markdown};
+use chunking::{CHUNKING_VERSION, ChunkingError, chunk_markdown_with_limit};
 use diagnostics::summarize_chunks;
 use scan::{ScannedMarkdown, scan_markdown_files};
 use search::{KnowledgeSearchProfile, build_evidence, query_diagnostics, query_text};
 use text::hash_text;
+
+/// 即使输入文件在字节上限内，极端换行/代码块也可能产生过多切片；限制切片数量，
+/// 避免 chunk、search_text 和可选 embedding records 随输入结构无限放大。
+pub(crate) const MAX_MANAGED_CHUNKS: usize = 16_384;
 
 /// 知识库同步结果，用于启动日志和测试断言。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -146,7 +150,8 @@ impl KnowledgeIndex {
 
         let document_key = managed_document_key(file_id);
         let file_hash = hash_text(content);
-        let chunks = chunk_markdown(&document_key, content);
+        let chunks = chunk_markdown_with_limit(&document_key, content, MAX_MANAGED_CHUNKS)
+            .map_err(map_chunking_error)?;
         if chunks.is_empty() {
             return Err(LlmError::new(
                 "empty_document",
@@ -431,7 +436,8 @@ impl KnowledgeIndex {
             return Ok(FileSyncOutcome::Unchanged);
         }
 
-        let chunks = chunk_markdown(&file.relative_path, &content);
+        let chunks = chunk_markdown_with_limit(&file.relative_path, &content, MAX_MANAGED_CHUNKS)
+            .map_err(map_chunking_error)?;
         let diagnostics = summarize_chunks(&content, &chunks);
         tracing::info!(
             path = %file.relative_path,
@@ -486,6 +492,16 @@ impl KnowledgeIndex {
         } else {
             FileSyncOutcome::Added
         })
+    }
+}
+
+fn map_chunking_error(error: ChunkingError) -> LlmError {
+    match error {
+        ChunkingError::TooManyChunks => LlmError::new(
+            "too_many_chunks",
+            "knowledge document produces too many chunks",
+            "knowledge",
+        ),
     }
 }
 
