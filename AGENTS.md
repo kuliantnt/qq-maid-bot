@@ -67,7 +67,7 @@ qq-maid-common / reqwest / serde / tokio
 - 默认做小改动，保持用户可见行为稳定；不要未经要求重写架构、迁移运行路径或引入大依赖。
 - 不要恢复 Python 接入层、adapter、fallback、本地 LLM / 查询 / 记忆 / session / 命令 / prompt 入口。
 - 不要恢复独立 HTTP `/query`、HTTP `/memory`、`/v1/chat` 等旧入口；Rust HTTP 层只保留 `/healthz`、外部运维、Web Console/管理 API 和 Markdown 渲染等受控能力。
-- Web Console 只修改 `web-console/src/`，通过构建生成并提交 `web-console/dist/`；不得手工编辑 `dist/`，也不得把控制台端口直接暴露到公网。
+- Web Console 的源码、测试、构建脚本和配置应在 `web-console/` 下各自对应目录或文件中修改；`web-console/dist/` 必须由构建生成并提交；不得手工编辑 `dist/`，也不得把控制台端口直接暴露到公网。
 - 不要吞错误、返回空字符串或只生成成功文案来伪造成功状态；工具、构建、测试和发送结果必须以真实返回为准。
 - 新增或修改代码时补充必要中文注释，并保留说明业务背景、边界条件、兼容原因、安全要求或设计意图的有效注释。
 - 修改已有逻辑时同步检查附近注释是否仍准确；只有注释明显错误、重复或失去意义时才删除。
@@ -111,7 +111,7 @@ cargo build --workspace --release --all-features
 - `make test` 执行 workspace 的 `cargo fmt --all -- --check`、`cargo test --workspace` 和 `cargo check --workspace`；它不等同于 CI 的 clippy、`--all-features` 测试或 release 构建。
 - 只影响某个 crate 时可先使用 `make test-common`、`make test-llm`、`make test-core` 或 `make test-gateway` 做局部检查；跨模块或提交前执行 `make test`，并按需补充 CI 中的 clippy、`--all-features` 测试或 release 构建。
 - 修改 `scripts/*.sh` 时至少执行对应的 `bash -n`；修改 `scripts/*.ps1` 或 Windows 控制脚本时执行 PowerShell 语法检查和对应 smoke/regression 测试。
-- 修改 `web-console/src/` 时在 `web-console/` 执行 `npm ci`、`npm run check`、`npm run build`、`npm test`，并确认 `git diff --exit-code -- web-console/dist`；`dist/` 是 Rust 嵌入的可复现产物，不能漏提交或手工修补。
+- 修改 Web Console 的源码、测试、构建脚本或配置时，在 `web-console/` 执行 `npm ci`、`npm run check`、`npm run build`、`npm test`，并确认构建后的 `dist/` 没有 tracked 或 untracked 差异；`dist/` 是 Rust 嵌入的可复现产物，不能漏提交或手工修补。
 - 修改 Docker/Compose 或容器部署脚本时至少执行 `make test-docker`；涉及部署、配置迁移、备份恢复或 release 包时按对应 `docs/deployment/` 文档补充检查。
 - 涉及诊断入口时执行 `make diagnose`。
 - 修改启动、配置、依赖、QQ/OneBot/微信事件或任意 Provider 调用时，需要本地启动或运行相应诊断验证；可按范围使用 `scripts/validate-runtime.sh check|glm|console|restart-source`。

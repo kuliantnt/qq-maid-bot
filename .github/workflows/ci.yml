@@ -69,7 +69,7 @@ jobs:
           if grep -Eq '^web-console/(src|tests|scripts)/|^web-console/(package\.json|package-lock\.json|tsconfig\.json)$|^web-console/dist/|^assets/(favicon\.png|special-sprite\.webp)$|^\.github/workflows/ci\.yml$' "${changed_files}"; then
             frontend=true
           fi
-          if grep -Eq '\.rs$|^Cargo\.(toml|lock)$|^rust-toolchain|^runtime/|^Makefile|^\.github/workflows/ci\.yml$' "${changed_files}"; then
+          if grep -Eq '\.rs$|(^|/)Cargo\.toml$|^Cargo\.lock$|^\.cargo/|^rust-toolchain|^\.?(rustfmt|clippy)\.toml$|^runtime/|^Makefile$|^\.github/workflows/ci\.yml$' "${changed_files}"; then
             rust=true
           fi
           echo "shell=${shell}" >> "${GITHUB_OUTPUT}"
@@ -173,7 +173,17 @@ jobs:
         run: npm test
 
       - name: Verify committed dist is reproducible
-        run: git diff --exit-code -- web-console/dist
+        run: |
+          tracked_dist_diff=false
+          if ! git diff --quiet -- web-console/dist || ! git diff --cached --quiet -- web-console/dist; then
+            tracked_dist_diff=true
+          fi
+          untracked_dist_files="$(git ls-files --others --exclude-standard -- web-console/dist)"
+          if [[ "${tracked_dist_diff}" == true || -n "${untracked_dist_files}" ]]; then
+            echo "web-console/dist contains uncommitted changes:"
+            git status --short --untracked-files=all -- web-console/dist
+            exit 1
+          fi
 
   rust:
     name: Rust checks
