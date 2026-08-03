@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use super::text::{build_index_text, hash_text};
 
 // 修改分块正文语义时必须提升版本，确保 file_hash 未变的已索引知识文件也会重建。
-pub(super) const CHUNKING_VERSION: i64 = 4;
+pub(super) const CHUNKING_VERSION: i64 = 5;
 
 const TARGET_CHUNK_CHARS: usize = 900;
 const SOFT_CHUNK_CHARS: usize = 1200;
@@ -25,6 +25,11 @@ pub(super) struct MarkdownChunk {
     pub end_line: Option<usize>,
     pub code_language: Option<String>,
     pub search_text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ChunkingError {
+    TooManyChunks,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,31 +64,65 @@ struct MarkdownBlock {
     code_language: Option<String>,
 }
 
+#[cfg(test)]
 pub(super) fn chunk_markdown(relative_path: &str, content: &str) -> Vec<MarkdownChunk> {
+    chunk_markdown_with_limit(relative_path, content, usize::MAX)
+        .expect("unbounded chunking must not hit the chunk limit")
+}
+
+pub(super) fn chunk_markdown_with_limit(
+    relative_path: &str,
+    content: &str,
+    max_chunks: usize,
+) -> Result<Vec<MarkdownChunk>, ChunkingError> {
+    chunk_markdown_for_source_with_limit(relative_path, relative_path, content, max_chunks)
+}
+
+pub(super) fn chunk_markdown_for_source_with_limit(
+    relative_path: &str,
+    search_source_name: &str,
+    content: &str,
+    max_chunks: usize,
+) -> Result<Vec<MarkdownChunk>, ChunkingError> {
     let parsed = strip_frontmatter(content);
     ChunkEmitter::new(
         relative_path,
+        search_source_name,
         parsed.metadata.search_terms,
         parsed.metadata.title,
+        max_chunks,
     )
-    .emit(parse_blocks(parsed.body, parsed.body_start_line))
+    .emit(parse_blocks(
+        parsed.body,
+        parsed.body_start_line,
+        max_chunks,
+    )?)
 }
 
-fn parse_blocks(content: &str, start_line: usize) -> Vec<MarkdownBlock> {
-    parse_blocks_with_title(content, start_line, None)
+fn parse_blocks(
+    content: &str,
+    start_line: usize,
+    max_blocks: usize,
+) -> Result<Vec<MarkdownBlock>, ChunkingError> {
+    parse_blocks_with_title(content, start_line, None, max_blocks)
 }
 
 fn parse_blocks_with_title(
     content: &str,
     start_line: usize,
     document_title: Option<String>,
-) -> Vec<MarkdownBlock> {
+    max_blocks: usize,
+) -> Result<Vec<MarkdownBlock>, ChunkingError> {
     let mut parser = BlockParser {
         document_title,
+        max_blocks,
         ..BlockParser::default()
     };
     for (offset, line) in content.lines().enumerate() {
         parser.push_line(line, start_line + offset);
+        if parser.too_many {
+            break;
+        }
     }
     parser.finish()
 }
@@ -294,6 +333,8 @@ struct BlockParser {
     current: Option<OpenBlock>,
     blocks: Vec<MarkdownBlock>,
     fence: Option<CodeFence>,
+    max_blocks: usize,
+    too_many: bool,
 }
 
 impl BlockParser {
@@ -366,6 +407,10 @@ impl BlockParser {
         if !has_retrievable_content(&text, current.kind) {
             return;
         }
+        if self.blocks.len() >= self.max_blocks {
+            self.too_many = true;
+            return;
+        }
         self.blocks.push(MarkdownBlock {
             kind: current.kind,
             text,
@@ -409,9 +454,13 @@ impl BlockParser {
         )
     }
 
-    fn finish(mut self) -> Vec<MarkdownBlock> {
+    fn finish(mut self) -> Result<Vec<MarkdownBlock>, ChunkingError> {
         self.flush_current();
-        self.blocks
+        if self.too_many {
+            Err(ChunkingError::TooManyChunks)
+        } else {
+            Ok(self.blocks)
+        }
     }
 }
 
@@ -458,47 +507,57 @@ impl CodeFence {
 
 struct ChunkEmitter<'a> {
     relative_path: &'a str,
+    search_source_name: &'a str,
     frontmatter_terms: Vec<String>,
     frontmatter_title: Option<String>,
     chunks: Vec<MarkdownChunk>,
+    max_chunks: usize,
 }
 
 impl<'a> ChunkEmitter<'a> {
     fn new(
         relative_path: &'a str,
+        search_source_name: &'a str,
         frontmatter_terms: Vec<String>,
         frontmatter_title: Option<String>,
+        max_chunks: usize,
     ) -> Self {
         Self {
             relative_path,
+            search_source_name,
             frontmatter_terms,
             frontmatter_title,
             chunks: Vec::new(),
+            max_chunks,
         }
     }
 
-    fn emit(mut self, blocks: Vec<MarkdownBlock>) -> Vec<MarkdownChunk> {
+    fn emit(mut self, blocks: Vec<MarkdownBlock>) -> Result<Vec<MarkdownChunk>, ChunkingError> {
         let mut pending = Vec::<MarkdownBlock>::new();
         for block in blocks {
             if block.kind == BlockKind::Code && oversized_code_block(&block) {
-                self.flush_pending(&mut pending);
+                self.flush_pending(&mut pending)?;
+                let estimated_chunks = estimated_code_chunk_count(&block);
+                if self.chunks.len().saturating_add(estimated_chunks) > self.max_chunks {
+                    return Err(ChunkingError::TooManyChunks);
+                }
                 for split in split_code_block(&block) {
-                    self.push_chunk(split.text.clone(), &split, BlockKind::Code);
+                    self.push_chunk(split.text.clone(), &split, BlockKind::Code)?;
                 }
                 continue;
             }
             if should_start_new_chunk(&pending, &block) {
-                self.flush_pending(&mut pending);
+                self.flush_pending(&mut pending)?;
             }
             pending.push(block);
         }
-        self.flush_pending(&mut pending);
-        self.chunks
+        self.flush_pending(&mut pending)?;
+        Ok(self.chunks)
     }
 
-    fn flush_pending(&mut self, pending: &mut Vec<MarkdownBlock>) {
+    fn flush_pending(&mut self, pending: &mut Vec<MarkdownBlock>) -> Result<(), ChunkingError> {
         if pending.is_empty() {
-            return;
+            return Ok(());
         }
         let body = pending
             .iter()
@@ -506,23 +565,54 @@ impl<'a> ChunkEmitter<'a> {
             .collect::<Vec<_>>()
             .join("\n\n");
         let first = pending.first().expect("pending is not empty").clone();
-        let last = pending.last().expect("pending is not empty");
+        let end_line = pending.last().expect("pending is not empty").end_line;
         let kind = combined_kind(pending);
-        let parts = if body.chars().count() > SOFT_CHUNK_CHARS && kind != BlockKind::Code {
-            split_long_text(&body, HARD_CHUNK_CHARS)
+        if body.chars().count() > SOFT_CHUNK_CHARS && kind != BlockKind::Code {
+            self.push_split_long_text(&body, HARD_CHUNK_CHARS, &first, end_line, kind)?;
         } else {
-            vec![body]
-        };
-        for part in parts {
-            let mut meta = first.clone();
-            meta.text = part;
-            meta.end_line = last.end_line;
-            self.push_chunk(meta.text.clone(), &meta, kind);
+            let mut meta = first;
+            meta.end_line = end_line;
+            self.push_chunk(body, &meta, kind)?;
         }
         pending.clear();
+        Ok(())
     }
 
-    fn push_chunk(&mut self, body: String, block: &MarkdownBlock, kind: BlockKind) {
+    fn push_split_long_text(
+        &mut self,
+        text: &str,
+        max_chars: usize,
+        first: &MarkdownBlock,
+        end_line: usize,
+        kind: BlockKind,
+    ) -> Result<(), ChunkingError> {
+        let mut rest = text.trim();
+        while rest.chars().count() > max_chars {
+            let cut =
+                best_cut(rest, max_chars).unwrap_or_else(|| char_boundary_at(rest, max_chars));
+            let (head, tail) = rest.split_at(cut);
+            let mut meta = first.clone();
+            meta.end_line = end_line;
+            self.push_chunk(head.trim().to_owned(), &meta, kind)?;
+            rest = tail.trim_start();
+        }
+        if !rest.is_empty() {
+            let mut meta = first.clone();
+            meta.end_line = end_line;
+            self.push_chunk(rest.to_owned(), &meta, kind)?;
+        }
+        Ok(())
+    }
+
+    fn push_chunk(
+        &mut self,
+        body: String,
+        block: &MarkdownBlock,
+        kind: BlockKind,
+    ) -> Result<(), ChunkingError> {
+        if self.chunks.len() >= self.max_chunks {
+            return Err(ChunkingError::TooManyChunks);
+        }
         let content_hash = hash_text(&body);
         let index = self.chunks.len();
         let short_hash = content_hash.chars().take(12).collect::<String>();
@@ -537,7 +627,7 @@ impl<'a> ChunkEmitter<'a> {
             stable_path_id(self.relative_path),
         );
         let mut searchable = String::new();
-        searchable.push_str(self.relative_path);
+        searchable.push_str(self.search_source_name);
         searchable.push('\n');
         let include_frontmatter_terms = should_attach_frontmatter_terms(block, kind);
         let document_title = block
@@ -577,6 +667,7 @@ impl<'a> ChunkEmitter<'a> {
             end_line: Some(block.end_line),
             code_language: block.code_language.clone(),
         });
+        Ok(())
     }
 }
 
@@ -615,7 +706,7 @@ fn combined_kind(blocks: &[MarkdownBlock]) -> BlockKind {
 
 fn split_code_block(block: &MarkdownBlock) -> Vec<MarkdownBlock> {
     let lines = block.text.lines().collect::<Vec<_>>();
-    if lines.len() <= 2 {
+    if lines.len() < 2 {
         return vec![block.clone()];
     }
     let opener = lines[0];
@@ -624,6 +715,9 @@ fn split_code_block(block: &MarkdownBlock) -> Vec<MarkdownBlock> {
     };
     let last_line = lines[lines.len() - 1];
     let closed = fence.closes(last_line.trim());
+    if closed && lines.len() == 2 {
+        return vec![block.clone()];
+    }
     // 未闭合 fenced code block 到 EOF 时，最后一行仍是真实代码内容；
     // 不能把它当作 closer，否则会被复制进每个切片并污染检索索引。
     let closer = if closed {
@@ -636,53 +730,171 @@ fn split_code_block(block: &MarkdownBlock) -> Vec<MarkdownBlock> {
     } else {
         &lines[1..]
     };
+    let content_char_limit = code_content_char_limit(opener, &closer);
     let mut blocks = Vec::new();
-    let mut start = 0;
-    while start < content.len() {
-        let mut chars = opener.chars().count() + closer.chars().count() + 2;
-        let mut end = start;
-        while end < content.len() && end - start < CODE_CHUNK_LINES {
-            let line_chars = content[end].chars().count() + 1;
-            if end > start && chars + line_chars > CODE_CHUNK_CHARS {
-                break;
-            }
-            chars += line_chars;
-            end += 1;
+    let mut pending = Vec::new();
+    let mut pending_chars = opener.chars().count() + closer.chars().count() + 2;
+    let mut pending_start = 0;
+
+    for (line_index, line) in content.iter().enumerate() {
+        let mut rest = *line;
+        let mut rest_chars = rest.chars().count();
+        // 单行也必须按字符上限切开；否则后续 ASCII n-gram 会对整行产生巨量字符串。
+        while rest_chars > content_char_limit {
+            flush_code_lines(
+                &mut blocks,
+                &mut pending,
+                block,
+                opener,
+                &closer,
+                pending_start,
+                line_index,
+            );
+            pending_chars = opener.chars().count() + closer.chars().count() + 2;
+            let cut = char_boundary_at(rest, content_char_limit);
+            let (fragment, tail) = rest.split_at(cut);
+            blocks.push(code_block_fragment(
+                block,
+                opener,
+                &closer,
+                fragment.to_owned(),
+                line_index,
+                line_index + 1,
+            ));
+            rest = tail;
+            rest_chars -= content_char_limit;
         }
-        let mut text = String::new();
-        text.push_str(opener);
-        text.push('\n');
-        text.push_str(&content[start..end].join("\n"));
-        text.push('\n');
-        text.push_str(&closer);
-        blocks.push(MarkdownBlock {
-            text,
-            start_line: block.start_line + start,
-            end_line: block.start_line + end + 1,
-            ..block.clone()
-        });
-        start = end;
+
+        let line_chars = rest_chars + 1;
+        if !pending.is_empty()
+            && (pending.len() >= CODE_CHUNK_LINES || pending_chars + line_chars > CODE_CHUNK_CHARS)
+        {
+            flush_code_lines(
+                &mut blocks,
+                &mut pending,
+                block,
+                opener,
+                &closer,
+                pending_start,
+                line_index,
+            );
+            pending_chars = opener.chars().count() + closer.chars().count() + 2;
+        }
+        if pending.is_empty() {
+            pending_start = line_index;
+        }
+        pending.push(rest);
+        pending_chars += line_chars;
     }
+    flush_code_lines(
+        &mut blocks,
+        &mut pending,
+        block,
+        opener,
+        &closer,
+        pending_start,
+        content.len(),
+    );
     blocks
+}
+
+fn flush_code_lines(
+    blocks: &mut Vec<MarkdownBlock>,
+    pending: &mut Vec<&str>,
+    block: &MarkdownBlock,
+    opener: &str,
+    closer: &str,
+    start: usize,
+    end: usize,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    blocks.push(code_block_fragment(
+        block,
+        opener,
+        closer,
+        pending.join("\n"),
+        start,
+        end,
+    ));
+    pending.clear();
+}
+
+fn code_block_fragment(
+    block: &MarkdownBlock,
+    opener: &str,
+    closer: &str,
+    body: String,
+    start: usize,
+    end: usize,
+) -> MarkdownBlock {
+    let mut text = String::with_capacity(opener.len() + body.len() + closer.len() + 2);
+    text.push_str(opener);
+    text.push('\n');
+    text.push_str(&body);
+    text.push('\n');
+    text.push_str(closer);
+    MarkdownBlock {
+        text,
+        start_line: block.start_line + start,
+        end_line: block.start_line + end + 1,
+        ..block.clone()
+    }
+}
+
+fn code_content_char_limit(opener: &str, closer: &str) -> usize {
+    CODE_CHUNK_CHARS
+        .saturating_sub(opener.chars().count() + closer.chars().count() + 2)
+        .max(1)
 }
 
 fn oversized_code_block(block: &MarkdownBlock) -> bool {
     block.text.chars().count() > CODE_CHUNK_CHARS || block.text.lines().count() > CODE_CHUNK_LINES
 }
 
-fn split_long_text(text: &str, max_chars: usize) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut rest = text.trim();
-    while rest.chars().count() > max_chars {
-        let cut = best_cut(rest, max_chars).unwrap_or_else(|| char_boundary_at(rest, max_chars));
-        let (head, tail) = rest.split_at(cut);
-        chunks.push(head.trim().to_owned());
-        rest = tail.trim_start();
+/// `split_code_block` 每个结果至少消耗一行或一个超长行片段；先用不分配 Vec 的上界
+/// 拒绝过大代码块，避免先构造大量切片再因数量上限失败。
+fn estimated_code_chunk_count(block: &MarkdownBlock) -> usize {
+    let mut lines = block.text.lines();
+    let Some(opener) = lines.next() else {
+        return 1;
+    };
+    let Some(fence) = CodeFence::open(opener.trim()) else {
+        return 1;
+    };
+    let line_count = block.text.lines().count();
+    if line_count <= 1 {
+        return 1;
     }
-    if !rest.is_empty() {
-        chunks.push(rest.to_owned());
-    }
-    chunks
+    let last_line = block.text.lines().last().unwrap_or_default();
+    let closed = fence.closes(last_line.trim());
+    let content_lines = if closed {
+        line_count.saturating_sub(2)
+    } else {
+        line_count.saturating_sub(1)
+    };
+    let closer = if closed {
+        last_line
+    } else {
+        fence.marker.as_str()
+    };
+    let content_char_limit = code_content_char_limit(opener, closer);
+    block
+        .text
+        .lines()
+        .skip(1)
+        .take(content_lines)
+        .fold(0usize, |count, line| {
+            let chars = line.chars().count();
+            let fragments = chars
+                .saturating_add(content_char_limit - 1)
+                .checked_div(content_char_limit)
+                .unwrap_or(usize::MAX)
+                .max(1);
+            count.saturating_add(fragments)
+        })
+        .max(1)
 }
 
 fn best_cut(text: &str, max_chars: usize) -> Option<usize> {

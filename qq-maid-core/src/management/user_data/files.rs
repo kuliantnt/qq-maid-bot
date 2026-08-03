@@ -4,12 +4,13 @@ use std::{
     path::{Component, Path},
 };
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::{
     ConsoleUserDataError, ConsoleUserDataService, MAX_CONSOLE_FILE_BYTES, MAX_CONTENT_TYPE_CHARS,
-    MAX_ORIGINAL_FILENAME_CHARS, UserFile, UserFileContent, UserFilePage, now_rfc3339,
-    preferences::read_preferences, preferences::write_cleaned_preferences, validate_file_id,
+    MAX_ORIGINAL_FILENAME_CHARS, UserFile, UserFileContent, UserFileModule, UserFilePage,
+    now_rfc3339, preferences::read_preferences, preferences::write_cleaned_preferences,
+    validate_file_id,
 };
 
 impl ConsoleUserDataService {
@@ -20,7 +21,28 @@ impl ConsoleUserDataService {
         content_type: String,
         bytes: Vec<u8>,
     ) -> Result<UserFile, ConsoleUserDataError> {
-        validate_upload(&filename, &content_type, bytes.len())?;
+        self.create_file_with_limit(
+            admin_id,
+            filename,
+            content_type,
+            bytes,
+            MAX_CONSOLE_FILE_BYTES,
+            UserFileModule::Background,
+        )
+    }
+
+    /// 领域入口复用同一套安全文件落盘流程，但用途和大小上限都由服务端传入。
+    /// 不把 module 放在 multipart DTO 中，避免客户端伪造跨领域文件。
+    pub(crate) fn create_file_with_limit(
+        &self,
+        admin_id: i64,
+        filename: String,
+        content_type: String,
+        bytes: Vec<u8>,
+        max_bytes: usize,
+        module: UserFileModule,
+    ) -> Result<UserFile, ConsoleUserDataError> {
+        validate_upload(&filename, &content_type, bytes.len(), max_bytes)?;
         ensure_file_root(&self.file_root)?;
 
         let file_id = uuid::Uuid::new_v4().hyphenated().to_string();
@@ -40,6 +62,7 @@ impl ConsoleUserDataService {
             file_id,
             filename,
             content_type,
+            module,
             size: u64::try_from(bytes.len())
                 .map_err(|_| ConsoleUserDataError::invalid("file size is too large"))?,
             created_at: now_rfc3339(),
@@ -71,23 +94,27 @@ impl ConsoleUserDataService {
         let connection = self.database.connection().map_err(storage_error)?;
         let total: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM console_user_files WHERE admin_id = ?1",
-                [admin_id],
+                "SELECT COUNT(*) FROM console_user_files
+                 WHERE admin_id = ?1 AND module = ?2",
+                rusqlite::params![admin_id, UserFileModule::Background.as_str()],
                 |row| row.get(0),
             )
             .map_err(storage_error)?;
         let mut statement = connection
             .prepare(
                 "SELECT file_id, original_filename, content_type, size,
-                        created_at, storage_filename
+                        created_at, storage_filename, module
                  FROM console_user_files
-                 WHERE admin_id = ?1
+                 WHERE admin_id = ?1 AND module = ?4
                  ORDER BY created_at DESC, file_id DESC
                  LIMIT ?2 OFFSET ?3",
             )
             .map_err(storage_error)?;
         let items = statement
-            .query_map(params![admin_id, limit, offset], file_from_row)
+            .query_map(
+                params![admin_id, limit, offset, UserFileModule::Background.as_str()],
+                file_from_row,
+            )
             .map_err(storage_error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(storage_error)?;
@@ -103,9 +130,18 @@ impl ConsoleUserDataService {
         admin_id: i64,
         file_id: &str,
     ) -> Result<UserFileContent, ConsoleUserDataError> {
+        self.read_file_for_module(admin_id, file_id, UserFileModule::Background)
+    }
+
+    pub(crate) fn read_file_for_module(
+        &self,
+        admin_id: i64,
+        file_id: &str,
+        module: UserFileModule,
+    ) -> Result<UserFileContent, ConsoleUserDataError> {
         validate_file_id(file_id)?;
         let connection = self.database.connection().map_err(storage_error)?;
-        let metadata = find_owned_file(&connection, admin_id, file_id)?
+        let metadata = find_owned_file(&connection, admin_id, file_id, module)?
             .ok_or_else(|| ConsoleUserDataError::not_found("file not found"))?;
         let path = storage_path(&self.file_root, &metadata.storage_filename)?;
         let bytes = fs::read(&path).map_err(|error| {
@@ -120,12 +156,21 @@ impl ConsoleUserDataService {
     }
 
     pub fn delete_file(&self, admin_id: i64, file_id: &str) -> Result<(), ConsoleUserDataError> {
+        self.delete_file_for_module(admin_id, file_id, UserFileModule::Background)
+    }
+
+    pub(crate) fn delete_file_for_module(
+        &self,
+        admin_id: i64,
+        file_id: &str,
+        module: UserFileModule,
+    ) -> Result<(), ConsoleUserDataError> {
         validate_file_id(file_id)?;
         let mut connection = self.database.connection().map_err(storage_error)?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage_error)?;
-        let metadata = find_owned_file(&transaction, admin_id, file_id)?
+        let metadata = find_owned_file(&transaction, admin_id, file_id, module)?
             .ok_or_else(|| ConsoleUserDataError::not_found("file not found"))?;
         let original_path = storage_path(&self.file_root, &metadata.storage_filename)?;
         let tombstone_path = self
@@ -151,8 +196,9 @@ impl ConsoleUserDataService {
             }
             let deleted = transaction
                 .execute(
-                    "DELETE FROM console_user_files WHERE admin_id = ?1 AND file_id = ?2",
-                    params![admin_id, file_id],
+                    "DELETE FROM console_user_files
+                     WHERE admin_id = ?1 AND file_id = ?2 AND module = ?3",
+                    params![admin_id, file_id, module.as_str()],
                 )
                 .map_err(storage_error)?;
             if deleted != 1 {
@@ -178,6 +224,83 @@ impl ConsoleUserDataService {
         }
         Ok(())
     }
+
+    /// 在调用方自己的 SQLite 事务内暂存原始文件，供知识库删除流程同时清理关联和派生数据。
+    /// 暂存名不带文件 ID，且不再通过任何 API 可达；事务失败时必须调用恢复方法。
+    /// 元数据存在但原文件已缺失时返回 `None`，让调用方继续清理数据库。
+    pub(crate) fn stage_owned_file_deletion(
+        &self,
+        transaction: &Transaction<'_>,
+        admin_id: i64,
+        file_id: &str,
+        module: UserFileModule,
+    ) -> Result<Option<StagedFileDeletion>, ConsoleUserDataError> {
+        let metadata = find_owned_file(transaction, admin_id, file_id, module)?
+            .ok_or_else(|| ConsoleUserDataError::not_found("file not found"))?;
+        let original_path = storage_path(&self.file_root, &metadata.storage_filename)?;
+        let tombstone_path = self
+            .file_root
+            .join(format!(".delete-{}.tmp", uuid::Uuid::new_v4().hyphenated()));
+        match fs::rename(&original_path, &tombstone_path) {
+            Ok(()) => {}
+            // 原文件可能已因磁盘故障或人工恢复丢失；元数据与派生索引仍必须可清理。
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(ConsoleUserDataError::storage(format!(
+                    "failed to stage stored file deletion: {error}"
+                )));
+            }
+        }
+        Ok(Some(StagedFileDeletion {
+            original_path,
+            tombstone_path,
+        }))
+    }
+
+    pub(crate) fn finish_staged_file_deletion(
+        &self,
+        staged: &StagedFileDeletion,
+    ) -> Result<(), ConsoleUserDataError> {
+        fs::remove_file(&staged.tombstone_path).map_err(|error| {
+            ConsoleUserDataError::storage(format!("failed to remove staged stored file: {error}"))
+        })
+    }
+
+    pub(crate) fn restore_staged_file_deletion(
+        &self,
+        staged: &StagedFileDeletion,
+    ) -> Result<(), ConsoleUserDataError> {
+        fs::rename(&staged.tombstone_path, &staged.original_path).map_err(|error| {
+            ConsoleUserDataError::storage(format!("failed to restore staged stored file: {error}"))
+        })
+    }
+
+    /// 用途已经隔离；这里仍清理迁移前可能残留在偏好 JSON 中的同一 ID，保持旧状态收敛。
+    pub(crate) fn clean_file_references_in_transaction(
+        &self,
+        transaction: &Transaction<'_>,
+        admin_id: i64,
+        file_id: &str,
+    ) -> Result<(), ConsoleUserDataError> {
+        let cleaned_preferences = read_preferences(transaction, admin_id)?.map(|mut value| {
+            value
+                .background_file_ids
+                .retain(|background_id| background_id != file_id);
+            if value.active_background_file_id.as_deref() == Some(file_id) {
+                value.active_background_file_id = None;
+            }
+            value
+        });
+        if let Some(preferences) = cleaned_preferences.as_ref() {
+            write_cleaned_preferences(transaction, admin_id, preferences)?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct StagedFileDeletion {
+    original_path: std::path::PathBuf,
+    tombstone_path: std::path::PathBuf,
 }
 
 fn insert_file(
@@ -192,14 +315,15 @@ fn insert_file(
         .map_err(storage_error)?
         .execute(
             "INSERT INTO console_user_files
-             (file_id, admin_id, original_filename, content_type, size,
+             (file_id, admin_id, original_filename, content_type, module, size,
               storage_filename, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 file.file_id,
                 admin_id,
                 file.filename,
                 file.content_type,
+                file.module.as_str(),
                 size,
                 file.storage_filename,
                 file.created_at,
@@ -213,14 +337,15 @@ fn find_owned_file(
     connection: &Connection,
     admin_id: i64,
     file_id: &str,
+    module: UserFileModule,
 ) -> Result<Option<UserFile>, ConsoleUserDataError> {
     connection
         .query_row(
             "SELECT file_id, original_filename, content_type, size,
-                    created_at, storage_filename
+                    created_at, storage_filename, module
              FROM console_user_files
-             WHERE admin_id = ?1 AND file_id = ?2",
-            params![admin_id, file_id],
+             WHERE admin_id = ?1 AND file_id = ?2 AND module = ?3",
+            params![admin_id, file_id, module.as_str()],
             file_from_row,
         )
         .optional()
@@ -240,6 +365,13 @@ fn file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserFile> {
         file_id: row.get(0)?,
         filename: row.get(1)?,
         content_type: row.get(2)?,
+        module: UserFileModule::parse(row.get::<_, String>(6)?.as_str()).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                6,
+                rusqlite::types::Type::Text,
+                "unknown console file module".into(),
+            )
+        })?,
         size,
         created_at: row.get(4)?,
         storage_filename: row.get(5)?,
@@ -250,6 +382,7 @@ fn validate_upload(
     filename: &str,
     content_type: &str,
     size: usize,
+    max_bytes: usize,
 ) -> Result<(), ConsoleUserDataError> {
     if filename.is_empty() || filename.chars().count() > MAX_ORIGINAL_FILENAME_CHARS {
         return Err(ConsoleUserDataError::invalid(format!(
@@ -269,9 +402,9 @@ fn validate_upload(
     if axum::http::HeaderValue::from_str(content_type).is_err() {
         return Err(ConsoleUserDataError::invalid("content_type is invalid"));
     }
-    if size > MAX_CONSOLE_FILE_BYTES {
+    if size > max_bytes {
         return Err(ConsoleUserDataError::invalid(format!(
-            "file must not exceed {MAX_CONSOLE_FILE_BYTES} bytes"
+            "file must not exceed {max_bytes} bytes"
         )));
     }
     Ok(())

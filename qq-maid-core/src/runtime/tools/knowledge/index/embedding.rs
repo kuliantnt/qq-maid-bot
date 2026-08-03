@@ -255,6 +255,52 @@ impl SemanticRuntime {
         Ok(completed)
     }
 
+    pub(super) fn model_id(&self) -> &'static str {
+        self.embedder.model_id()
+    }
+
+    pub(super) fn embedding_version(&self) -> i64 {
+        SEMANTIC_EMBEDDING_VERSION
+    }
+
+    /// 托管文件先在内存中完成有界批量 embedding，成功后由索引层与 FTS 一起提交。
+    pub(super) fn embed_chunks(
+        &self,
+        chunks: &[crate::runtime::tools::knowledge::storage::KnowledgeChunkDraft],
+    ) -> Result<Vec<KnowledgeEmbeddingRecord>, LlmError> {
+        let mut records = Vec::with_capacity(chunks.len());
+        for batch in chunks.chunks(SEMANTIC_SYNC_BATCH_SIZE) {
+            let texts = batch
+                .iter()
+                .map(|chunk| {
+                    format!(
+                        "{}\n{}\n{}",
+                        chunk.document_title.as_deref().unwrap_or_default(),
+                        chunk.heading_path.as_deref().unwrap_or_default(),
+                        chunk.body
+                    )
+                })
+                .collect::<Vec<_>>();
+            let references = texts.iter().map(String::as_str).collect::<Vec<_>>();
+            let vectors = self.embedder.embed_documents(&references)?;
+            if vectors.len() != batch.len() {
+                return Err(LlmError::new(
+                    "knowledge_embedding_count_mismatch",
+                    "local knowledge embedding result count does not match chunks",
+                    "knowledge",
+                ));
+            }
+            records.extend(batch.iter().zip(vectors).map(|(chunk, vector)| {
+                KnowledgeEmbeddingRecord {
+                    chunk_id: chunk.chunk_id.clone(),
+                    content_hash: chunk.content_hash.clone(),
+                    vector,
+                }
+            }));
+        }
+        Ok(records)
+    }
+
     pub(super) fn search(
         &self,
         store: &KnowledgeStore,

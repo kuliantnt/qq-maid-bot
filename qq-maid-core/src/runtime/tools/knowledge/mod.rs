@@ -1,5 +1,7 @@
 //! 只读知识检索 Tool。
 
+mod file_management;
+mod file_storage;
 mod index;
 pub(crate) mod status;
 mod storage;
@@ -8,6 +10,10 @@ mod tool;
 #[cfg(test)]
 mod agent_tests;
 
+pub use file_management::{KnowledgeFileError, KnowledgeFileService, KnowledgeFileWorker};
+pub(crate) use file_storage::{
+    KnowledgeFileEntry, KnowledgeFileListQuery, KnowledgeFileSort, KnowledgeFileStatus,
+};
 pub use index::{
     KnowledgeEvidence, KnowledgeEvidenceDiagnostics, KnowledgeEvidenceFailure,
     KnowledgeEvidenceItem, KnowledgeEvidenceStatus, KnowledgeIndex, KnowledgeInjectionDecision,
@@ -16,6 +22,6 @@ pub use index::{
 };
 pub use storage::{
     KNOWLEDGE_MIGRATIONS, KNOWLEDGE_SCHEMA_V1, KNOWLEDGE_SCHEMA_V2, KNOWLEDGE_SCHEMA_V3,
-    KnowledgeChunkDraft, KnowledgeStore,
+    KNOWLEDGE_SCHEMA_V4, KnowledgeChunkDraft, KnowledgeStore,
 };
 pub use tool::{KNOWLEDGE_SEARCH_TOOL_NAME, KnowledgeSearchTool};

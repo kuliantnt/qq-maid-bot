@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::storage::database::SqliteDatabase;
 
 use super::{KnowledgeEvidenceStatus, KnowledgeIndex, KnowledgeSemanticConfig};
-use crate::runtime::tools::knowledge::storage::{KNOWLEDGE_MIGRATIONS, KnowledgeStore};
+use crate::{runtime::tools::knowledge::storage::KnowledgeStore, storage::APP_MIGRATIONS};
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct KnowledgeEvalDataset {
@@ -136,11 +136,8 @@ fn run_evaluation(
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         fs::write(path, &document.content).map_err(|error| error.to_string())?;
     }
-    let database = SqliteDatabase::open(
-        workspace.root.join("knowledge-eval.db"),
-        KNOWLEDGE_MIGRATIONS,
-    )
-    .map_err(|error| error.to_string())?;
+    let database = SqliteDatabase::open(workspace.root.join("knowledge-eval.db"), APP_MIGRATIONS)
+        .map_err(|error| error.to_string())?;
     let mut index = KnowledgeIndex::new(KnowledgeStore::new(database), &workspace.knowledge_dir);
     if let Some(config) = semantic {
         index = index

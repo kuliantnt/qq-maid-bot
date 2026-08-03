@@ -59,6 +59,7 @@ impl ManagementRuntime {
                 web_console_allowed_origins: config.web_console_allowed_origins,
                 web_console_trusted_proxy_ips: config.web_console_trusted_proxy_ips,
                 web_console_secure_cookies: config.web_console_secure_cookies,
+                knowledge_max_file_bytes: config.knowledge_max_file_bytes,
             },
             summary,
             config_center,
@@ -152,7 +153,6 @@ impl LlmRuntime {
         // 控制台开关（WEB_CONSOLE_ENABLED）关闭时不初始化控制台专属服务与工具元数据，
         // 减少进程常驻内存；路由层同样不会注册 /console 与相关 API。
         let console_enabled = config.web_console_enabled;
-        let console_user_data_database = console_enabled.then(|| database.clone());
         let core_state = CoreRuntimeState::from_config_with_database(config, database)?;
         let mut http_state = OpsHttpState::from_config_with_center(
             &core_state.config,
@@ -163,7 +163,19 @@ impl LlmRuntime {
             config_center,
             admin_auth,
         );
-        if let Some(user_data_database) = console_user_data_database {
+        let console_user_data = console_enabled
+            .then(|| ConsoleUserDataService::new(core_state.knowledge_index.database().clone()));
+        let knowledge_file_service = console_user_data
+            .as_ref()
+            .map(|service| {
+                crate::runtime::tools::knowledge::KnowledgeFileService::new(
+                    service.clone(),
+                    core_state.knowledge_index.clone(),
+                    core_state.config.knowledge_max_file_bytes,
+                )
+            })
+            .transpose()?;
+        if let Some(user_data) = console_user_data {
             let registered_tools = crate::service::CoreHandle::new(core_state.clone())
                 .registered_tool_metadata()
                 .into_iter()
@@ -177,10 +189,16 @@ impl LlmRuntime {
                     core_state.stores.todo_store.clone(),
                     core_state.stores.notification_store.clone(),
                 ))
-                .with_console_user_data(ConsoleUserDataService::new(user_data_database))
+                .with_console_user_data(user_data)
+                .with_knowledge_files(
+                    knowledge_file_service
+                        .clone()
+                        .expect("knowledge file service must exist with console user data"),
+                )
                 .with_registered_tools(registered_tools);
         }
-        let workers = CoreWorkers::from_runtime_state(&core_state, push_sink)?;
+        let workers =
+            CoreWorkers::from_runtime_state(&core_state, push_sink, knowledge_file_service)?;
 
         Ok(Self {
             addr,

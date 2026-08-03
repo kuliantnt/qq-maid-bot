@@ -757,6 +757,7 @@ fn test_state_with_group_tool_calling_and_query_executor(
             prompt_dir: prompt_dir.to_string_lossy().into_owned(),
             prompt_dir_uses_builtin_defaults: false,
             knowledge_dir: knowledge_dir.to_string_lossy().into_owned(),
+            knowledge_max_file_bytes: crate::config::DEFAULT_KNOWLEDGE_MAX_FILE_BYTES,
             qweather_api_key: "test".to_owned(),
             qweather_api_host: "https://api.qweather.com".to_owned(),
             qweather_geo_host: "https://geoapi.qweather.com".to_owned(),

@@ -86,11 +86,37 @@ SQLite 使用同一组筛选分别执行 `COUNT(*)` 与带 `LIMIT/OFFSET` 的当
 | `/api/v1/console/user-preferences/get` | JSON `{}` | 读取当前用户偏好；无记录时返回完整默认值 |
 | `/api/v1/console/user-preferences/update` | JSON 部分字段 | 部分更新当前用户偏好 |
 | `/api/v1/console/files/upload` | `multipart/form-data` | 上传单个通用文件 |
-| `/api/v1/console/files/list` | JSON 分页参数 | 分页列出当前用户文件 |
-| `/api/v1/console/files/get/{file_id}` | 无请求体 | 返回当前用户文件原始内容 |
-| `/api/v1/console/files/delete` | JSON `file_id` | 删除当前用户文件并清理背景引用 |
+| `/api/v1/console/files/list` | JSON 分页参数 | 分页列出当前管理员的 `background` 文件 |
+| `/api/v1/console/files/get/{file_id}` | 无请求体 | 返回当前管理员 `background` 文件原始内容 |
+| `/api/v1/console/files/delete` | JSON `file_id` | 删除当前管理员 `background` 文件并清理背景引用 |
 
 偏好字段、文件响应、限制、Blob 读取方式和删除一致性的完整前端契约见[控制台用户偏好与通用文件 API](./console-user-data-api.md)。文件 ID 是服务端生成的规范 UUID；原始文件名只作为元数据保存，不参与服务器路径解析。文件列表复用公共分页协议，文件内容读取是唯一不返回 JSON 成功包络的接口，会返回真实 `Content-Type` 与 `Content-Length`，错误仍使用统一 JSON 包络。
+
+## 知识库托管文件 API
+
+知识库托管文件复用通用控制台文件的原始存储，只增加知识库关联和异步处理状态，不复制第二套磁盘存储。接口仍只在 `WEB_CONSOLE_ENABLED=true` 时注册，并使用当前管理员 Session、同源校验、CSRF 和请求 ID。
+
+| 路径 | 请求类型 | 用途 |
+| --- | --- | --- |
+| `/api/v1/console/knowledge/files/capabilities` | JSON `{}` | 返回 `.md` / `.markdown` 和当前单文件字节上限 |
+| `/api/v1/console/knowledge/files/list` | JSON 分页参数 | 按文件名、状态、上传/更新时间列出当前管理员的托管文件及历史目录文档 |
+| `/api/v1/console/knowledge/files/upload` | `multipart/form-data` | 上传单个 Markdown；成功只代表原始文件已保存，初始状态为 `pending` |
+| `/api/v1/console/knowledge/files/get/{file_id}` | 无请求体 | 下载仍关联、用途为 `knowledge` 且属于当前管理员的原始文件 |
+| `/api/v1/console/knowledge/files/retry` | JSON `file_id` | 仅将 `failed` 文件清理旧派生数据后重新置为 `pending` |
+| `/api/v1/console/knowledge/files/delete` | JSON `file_id` | 清理知识文档、切片、FTS、embedding 和 knowledge 原始文件 |
+
+托管文件状态依次为 `pending`、`processing`、`ready` 或 `failed`。后台 worker 以 SQLite 事务原子领取任务；
+运行期间每轮也会恢复遗留的 `processing`，进程重启时同样会恢复为 `pending`。只有 Markdown UTF-8 内容非空、
+示例模板未命中、FTS 及已启用的 embedding 都成功后才会进入 `ready`。`processing` 文件删除返回 409，避免
+删除事务与正在写入的索引交错。状态确认未应用时会清理本轮已写入的文档、切片、FTS 和 embedding。失败响应只保留
+安全的 `error_code` / `error_summary`，不返回路径、服务器文件名、正文或上游响应。
+
+`KNOWLEDGE_MAX_FILE_BYTES` 独立控制知识库上传，默认 50 MiB，范围为 16 KiB 至 100 MiB；上传路由的 multipart body limit、服务端字节校验和 capabilities 响应均使用同一配置，通用文件接口仍保持 10 MiB 上限。
+
+列表中的 `source="managed"` 表示用途为 `knowledge`、可按 `file_id` 下载的控制台托管文件；
+`source="directory"` 表示历史 `KNOWLEDGE_DIR` 文档，只有索引元数据和检索结果，不伪造 `file_id` 或下载能力。
+目录同步只清理未关联托管文件的历史索引，托管文档不会因不在 `KNOWLEDGE_DIR` 中而被误删。知识用途与背景用途
+不共享同一文件记录；删除托管文件会同时删除 knowledge 原始文件和派生索引。
 
 ## Todo API
 

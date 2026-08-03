@@ -12,13 +12,14 @@ use crate::storage::database::{SqliteDatabase, SqliteMigration};
 mod files;
 mod preferences;
 
+pub(crate) use files::StagedFileDeletion;
+
 pub const MAX_CONSOLE_FILE_BYTES: usize = 10 * 1024 * 1024;
 pub(crate) const MAX_CUSTOM_COLORS: usize = 32;
 pub(crate) const MAX_CUSTOM_COLOR_CHARS: usize = 64;
 pub(crate) const MAX_BACKGROUND_FILES: usize = 64;
 pub(crate) const MAX_ORIGINAL_FILENAME_CHARS: usize = 255;
 pub(crate) const MAX_CONTENT_TYPE_CHARS: usize = 255;
-
 pub const CONSOLE_USER_DATA_SCHEMA_V1: SqliteMigration = SqliteMigration {
     name: "console_user_data_schema_v1",
     sql: "CREATE TABLE IF NOT EXISTS console_user_files (
@@ -55,6 +56,21 @@ pub const CONSOLE_USER_DATA_SCHEMA_V2: SqliteMigration = SqliteMigration {
             CHECK(background_mode IN ('default', 'special'));",
 };
 
+/// 文件用途隔离：旧表中没有用途的文件默认作为背景文件；当前 PR 已创建知识托管关联的
+/// 文件在同一 migration 中恢复为 `knowledge`。该 migration 放在知识库 schema 之后，
+/// 这样新库和已有 PR 中间态数据库都能安全执行同一条 SQL。
+pub const CONSOLE_USER_DATA_SCHEMA_V3: SqliteMigration = SqliteMigration {
+    name: "console_user_data_file_module_v3",
+    sql: "ALTER TABLE console_user_files
+            ADD COLUMN module TEXT NOT NULL DEFAULT 'background'
+            CHECK(module IN ('background', 'knowledge'));
+          CREATE INDEX IF NOT EXISTS idx_console_user_files_owner_module_created
+            ON console_user_files(admin_id, module, created_at DESC, file_id DESC);
+          UPDATE console_user_files
+             SET module = 'knowledge'
+           WHERE file_id IN (SELECT file_id FROM knowledge_managed_files);",
+};
+
 /// 背景模式：`default` 表示无背景或由 `active_background_file_id` 指定的自定义背景；
 /// `special` 表示特殊九宫格（不引用文件）。该字段与 `kuliantnt`（仅表示是否解锁）语义分离，
 /// 避免用单个布尔值同时承担“解锁”和“当前选择”两个状态。
@@ -64,6 +80,31 @@ pub enum BackgroundMode {
     #[default]
     Default,
     Special,
+}
+
+/// 通用托管文件的业务用途。用途只由后端领域入口决定，不能由客户端上传参数覆盖。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserFileModule {
+    Background,
+    Knowledge,
+}
+
+impl UserFileModule {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Background => "background",
+            Self::Knowledge => "knowledge",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "background" => Some(Self::Background),
+            "knowledge" => Some(Self::Knowledge),
+            _ => None,
+        }
+    }
 }
 
 impl BackgroundMode {
@@ -130,6 +171,7 @@ pub struct UserFile {
     pub file_id: String,
     pub filename: String,
     pub content_type: String,
+    pub module: UserFileModule,
     pub size: u64,
     pub created_at: String,
     #[serde(skip)]

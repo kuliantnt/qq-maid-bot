@@ -718,6 +718,7 @@ mod tests {
                 web_console_allowed_origins: Vec::new(),
                 web_console_trusted_proxy_ips: Vec::new(),
                 web_console_secure_cookies: false,
+                knowledge_max_file_bytes: crate::config::DEFAULT_KNOWLEDGE_MAX_FILE_BYTES,
             },
             provider,
             upstream_status,
