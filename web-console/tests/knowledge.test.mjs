@@ -117,7 +117,7 @@ function file(name, size) {
   return new File(["x".repeat(size)], name, { type: "text/markdown" });
 }
 
-function setupUpload(upload) {
+function setupUpload(upload, getCapabilities = knowledgeCapabilities) {
   const fake = createFakeDom();
   installDomGlobals(fake);
   document.body = document.createElement("div");
@@ -128,7 +128,7 @@ function setupUpload(upload) {
     inputId: "knowledge-upload-input",
     buttonId: "knowledge-upload-open",
     setStatus: (text) => statuses.push(text),
-    getCapabilities: knowledgeCapabilities,
+    getCapabilities,
     upload,
     onUploaded: () => { uploaded += 1; },
   });
@@ -190,10 +190,22 @@ test("知识库上传失败显示安全代码并恢复按钮", async () => {
 test("知识库上传格式预检会阻止请求", async () => {
   const files = [];
   const flow = setupUpload(async (selectedFile) => { files.push(selectedFile); return knowledgeItem({ status: "pending" }); });
-  triggerInputChange(flow.input, file("guide.txt", 100));
+  for (const [invalidFile, reason] of [
+    [file("guide.txt", 100), "仅支持 .md / .markdown 文件"],
+    [file("guide.md", 1025), "文件大小超过上限（1 KB）"],
+    [file(`${"a".repeat(14)}.md`, 100), "文件名过长"],
+  ]) {
+    triggerInputChange(flow.input, invalidFile);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(files.length, 0, `${reason} 不应发送上传请求`);
+    assert.equal(flow.statuses.at(-1), `上传已阻止：${reason}`);
+  }
+
+  const serverAuthoritative = setupUpload(async (selectedFile) => { files.push(selectedFile); return knowledgeItem({ status: "pending" }); }, () => null);
+  triggerInputChange(serverAuthoritative.input, file("guide.txt", 100));
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(files.length, 0);
-  assert.equal(flow.statuses.at(-1), "上传已阻止：仅支持 .md / .markdown 文件");
+  assert.equal(files.length, 1, "能力尚未加载时应交由服务端校验");
+  assert.equal(serverAuthoritative.statuses.at(-1), "文件已上传，正在等待处理");
 });
 
 function knowledgeResponse(items = []) {
@@ -280,6 +292,14 @@ test("知识库刷新失败保留现有列表并显示安全错误", async () =>
 
 test("加载两页后轮询不会丢失后续页", async () => {
   setupKnowledgePage();
+  const timers = new Map();
+  let nextTimerId = 1;
+  window.setTimeout = (callback) => {
+    const timerId = nextTimerId++;
+    timers.set(timerId, callback);
+    return timerId;
+  };
+  window.clearTimeout = (timerId) => timers.delete(timerId);
   const requests = [];
   globalThis.fetch = async (_input, init) => {
     const body = JSON.parse(String(init.body));
@@ -291,20 +311,102 @@ test("加载两页后轮询不会丢失后续页", async () => {
   };
   await initializeKnowledge();
   document.getElementById("knowledge-pagination").children[0].onclick();
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(requests.some((request) => request.page === 2), true);
-  const body = document.getElementById("knowledge-list").children[0].children[1];
+  let body = document.getElementById("knowledge-list").children[0].children[1];
   assert.equal(body.children.some((row) => row.children[0].textContent === "page-2.md"), true);
+  const scheduled = timers.entries().next().value;
+  assert.ok(scheduled, "第二页仍在处理中时应安排轮询");
+  timers.delete(scheduled[0]);
+  scheduled[1]();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(requests.slice(-2).map((request) => request.page), [1, 2]);
+  body = document.getElementById("knowledge-list").children[0].children[1];
+  assert.equal(body.children.some((row) => row.children[0].textContent === "page-2.md"), true, "轮询完成后必须保留已加载的第二页");
   delete globalThis.fetch;
 });
 
-test("首屏列表失败退出加载态并提供重试", async () => {
+test("连续点击加载更多只请求一次并且不会重复追加", async () => {
   setupKnowledgePage();
-  globalThis.fetch = async () => { throw new Error("列表不可用"); };
+  const requests = [];
+  let resolvePageTwo;
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init.body));
+    requests.push(body);
+    if (requests.length === 1) return new Response(JSON.stringify({ ok: true, data: knowledgeCapabilities() }));
+    if (body.page === 2) return new Promise((resolve) => { resolvePageTwo = () => resolve(new Response(JSON.stringify({ ok: true, data: { items: [knowledgeItem({ file_id: "file-2", filename: "page-2.md" })], page: 2, page_size: 20, total: 2, total_pages: 2 } }))); });
+    return new Response(JSON.stringify({ ok: true, data: { items: [knowledgeItem({ filename: "page-1.md" })], page: 1, page_size: 20, total: 2, total_pages: 2 } }));
+  };
+  await initializeKnowledge();
+  const loadMore = document.getElementById("knowledge-pagination").children[0];
+  loadMore.onclick();
+  loadMore.onclick();
+  assert.equal(document.getElementById("knowledge-pagination").children[0].disabled, true);
+  assert.equal(requests.filter((request) => request.page === 2).length, 1);
+  resolvePageTwo();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const rows = document.getElementById("knowledge-list").children[0].children[1].children;
+  assert.deepEqual(rows.map((row) => row.children[0].textContent), ["page-1.md", "page-2.md"]);
+  assert.equal(document.getElementById("knowledge-pagination").children.length, 0, "最后一页完成后加载更多按钮应消失");
+  delete globalThis.fetch;
+});
+
+test("登出停止轮询，重新登录不重复绑定控件并重建上传输入", async () => {
+  setupKnowledgePage();
+  const timers = new Map();
+  let nextTimerId = 1;
+  window.setTimeout = (callback) => {
+    const timerId = nextTimerId++;
+    timers.set(timerId, callback);
+    return timerId;
+  };
+  window.clearTimeout = (timerId) => timers.delete(timerId);
+  const requests = [];
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init.body));
+    requests.push(body);
+    if (body.page === undefined) return new Response(JSON.stringify({ ok: true, data: knowledgeCapabilities() }));
+    return new Response(JSON.stringify(knowledgeResponse([knowledgeItem({ status: "pending" })])));
+  };
+  await initializeKnowledge();
+  assert.equal(timers.size, 1, "待处理文件应启动轮询");
+  const firstInput = document.getElementById("knowledge-upload-input");
+  let removed = false;
+  firstInput.remove = () => { removed = true; document.registry.delete("knowledge-upload-input"); };
+  disposeKnowledge();
+  assert.equal(timers.size, 0, "登出必须清除已安排的轮询");
+  assert.equal(removed, true, "登出必须移除上传输入");
+  assert.equal(document.getElementById("knowledge-upload-input"), null);
+  await initializeKnowledge();
+  assert.equal(requests.length, 4, "重新登录应重新加载 capabilities 和第一页列表");
+  assert.notEqual(document.getElementById("knowledge-upload-input"), firstInput, "重新登录必须创建新的上传输入");
+  const beforeFilter = requests.length;
+  document.getElementById("knowledge-search").value = "relogin";
+  for (const listener of document.getElementById("knowledge-search").listeners.get("keydown")) listener({ key: "Enter", preventDefault: () => undefined });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(requests.length - beforeFilter, 1, "重新登录后的 Enter 筛选只能发送一次列表请求");
+  disposeKnowledge();
+  delete globalThis.fetch;
+});
+
+test("首屏列表失败退出加载态并可重试恢复列表", async () => {
+  setupKnowledgePage();
+  let attempts = 0;
+  globalThis.fetch = async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("列表不可用");
+    return new Response(JSON.stringify(knowledgeResponse([knowledgeItem({ filename: "retry.md" })])));
+  };
   await refreshKnowledgeList("refresh");
   assert.equal(document.getElementById("knowledge-list").textContent.includes("正在加载知识库…"), false);
   assert.equal(document.getElementById("knowledge-list").children[0].textContent, "知识库列表加载失败");
   assert.match(document.getElementById("knowledge-result").textContent, /列表不可用/);
+  const retry = document.getElementById("knowledge-list").children[1];
+  assert.equal(retry.textContent, "重试");
+  retry.onclick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const rows = document.getElementById("knowledge-list").children[0].children[1].children;
+  assert.equal(rows.some((row) => row.children[0].textContent === "retry.md"), true);
+  assert.equal(document.getElementById("knowledge-list").textContent.includes("正在加载知识库…"), false);
   delete globalThis.fetch;
 });

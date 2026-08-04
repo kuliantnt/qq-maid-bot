@@ -22,6 +22,15 @@ const onVisibilityChange = () => {
         polling.notifyChange();
 };
 const onPageHide = () => polling.stop();
+const onSearchKeydown = (event) => {
+    if (event.key === "Enter") {
+        event.preventDefault();
+        const search = requiredElement("knowledge-search", HTMLInputElement);
+        const status = requiredElement("knowledge-status-filter", HTMLSelectElement);
+        syncKnowledgeFilters(search, status);
+        void refreshKnowledgeList("filter");
+    }
+};
 const polling = new KnowledgePollingController({
     isVisible: () => typeof document === "undefined" || document.visibilityState !== "hidden",
     setTimeout: (fn, ms) => window.setTimeout(fn, ms),
@@ -83,6 +92,9 @@ export function disposeKnowledge() {
         document.removeEventListener("visibilitychange", onVisibilityChange);
     if (documentListenersBound && typeof window !== "undefined" && typeof window.removeEventListener === "function")
         window.removeEventListener("pagehide", onPageHide);
+    const search = typeof document === "undefined" ? null : document.getElementById("knowledge-search");
+    if (typeof HTMLInputElement !== "undefined" && search instanceof HTMLInputElement)
+        search.removeEventListener("keydown", onSearchKeydown);
     documentListenersBound = false;
     const input = typeof document === "undefined" ? null : document.getElementById("knowledge-upload-input");
     if (input && typeof input.remove === "function")
@@ -152,10 +164,7 @@ function bindKnowledgeControls() {
     submit.onclick = apply;
     reset.onclick = () => { search.value = ""; status.value = "all"; syncKnowledgeFilters(search, status); void refreshKnowledgeList("filter"); };
     refresh.onclick = () => void refreshKnowledgeList("refresh");
-    search.addEventListener("keydown", (event) => { if (event.key === "Enter") {
-        event.preventDefault();
-        apply();
-    } });
+    search.addEventListener("keydown", onSearchKeydown);
 }
 function bindDocumentListeners() {
     if (documentListenersBound)
