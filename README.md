@@ -17,12 +17,13 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.23.4`，项目处于 `23.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.23.5`，项目处于 `23.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
 ## 23.x 版本线更新
 
+- **知识库托管文件与 Agent 稳定性**（v0.23.5）：Web Console 新增知识库托管文件的上传、状态轮询、下载、删除和失败重试；知识库来源、异步索引和 SQLite 迁移边界明确，Web Search 参数错误支持 Agent 自纠，LLM 流式结束与回退预算也完成收口。
 - **多代理 Release 下载与 AI Radar 升级**（v0.23.4）：Linux / Windows 安装器支持官方源与多个代理候选的顺序回退，并在安装前校验归档结构和 SHA-256；`/radar` 新增 Codex Radar 预测、额度、模型 IQ 与社区评分等公开指标，数据读取与展示模块也完成领域化收口。
 - **控制台重构与运行稳定性收口**（v0.23.3）：PR #627 按业务场景重组配置中心并移除无调用方的 Provider 连接测试，PR #629 保留 LLM / 联网搜索的真实超时分类，PR #630 将配置与 Todo 页面模块化并优化交互，PR #631 恢复仅填写日期创建截止 Todo；前端契约文档统一迁移到根 `docs/`。
 - **控制台合并收口与主题语义化**（v0.23.2）：控制台背景状态统一为服务端权威并补全 Todo 管理页面，默认不再展示背景图、嵌入背景资源约 14.4 MB → 0.5 MB；配色重构为语义化主题 token 预设，修复静态缓存、导航状态机、自动保存与 Secret 并发保存等问题。

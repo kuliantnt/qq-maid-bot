@@ -2,6 +2,35 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.23.5] - 2026-08-05
+
+### Release Focus
+
+* **知识库托管文件与控制台管理**：本版本把知识库从单纯的目录同步扩展为受保护的托管文件生命周期，补齐上传、异步索引、状态查询、下载、删除和失败重试；同时收口 Web Search 参数诊断与 LLM 流式回退边界，让控制台和 Agent 运行更容易观察与恢复。
+
+### Added
+
+* **知识库托管文件生命周期**（PR #644）：新增部署管理员专用的知识库文件 API 和后台处理 worker，支持 Markdown 能力探测、分页列表、上传、下载、删除和失败重试；文件状态按 `pending`、`processing`、`ready`、`failed` 真实反映索引进度，知识库来源明确区分可管理的 `managed` 文件与只读的 `directory` 文档。
+* **知识库控制台页面**（PR #645）：Web Console 新增知识库页面，覆盖分页、上传限制提示、状态轮询、下载、删除确认和失败重试，并补齐窄屏展示、登出和上传阻断等交互测试；`web-console/dist/` 与源码保持可复现同步。
+
+### Changed
+
+* **Web Search 参数诊断与 Agent 自纠**（PR #638）：将研究目标、主题、时间范围、结果数量和上下文尺寸等参数校验收敛到独立领域模块；Tool Loop 收到结构化参数错误后可以修正请求，非法参数不会被错误缓存为终态失败，搜索结果和失败摘要继续遵守脱敏边界。
+* **Docker 文件布局**（PR #640）：将 Dockerfile、Compose 文件和环境示例归入 `docker/`，Makefile、Container workflow、部署文档和测试同步使用显式 `-f docker/compose.yaml`；远程部署 bundle 继续兼容根级 `compose.yaml`。
+* **CI 按变更范围分流**（PR #639）：前端独立执行 `npm ci`、类型检查、构建、测试和 `dist` 可复现校验；Rust、Shell、Windows 检查按实际路径触发，减少无关检查并保留发布门禁。
+* **项目日志中文化**（PR #647）：项目自有日志正文统一使用中文，结构化字段、状态值、协议标识和上游错误保持稳定；知识库 worker 的空轮询不再持续刷高频日志，Gateway 关键诊断可见性保持不变。
+
+### Fixed
+
+* **LLM 流式结束与回退预算**（PR #646）：修复 Agent 流式完成判定、Responses 兼容 EOF、SSE 可忽略尾部和流式失败后的非流式回退预算，补齐跨候选回退、超时和诊断轨迹测试。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.23.5`；本次实际变更的 `qq-maid-core`、`qq-maid-llm`、`qq-maid-gateway-rs` 分别提升到 `0.1.20`、`0.1.10`、`0.1.14`，`qq-maid-common` 保持 `0.1.4`。
+* 本版本包含知识库托管文件相关的 SQLite migration（知识 schema V4、控制台用户文件用途 V3），启动时自动执行。旧的控制台背景文件保持 `background` 用途，已关联知识托管记录的历史文件会安全迁移为 `knowledge`；升级前请备份 `APP_DB_FILE`、数据库父目录下的 `console-files/`、配置和主密钥。
+* 新增可选环境变量 `KNOWLEDGE_MAX_FILE_BYTES`，默认 50 MiB，允许范围为 16 KiB 至 100 MiB；它只控制知识库托管文件，通用控制台文件的 10 MiB 限制保持不变，不需要手工配置迁移。
+* 知识库 API 仍只在 `WEB_CONSOLE_ENABLED=true` 时注册，并继续要求部署管理员 Session、同源校验和 CSRF；目录来源文档只读，正在处理的托管文件不能删除。Docker 源码 Compose 命令需要改用 `docker/` 路径。
+
 ## [v0.23.4] - 2026-08-02
 
 ### Release Focus
