@@ -11,7 +11,7 @@ use tokio::{
     time::timeout,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{trace, warn};
+use tracing::{debug, warn};
 
 use super::super::logging::mask_scope_key;
 // `MessageHandler` 定义在 actor 子模块，actor 通过 `pub(super)` 暴露给 dispatcher
@@ -106,7 +106,7 @@ pub(super) async fn run_worker(mut ctx: WorkerContext) -> WorkerExitReason {
                 "dispatcher worker 处理消息失败"
             );
         } else {
-            trace!(
+            debug!(
                 scope_key = %mask_scope_key(&ctx.scope_key),
                 generation = ctx.generation,
                 "dispatcher worker 已处理消息"

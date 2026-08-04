@@ -12,7 +12,7 @@ use tokio::{
     time::{Instant, sleep_until},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{trace, warn};
+use tracing::{debug, trace, warn};
 
 use super::{
     batch::{
@@ -676,7 +676,7 @@ impl AggregatorActor {
                 "消息聚合屏障处理确认通道已关闭，正在释放作用域屏障"
             );
         } else {
-            trace!(
+            debug!(
                 scope_key = %mask_scope_key(&format!("private:{}", event.key.conversation_id)),
                 barrier_token = event.token,
                 "消息聚合屏障已解除"

@@ -116,6 +116,7 @@ impl C2cTypingStatusGuard {
         let started_at = Instant::now();
 
         trace!(
+            event = "typing_status_scheduled",
             user = %masked_user,
             source_message_id = %source_message_id,
             transport,
@@ -127,6 +128,7 @@ impl C2cTypingStatusGuard {
             let delay_finished = tokio::select! {
                 _ = task_token.cancelled() => {
                     trace!(
+                        event = "typing_status_cancelled",
                         user = %task_masked_user,
                         source_message_id = %task_source_message_id,
                         transport,
@@ -147,6 +149,7 @@ impl C2cTypingStatusGuard {
             let result = tokio::select! {
                 _ = task_token.cancelled() => {
                     trace!(
+                        event = "typing_status_cancelled",
                         user = %task_masked_user,
                         source_message_id = %task_source_message_id,
                         transport,
@@ -165,6 +168,7 @@ impl C2cTypingStatusGuard {
                 Ok(_) => {
                     task_sent.store(true, Ordering::SeqCst);
                     trace!(
+                        event = "typing_status_sent",
                         user = %task_masked_user,
                         source_message_id = %task_source_message_id,
                         transport,
@@ -175,6 +179,7 @@ impl C2cTypingStatusGuard {
                 }
                 Err(error) => {
                     warn!(
+                        event = "typing_status_send_failed",
                         user = %task_masked_user,
                         source_message_id = %task_source_message_id,
                         transport,
@@ -214,6 +219,7 @@ impl C2cTypingStatusGuard {
             *self.stop_reason.lock().unwrap() = Some(reason);
         }
         trace!(
+            event = "typing_status_stopped",
             user = %self.masked_user,
             source_message_id = %self.source_message_id,
             delay_ms = self.delay_ms,

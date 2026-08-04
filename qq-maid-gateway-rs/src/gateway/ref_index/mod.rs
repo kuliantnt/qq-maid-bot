@@ -18,7 +18,7 @@ use std::{
 use qq_maid_common::identity_context::MessageActorContext;
 use qq_maid_common::input_part::{MediaStatus, MessageInputPart, MessageMedia, QuotedMediaSummary};
 use qq_maid_core::service::{CoreGroupMemberRole, VisibleEntitySnapshot};
-use tracing::{trace, warn};
+use tracing::{debug, warn};
 
 use super::{
     logging::mask_identifier,
@@ -513,7 +513,7 @@ fn key_for(
 }
 
 fn log_ref_index_insert(key: &RefIndexKey, entry: &RefIndexEntry, store: &RefIndex) {
-    trace!(
+    debug!(
         platform = %key.platform,
         account = %mask_identifier(&key.app_id),
         account_present = key.app_id != "-",
@@ -538,7 +538,7 @@ fn log_ref_index_insert(key: &RefIndexKey, entry: &RefIndexEntry, store: &RefInd
 }
 
 fn log_ref_index_hit(reason: &'static str, key: &RefIndexKey, entry: &RefIndexEntry) {
-    trace!(
+    debug!(
         platform = %key.platform,
         account = %mask_identifier(&key.app_id),
         account_present = key.app_id != "-",
@@ -592,14 +592,14 @@ fn log_ref_index_miss(
     // 事件已自带引用 payload 时可以无损降级，不应作为运行告警；只有引用内容确实
     // 无法恢复时保留 WARN，便于区分索引断档与可预期的进程内缓存 miss。
     if payload_fallback_available {
-        emit_miss!(trace);
+        emit_miss!(debug);
     } else {
         emit_miss!(warn);
     }
 }
 
 fn log_ref_index_eviction(reason: &'static str, key: &RefIndexKey, store: &RefIndex) {
-    trace!(
+    debug!(
         platform = %key.platform,
         account = %mask_identifier(&key.app_id),
         account_present = key.app_id != "-",
@@ -619,7 +619,7 @@ fn log_ref_index_eviction(reason: &'static str, key: &RefIndexKey, store: &RefIn
 }
 
 fn log_ref_index_metrics(store: &RefIndex) {
-    trace!(
+    debug!(
         entries = store.entries.len(),
         scopes = store
             .entries

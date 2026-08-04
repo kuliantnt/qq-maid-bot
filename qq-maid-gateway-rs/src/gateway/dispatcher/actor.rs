@@ -25,7 +25,7 @@ use tokio::{
     time::timeout,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{info, trace, warn};
+use tracing::{debug, info, warn};
 
 use super::super::{
     BotOutboundCache,
@@ -297,7 +297,7 @@ impl DispatcherActor {
                             }
                         })?;
                         entry.queue_len += 1;
-                        trace!(
+                        debug!(
                             scope_key = %mask_scope_key(&scope_key),
                             queue_len = entry.queue_len,
                             backlog_len = entry.backlog.len(),
@@ -308,7 +308,7 @@ impl DispatcherActor {
                 }
                 ScopeState::Retiring => {
                     entry.backlog.push_back(message);
-                    trace!(
+                    debug!(
                         scope_key = %mask_scope_key(&scope_key),
                         queue_len = entry.queue_len,
                         backlog_len = entry.backlog.len(),

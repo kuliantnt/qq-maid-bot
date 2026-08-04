@@ -241,7 +241,7 @@ impl OneBotScopeDispatcher {
         if let Some(reservation) = reservation {
             reservation.commit();
         }
-        trace!(
+        debug!(
             scope_key = %mask_scope_key(&scope_key),
             generation,
             active_scopes = state.scopes.len(),

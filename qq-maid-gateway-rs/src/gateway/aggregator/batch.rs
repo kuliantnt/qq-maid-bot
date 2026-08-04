@@ -1,5 +1,5 @@
 use tokio::time::Instant;
-use tracing::trace;
+use tracing::debug;
 
 use super::types::{FlushReason, PendingAggregation};
 use crate::{
@@ -128,7 +128,7 @@ pub(super) fn merge_batch(batch: &PendingAggregation, reason: FlushReason) -> C2
             .or_else(|| message.timestamp.clone())
     });
     merged.timestamp = merged.last_message_timestamp.clone();
-    trace!(
+    debug!(
         scope_key = %mask_scope_key(&scope_key_from_c2c_message(&merged)),
         aggregation_batch_size = all_messages.len(),
         aggregation_total_chars = batch.total_chars,
