@@ -34,7 +34,9 @@ function knowledgeRow(item, callbacks) {
     row.append(filename, textCell(shortContentType(item.content_type)), textCell(formatBytes(item.size)));
     row.append(textCell(formatDateTime(item.uploaded_at)), textCell(formatDateTime(latestProcessingTime(item))));
     const status = document.createElement("td");
-    renderKnowledgeStatus(status, item);
+    const statusBadge = document.createElement("span");
+    renderKnowledgeStatus(statusBadge, item);
+    status.append(statusBadge);
     row.append(status, errorCell(item.error_summary), actionsCell(item, callbacks));
     return row;
 }

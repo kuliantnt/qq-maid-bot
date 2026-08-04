@@ -84,6 +84,9 @@ test("知识库列表按来源和状态展示安全操作并触发回调", () =>
   assert.equal(target.querySelectorAll("button[data-file-id]").length, 5);
   const directoryActions = target.children[0].children[1].children[3].children[7];
   assert.equal(directoryActions.textContent, "—");
+  const readyStatus = target.children[0].children[1].children[0].children[5];
+  assert.equal(readyStatus.className, "");
+  assert.equal(readyStatus.children[0].className, "knowledge-status knowledge-status--ready");
   buttons[0].onclick();
   buttons[1].onclick();
   buttons[2].onclick();
