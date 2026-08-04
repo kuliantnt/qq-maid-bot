@@ -277,7 +277,7 @@ impl RustRespondService {
                             .agent
                             .as_deref()
                             .map(|agent| &agent.executed_tools),
-                        "agent final reply failed after verified tool execution; using domain fallback"
+                        "Tool 执行已验真，但 Agent 最终回复失败，改用领域回退"
                     );
                     agent_finalization_error = Some(err.as_info());
                     output
@@ -636,13 +636,14 @@ impl RustRespondService {
         if tracing::enabled!(tracing::Level::DEBUG) {
             let before_mem = qq_maid_common::process_mem::process_memory_sample();
             tracing::debug!(
+                event = "before_knowledge_search",
                 knowledge_mode = %mode.as_str(),
                 user_text_chars = user_text.trim().chars().count(),
                 rss_kb = before_mem.rss_kb,
                 vm_size_kb = before_mem.vm_size_kb,
                 pss_kb = before_mem.pss_kb,
                 private_dirty_kb = before_mem.private_dirty_kb,
-                "before_knowledge_search"
+                "执行知识库搜索前的诊断"
             );
         }
         let evidence = match mode {
@@ -677,7 +678,7 @@ impl RustRespondService {
                         .as_ref()
                         .map(|failure| failure.error_code.as_str())
                         .unwrap_or("knowledge_search_failed"),
-                    "knowledge preflight failed; continuing without injected evidence"
+                    "知识库预检失败，将在不注入证据的情况下继续"
                 );
             }
             return Ok(KnowledgeContextOutcome {
@@ -695,6 +696,7 @@ impl RustRespondService {
         if tracing::enabled!(tracing::Level::DEBUG) {
             let after_mem = qq_maid_common::process_mem::process_memory_sample();
             tracing::debug!(
+                event = "after_knowledge_search",
                 knowledge_mode = %mode.as_str(),
                 candidate_count,
                 hit_count,
@@ -707,7 +709,7 @@ impl RustRespondService {
                 vm_size_kb = after_mem.vm_size_kb,
                 pss_kb = after_mem.pss_kb,
                 private_dirty_kb = after_mem.private_dirty_kb,
-                "after_knowledge_search"
+                "知识库搜索完成后的诊断"
             );
         }
         Ok(KnowledgeContextOutcome {

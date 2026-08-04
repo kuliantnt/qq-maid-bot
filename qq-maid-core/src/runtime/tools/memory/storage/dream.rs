@@ -12,7 +12,6 @@ use std::collections::HashSet;
 use qq_maid_common::time_context::local_date_from_timestamp;
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde_json::Value;
-use tracing::debug;
 use uuid::Uuid;
 
 use crate::runtime::session::{SessionMessage, SessionTurnActor};
@@ -207,7 +206,7 @@ impl MemoryStore {
             } else {
                 dream_trigger_miss_reason(trigger_stats, limits.trigger_policy)
             };
-            debug!(
+            tracing::trace!(
                 message_count = trigger_stats.message_count,
                 session_count = trigger_stats.session_count,
                 active_date_count = trigger_stats.active_date_count,
@@ -215,7 +214,7 @@ impl MemoryStore {
                 has_successful_checkpoint = trigger_stats.has_successful_checkpoint,
                 pending_continuation,
                 reason = %reason,
-                "memory Dream trigger skipped"
+                "Memory Dream 未满足触发条件，已跳过"
             );
             return Ok(None);
         }

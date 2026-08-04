@@ -222,7 +222,7 @@ impl SemanticRuntime {
                 completed_chunks = completed,
                 remaining_chunks = total_missing.saturating_sub(completed),
                 elapsed_ms = batch_elapsed_ms,
-                "knowledge embedding batch diagnostics"
+                "知识库 embedding 批次诊断"
             );
             // 大知识库可能产生数万批；保留首批、周期进度与末批，避免日志反向放大。
             if batch_number == 1
@@ -237,7 +237,7 @@ impl SemanticRuntime {
                     completed_chunks = completed,
                     remaining_chunks = total_missing.saturating_sub(completed),
                     elapsed_ms = batch_elapsed_ms,
-                    "knowledge embedding batch completed"
+                    "知识库 embedding 批次处理完成"
                 );
             }
         }
@@ -250,7 +250,7 @@ impl SemanticRuntime {
             batch_size = SEMANTIC_SYNC_BATCH_SIZE,
             inference_batch_size = FASTEMBED_INFERENCE_BATCH_SIZE,
             elapsed_ms = started.elapsed().as_millis(),
-            "knowledge embedding sync completed"
+            "知识库 embedding 同步完成"
         );
         Ok(completed)
     }

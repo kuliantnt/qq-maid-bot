@@ -221,7 +221,7 @@ fn parse_travel_date(value: Option<&Value>) -> Result<NaiveDate, LlmError> {
                 tool = TRAIN_TOOL_NAME,
                 error_code = "bad_tool_arguments",
                 argument = "travel_date",
-                "invalid train travel_date argument rejected",
+                "已拒绝无效的列车 travel_date 参数",
             );
             LlmError::new(
                 "bad_tool_arguments",
@@ -237,7 +237,7 @@ fn reject_invalid_travel_date() -> Result<NaiveDate, LlmError> {
         tool = TRAIN_TOOL_NAME,
         error_code = "bad_tool_arguments",
         argument = "travel_date",
-        "invalid train travel_date argument rejected",
+        "已拒绝无效的列车 travel_date 参数",
     );
     Err(LlmError::new(
         "bad_tool_arguments",

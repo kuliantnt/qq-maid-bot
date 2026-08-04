@@ -498,6 +498,7 @@ impl Tool for WebSearchTool {
         if tracing::enabled!(tracing::Level::DEBUG) {
             let before_mem = qq_maid_common::process_mem::process_memory_sample();
             tracing::debug!(
+                event = "before_web_search",
                 tool = WEB_SEARCH_TOOL_NAME,
                 query_chars = request.query.chars().count(),
                 max_results = request.max_results,
@@ -505,7 +506,7 @@ impl Tool for WebSearchTool {
                 vm_size_kb = before_mem.vm_size_kb,
                 pss_kb = before_mem.pss_kb,
                 private_dirty_kb = before_mem.private_dirty_kb,
-                "before_web_search"
+                "执行联网搜索前的诊断"
             );
         }
         let (outcome, attempts) = self
@@ -571,7 +572,7 @@ fn log_web_search_attempt(
             provider = outcome.provider.as_str(),
             model = tool.model_override.as_deref().unwrap_or("configured_default"),
             failure_layer = "none",
-            "web search attempt succeeded"
+            "联网搜索尝试成功"
         ),
         Err(error) => tracing::warn!(
             tool_name = WEB_SEARCH_TOOL_NAME,
@@ -590,7 +591,7 @@ fn log_web_search_attempt(
                 .or(tool.model_override.as_deref())
                 .unwrap_or("configured_default"),
             failure_layer = error.stage.as_str(),
-            "web search attempt failed"
+            "联网搜索尝试失败"
         ),
     }
 }
@@ -618,7 +619,7 @@ fn log_web_search_argument_error(
         task_id = context.task_id.as_str(),
         tool_call_id = context.tool_call_id.as_deref().unwrap_or("direct"),
         tool_round = ?context.tool_round,
-        "web search argument validation failed"
+        "联网搜索参数校验失败"
     );
 }
 
@@ -702,7 +703,7 @@ fn log_web_search_execution(
             .and_then(|value| value.as_str())
             .unwrap_or(""),
         retry_of = ?context.retry_of,
-        "web search tool execution completed"
+        "联网搜索 Tool 执行完成"
     );
 }
 

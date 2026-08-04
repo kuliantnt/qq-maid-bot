@@ -94,7 +94,7 @@ impl CoreRuntimeState {
     ) -> anyhow::Result<Self> {
         tracing::info!(
             agent_policy = %config.agent_config.diagnostic_summary()?,
-            "agent policy loaded"
+            "Agent 策略已加载"
         );
         let upstream_status = UpstreamStatus::default();
         let llm_gate = (config.max_concurrent_responses > 0)

@@ -93,7 +93,7 @@ impl RespondClient {
                 message_id = %message.message_id,
                 user = %masked_user,
                 error = %format!("{}@{}", error.code, error.stage),
-                "core respond request failed"
+                "Core 回复请求失败"
             );
             RespondError::Core(error)
         })?;
@@ -125,7 +125,7 @@ impl RespondClient {
                 message_id = %message.message_id,
                 group = %masked_group,
                 error = %format!("{}@{}", error.code, error.stage),
-                "core group respond request failed"
+                "Core 群聊回复请求失败"
             );
             RespondError::Core(error)
         })?;
@@ -163,7 +163,7 @@ impl RespondClient {
                 group = masked_group.as_deref().unwrap_or(""),
                 platform = %inbound.platform.as_str(),
                 error = %error,
-                "core inbound mapping failed"
+                "Core 入站消息转换失败"
             );
             RespondError::Core(CoreError {
                 code: "invalid_request".to_owned(),
@@ -178,7 +178,7 @@ impl RespondClient {
                 group = masked_group.as_deref().unwrap_or(""),
                 platform = %inbound.platform.as_str(),
                 error = %format!("{}@{}", error.code, error.stage),
-                "core inbound respond request failed"
+                "Core 入站回复请求失败"
             );
             RespondError::Core(error)
         })?;
@@ -279,7 +279,7 @@ fn log_core_output_success(
                     .unwrap_or(0),
                 transport = "complete",
                 response_delivery_mode = output_policy,
-                "core respond request succeeded"
+                "Core 回复请求成功"
             );
         }
         CoreRespondOutput::Stream(_) => {
@@ -289,7 +289,7 @@ fn log_core_output_success(
                 group = masked_group.unwrap_or(""),
                 transport = "stream",
                 response_delivery_mode = output_policy,
-                "core respond stream initialized"
+                "Core 回复流已初始化"
             );
         }
     }
@@ -379,7 +379,7 @@ fn log_inbound_media_diagnostics(inbound: &platform::InboundMessage) {
         image_has_media_id,
         image_url_scheme,
         media_status,
-        "inbound media readability diagnostics"
+        "入站媒体可读性诊断"
     );
 }
 

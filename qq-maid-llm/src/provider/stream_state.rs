@@ -173,7 +173,7 @@ async fn start_next_route_candidate(state: &mut RouteStreamState) -> Result<bool
                 error_stage = err.stage.as_str(),
                 error_kind = model_error_kind(&err),
                 fallback,
-                "model candidate provider is not available"
+                "模型候选的 Provider 不可用"
             );
             if !fallback {
                 state.failures.push(ModelAttemptFailure::new(
@@ -202,7 +202,7 @@ async fn start_next_route_candidate(state: &mut RouteStreamState) -> Result<bool
                     provider = provider_kind.as_str(),
                     model = %candidate.name,
                     result = "stream_started",
-                    "model candidate stream started"
+                    "模型候选已开始流式响应"
                 );
                 state.current_stream = Some(stream);
                 state.current_attempt = Some((index, provider_kind.clone(), candidate));
@@ -221,7 +221,7 @@ async fn start_next_route_candidate(state: &mut RouteStreamState) -> Result<bool
                     error_stage = err.stage.as_str(),
                     error_kind = model_error_kind(&err),
                     fallback,
-                    "model candidate stream init failed"
+                    "模型候选的流式响应初始化失败"
                 );
                 if !fallback {
                     return Err(err);
@@ -262,7 +262,7 @@ fn record_current_route_failure(state: &mut RouteStreamState, err: LlmError) {
         error_stage = err.stage.as_str(),
         error_kind = model_error_kind(&err),
         fallback,
-        "model candidate stream failed before text delta"
+        "模型候选的流式响应在文本增量前失败"
     );
     state.failures.push(ModelAttemptFailure::new(
         index,

@@ -101,7 +101,7 @@ pub(super) async fn spawn_callback_server(
         .route(&path, get(verify_url).post(handle_message))
         .with_state(state);
 
-    info!(%addr, path = %path, "wechat service callback listening");
+    info!(%addr, path = %path, "微信服务号回调已开始监听");
     runtime.record_wechat_service_listening();
     Ok(tokio::spawn(async move {
         let result = axum::serve(listener, app)
@@ -145,7 +145,7 @@ async fn handle_message(
     let message = match parse_message_xml(&body) {
         Ok(WechatInboundMessage::Text(message)) => message,
         Ok(WechatInboundMessage::Unsupported { msg_type }) => {
-            debug!(msg_type = %msg_type, "wechat service message type is not supported");
+            debug!(msg_type = %msg_type, "微信服务号消息类型不受支持");
             return plain(StatusCode::OK, "");
         }
         Err(error) => return plain(StatusCode::BAD_REQUEST, &error.to_string()),
@@ -199,7 +199,7 @@ async fn handle_message(
                 message_id = %message.msg_id,
                 timeout_ms = reply_timeout.as_millis(),
                 customer_message_enabled = state.customer_messenger.is_some(),
-                "wechat service respond exceeded sync budget"
+                "微信服务号回复超过同步处理时限"
             );
             if state.customer_messenger.is_some() {
                 return plain(StatusCode::OK, WECHAT_SUCCESS_BODY);
@@ -248,7 +248,7 @@ async fn handle_slow_job_completion(
             message_id = %message.msg_id,
             user = %mask_openid(&message.from_user_name),
             reply_len = reply.chars().count(),
-            "wechat service slow response completed without customer-message capability"
+            "微信服务号慢回复已完成，但未启用客服消息能力"
         );
         return;
     };
@@ -256,7 +256,7 @@ async fn handle_slow_job_completion(
         info!(
             message_id = %message.msg_id,
             user = %mask_openid(&message.from_user_name),
-            "wechat service slow response completed with empty reply; customer message skipped"
+            "微信服务号慢回复结果为空，已跳过客服消息发送"
         );
         return;
     }
@@ -266,7 +266,7 @@ async fn handle_slow_job_completion(
                 message_id = %message.msg_id,
                 user = %mask_openid(&message.from_user_name),
                 reply_len = reply.chars().count(),
-                "wechat customer text message sent"
+                "微信客服文本消息已发送"
             );
         }
         Err(error) => {
@@ -275,7 +275,7 @@ async fn handle_slow_job_completion(
                 user = %mask_openid(&message.from_user_name),
                 reply_len = reply.chars().count(),
                 error = %error.log_summary(),
-                "wechat customer text message failed"
+                "微信客服文本消息发送失败"
             );
         }
     }
@@ -294,7 +294,7 @@ fn reserve_wechat_message(
         Err(_) => {
             info!(
                 message_id = %message_id,
-                "wechat service duplicate message retry ignored"
+                "微信服务号重复消息重试已忽略"
             );
             Err(())
         }
@@ -324,7 +324,7 @@ async fn build_reply_text(
                         warn!(
                             message_id = %message.msg_id,
                             kind = ?failure.kind,
-                            "wechat service core stream failed"
+                            "微信服务号 Core 回复流失败"
                         );
                         return FALLBACK_ERROR_TEXT.to_owned();
                     }
@@ -337,7 +337,7 @@ async fn build_reply_text(
             warn!(
                 message_id = %message.msg_id,
                 error = %error.log_summary(),
-                "wechat service respond failed"
+                "微信服务号回复失败"
             );
             return respond_error_to_wechat_text(&error);
         }
@@ -417,7 +417,7 @@ fn verify_encrypted_url(
     match crypto.decrypt(encrypted_echo) {
         Ok(echo) => plain(StatusCode::OK, &echo),
         Err(error) => {
-            warn!(error = %error, "wechat encrypted URL verification failed");
+            warn!(error = %error, "微信加密 URL 验证失败");
             plain(StatusCode::BAD_REQUEST, "invalid encrypted echostr")
         }
     }
@@ -470,7 +470,7 @@ fn decode_callback_body(
                 )));
             }
             crypto.decrypt(&encrypted).map_err(|error| {
-                warn!(error = %error, "wechat encrypted callback decryption failed");
+                warn!(error = %error, "微信加密回调解密失败");
                 Box::new(plain(StatusCode::BAD_REQUEST, "invalid encrypted message"))
             })
         }
@@ -510,7 +510,7 @@ fn render_sync_reply(
     match result {
         Ok(xml) => xml_response(xml),
         Err(error) => {
-            warn!(error = %error, "wechat encrypted reply generation failed");
+            warn!(error = %error, "微信加密回复生成失败");
             plain(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "wechat reply encryption failed",

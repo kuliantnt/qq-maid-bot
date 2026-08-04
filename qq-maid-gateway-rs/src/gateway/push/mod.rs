@@ -330,7 +330,7 @@ impl OneBotPushRuntime {
                 warn!(
                     platform = ONEBOT11_PLATFORM,
                     invalid_mention_count = invalid_mentions.len(),
-                    "push mentions partially downgraded because OneBot member IDs are invalid"
+                    "部分 OneBot 成员 ID 无效，推送中的 mention 已部分降级"
                 );
             }
             prepend_mention_notice(base_delivered_text, &degraded_names, false)
@@ -343,7 +343,7 @@ impl OneBotPushRuntime {
                     warn!(
                         platform = ONEBOT11_PLATFORM,
                         mention_count = mentions.len(),
-                        "push mentions ignored because private messages do not support group member mention"
+                        "私聊消息不支持提及群成员，已忽略推送中的 mention"
                     );
                 }
                 self.sender
@@ -351,7 +351,9 @@ impl OneBotPushRuntime {
                     .await
             }
             PushTargetType::Group if valid_mentions.is_empty() => {
-                self.sender.send_group_text(target_id, &delivered_text).await
+                self.sender
+                    .send_group_text(target_id, &delivered_text)
+                    .await
             }
             PushTargetType::Group => {
                 self.sender
@@ -441,7 +443,7 @@ impl GatewayPushRuntime {
                     target_type = %intent.target.target_type.as_str(),
                     target = %mask_identifier(target_id),
                     error = %err.log_summary(),
-                    "gateway push failed"
+                    "Gateway 推送失败"
                 );
                 Err(PushError::Failed {
                     summary: err.log_summary(),
@@ -466,7 +468,7 @@ impl GatewayPushRuntime {
             platform = %intent.target.platform,
             target_type = %intent.target.target_type.as_str(),
             target = %mask_identifier(target_id),
-            "gateway push sent"
+            "Gateway 推送已发送"
         );
         PushResult {
             message_id: outcome.ids.message_id,
@@ -497,7 +499,7 @@ impl GatewayPushRuntime {
                     target_type = %intent.target.target_type.as_str(),
                     target = %mask_identifier(&intent.target.target_id),
                     ref_index_id = %mask_identifier(ref_index_id),
-                    "push ref_index write skipped because index lock is poisoned"
+                    "ref_index 锁已中毒，跳过写入推送引用索引"
                 );
                 return;
             }
@@ -558,7 +560,7 @@ async fn send_private_push<S: PushQqSender + ?Sized>(
                     warn!(
                         target = %mask_identifier(target_id),
                         error = %err.log_summary(),
-                        "markdown push failed; falling back to text"
+                        "Markdown 推送失败，将降级为文本推送"
                     );
                     sender
                         .send_c2c_text(target_id, fallback_text)
@@ -603,7 +605,7 @@ async fn send_group_push<S: PushQqSender + ?Sized>(
                     warn!(
                         target = %mask_identifier(target_id),
                         error = %err.log_summary(),
-                        "group markdown push failed; falling back to text"
+                        "群聊 Markdown 推送失败，将降级为文本推送"
                     );
                     sender
                         .send_group_text(target_id, &prepared.fallback_content)

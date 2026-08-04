@@ -225,7 +225,7 @@ impl OneBotConnectionContext {
 
     pub(super) fn dispatch_response(&self, generation: u64, response: ActionResponse) {
         let Some(Echo(Value::String(echo))) = response.echo.as_ref() else {
-            debug!("ignoring OneBot API response without string echo");
+            debug!("OneBot API 响应缺少字符串 echo，已忽略");
             return;
         };
         let Ok(state) = self.state.lock() else {
@@ -236,10 +236,7 @@ impl OneBotConnectionContext {
             .as_ref()
             .is_some_and(|active| active.generation == generation);
         if !is_current {
-            debug!(
-                generation,
-                "ignoring OneBot API response from stale connection"
-            );
+            debug!(generation, "已忽略过期连接返回的 OneBot API 响应");
             return;
         }
         let sender = self.pending.lock().ok().and_then(|mut pending| {

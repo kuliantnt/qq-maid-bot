@@ -69,7 +69,7 @@ pub(super) async fn run_reject_worker(
                 scope_key = %mask_scope_key(&notification.scope_key),
                 target = %masked_target,
                 error = %error.log_summary(),
-                "dispatcher reject notification send failed"
+                "dispatcher 拒绝通知发送失败"
             );
         }
     }

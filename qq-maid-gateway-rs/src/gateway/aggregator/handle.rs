@@ -206,8 +206,8 @@ impl MessageAggregator {
         .await;
         match graceful {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => warn!(error = %error, "message aggregator shutdown command failed"),
-            Err(_) => warn!("message aggregator shutdown command timed out"),
+            Ok(Err(error)) => warn!(error = %error, "消息聚合器关闭命令执行失败"),
+            Err(_) => warn!("消息聚合器关闭命令执行超时"),
         }
 
         // 这里取消的是 actor 实际监听的同一个 token；若 join 仍超时则 abort，避免遗留 detached task。
@@ -216,14 +216,14 @@ impl MessageAggregator {
         match timeout(Duration::from_secs(1), join).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) if error.is_cancelled() => {}
-            Ok(Err(error)) => warn!(error = %error, "message aggregator task ended unexpectedly"),
+            Ok(Err(error)) => warn!(error = %error, "消息聚合器任务意外结束"),
             Err(_) => {
                 self.join_handle.abort();
                 match self.join_handle.await {
                     Ok(()) => {}
                     Err(error) if error.is_cancelled() => {}
                     Err(error) => {
-                        warn!(error = %error, "message aggregator aborted task ended unexpectedly")
+                        warn!(error = %error, "消息聚合器中止后的任务意外结束")
                     }
                 }
             }

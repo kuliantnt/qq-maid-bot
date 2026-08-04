@@ -200,7 +200,7 @@ pub(crate) fn warn_core_error(scope_key: &str, err: &LlmError) {
         agent_executed_tools = ?agent.map(|diagnostics| &diagnostics.executed_tools),
         agent_streaming_fallback_used = agent
             .map(|diagnostics| diagnostics.streaming_fallback_used),
-        "core respond request failed"
+        "Core 响应请求失败"
     );
 }
 
@@ -223,7 +223,7 @@ pub(crate) fn error_core_error(
         timeout_stage = err.stage,
         timeout_seconds,
         error_message = %safe_error_message(err),
-        "core respond request timed out"
+        "Core 响应请求超时"
     );
 }
 

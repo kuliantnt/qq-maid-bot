@@ -392,7 +392,7 @@ impl EvalWorkspace {
 impl Drop for EvalWorkspace {
     fn drop(&mut self) {
         if let Err(error) = fs::remove_dir_all(&self.root) {
-            tracing::warn!(error = %error, "knowledge eval workspace cleanup failed");
+            tracing::warn!(error = %error, "清理知识库评测 workspace 失败");
         }
     }
 }

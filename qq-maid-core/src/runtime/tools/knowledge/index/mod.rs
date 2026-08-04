@@ -260,7 +260,7 @@ impl KnowledgeIndex {
                     tracing::warn!(
                         path = %file.relative_path,
                         error = %err,
-                        "knowledge markdown file sync failed"
+                        "知识库 Markdown 文件同步失败"
                     );
                     return Err(err);
                 }
@@ -285,7 +285,7 @@ impl KnowledgeIndex {
         } else {
             tracing::info!(
                 dir = %self.knowledge_dir.display(),
-                "knowledge dir has no scannable markdown files, keeping existing db index"
+                "知识库目录没有可扫描的 Markdown 文件，保留现有数据库索引"
             );
         }
         summary.chunk_count = self.store.chunk_count().map_err(knowledge_db_error)?;
@@ -304,7 +304,7 @@ impl KnowledgeIndex {
             elapsed_ms = start.elapsed().as_millis(),
             enabled = summary.enabled,
             dir = %self.knowledge_dir.display(),
-            "knowledge index sync completed"
+            "知识库索引同步完成"
         );
         Ok(summary)
     }
@@ -420,7 +420,7 @@ impl KnowledgeIndex {
             threshold_version = %evidence.injection.threshold_version,
             truncation_reasons = ?evidence.diagnostics.truncation_reasons,
             latency_ms = evidence.diagnostics.latency_ms,
-            "knowledge search completed"
+            "知识库搜索完成"
         );
         Ok(evidence)
     }
@@ -465,7 +465,7 @@ impl KnowledgeIndex {
             heading_chunks_p50 = diagnostics.heading_chunks_p50,
             heading_chunks_p95 = diagnostics.heading_chunks_p95,
             heading_chunks_max = diagnostics.heading_chunks_max,
-            "knowledge markdown chunking completed"
+            "知识库 Markdown 分块完成"
         );
         let chunks = chunks
             .into_iter()

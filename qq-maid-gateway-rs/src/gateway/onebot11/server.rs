@@ -141,7 +141,7 @@ pub(crate) async fn spawn_reverse_websocket_server_with_ref_index(
         .route(&path, get(upgrade_websocket))
         .with_state(state);
 
-    info!(%local_addr, path = %path, "OneBot 11 reverse WebSocket listening");
+    info!(%local_addr, path = %path, "OneBot 11 反向 WebSocket 已开始监听");
     runtime.record_onebot_listening();
     let task = tokio::spawn(async move {
         let result = axum::serve(listener, app)
@@ -168,7 +168,7 @@ async fn upgrade_websocket(
     websocket: WebSocketUpgrade,
 ) -> Response {
     if !authorized(&state.config, &headers) {
-        warn!("rejected unauthorized OneBot 11 WebSocket connection");
+        warn!("已拒绝未授权的 OneBot 11 WebSocket 连接");
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
     let header_self_id = match headers.get(X_SELF_ID) {
@@ -305,7 +305,7 @@ async fn handle_socket(
         && state.connection.unregister(registration.generation)
     {
         state.runtime.record_onebot_disconnected(disconnect_summary);
-        info!(reason = disconnect_summary, "OneBot 11 client disconnected");
+        info!(reason = disconnect_summary, "OneBot 11 客户端已断开连接");
     }
 }
 
@@ -342,7 +342,7 @@ async fn handle_message(
     let value: Value = match serde_json::from_str(text.as_str()) {
         Ok(value) => value,
         Err(_) => {
-            warn!("closing OneBot 11 connection after invalid JSON");
+            warn!("收到无效 JSON，正在关闭 OneBot 11 连接");
             close_socket(socket, close_code::INVALID, "invalid JSON").await;
             return MessageOutcome::Disconnect("invalid JSON");
         }
@@ -356,7 +356,7 @@ async fn handle_message(
             }
         };
         let Some(registration) = registration.as_ref() else {
-            debug!("ignoring OneBot API response before self_id registration");
+            debug!("self_id 注册前收到 OneBot API 响应，已忽略");
             return MessageOutcome::Continue;
         };
         state
@@ -401,7 +401,7 @@ async fn handle_message(
             *heartbeat_deadline = Some(Instant::now() + heartbeat_budget);
         }
     } else if event.is_lifecycle() {
-        debug!(sub_type = ?event.sub_type, "received OneBot 11 lifecycle event");
+        debug!(sub_type = ?event.sub_type, "已收到 OneBot 11 生命周期事件");
     } else {
         match inbound_from_event_with_media_limit(
             &event,
@@ -413,7 +413,7 @@ async fn handle_message(
                     conversation = inbound.conversation.kind(),
                     text_parts = inbound.input_parts.len(),
                     mentions = inbound.mentions.len(),
-                    "adapted OneBot 11 inbound message"
+                    "OneBot 11 入站消息转换完成"
                 );
                 // 这里只做去重和有界 `try_send`。Core / sender 在 scope worker 中执行，
                 // 因而 action echo 仍可由当前读循环继续接收和分派，不会形成自锁。
@@ -421,18 +421,18 @@ async fn handle_message(
                     Ok(OneBotEnqueueOutcome::Accepted) => {}
                     Ok(OneBotEnqueueOutcome::Duplicate) => {}
                     Err(OneBotEnqueueError::Shutdown) => {
-                        debug!("ignored OneBot 11 inbound message during gateway shutdown");
+                        debug!("Gateway 关闭期间收到 OneBot 11 入站消息，已忽略");
                     }
                     Err(error) => {
                         // scope dispatcher 已记录脱敏的容量原因；这里保留协议入口级结果，
                         // 不打印消息正文、message_id 或原始平台标识。
-                        warn!(error = %error, "OneBot 11 inbound enqueue failed");
+                        warn!(error = %error, "OneBot 11 入站消息入队失败");
                     }
                 }
             }
             OneBotInboundOutcome::Ignored(reason) => debug!(
                 reason = reason.as_str(),
-                "ignored OneBot 11 event before core dispatch"
+                "OneBot 11 事件在分发至 Core 前被忽略"
             ),
         }
     }
@@ -454,7 +454,7 @@ fn register_connection(
             info!(
                 self_id = %state.runtime.snapshot().onebot_self_id_summary.as_deref().unwrap_or("unknown"),
                 replaced_existing = registration.replaced_existing,
-                "OneBot 11 client connected"
+                "OneBot 11 客户端已连接"
             );
             Ok(registration)
         }
@@ -462,7 +462,7 @@ fn register_connection(
             warn!(
                 expected = %mask_identifier(expected.as_str()),
                 received = %masked,
-                "rejected OneBot 11 connection for a different account"
+                "已拒绝账号不匹配的 OneBot 11 连接"
             );
             Err("different self_id is not allowed")
         }

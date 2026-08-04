@@ -291,7 +291,7 @@ async fn fallback_to_non_stream(
         fallback_skipped_reason = "none",
         non_stream_fallback_elapsed_ms,
         non_stream_fallback_succeeded = result.is_ok(),
-        "streaming agent fallback completed"
+        "流式 Agent 降级请求已完成"
     );
     result
         .map(|step| AgentAdvance {
@@ -345,7 +345,7 @@ fn log_streaming_fallback_skipped(
         stream_remaining_budget_ms = remaining_budget.map(|value| value.as_millis()),
         fallback_remaining_budget_ms = remaining_budget.map(|value| value.as_millis()),
         fallback_skipped_reason = skipped_reason,
-        "streaming agent fallback skipped"
+        "已跳过流式 Agent 降级请求"
     );
 }
 

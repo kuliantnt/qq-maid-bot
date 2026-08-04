@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
     info!(
         version = env!("CARGO_PKG_VERSION"),
         commit = BUILD_COMMIT,
-        "qq-maid-bot starting"
+        "正在启动 qq-maid-bot"
     );
 
     let external_environment = std::env::vars().collect::<HashMap<_, _>>();

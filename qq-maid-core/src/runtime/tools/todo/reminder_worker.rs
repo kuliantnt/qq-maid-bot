@@ -101,13 +101,13 @@ impl TodoReminderScheduler {
 
     pub fn spawn(self) {
         if !self.config.enabled {
-            info!("todo daily reminder disabled");
+            info!("Todo 每日提醒已停用");
             return;
         }
         tokio::spawn(async move {
             info!(
                 reminder_time = %self.config.reminder_time,
-                "todo daily reminder scheduler enabled"
+                "Todo 每日提醒调度器已启用"
             );
             self.run_loop().await;
         });
@@ -123,7 +123,7 @@ impl TodoReminderScheduler {
             debug!(
                 next_run_at = %next_run.to_rfc3339(),
                 reminder_time = %self.config.reminder_time,
-                "todo daily reminder waiting for next run"
+                "Todo 每日提醒正在等待下次运行"
             );
             tokio::time::sleep(wait_duration).await;
             self.run_scheduled_cycle_for_date(next_run.date_naive())
@@ -140,7 +140,7 @@ impl TodoReminderScheduler {
                         info!(
                             scheduled_date = %scheduled_date,
                             attempt,
-                            "todo daily reminder retry finished successfully"
+                            "Todo 每日提醒重试成功"
                         );
                     }
                     return;
@@ -150,7 +150,7 @@ impl TodoReminderScheduler {
                         scheduled_date = %scheduled_date,
                         attempt,
                         enqueue_failed_owner_count = stats.enqueue_failed_owner_count,
-                        "todo daily reminder cycle had enqueue failures; scheduling same-day retry"
+                        "Todo 每日提醒本轮存在入队失败，准备安排当日重试"
                     );
                 }
                 Err(err) => {
@@ -158,7 +158,7 @@ impl TodoReminderScheduler {
                         scheduled_date = %scheduled_date,
                         attempt,
                         error = %err,
-                        "todo daily reminder cycle failed; scheduling same-day retry"
+                        "Todo 每日提醒本轮执行失败，准备安排当日重试"
                     );
                 }
             }
@@ -167,7 +167,7 @@ impl TodoReminderScheduler {
                 warn!(
                     scheduled_date = %scheduled_date,
                     attempt,
-                    "todo daily reminder retry attempts exhausted for today"
+                    "Todo 每日提醒今日重试次数已耗尽"
                 );
                 return;
             }
@@ -177,7 +177,7 @@ impl TodoReminderScheduler {
                 warn!(
                     scheduled_date = %scheduled_date,
                     attempt,
-                    "todo daily reminder retry window closed for today"
+                    "Todo 每日提醒今日重试窗口已关闭"
                 );
                 return;
             };
@@ -188,7 +188,7 @@ impl TodoReminderScheduler {
                 scheduled_date = %scheduled_date,
                 attempt,
                 retry_at = %retry_at.to_rfc3339(),
-                "todo daily reminder waiting to retry failed cycle"
+                "Todo 每日提醒正在等待重试失败轮次"
             );
             tokio::time::sleep(wait_duration).await;
             attempt += 1;
@@ -268,7 +268,7 @@ impl TodoReminderScheduler {
                         info!(
                             owner = %short_hash(&owner.owner_key),
                             target = %short_hash(&owner.private_target_id),
-                            "todo daily reminder task remains cancelled"
+                            "Todo 每日提醒任务仍处于取消状态"
                         );
                         continue;
                     }
@@ -276,7 +276,7 @@ impl TodoReminderScheduler {
                     info!(
                         owner = %short_hash(&owner.owner_key),
                         target = %short_hash(&owner.private_target_id),
-                        "todo daily reminder notification queued"
+                        "Todo 每日提醒通知已入队"
                     );
                 }
                 Err(err) => {
@@ -285,7 +285,7 @@ impl TodoReminderScheduler {
                         owner = %short_hash(&owner.owner_key),
                         target = %short_hash(&owner.private_target_id),
                         error = %err.message(),
-                        "todo daily reminder notification enqueue failed"
+                        "Todo 每日提醒通知入队失败"
                     );
                 }
             }
@@ -518,7 +518,7 @@ fn log_skipped_owners(result: &TodoReminderOwnerQueryResult) {
             scope_count = skipped.private_scope_keys.len(),
             scope_hashes = ?hash_values(&skipped.private_scope_keys),
             parsed_target_hashes = ?hash_values(&skipped.parsed_target_ids),
-            "todo reminder skipped owner candidate"
+            "Todo 提醒已跳过候选归属对象"
         );
     }
 }

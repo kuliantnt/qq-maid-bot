@@ -225,7 +225,7 @@ fn map_user_data_error(error: ConsoleUserDataError) -> ApiError {
         "bad_request" => ApiError::validation(error.message()),
         "not_found" => ApiError::not_found("file not found"),
         _ => {
-            tracing::error!(code = error.code(), "console user data operation failed");
+            tracing::error!(code = error.code(), "控制台用户数据操作失败");
             ApiError::internal("console user data service failed")
         }
     }

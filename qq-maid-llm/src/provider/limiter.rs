@@ -180,7 +180,7 @@ fn log_waiting_permits(kind: &str, semaphore: &Arc<Semaphore>) {
     debug!(
         kind,
         available_permits = semaphore.available_permits(),
-        "waiting for shared LLM concurrency permit"
+        "正在等待共享 LLM 并发许可"
     );
 }
 

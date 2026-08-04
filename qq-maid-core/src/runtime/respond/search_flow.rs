@@ -162,7 +162,7 @@ impl RustRespondService {
                     error_code = err.code,
                     error_stage = err.stage,
                     query_provider = self.query_executor.provider_name(),
-                    "web search command tool failed"
+                    "联网搜索命令 Tool 执行失败"
                 );
                 let reply = format_web_search_error_reply(&err);
                 self.session_store
@@ -282,7 +282,7 @@ impl RustRespondService {
                 tracing::warn!(
                     error_code = err.code,
                     error_stage = err.stage,
-                    "web search query rewrite failed; using local compact fallback"
+                    "联网搜索查询改写失败，改用本地精简回退"
                 );
                 fallback_web_search_query(&query, req)
             }

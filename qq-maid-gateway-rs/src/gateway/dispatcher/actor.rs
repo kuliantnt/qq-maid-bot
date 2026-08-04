@@ -301,7 +301,7 @@ impl DispatcherActor {
                             scope_key = %mask_scope_key(&scope_key),
                             queue_len = entry.queue_len,
                             backlog_len = entry.backlog.len(),
-                            "dispatcher enqueued message to active worker"
+                            "dispatcher 已将消息加入活动 worker 队列"
                         );
                         return Ok(());
                     }
@@ -312,7 +312,7 @@ impl DispatcherActor {
                         scope_key = %mask_scope_key(&scope_key),
                         queue_len = entry.queue_len,
                         backlog_len = entry.backlog.len(),
-                        "dispatcher buffered message in retiring backlog"
+                        "dispatcher 已将消息暂存至待退出 worker 的积压队列"
                     );
                     return Ok(());
                 }
@@ -361,7 +361,7 @@ impl DispatcherActor {
             generation,
             active_workers = self.active_workers.load(Ordering::Relaxed),
             max_active_workers = self.config.max_active_conversation_workers,
-            "dispatcher created worker"
+            "dispatcher 已创建 worker"
         );
         Ok(())
     }
@@ -382,7 +382,7 @@ impl DispatcherActor {
             scope_key = %mask_scope_key(scope_key),
             generation,
             backlog_len = entry.backlog.len(),
-            "dispatcher marked worker retiring"
+            "dispatcher 已将 worker 标记为待退出"
         );
         IdleDecision::RetireNow
     }
@@ -405,21 +405,21 @@ impl DispatcherActor {
             WorkerExitReason::Completed => info!(
                 scope_key = %mask_scope_key(&scope_key),
                 generation,
-                "dispatcher observed worker exit"
+                "dispatcher 检测到 worker 已退出"
             ),
             WorkerExitReason::Cancelled => warn!(
                 scope_key = %mask_scope_key(&scope_key),
                 generation,
                 queued_messages = entry.queue_len,
                 backlog_len = entry.backlog.len(),
-                "dispatcher observed cancelled worker"
+                "dispatcher 检测到 worker 已取消"
             ),
             WorkerExitReason::Panic => warn!(
                 scope_key = %mask_scope_key(&scope_key),
                 generation,
                 queued_messages = entry.queue_len,
                 backlog_len = entry.backlog.len(),
-                "dispatcher observed panicked worker"
+                "dispatcher 检测到 worker 发生 panic"
             ),
         }
         if entry.backlog.is_empty() || self.shutdown_token.is_cancelled() {
@@ -455,7 +455,7 @@ impl DispatcherActor {
                 warn!(
                     scope_key = %mask_scope_key(&scope_key),
                     generation = next_generation,
-                    "dispatcher successor worker queue unavailable while replaying backlog"
+                    "dispatcher 重放积压消息时后继 worker 队列不可用"
                 );
             }
         }
@@ -474,7 +474,7 @@ impl DispatcherActor {
             scope_key = %mask_scope_key(&scope_key),
             generation = next_generation,
             queue_len,
-            "dispatcher started successor worker"
+            "dispatcher 已启动后继 worker"
         );
     }
 
@@ -537,7 +537,7 @@ impl DispatcherActor {
                 reject_total,
                 reject_dropped,
                 reason,
-                "dispatcher reject queue full"
+                "dispatcher 拒绝队列已满"
             );
             return false;
         }
@@ -565,13 +565,13 @@ impl DispatcherActor {
                 active_workers = self.active_workers.load(Ordering::Relaxed),
                 reject_total = self.reject_metrics.total.load(Ordering::Relaxed),
                 reject_dropped = self.reject_metrics.dropped.load(Ordering::Relaxed),
-                "dispatcher shutdown drained with remaining work"
+                "dispatcher 关闭排空后仍有剩余任务"
             );
         } else {
             info!(
                 reject_total = self.reject_metrics.total.load(Ordering::Relaxed),
                 reject_dropped = self.reject_metrics.dropped.load(Ordering::Relaxed),
-                "dispatcher shutdown completed"
+                "dispatcher 已完成关闭"
             );
         }
     }

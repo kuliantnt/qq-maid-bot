@@ -533,7 +533,7 @@ fn log_ref_index_insert(key: &RefIndexKey, entry: &RefIndexEntry, store: &RefInd
             .unwrap_or(0),
         media_count = entry.media_summaries.len(),
         input_part_count = entry.input_parts.len(),
-        "ref_index insert"
+        "ref_index 已写入条目"
     );
 }
 
@@ -550,7 +550,7 @@ fn log_ref_index_hit(reason: &'static str, key: &RefIndexKey, entry: &RefIndexEn
         text_present = entry.text_summary.is_some(),
         media_count = entry.media_summaries.len(),
         reason,
-        "ref_index hit"
+        "ref_index 已命中条目"
     );
 }
 
@@ -585,7 +585,7 @@ fn log_ref_index_miss(
                 candidate_peer_id = %first_candidate
                     .map(|key| mask_identifier(&key.peer_id))
                     .unwrap_or_default(),
-                "ref_index miss"
+                "ref_index 未命中条目"
             );
         };
     }
@@ -614,7 +614,7 @@ fn log_ref_index_eviction(reason: &'static str, key: &RefIndexKey, store: &RefIn
         expired_evictions = store.expired_evictions,
         capacity_evictions = store.capacity_evictions,
         scope_evictions = store.scope_evictions,
-        "ref_index evicted entry"
+        "ref_index 已淘汰条目"
     );
 }
 
@@ -633,7 +633,7 @@ fn log_ref_index_metrics(store: &RefIndex) {
         expired_evictions = store.expired_evictions,
         capacity_evictions = store.capacity_evictions,
         scope_evictions = store.scope_evictions,
-        "ref_index metrics"
+        "ref_index 统计"
     );
 }
 

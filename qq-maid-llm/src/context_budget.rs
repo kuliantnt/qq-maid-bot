@@ -336,7 +336,7 @@ pub fn fit_tool_loop_payload(
             text_and_protocol_chars = initial_estimate.text_and_protocol_chars,
             structured_image_count = initial_estimate.structured_image_count,
             input_item_count,
-            "large tool loop input detected"
+            "检测到较大的 Tool Loop 输入"
         );
     }
     debug!(
@@ -348,7 +348,7 @@ pub fn fit_tool_loop_payload(
         structured_image_budget_chars = initial_estimate.structured_image_budget_chars,
         tool_schema_chars = initial_estimate.tool_schema_chars,
         text_and_protocol_chars = initial_estimate.text_and_protocol_chars,
-        "tool loop context budget estimate"
+        "Tool Loop 上下文预算估算完成"
     );
     if initial_estimate.budgeted_chars <= max_input_chars {
         return Ok((payload, false));
@@ -397,7 +397,7 @@ pub fn fit_tool_loop_payload(
         max_input_chars,
         output_reserve_chars = config.output_reserve_chars,
         tools_disabled = true,
-        "tool loop entered forced finalization budget"
+        "Tool Loop 已进入强制最终回答预算阶段"
     );
     Ok((payload, true))
 }
@@ -739,7 +739,7 @@ pub fn log_budget_report(scope: &'static str, report: &BudgetReport) {
             retained_chars = report.retained_chars,
             evicted_chars = report.evicted_chars,
             evicted_items,
-            "context budget exceeded"
+            "上下文超出预算"
         );
     } else if report.evicted_chars > 0 {
         debug!(
@@ -749,7 +749,7 @@ pub fn log_budget_report(scope: &'static str, report: &BudgetReport) {
             retained_chars = report.retained_chars,
             evicted_chars = report.evicted_chars,
             evicted_items,
-            "context budget evicted input items"
+            "上下文预算已移除部分输入项"
         );
     }
 }

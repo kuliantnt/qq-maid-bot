@@ -67,7 +67,7 @@ pub(crate) async fn openai_responses_chat_with_stream_fallback(
                 tracing::warn!(
                     provider = req.provider,
                     model = %req.model,
-                    "streaming OpenAI Responses chat returned empty reply; retrying once with non-stream request"
+                    "流式 OpenAI Responses 对话返回空回复，将使用非流式请求重试一次"
                 );
             }
             Err(err) => {
@@ -79,7 +79,7 @@ pub(crate) async fn openai_responses_chat_with_stream_fallback(
                     model = %req.model,
                     error_code = err.code.as_str(),
                     error_stage = err.stage.as_str(),
-                    "streaming OpenAI Responses chat failed; retrying once with non-stream request"
+                    "流式 OpenAI Responses 对话失败，将使用非流式请求重试一次"
                 );
             }
         }
@@ -310,7 +310,7 @@ async fn next_responses_stream_event(
                             saw_text_delta = !state.answer.trim().is_empty(),
                             visible_text_chars = state.answer.chars().count(),
                             incomplete_frame_bytes = state.frame_buffer.len(),
-                            "OpenAI Responses chat stream ended with an incomplete SSE frame"
+                            "OpenAI Responses 对话流以不完整的 SSE 帧结束"
                         );
                         state.finished = true;
                         return Some(Err(incomplete_sse_frame_error(&state.answer)));
@@ -348,7 +348,7 @@ async fn next_responses_stream_event(
                             saw_done = state.saw_done,
                             saw_text_delta = true,
                             visible_text_chars = state.answer.chars().count(),
-                            "OpenAI Responses chat stream used compatible completion after normal HTTP EOF"
+                            "OpenAI Responses 对话流在正常 HTTP EOF 后按兼容规则完成"
                         );
                         state.finished = true;
                         return Some(Ok(LlmStreamEvent::Completed {

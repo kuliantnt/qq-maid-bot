@@ -113,7 +113,7 @@ impl RustRespondService {
                     train_provider = self.train_executor.provider_name(),
                     train_code = %command.train_code,
                     travel_date = %command.travel_date,
-                    "train command failed"
+                    "列车命令执行失败"
                 );
                 let reply = format_train_error_reply(&err);
                 self.session_store

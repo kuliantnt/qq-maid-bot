@@ -66,7 +66,7 @@ pub(crate) fn extract_response_output_parts(body: &Value) -> Vec<OutputPart> {
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or("");
-        tracing::debug!(output_type, "observed OpenAI Responses output item");
+        tracing::debug!(output_type, "检测到 OpenAI Responses 输出项");
         match output_type {
             "image_generation_call" => {
                 let Some(result) = output_item
@@ -82,7 +82,7 @@ pub(crate) fn extract_response_output_parts(body: &Value) -> Vec<OutputPart> {
                     tracing::warn!(
                         output_type = "image_generation_call",
                         result_chars = result.len(),
-                        "ignored invalid base64 OpenAI image generation result"
+                        "已忽略 OpenAI 图片生成返回的无效 base64 结果"
                     );
                     continue;
                 }

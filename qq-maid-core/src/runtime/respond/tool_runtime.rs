@@ -90,7 +90,7 @@ impl ToolRuntime {
                 tracing::warn!(
                     error_code = %err.code,
                     error_stage = %err.stage,
-                    "failed to register core tool"
+                    "注册 Core Tool 失败"
                 );
             }
         }

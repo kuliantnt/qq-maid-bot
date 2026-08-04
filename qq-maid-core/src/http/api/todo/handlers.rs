@@ -204,7 +204,7 @@ fn map_todo_error(error: TodoManagementError) -> ApiError {
         "permission_denied" => ApiError::forbidden("permission_denied", error.message()),
         "conflict" => ApiError::conflict(error.message()),
         _ => {
-            tracing::error!(code = error.code(), "todo management operation failed");
+            tracing::error!(code = error.code(), "Todo 管理操作失败");
             ApiError::internal("todo service failed")
         }
     }

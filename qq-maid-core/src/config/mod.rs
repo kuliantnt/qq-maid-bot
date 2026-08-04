@@ -790,7 +790,7 @@ fn warn_removed_member_id_mapping_file() {
     if Path::new(REMOVED_MEMBER_ID_MAPPING_FILE).exists() {
         tracing::warn!(
             path = REMOVED_MEMBER_ID_MAPPING_FILE,
-            "member_id_mapping.json is no longer read; remove this file from the runtime config directory"
+            "已不再读取 member_id_mapping.json，请从 runtime 配置目录中移除此文件"
         );
     }
 }

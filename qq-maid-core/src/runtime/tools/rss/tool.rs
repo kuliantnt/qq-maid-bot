@@ -649,7 +649,7 @@ fn reject_bad_arguments<T>(message: &str) -> Result<T, LlmError> {
     tracing::warn!(
         tool = "rss",
         error_code = "bad_tool_arguments",
-        "invalid RSS tool argument rejected",
+        "已拒绝无效的 RSS Tool 参数",
     );
     Err(LlmError::new("bad_tool_arguments", message, "tool"))
 }

@@ -117,7 +117,7 @@ pub(super) fn weather_supplement_or_failed<T>(
                 weather_supplement = supplement,
                 error_code = %err.code,
                 error_stage = %err.stage,
-                "optional weather supplement failed"
+                "获取可选天气补充信息失败"
             );
             WeatherSupplement::failed(&err)
         }

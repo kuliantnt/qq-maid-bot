@@ -136,7 +136,7 @@ async fn send_cooldown_hint(
             message_id = %message.message_id,
             group = %mask_openid(&message.group_openid),
             error = %error.log_summary(),
-            "group cooldown hint send failed"
+            "群聊冷却提示发送失败"
         );
     }
 }
@@ -224,7 +224,7 @@ pub(crate) async fn handle_group_message(
         info!(
             message_id = %message.message_id,
             group = %masked_group,
-            "duplicate group message ignored"
+            "重复的群聊消息已忽略"
         );
         return Ok(());
     }
@@ -246,7 +246,7 @@ pub(crate) async fn handle_group_message(
         info!(
             message_id = %message.message_id,
             group = %masked_group,
-            "local Gateway command matched for QQ group"
+            "QQ 群聊已匹配本地 Gateway 命令"
         );
         send_group_local_command(
             api,
@@ -275,7 +275,7 @@ pub(crate) async fn handle_group_message(
             event_type = message.event_type.as_respond_event_type(),
             mode = ?config.group_message_mode,
             active_keyword_count,
-            "group message ignored by mode policy"
+            "群聊消息已按模式策略忽略"
         );
         return Ok(());
     }
@@ -299,7 +299,7 @@ pub(crate) async fn handle_group_message(
                     group = %masked_group,
                     member = %message.member_openid.as_deref().map(mask_openid).unwrap_or_default(),
                     error = %error.log_summary(),
-                    "group inbound classification failed; preserving normal chat cooldown"
+                    "群聊入站分类失败，将保留普通聊天冷却状态"
                 );
                 false
             }
@@ -319,7 +319,7 @@ pub(crate) async fn handle_group_message(
                 message_id = %message.message_id,
                 group = %masked_group,
                 member = %message.member_openid.as_deref().map(mask_openid).unwrap_or_default(),
-                "group message throttled by cooldown; sending lightweight hint"
+                "群聊消息触发冷却限制，正在发送轻量提示"
             );
             send_cooldown_hint(api, runtime, &message, config.bot_display_name()).await;
         } else {
@@ -327,7 +327,7 @@ pub(crate) async fn handle_group_message(
                 message_id = %message.message_id,
                 group = %masked_group,
                 member = %message.member_openid.as_deref().map(mask_openid).unwrap_or_default(),
-                "group message ignored by cooldown"
+                "群聊消息因冷却限制被忽略"
             );
         }
         return Ok(());
@@ -391,7 +391,7 @@ pub(crate) async fn handle_group_message(
     info!(
         message_id = %message.message_id,
         group = %masked_group,
-        "calling respond backend for group"
+        "正在调用群聊回复后端"
     );
     let transport = match respond.respond_inbound(&inbound, respond_content).await {
         Ok(response) => {
@@ -409,7 +409,7 @@ pub(crate) async fn handle_group_message(
                 local_fallback = true,
                 fallback_reason = "respond_error",
                 qq_error_text = %log_text,
-                "respond backend call failed; sending local group fallback"
+                "回复后端调用失败，正在发送本地群聊降级回复"
             );
             let sent_message_id = send_group_text_with_status(
                 api,
@@ -502,7 +502,7 @@ async fn send_group_local_command(
             message_id = target.msg_id.as_deref().unwrap_or(""),
             group = %mask_openid(&target.group_openid),
             reply_budget = QQ_GROUP_PASSIVE_REPLY_BUDGET,
-            "QQ group passive reply was truncated before sending"
+            "QQ 群聊被动回复在发送前已截断"
         );
     }
     send_group_outbound_chunked(&sender, &target, &outbound, &limits, |_, _| {})
@@ -527,7 +527,7 @@ async fn send_group_respond_response(
         debug!(
             message_id = %message.message_id,
             group = %mask_openid(&message.group_openid),
-            "group reply suppressed by Core"
+            "群聊回复已被 Core 抑制"
         );
         return Ok(());
     }
@@ -566,7 +566,7 @@ async fn send_group_respond_response(
             message_id = %message.message_id,
             group = %mask_openid(&message.group_openid),
             fallback_reason = "empty_rendered_response",
-            "respond backend produced no group reply text; sending local fallback"
+            "回复后端未生成群聊回复文本，正在发送本地降级回复"
         );
         outbounds.push(OutboundMessage::Text {
             text: empty_group_reply_fallback_text(config.bot_display_name()),
@@ -587,7 +587,7 @@ async fn send_group_respond_response(
             message_id = target.msg_id.as_deref().unwrap_or(""),
             group = %mask_openid(&target.group_openid),
             reply_budget = QQ_GROUP_PASSIVE_REPLY_BUDGET,
-            "QQ group passive reply was truncated before sending"
+            "QQ 群聊被动回复在发送前已截断"
         );
     }
     // 普通群回复统一走分段编排：每个成功发送并返回 message id 的分段写入
@@ -644,7 +644,7 @@ fn observe_mode_ignored_group_message_ref_index(
         Err(_) => warn!(
             message_id = %message.message_id,
             group = %mask_openid(&message.group_openid),
-            "mode-ignored group inbound ref_index observation skipped because index lock is poisoned"
+            "ref_index 锁已中毒，跳过记录被模式策略忽略的群聊入站消息"
         ),
     }
 }
@@ -697,7 +697,7 @@ where
                     response_delivery_mode = "progress_status",
                     status_chars = status.text.chars().count(),
                     status_event_count,
-                    "group stream status event recorded without group progress send"
+                    "群聊流式状态事件已记录，未发送群聊进度状态"
                 );
             }
             CoreResponseEvent::TextDelta(delta) => {
@@ -708,9 +708,7 @@ where
             CoreResponseEvent::Completed(response) => {
                 debug!(
                     response_delivery_mode = output_policy.as_str(),
-                    text_delta_count,
-                    status_event_count,
-                    "group stream collapsed into single Completed response"
+                    text_delta_count, status_event_count, "群聊回复流已合并为单条 Completed 回复"
                 );
                 return GroupStreamOutcome::Completed(*response);
             }
@@ -721,7 +719,7 @@ where
                     response_delivery_mode = output_policy.as_str(),
                     text_delta_count,
                     status_event_count,
-                    "core respond stream failed"
+                    "Core 回复流失败"
                 );
                 return GroupStreamOutcome::Failed(failure);
             }
@@ -767,7 +765,7 @@ fn log_group_message_received(message: &GroupMessage, verbose_log: bool) {
             attachment_count = summary.attachment_count,
             is_ping = summary.is_ping,
             extracted_content = %extracted_content,
-            "received group message"
+            "已收到群聊消息"
         );
     } else {
         info!(
@@ -779,7 +777,7 @@ fn log_group_message_received(message: &GroupMessage, verbose_log: bool) {
             mention_count = summary.mention_count,
             attachment_count = summary.attachment_count,
             is_ping = summary.is_ping,
-            "received group message"
+            "已收到群聊消息"
         );
     }
 }

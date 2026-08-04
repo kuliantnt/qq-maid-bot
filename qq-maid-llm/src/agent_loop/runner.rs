@@ -181,7 +181,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
             pss_kb = round_size.as_ref().and_then(|(_, mem)| mem.pss_kb),
             private_dirty_kb = round_size.as_ref().and_then(|(_, mem)| mem.private_dirty_kb),
             remaining_budget_ms = run_handle.remaining_budget().map(|value| value.as_millis()),
-            "starting agent model round"
+            "正在开始 Agent 模型轮次"
         );
         let advance_future = advance_with_optional_streaming(
             session.as_mut(),
@@ -234,7 +234,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
             model_round_elapsed_ms = model_round_started.elapsed().as_millis(),
             model_round_succeeded = advance_result.is_ok(),
             remaining_budget_ms = run_handle.remaining_budget().map(|value| value.as_millis()),
-            "agent model round completed"
+            "Agent 模型轮次已结束"
         );
         let advance = match advance_result {
             Ok(advance) => advance,
@@ -298,7 +298,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
                     model = %model,
                     tool_loop_used = true,
                     model_rounds = run_handle.snapshot().model_rounds,
-                    "agent loop completed with final reply"
+                    "Agent Loop 已生成最终回复"
                 );
                 return Ok(ChatOutcome {
                     reply,
@@ -356,7 +356,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
                         round,
                         preserve_finalization_budget,
                         tool_call_count = calls.len(),
-                        "provider returned tool calls after tools were disabled"
+                        "禁用工具后 Provider 仍返回了工具调用"
                     );
                     return Err(agent_error(
                         LlmError::new(code, message, "tool_loop"),
@@ -375,7 +375,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
                         tool_loop_used = true,
                         model_rounds = run_handle.snapshot().model_rounds,
                         max_rounds = max_rounds,
-                        "agent loop exceeded maximum rounds"
+                        "Agent Loop 已超过最大轮数"
                     );
                     return Err(agent_error(
                         LlmError::new(
@@ -409,7 +409,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
                         skipped_for_finalization_reserve = true,
                         has_completed_result,
                         has_successful_result,
-                        "agent tool batch rejected because only finalization budget remains"
+                        "仅剩最终回答预算，已拒绝 Agent 工具批次"
                     );
                     return Err(agent_error(
                         finalization_budget_error(),
@@ -469,7 +469,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
                     round,
                     has_completed_result_after_batch,
                     has_successful_result_after_batch,
-                    "classified completed and successful agent tool results"
+                    "已完成 Agent 工具结果的完成与成功状态分类"
                 );
                 if preserve_after_batch {
                     if has_completed_result_after_batch {
@@ -480,7 +480,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
                             remaining_budget_ms =
                                 run_handle.remaining_budget().map(|value| value.as_millis()),
                             has_completed_result = false,
-                            "agent tool batch exhausted tool budget without a completed result"
+                            "Agent 工具批次已耗尽工具预算，且没有已完成的结果"
                         );
                         return Err(agent_error(
                             finalization_budget_error(),
@@ -660,7 +660,7 @@ async fn execute_tool_batch(
                             run_handle.remaining_budget().map(|value| value.as_millis()),
                         skipped_for_finalization_reserve = reserve_reached,
                         has_completed_result,
-                        "checked agent tool start budget"
+                        "已检查 Agent 工具启动预算"
                     );
                     if !reserve_reached {
                         return Ok(ToolCallStartDecision::Execute);
@@ -682,7 +682,7 @@ async fn execute_tool_batch(
             tool_elapsed_ms = tool_duration_ms,
             tool_succeeded = output.is_ok(),
             remaining_budget_ms = run_handle.remaining_budget().map(|value| value.as_millis()),
-            "agent tool call completed"
+            "Agent 工具调用已结束"
         );
         let snapshot = run_handle.snapshot();
         let emitted_tools = snapshot.emitted_tools[baseline.emitted_tools..].to_vec();
@@ -758,7 +758,7 @@ fn log_structured_tool_failure(
             .get("stage")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("tool_loop"),
-        "agent tool call failed"
+        "Agent 工具调用失败"
     );
 }
 
