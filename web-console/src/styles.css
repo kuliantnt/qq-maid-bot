@@ -437,8 +437,9 @@ textarea { width: 100%; min-height: 25rem; flex: 1; resize: vertical; padding: v
   .topbar { align-items: flex-start; padding-block: .7rem; }
   .topbar .security-note { display: none; }
   .refresh-box { width: 100%; }
-  .bottom-nav { bottom: calc(.75rem + env(safe-area-inset-bottom)); max-width: calc(100% - 1rem); }
-  .bottom-nav-link { flex-basis: 3.6rem; font-size: .6rem; }
+  .bottom-nav { bottom: calc(.75rem + env(safe-area-inset-bottom)); width: calc(100% - 1rem); max-width: 410px; }
+  .bottom-nav-list { width: 100%; }
+  .bottom-nav-link { flex: 1 1 0; min-width: 0; font-size: .6rem; }
   .console-content > .error, .console-content > .console-page { width: calc(100% - 1rem); }
   .overview-heading, .product-page-heading { flex-direction: column; gap: var(--console-space-3); padding-inline: 0; }
   .overview-heading-meta { justify-items: start; }
