@@ -362,7 +362,7 @@ fn log_llm_request_completed(
             memory_chars = cache.memory.chars,
             session_chars = cache.session.chars,
             user_chars = cache.current_message_chars,
-            "large tool or agent loop context detected"
+            "检测到大尺寸 Tool 或 Agent Loop 上下文"
         );
     }
     let cache_ratio = usage.and_then(|item| match (item.input_tokens, item.cached_input_tokens) {
@@ -397,7 +397,7 @@ fn log_llm_request_completed(
         history_compacted = cache.history_compacted,
         summary_revision = cache.summary_revision,
         fallback_used = outcome.fallback_used,
-        "llm request completed"
+        "LLM 请求已完成"
     );
 }
 

@@ -162,7 +162,7 @@ pub(crate) fn start_core_response_stream(
                     scope_key,
                     error_code = err.code,
                     error_stage = err.stage,
-                    "streaming core respond returned business error"
+                    "Core 流式响应返回业务错误"
                 );
                 CoreResponseEvent::Failed(CoreRespondFailure::from_core_error(&err))
             }
@@ -254,7 +254,7 @@ async fn run_streaming_respond(
             final_chars = response_visible_content(&response)
                 .map(|content| content.chars().count())
                 .unwrap_or_default(),
-            "core stream completed without synthetic final delta"
+            "Core 流已完成，未补充合成的最终增量"
         );
         return Ok(response);
     }
@@ -298,7 +298,7 @@ async fn run_command_event_respond(
         final_chars = response_visible_content(&response)
             .map(|content| content.chars().count())
             .unwrap_or_default(),
-        "core command event stream completed"
+        "Core 命令事件流已完成"
     );
     Ok(response)
 }
@@ -322,7 +322,7 @@ async fn run_web_search_respond(
         final_chars = response_visible_content(&response)
             .map(|content| content.chars().count())
             .unwrap_or_default(),
-        "core web search stream completed"
+        "Core 联网搜索流已完成"
     );
     Ok(response)
 }
@@ -426,7 +426,7 @@ async fn run_agent_runtime_respond(
         final_chars = response_visible_content(&response)
             .map(|content| content.chars().count())
             .unwrap_or_default(),
-        "core agent chat completed with progress status events"
+        "Core Agent 对话已完成并产生进度状态事件"
     );
 
     Ok(response)

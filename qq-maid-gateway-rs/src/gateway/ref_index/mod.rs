@@ -18,7 +18,7 @@ use std::{
 use qq_maid_common::identity_context::MessageActorContext;
 use qq_maid_common::input_part::{MediaStatus, MessageInputPart, MessageMedia, QuotedMediaSummary};
 use qq_maid_core::service::{CoreGroupMemberRole, VisibleEntitySnapshot};
-use tracing::{debug, warn};
+use tracing::{trace, warn};
 
 use super::{
     logging::mask_identifier,
@@ -513,7 +513,7 @@ fn key_for(
 }
 
 fn log_ref_index_insert(key: &RefIndexKey, entry: &RefIndexEntry, store: &RefIndex) {
-    debug!(
+    trace!(
         platform = %key.platform,
         account = %mask_identifier(&key.app_id),
         account_present = key.app_id != "-",
@@ -533,12 +533,12 @@ fn log_ref_index_insert(key: &RefIndexKey, entry: &RefIndexEntry, store: &RefInd
             .unwrap_or(0),
         media_count = entry.media_summaries.len(),
         input_part_count = entry.input_parts.len(),
-        "ref_index insert"
+        "ref_index 已写入条目"
     );
 }
 
 fn log_ref_index_hit(reason: &'static str, key: &RefIndexKey, entry: &RefIndexEntry) {
-    debug!(
+    trace!(
         platform = %key.platform,
         account = %mask_identifier(&key.app_id),
         account_present = key.app_id != "-",
@@ -550,7 +550,7 @@ fn log_ref_index_hit(reason: &'static str, key: &RefIndexKey, entry: &RefIndexEn
         text_present = entry.text_summary.is_some(),
         media_count = entry.media_summaries.len(),
         reason,
-        "ref_index hit"
+        "ref_index 已命中条目"
     );
 }
 
@@ -585,21 +585,21 @@ fn log_ref_index_miss(
                 candidate_peer_id = %first_candidate
                     .map(|key| mask_identifier(&key.peer_id))
                     .unwrap_or_default(),
-                "ref_index miss"
+                "ref_index 未命中条目"
             );
         };
     }
     // 事件已自带引用 payload 时可以无损降级，不应作为运行告警；只有引用内容确实
     // 无法恢复时保留 WARN，便于区分索引断档与可预期的进程内缓存 miss。
     if payload_fallback_available {
-        emit_miss!(debug);
+        emit_miss!(trace);
     } else {
         emit_miss!(warn);
     }
 }
 
 fn log_ref_index_eviction(reason: &'static str, key: &RefIndexKey, store: &RefIndex) {
-    debug!(
+    trace!(
         platform = %key.platform,
         account = %mask_identifier(&key.app_id),
         account_present = key.app_id != "-",
@@ -614,12 +614,12 @@ fn log_ref_index_eviction(reason: &'static str, key: &RefIndexKey, store: &RefIn
         expired_evictions = store.expired_evictions,
         capacity_evictions = store.capacity_evictions,
         scope_evictions = store.scope_evictions,
-        "ref_index evicted entry"
+        "ref_index 已淘汰条目"
     );
 }
 
 fn log_ref_index_metrics(store: &RefIndex) {
-    debug!(
+    trace!(
         entries = store.entries.len(),
         scopes = store
             .entries
@@ -633,7 +633,7 @@ fn log_ref_index_metrics(store: &RefIndex) {
         expired_evictions = store.expired_evictions,
         capacity_evictions = store.capacity_evictions,
         scope_evictions = store.scope_evictions,
-        "ref_index metrics"
+        "ref_index 统计"
     );
 }
 

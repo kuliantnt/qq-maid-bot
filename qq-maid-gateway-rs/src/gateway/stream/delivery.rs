@@ -210,7 +210,7 @@ where
                     stream_state = phase.name(),
                     status_chars = status.text.chars().count(),
                     status_event_count,
-                    "core progress status event recorded by C2C stream state machine"
+                    "C2C 流状态机已记录 Core 进度状态事件"
                 );
                 if should_send_progress_status(
                     config.c2c_visible_progress_status_enabled,
@@ -279,7 +279,7 @@ where
                                     stream_entered_active = true,
                                     content_chars,
                                     accumulated_chars = accumulated.chars().count(),
-                                    "QQ stream first send succeeded"
+                                    "QQ 流式首帧发送成功"
                                 );
                                 phase = C2cStreamingPhase::Active(stream_state);
                             }
@@ -299,7 +299,7 @@ where
                                     stream_entered_active = false,
                                     content_chars = pending_delta.chars().count(),
                                     accumulated_chars = accumulated.chars().count(),
-                                    "QQ stream first send returned no stream id; ordinary reply remains allowed on Completed"
+                                    "QQ 流式首帧发送未返回 stream id，收到 Completed 时仍可发送普通回复"
                                 );
                                 phase = C2cStreamingPhase::Pending(stream_state);
                             }
@@ -319,7 +319,7 @@ where
                                     content_chars = pending_delta.chars().count(),
                                     error = %err.log_summary(),
                                     accumulated_chars = accumulated.chars().count(),
-                                    "QQ stream first send failed; ordinary reply remains allowed on Completed"
+                                    "QQ 流式首帧发送失败，收到 Completed 时仍可发送普通回复"
                                 );
                                 phase = C2cStreamingPhase::Pending(stream_state);
                             }
@@ -362,7 +362,7 @@ where
                                         stream_entered_active = true,
                                         sent_len = accumulated.len(),
                                         chunk_chars = chunk.chars().count(),
-                                        "QQ stream middle send succeeded"
+                                        "QQ 流式中间帧发送成功"
                                     );
                                     phase = C2cStreamingPhase::Active(stream_state);
                                 }
@@ -382,7 +382,7 @@ where
                                         content_chars = chunk.chars().count(),
                                         error = %err.log_summary(),
                                         accumulated_chars = accumulated.chars().count(),
-                                        "QQ stream middle send failed; ordinary fallback is disabled after stream id was created"
+                                        "QQ 流式中间帧发送失败，stream id 创建后禁止降级为普通回复"
                                     );
                                     phase = C2cStreamingPhase::BrokenActive(stream_state);
                                 }
@@ -447,7 +447,7 @@ where
                                         qq_stream_send_count = stream_state.index,
                                         content_chars = chunk.chars().count(),
                                         final_chars,
-                                        "QQ stream pending delta flushed before final"
+                                        "QQ 流式待发送增量已在最终帧前刷新"
                                     );
                                 }
                                 Err(err) => {
@@ -467,7 +467,7 @@ where
                                         content_chars = chunk.chars().count(),
                                         error = %err.log_summary(),
                                         final_chars,
-                                        "QQ stream pending delta flush failed; ordinary fallback is disabled"
+                                        "QQ 流式待发送增量刷新失败，禁止降级为普通回复"
                                     );
                                     match send_stream_end(
                                         sender,
@@ -499,7 +499,7 @@ where
                                                 elapsed_ms = started_at.elapsed().as_millis(),
                                                 content_chars = final_chars,
                                                 final_chars,
-                                                "QQ stream end after pending delta flush failure succeeded"
+                                                "QQ 流式待发送增量刷新失败后结束帧发送成功"
                                             );
                                             info!(
                                                 user = %masked_user,
@@ -515,7 +515,7 @@ where
                                                 elapsed_ms = started_at.elapsed().as_millis(),
                                                 stream_entered_active = true,
                                                 fallback_used = false,
-                                                "QQ C2C stream response completed"
+                                                "QQ C2C 流式回复已完成"
                                             );
                                             send_completed_media_after_stream(
                                                 sender, message, &response, config,
@@ -544,7 +544,7 @@ where
                                                 content_chars = final_chars,
                                                 error = %end_err.log_summary(),
                                                 final_chars,
-                                                "QQ stream end after pending delta flush failure failed"
+                                                "QQ 流式待发送增量刷新失败后结束帧发送失败"
                                             );
                                             return Ok(C2cStreamingPhase::BrokenActive(
                                                 stream_state,
@@ -586,7 +586,7 @@ where
                                     fallback_used = false,
                                     content_chars = final_chars,
                                     final_chars,
-                                    "QQ C2C stream response completed"
+                                    "QQ C2C 流式回复已完成"
                                 );
                                 send_completed_media_after_stream(
                                     sender, message, &response, config,
@@ -615,7 +615,7 @@ where
                                     content_chars = final_chars,
                                     error = %err.log_summary(),
                                     final_chars,
-                                    "QQ stream final send failed; ordinary fallback is disabled after stream id was created"
+                                    "QQ 流式最终帧发送失败，stream id 创建后禁止降级为普通回复"
                                 );
                                 return Ok(C2cStreamingPhase::BrokenActive(stream_state));
                             }
@@ -654,7 +654,7 @@ where
                                     fallback_used = false,
                                     content_chars = final_chars,
                                     final_chars,
-                                    "QQ C2C stream response completed after broken active"
+                                    "QQ C2C 流式回复在活动流中断后完成"
                                 );
                                 send_completed_media_after_stream(
                                     sender, message, &response, config,
@@ -683,7 +683,7 @@ where
                                     content_chars = final_chars,
                                     error = %err.log_summary(),
                                     final_chars,
-                                    "QQ stream end after broken active failed; ordinary fallback is disabled"
+                                    "QQ 活动流中断后结束帧发送失败，禁止降级为普通回复"
                                 );
                                 return Ok(C2cStreamingPhase::BrokenActive(stream_state));
                             }
@@ -722,7 +722,7 @@ where
                                 elapsed_ms = started_at.elapsed().as_millis(),
                                 fallback_used = stream_first_attempted,
                                 final_chars,
-                                "QQ C2C stream response completed"
+                                "QQ C2C 流式回复已完成"
                             );
                         })
                         .inspect_err(|fallback_err| {
@@ -738,7 +738,7 @@ where
                                 stream_entered_active = false,
                                 final_send_exit = "ordinary_reply",
                                 final_chars,
-                                "QQ ordinary fallback send failed"
+                                "QQ 普通降级回复发送失败"
                             );
                         })?;
                         if let Some(ref_index) = ref_index {
@@ -768,7 +768,7 @@ where
                     text_delta_count,
                     status_event_count,
                     accumulated_chars = accumulated.chars().count(),
-                    "core respond stream failed"
+                    "Core 回复流失败"
                 );
                 match phase {
                     C2cStreamingPhase::Pending(_) => {
@@ -798,7 +798,7 @@ where
                             status_event_count,
                             accumulated_chars = accumulated.chars().count(),
                             elapsed_ms = started_at.elapsed().as_millis(),
-                            "QQ C2C pending stream failure sent to user"
+                            "QQ C2C 待定流失败提示已发送给用户"
                         );
                         return Ok(C2cStreamingPhase::Completed);
                     }
@@ -824,7 +824,7 @@ where
                                 content_chars = accumulated.chars().count(),
                                 error = %err.log_summary(),
                                 accumulated_chars = accumulated.chars().count(),
-                                "QQ stream finalization after core failure failed"
+                                "Core 失败后 QQ 流式收尾失败"
                             );
                         })?;
                     }
@@ -847,7 +847,7 @@ where
         text_delta_count,
         status_event_count,
         accumulated_chars,
-        "core respond stream closed before Completed"
+        "Core 回复流在 Completed 前关闭"
     );
     if let Some(typing) = typing.as_mut() {
         typing.stop(TypingStopReason::Cancelled);
@@ -924,7 +924,7 @@ async fn send_progress_status<S: C2cStreamSender + ?Sized>(
                 response_delivery_mode = "progress_status",
                 stream_state,
                 status_chars = status.text.chars().count(),
-                "C2C progress status sent"
+                "C2C 进度状态已发送"
             );
         }
         Err(err) => {
@@ -935,7 +935,7 @@ async fn send_progress_status<S: C2cStreamSender + ?Sized>(
                 response_delivery_mode = "progress_status",
                 stream_state,
                 error = %err.log_summary(),
-                "C2C progress status send failed; final response will continue"
+                "C2C 进度状态发送失败，将继续发送最终回复"
             );
         }
     }

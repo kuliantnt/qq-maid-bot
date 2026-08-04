@@ -117,7 +117,7 @@ impl WebSearchExecutor for GeminiWebSearchExecutor {
                     elapsed_ms = started.elapsed().as_millis(),
                     error_kind = mapped.kind().as_str(),
                     error = %err,
-                    "Gemini web search transport failed"
+                    "Gemini 联网搜索传输失败"
                 );
                 mapped
             })?;
@@ -231,14 +231,14 @@ fn trace_gemini_query_payload(req: &WebSearchRequest, url: &str, model: &str, pa
         tools = %tools,
         input_chars = input.chars().count(),
         query_chars = req.query.trim().chars().count(),
-        "gemini query request payload summary"
+        "Gemini 查询请求载荷摘要"
     );
 
     if trace_query_input_enabled() {
         tracing::trace!(
             upstream_url = url,
             input = %input,
-            "gemini query request input"
+            "Gemini 查询请求输入"
         );
     }
 }

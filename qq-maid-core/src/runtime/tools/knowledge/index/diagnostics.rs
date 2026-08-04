@@ -110,7 +110,7 @@ mod tests {
 
         let chunks = chunk_markdown("generated-large.md", &content);
         let diagnostics = summarize_chunks(&content, &chunks);
-        tracing::debug!(?diagnostics, "large markdown chunk diagnostics");
+        tracing::debug!(?diagnostics, "大尺寸 Markdown 分块诊断");
 
         assert_eq!(diagnostics.file_bytes, content.len());
         assert_eq!(diagnostics.file_chars, content.chars().count());

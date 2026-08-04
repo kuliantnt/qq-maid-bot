@@ -217,7 +217,7 @@ pub(crate) fn log_request_stage_snapshot(stage: &'static str, snapshot: &Request
         vm_size_kb = mem.vm_size_kb,
         pss_kb = mem.pss_kb,
         private_dirty_kb = mem.private_dirty_kb,
-        "respond request stage"
+        "响应请求阶段诊断"
     );
 }
 
@@ -243,7 +243,7 @@ pub(super) fn log_after_build_llm_messages(messages: &[ChatMessage]) {
         vm_size_kb = mem.vm_size_kb,
         pss_kb = mem.pss_kb,
         private_dirty_kb = mem.private_dirty_kb,
-        "respond request stage"
+        "响应请求阶段诊断"
     );
 }
 
@@ -281,7 +281,7 @@ pub(crate) fn warn_large_request_context_snapshot(
         vm_size_kb = mem.vm_size_kb,
         pss_kb = mem.pss_kb,
         private_dirty_kb = mem.private_dirty_kb,
-        "large respond request context detected"
+        "检测到大尺寸响应请求上下文"
     );
 }
 

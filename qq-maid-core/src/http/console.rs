@@ -196,7 +196,7 @@ impl ConsoleRestartController {
                 .stderr(std::process::Stdio::null())
                 .spawn();
             if let Err(error) = result {
-                tracing::error!(error = %error, "failed to schedule bot restart");
+                tracing::error!(error = %error, "调度机器人重启失败");
             }
         });
         Ok(())

@@ -90,7 +90,7 @@ pub(crate) async fn send_openai_responses_request(
             elapsed_ms = started.elapsed().as_millis(),
             error_kind = mapped.kind().as_str(),
             error = %err,
-            "LLM Responses transport failed"
+            "LLM Responses 传输失败"
         );
         mapped
     })?;

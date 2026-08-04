@@ -95,7 +95,7 @@ impl CoreService for CoreHandle {
                         scope_key,
                         error_code = error.code(),
                         error_stage = "voice_preference",
-                        "voice preference read failed; using text delivery"
+                        "读取语音偏好失败，改用文本投递"
                     );
                     false
                 }
@@ -203,7 +203,7 @@ impl CoreService for CoreHandle {
                     scope_key,
                     error_code = err.code,
                     error_stage = err.stage,
-                    "core respond returned business error"
+                    "Core 响应返回业务错误"
                 );
                 Err(err)
             }

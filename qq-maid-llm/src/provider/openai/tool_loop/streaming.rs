@@ -294,7 +294,7 @@ pub(super) async fn collect_responses_tool_loop_stream(
             buffered_text_chars = buffered_text_chars(&buffered_deltas),
             active_function_call_count = active_function_calls.len(),
             last_sse_event_type = ?stream_diagnostics.last_sse_event_type,
-            "OpenAI Responses stream used compatible completion after normal HTTP EOF"
+            "OpenAI Responses 流在正常 HTTP EOF 后按兼容规则完成"
         );
     } else if !explicit_completion && !completed_output_items.is_empty() {
         // function call 已完整结束但缺少协议终止事件时，不能执行工具，也不能把同轮

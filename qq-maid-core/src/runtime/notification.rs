@@ -150,14 +150,14 @@ impl NotificationWorker {
 
     pub fn spawn(self) {
         if !self.config.enabled {
-            info!("notification worker disabled");
+            info!("通知 worker 已停用");
             return;
         }
         tokio::spawn(async move {
             info!(
                 batch_limit = self.config.batch_limit,
                 poll_interval_seconds = self.config.poll_interval.as_secs(),
-                "notification worker enabled"
+                "通知 worker 已启用"
             );
             self.run_loop().await;
         });
@@ -166,7 +166,7 @@ impl NotificationWorker {
     async fn run_loop(self) {
         loop {
             if let Err(err) = self.run_once().await {
-                warn!(error = %err, "notification worker cycle failed");
+                warn!(error = %err, "通知 worker 单轮处理失败");
             }
             tokio::time::sleep(self.config.poll_interval).await;
         }
@@ -196,10 +196,7 @@ impl NotificationWorker {
                         }
                         NotificationWriteOutcome::LeaseLost => {
                             stats.lease_lost_count += 1;
-                            warn!(
-                                task_id = task.id,
-                                "notification worker lease lost before mark_sent"
-                            );
+                            warn!(task_id = task.id, "通知任务在标记 mark_sent 前丢失租约");
                         }
                     }
                 }
@@ -212,7 +209,7 @@ impl NotificationWorker {
                         task_id = task.id,
                         source_type = %task.source_type,
                         kind = %task.kind,
-                        "notification task payload invalid"
+                        "通知任务 payload 无效"
                     );
                 }
                 Err(DeliveryError::Push(err)) => {
@@ -226,7 +223,7 @@ impl NotificationWorker {
                         source_type = %task.source_type,
                         kind = %task.kind,
                         error = %summary,
-                        "notification push failed"
+                        "通知推送失败"
                     );
                 }
                 Err(DeliveryError::Progress(message)) => {
@@ -238,7 +235,7 @@ impl NotificationWorker {
                         task_id = task.id,
                         source_type = %task.source_type,
                         kind = %task.kind,
-                        "notification part progress update failed"
+                        "更新通知分段投递进度失败"
                     );
                 }
                 Err(DeliveryError::LeaseLost) => {
@@ -247,7 +244,7 @@ impl NotificationWorker {
                         task_id = task.id,
                         source_type = %task.source_type,
                         kind = %task.kind,
-                        "notification worker lease lost during multipart delivery"
+                        "通知 worker 在多段投递期间丢失租约"
                     );
                 }
                 Err(DeliveryError::Cancelled) => {
@@ -256,7 +253,7 @@ impl NotificationWorker {
                         task_id = task.id,
                         source_type = %task.source_type,
                         kind = %task.kind,
-                        "notification task cancelled before push"
+                        "通知任务在推送前已取消"
                     );
                 }
             }
@@ -269,7 +266,7 @@ impl NotificationWorker {
                 invalid_payload = stats.invalid_payload_count,
                 cancelled = stats.cancelled_count,
                 lease_lost = stats.lease_lost_count,
-                "notification worker cycle finished"
+                "通知 worker 单轮处理完成"
             );
         }
         Ok(stats)
@@ -357,10 +354,7 @@ impl NotificationWorker {
         {
             NotificationWriteOutcome::Applied => Ok(MarkFailedOutcome::Applied),
             NotificationWriteOutcome::LeaseLost => {
-                warn!(
-                    task_id = task.id,
-                    "notification worker lease lost before mark_failed"
-                );
+                warn!(task_id = task.id, "通知任务在标记 mark_failed 前丢失租约");
                 Ok(MarkFailedOutcome::LeaseLost)
             }
         }

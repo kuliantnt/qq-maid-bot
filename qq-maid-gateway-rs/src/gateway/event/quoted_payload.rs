@@ -130,7 +130,7 @@ fn retain_direct_quoted_media_with_limit(input_parts: &mut Vec<MessageInputPart>
             media_count,
             original_media_count,
             max_media = MAX_NORMALIZED_MEDIA_PARTS,
-            "QQ direct quote media truncated by normalization limit"
+            "QQ 直接引用媒体因标准化限制被截断"
         );
     }
 }

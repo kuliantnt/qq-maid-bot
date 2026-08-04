@@ -93,7 +93,7 @@ impl RustRespondService {
                     error_code = %err.code,
                     error_stage = %err.stage,
                     weather_provider = self.weather_executor.provider_name(),
-                    "weather command failed"
+                    "天气命令执行失败"
                 );
                 let reply = format_weather_error_reply(&err);
                 self.session_store

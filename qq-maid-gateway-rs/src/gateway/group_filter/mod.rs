@@ -15,7 +15,7 @@ use std::{
 };
 
 use qq_maid_common::command_prefix::CommandPrefix;
-use tracing::debug;
+use tracing::trace;
 
 mod mention_normalizer;
 
@@ -80,18 +80,18 @@ pub(crate) fn should_ignore_group_message(
     bot_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
 ) -> bool {
     if message.author_is_self {
-        debug!(
+        trace!(
             message_id = %message.message_id,
             group = %masked_group,
-            "ignoring self group message"
+            "已忽略机器人自身发送的群聊消息"
         );
         return true;
     }
     if message.author_is_bot {
-        debug!(
+        trace!(
             message_id = %message.message_id,
             group = %masked_group,
-            "ignoring bot group message"
+            "已忽略其他机器人发送的群聊消息"
         );
         return true;
     }
@@ -100,10 +100,10 @@ pub(crate) fn should_ignore_group_message(
         && message.content.trim().is_empty()
         && !is_reply_to_bot(message, bot_outbound_cache)
     {
-        debug!(
+        trace!(
             message_id = %message.message_id,
             group = %masked_group,
-            "ignoring empty group message"
+            "已忽略空群聊消息"
         );
         return true;
     }

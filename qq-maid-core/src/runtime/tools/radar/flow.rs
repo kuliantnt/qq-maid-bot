@@ -64,7 +64,7 @@ impl RustRespondService {
                             error_code = %err.code,
                             error_stage = %err.stage,
                             radar_provider = self.radar_executor.provider_name(),
-                            "radar command failed"
+                            "Radar 命令执行失败"
                         );
                         let body = format_radar_total_failure(&err);
                         self.session_store

@@ -258,13 +258,13 @@ impl DomainTurnDiagnostics for TodoAgentDiagnostics {
                     executed_tools = ?executed_tools,
                     todo_success_claimed = true,
                     todo_success_verified = self.validation.passed(),
-                    "todo success claim blocked without todo write tool result"
+                    "缺少 Todo 写入 Tool 结果，已拦截成功声明"
                 );
             } else {
                 tracing::debug!(
                     entered_tool_loop = true,
                     executed_tools = ?executed_tools,
-                    "tool loop completed without todo write tool result"
+                    "Tool Loop 已完成，但没有 Todo 写入 Tool 结果"
                 );
             }
             return;
@@ -283,7 +283,7 @@ impl DomainTurnDiagnostics for TodoAgentDiagnostics {
                 pending_action = summary.pending_action.as_deref().unwrap_or(""),
                 todo_success_claimed = self.validation.claimed_success(),
                 todo_success_verified = self.validation.passed(),
-                "todo tool result"
+                "Todo Tool 返回结果"
             );
         }
     }

@@ -172,7 +172,7 @@ impl RustRespondService {
                 session: latest,
                 error,
             } => {
-                tracing::warn!(error = %error, "prepared action execution claim rejected");
+                tracing::warn!(error = %error, "领取预备操作执行权失败");
                 *session = latest;
                 Ok(false)
             }

@@ -38,7 +38,7 @@ impl RustRespondService {
                 tracing::warn!(
                     error = %err,
                     session_id = %session.session_id,
-                    "automatic session compaction could not serialize the session"
+                    "自动压缩 Session 时无法序列化会话"
                 );
                 return false;
             }
@@ -63,7 +63,7 @@ impl RustRespondService {
                 tracing::warn!(
                     session_id = %session.session_id,
                     history_messages = session.history.len(),
-                    "automatic session compaction returned an empty summary"
+                    "自动压缩 Session 返回空摘要"
                 );
                 return false;
             }
@@ -73,7 +73,7 @@ impl RustRespondService {
                     error_stage = %err.stage,
                     session_id = %session.session_id,
                     history_messages = session.history.len(),
-                    "automatic session compaction failed; keeping append-only history"
+                    "自动压缩 Session 失败，保留仅追加历史"
                 );
                 return false;
             }
@@ -92,7 +92,7 @@ impl RustRespondService {
                     error = %err,
                     session_id = %session.session_id,
                     history_messages = session.history.len(),
-                    "automatic session compaction could not be persisted"
+                    "自动压缩 Session 的结果无法持久化"
                 );
                 return false;
             }
@@ -100,7 +100,7 @@ impl RustRespondService {
         if !persisted {
             tracing::info!(
                 session_id = %session.session_id,
-                "automatic session compaction skipped because the session changed"
+                "Session 已发生变化，跳过本次自动压缩"
             );
             return false;
         }
@@ -108,7 +108,7 @@ impl RustRespondService {
             session_id = %compacted.session_id,
             retained_history_messages = compacted.history.len(),
             summary_revision = compacted.summary_revision(),
-            "automatic session compaction completed"
+            "Session 自动压缩完成"
         );
         *session = compacted;
         true
@@ -151,14 +151,14 @@ impl RustRespondService {
                         Ok(false) => {
                             tracing::debug!(
                                 session_id = %session_id,
-                                "generated session title ignored because current title changed"
+                                "当前标题已变化，忽略自动生成的 Session 标题"
                             );
                         }
                         Err(err) => {
                             tracing::warn!(
                                 error = %err.message(),
                                 session_id = %session_id,
-                                "failed to save generated session title"
+                                "保存自动生成的 Session 标题失败"
                             );
                         }
                     }
@@ -167,7 +167,7 @@ impl RustRespondService {
                     tracing::debug!(
                         error = %err,
                         session_id = %session_id,
-                        "session auto title generation failed"
+                        "自动生成 Session 标题失败"
                     );
                 }
             }

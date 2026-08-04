@@ -802,7 +802,7 @@ async fn send_chunk_c2c<S: OutboundSender + ?Sized>(
                     chunk_index = chunk.chunk_index,
                     chunk_count = chunk.chunk_count,
                     error = %err.log_summary(),
-                    "chunk markdown send failed; falling back to text per chunk"
+                    "分片 Markdown 发送失败，将逐片降级为文本发送"
                 );
                 let fallback = sender.send_text(target, &chunk.fallback_text).await;
                 let used_fallback = fallback.is_ok();
@@ -830,7 +830,7 @@ async fn send_chunk_group<S: GroupOutboundSender + ?Sized>(
                     chunk_index = chunk.chunk_index,
                     chunk_count = chunk.chunk_count,
                     error = %err.log_summary(),
-                    "group chunk markdown send failed; falling back to text per chunk"
+                    "群聊分片 Markdown 发送失败，将逐片降级为文本发送"
                 );
                 let fallback = sender.send_text(target, &chunk.fallback_text).await;
                 let used_fallback = fallback.is_ok();
@@ -880,7 +880,7 @@ where
                     user = %mask_openid(&target.user_openid),
                     source_message_id = target.msg_id.as_deref().unwrap_or(""),
                     error = %error.log_summary(),
-                    "C2C image send failed; falling back to text"
+                    "C2C 图片发送失败，将降级为文本发送"
                 );
                 sender.send_text(target, fallback_text).await
             }
@@ -900,7 +900,7 @@ where
         source_message_id = target.msg_id.as_deref().unwrap_or(""),
         chunk_count = total,
         kind = outbound_kind(message),
-        "preparing chunked C2C outbound"
+        "正在准备 C2C 分片消息"
     );
 
     let mut sent_ids = Vec::with_capacity(total);
@@ -914,7 +914,7 @@ where
             sent_chars = chunk.rendered_chars,
             remaining_chars = remaining_chars(&chunks, index),
             message_type = message_type_name(chunk),
-            "sending C2C chunk"
+            "正在发送 C2C 消息分片"
         );
         match send_chunk_c2c(sender, target, chunk).await {
             (Ok(id), fallback_used) => {
@@ -930,7 +930,7 @@ where
                     remaining_chars = remaining_chars(&chunks, index + 1),
                     message_type = message_type_name(chunk),
                     fallback_used,
-                    "C2C chunk sent"
+                    "C2C 消息分片已发送"
                 );
                 on_sent(chunk.chunk_index, &id);
                 sent_ids.push(id);
@@ -945,7 +945,7 @@ where
                     fallback_chunks,
                     remaining_chars = remaining_chars(&chunks, index),
                     error = %err.log_summary(),
-                    "C2C chunk send failed; aborting remaining chunks"
+                    "C2C 消息分片发送失败，停止发送剩余分片"
                 );
                 return Err(make_send_error(
                     err,
@@ -963,7 +963,7 @@ where
         sent_chunks = sent_ids.len(),
         fallback_chunks,
         kind = outbound_kind(message),
-        "chunked C2C outbound completed"
+        "C2C 分片消息发送完成"
     );
     Ok(sent_ids)
 }
@@ -994,7 +994,7 @@ where
                     group = %mask_openid(&target.group_openid),
                     source_message_id = target.msg_id.as_deref().unwrap_or(""),
                     error = %error.log_summary(),
-                    "group image send failed; falling back to text"
+                    "群聊图片发送失败，将降级为文本发送"
                 );
                 sender.send_text(target, fallback_text).await
             }
@@ -1014,7 +1014,7 @@ where
         source_message_id = target.msg_id.as_deref().unwrap_or(""),
         chunk_count = total,
         kind = outbound_kind(message),
-        "preparing chunked group outbound"
+        "正在准备群聊分片消息"
     );
 
     let mut sent_ids = Vec::with_capacity(total);
@@ -1028,7 +1028,7 @@ where
             sent_chars = chunk.rendered_chars,
             remaining_chars = remaining_chars(&chunks, index),
             message_type = message_type_name(chunk),
-            "sending group chunk"
+            "正在发送群聊消息分片"
         );
         match send_chunk_group(sender, target, chunk).await {
             (Ok(id), fallback_used) => {
@@ -1044,7 +1044,7 @@ where
                     remaining_chars = remaining_chars(&chunks, index + 1),
                     message_type = message_type_name(chunk),
                     fallback_used,
-                    "group chunk sent"
+                    "群聊消息分片已发送"
                 );
                 on_sent(chunk.chunk_index, &id);
                 sent_ids.push(id);
@@ -1059,7 +1059,7 @@ where
                     fallback_chunks,
                     remaining_chars = remaining_chars(&chunks, index),
                     error = %err.log_summary(),
-                    "group chunk send failed; aborting remaining chunks"
+                    "群聊消息分片发送失败，停止发送剩余分片"
                 );
                 return Err(make_send_error(
                     err,
@@ -1077,7 +1077,7 @@ where
         sent_chunks = sent_ids.len(),
         fallback_chunks,
         kind = outbound_kind(message),
-        "chunked group outbound completed"
+        "群聊分片消息发送完成"
     );
     Ok(sent_ids)
 }

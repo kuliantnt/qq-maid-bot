@@ -264,8 +264,8 @@ impl MessageDispatcher {
         .await
         {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => warn!(error = %error, "dispatcher task ended unexpectedly"),
-            Err(_) => warn!("dispatcher shutdown timed out"),
+            Ok(Err(error)) => warn!(error = %error, "dispatcher 任务意外结束"),
+            Err(_) => warn!("dispatcher 关闭超时"),
         }
     }
 }

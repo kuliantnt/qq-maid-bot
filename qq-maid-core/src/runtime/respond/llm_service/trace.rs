@@ -28,7 +28,7 @@ pub(super) fn trace_chat_messages(req: &RespondRequest, messages: &[ChatMessage]
         roles = %roles,
         model_override = %req.model.as_deref().unwrap_or("-"),
         user_text_chars = req.user_text.trim().chars().count(),
-        "llm chat request summary"
+        "LLM 对话请求摘要"
     );
     if !trace_chat_input_enabled() {
         return;
@@ -44,7 +44,7 @@ pub(super) fn trace_chat_messages(req: &RespondRequest, messages: &[ChatMessage]
         session_id = %session_id,
         scope_key = %trace_scope_key(req),
         messages = %payload,
-        "llm chat request messages"
+        "LLM 对话请求消息"
     );
 }
 
@@ -58,7 +58,7 @@ pub(super) fn trace_chat_raw_reply(req: &RespondRequest, raw_reply: &str) {
         scope_key = %trace_scope_key(req),
         raw_reply_chars = raw_reply.chars().count(),
         raw_reply = %trace_text(raw_reply),
-        "llm chat raw reply"
+        "LLM 对话原始回复"
     );
 }
 
@@ -72,7 +72,7 @@ pub(super) fn trace_chat_final_reply(req: &RespondRequest, final_reply: &str) {
         scope_key = %trace_scope_key(req),
         final_reply_chars = final_reply.chars().count(),
         final_reply = %trace_text(final_reply),
-        "llm chat final reply"
+        "LLM 对话最终回复"
     );
 }
 

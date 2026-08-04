@@ -197,7 +197,7 @@ fn reject_invalid_forecast_days() -> Result<u8, LlmError> {
         tool = WEATHER_TOOL_NAME,
         error_code = "bad_tool_arguments",
         argument = "forecast_days",
-        "invalid forecast_days argument rejected",
+        "已拒绝无效的 forecast_days 参数",
     );
     Err(LlmError::new(
         "bad_tool_arguments",

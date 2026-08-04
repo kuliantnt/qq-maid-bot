@@ -143,7 +143,7 @@ impl KnowledgeFileService {
                 warn!(
                     file_id = %short_id(&file.file_id),
                     cleanup_code = cleanup_error.code(),
-                    "failed to clean up original file after knowledge link insert failed"
+                    "知识库关联写入失败后无法清理原始文件"
                 );
             }
             return Err(map_database_error(error));
@@ -263,7 +263,7 @@ impl KnowledgeFileService {
                     warn!(
                         file_id = %short_id(file_id),
                         error_code = error.code(),
-                        "knowledge file db delete committed but staged file cleanup failed"
+                        "知识库文件数据库删除已提交，但暂存文件清理失败"
                     );
                     KnowledgeFileError::storage()
                 })?;
@@ -315,7 +315,7 @@ impl KnowledgeFileService {
                                 file_id = %short_id(&file_id),
                                 error_code = cleanup_error.code(),
                                 status = "processing",
-                                "failed to clean up index after mark_ready failure; a later cycle will recover it"
+                                "知识库 mark_ready 失败后清理索引失败，将由后续轮次恢复"
                             );
                         }
                         map_database_error(error)
@@ -327,7 +327,7 @@ impl KnowledgeFileService {
                         chunk_count = result.chunk_count,
                         embedding_count = result.embedding_count,
                         elapsed_ms = started.elapsed().as_millis(),
-                        "knowledge managed file processing completed"
+                        "知识库托管文件处理完成"
                     );
                     Ok(KnowledgeWorkerOutcome::Ready)
                 } else {
@@ -336,7 +336,7 @@ impl KnowledgeFileService {
                             file_id = %short_id(&file_id),
                             error_code = cleanup_error.code(),
                             status = "cancelled",
-                            "failed to clean up index after mark_ready not applied; a later cycle will recover it"
+                            "知识库 mark_ready 未应用后清理索引失败，将由后续轮次恢复"
                         );
                         return Err(map_database_error(cleanup_error));
                     }
@@ -344,7 +344,7 @@ impl KnowledgeFileService {
                         file_id = %short_id(&file_id),
                         status = "cancelled",
                         elapsed_ms = started.elapsed().as_millis(),
-                        "knowledge managed file claim became stale; derived index cleaned up"
+                        "知识库托管文件领取状态已失效，已清理本次派生索引"
                     );
                     Ok(KnowledgeWorkerOutcome::Cancelled)
                 }
@@ -356,7 +356,7 @@ impl KnowledgeFileService {
                         file_id = %short_id(&file_id),
                         error_code = cleanup_error.code(),
                         status = "processing",
-                        "failed to clean up derived index after processing failure; a later cycle will recover it"
+                        "知识库处理失败后清理派生索引失败，将由后续轮次恢复"
                     );
                 }
                 let applied = self
@@ -369,7 +369,7 @@ impl KnowledgeFileService {
                         status = "failed",
                         error_code = failure.0,
                         elapsed_ms = started.elapsed().as_millis(),
-                        "knowledge managed file processing failed"
+                        "知识库托管文件处理失败"
                     );
                     Ok(KnowledgeWorkerOutcome::Failed)
                 } else {
@@ -408,7 +408,7 @@ impl KnowledgeFileWorker {
         if recovered > 0 {
             info!(
                 recovered,
-                "knowledge managed file worker recovered leftover processing tasks"
+                "知识库托管文件 worker 已恢复遗留 processing 任务"
             );
         }
         Ok(Self {
@@ -426,15 +426,12 @@ impl KnowledgeFileWorker {
             ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
             info!(
                 interval_seconds = WORKER_INTERVAL.as_secs(),
-                "knowledge managed file worker started"
+                "知识库托管文件 worker 已启动"
             );
             loop {
                 ticker.tick().await;
                 if let Err(error) = self.run_once().await {
-                    warn!(
-                        error_code = error,
-                        "knowledge managed file worker cycle failed"
-                    );
+                    warn!(error_code = error, "知识库托管文件 worker 单轮处理失败");
                 }
             }
         });
@@ -457,7 +454,7 @@ impl KnowledgeFileWorker {
         if recovered > 0 {
             info!(
                 recovered,
-                "knowledge managed file worker cycle recovered leftover processing tasks"
+                "知识库托管文件 worker 本轮已恢复遗留 processing 任务"
             );
         }
         let Some(claimed) = self
@@ -507,14 +504,14 @@ impl KnowledgeFileWorker {
                 status = "failed",
                 error_code = failure.0,
                 elapsed_ms = started.elapsed().as_millis(),
-                "knowledge managed file failure status written back after error"
+                "知识库托管文件异常后已回写失败状态"
             ),
             Ok(false) => debug!(
                 file_id = %short_id(&claimed.file_id),
                 status = "not_processing",
                 error_code = failure.0,
                 elapsed_ms = started.elapsed().as_millis(),
-                "knowledge managed file failure status not applied after error"
+                "知识库托管文件异常后的失败状态未应用"
             ),
             Err(status_error) => warn!(
                 file_id = %short_id(&claimed.file_id),
@@ -522,7 +519,7 @@ impl KnowledgeFileWorker {
                 error_code = failure.0,
                 recovery_code = status_error.code(),
                 elapsed_ms = started.elapsed().as_millis(),
-                "failed to write back failure status after knowledge managed file error; a later cycle will recover it"
+                "知识库托管文件异常后回写失败状态失败，将由后续轮次恢复"
             ),
         }
     }
@@ -576,7 +573,7 @@ fn restore_staged_file(files: &ConsoleUserDataService, staged: &StagedFileDeleti
         warn!(
             file_id = %short_id(file_id),
             error_code = error.code(),
-            "failed to restore original file after knowledge delete transaction failed"
+            "知识库删除事务失败后无法恢复原始文件"
         );
     }
 }

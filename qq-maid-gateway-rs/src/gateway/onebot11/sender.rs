@@ -152,14 +152,14 @@ impl OneBotSender {
                 retcode = 0,
                 elapsed_ms,
                 target = %target,
-                "OneBot 11 text sent"
+                "OneBot 11 文本已发送"
             ),
             Err(error) => warn!(
                 action,
                 retcode = ?error.retcode(),
                 elapsed_ms,
                 target = %target,
-                "OneBot 11 text send failed"
+                "OneBot 11 文本发送失败"
             ),
         }
         result
@@ -189,7 +189,7 @@ impl OneBotSender {
                 elapsed_ms,
                 target = %target,
                 mention_count = mention_user_ids.len(),
-                "OneBot 11 group message sent"
+                "OneBot 11 群聊消息已发送"
             ),
             Err(error) => warn!(
                 action = SEND_GROUP_MSG,
@@ -197,7 +197,7 @@ impl OneBotSender {
                 elapsed_ms,
                 target = %target,
                 mention_count = mention_user_ids.len(),
-                "OneBot 11 group message send failed"
+                "OneBot 11 群聊消息发送失败"
             ),
         }
         result
@@ -222,9 +222,9 @@ impl OneBotSender {
         let elapsed_ms = started.elapsed().as_millis();
         let target = mask_identifier(&target_id.to_string());
         match &result {
-            Ok(_) => info!(action, elapsed_ms, target = %target, "OneBot 11 image sent"),
+            Ok(_) => info!(action, elapsed_ms, target = %target, "OneBot 11 图片已发送"),
             Err(error) => {
-                warn!(action, retcode = ?error.retcode(), elapsed_ms, target = %target, "OneBot 11 image send failed")
+                warn!(action, retcode = ?error.retcode(), elapsed_ms, target = %target, "OneBot 11 图片发送失败")
             }
         }
         result

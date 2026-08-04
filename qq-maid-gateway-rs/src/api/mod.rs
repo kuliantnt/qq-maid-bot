@@ -500,7 +500,7 @@ impl QqApiClient {
                     index_committed = request_fields.index_committed,
                     msg_seq_committed = request_fields.msg_seq_committed,
                     error = %reqwest_error_summary(&error),
-                    "QQ stream send request failed"
+                    "QQ 流式发送请求失败"
                 );
                 ApiError::Http(error)
             })?;
@@ -533,7 +533,7 @@ impl QqApiClient {
                 index_committed = failed_fields.index_committed,
                 msg_seq_committed = failed_fields.msg_seq_committed,
                 error_summary = %qq_api_error_body_summary(&body),
-                "QQ stream send returned non-success status"
+                "QQ 流式发送返回非成功状态码"
             );
             return Err(ApiError::Status { status, body });
         }
@@ -567,7 +567,7 @@ impl QqApiClient {
             msg_seq_committed = success_fields.msg_seq_committed,
             returned_stream_id = %sent_stream_id.as_deref().map(mask_identifier).unwrap_or_default(),
             returned_stream_id_present = sent_stream_id.is_some(),
-            "qq stream send success"
+            "QQ 流式发送成功"
         );
         Ok(sent_stream_id)
     }
@@ -594,7 +594,7 @@ impl QqApiClient {
                     source_message_id = msg_id.unwrap_or(""),
                     message_type = message_type,
                     error = %reqwest_error_summary(&error),
-                    "QQ send request failed"
+                    "QQ 发送请求失败"
                 );
                 ApiError::Http(error)
             })?;
@@ -606,7 +606,7 @@ impl QqApiClient {
                 source_message_id = msg_id.unwrap_or(""),
                 message_type = message_type,
                 status = %status,
-                "QQ send returned non-success status"
+                "QQ 发送返回非成功状态码"
             );
             let body = response.text().await.unwrap_or_default();
             return Err(ApiError::Status { status, body });
@@ -620,7 +620,7 @@ impl QqApiClient {
             sent_message_id = sent_ids.message_id.as_deref().unwrap_or(""),
             sent_ref_index_id = sent_ids.ref_index_id.as_deref().unwrap_or(""),
             message_type = message_type,
-            "qq send success"
+            "QQ 发送成功"
         );
         Ok(sent_ids)
     }
@@ -647,7 +647,7 @@ impl QqApiClient {
                     source_message_id = msg_id.unwrap_or(""),
                     message_type = message_type,
                     error = %reqwest_error_summary(&error),
-                    "QQ group send request failed"
+                    "QQ 群聊发送请求失败"
                 );
                 ApiError::Http(error)
             })?;
@@ -659,7 +659,7 @@ impl QqApiClient {
                 source_message_id = msg_id.unwrap_or(""),
                 message_type = message_type,
                 status = %status,
-                "QQ group send returned non-success status"
+                "QQ 群聊发送返回非成功状态码"
             );
             let body = response.text().await.unwrap_or_default();
             return Err(ApiError::Status { status, body });
@@ -673,7 +673,7 @@ impl QqApiClient {
             sent_message_id = sent_ids.message_id.as_deref().unwrap_or(""),
             sent_ref_index_id = sent_ids.ref_index_id.as_deref().unwrap_or(""),
             message_type = message_type,
-            "qq group send success"
+            "QQ 群聊发送成功"
         );
         Ok(sent_ids)
     }
@@ -848,7 +848,7 @@ pub async fn send_outbound_with_fallback<S: OutboundSender + ?Sized>(
                     user = %mask_openid(&target.user_openid),
                     source_message_id = target.msg_id.as_deref().unwrap_or(""),
                     error = %err.log_summary(),
-                    "markdown send failed; falling back to text"
+                    "Markdown 发送失败，将降级为文本发送"
                 );
                 match sender.send_text(target, fallback_text).await {
                     Ok(message_id) => Ok(message_id),
@@ -857,7 +857,7 @@ pub async fn send_outbound_with_fallback<S: OutboundSender + ?Sized>(
                             user = %mask_openid(&target.user_openid),
                             source_message_id = target.msg_id.as_deref().unwrap_or(""),
                             error = %fallback_err.log_summary(),
-                            "markdown fallback text send failed"
+                            "Markdown 降级文本发送失败"
                         );
                         Err(fallback_err)
                     }
@@ -875,7 +875,7 @@ pub async fn send_outbound_with_fallback<S: OutboundSender + ?Sized>(
                     user = %mask_openid(&target.user_openid),
                     source_message_id = target.msg_id.as_deref().unwrap_or(""),
                     error = %err.log_summary(),
-                    "image send failed; falling back to text"
+                    "图片发送失败，将降级为文本发送"
                 );
                 match sender.send_text(target, fallback_text).await {
                     Ok(message_id) => Ok(message_id),
@@ -884,7 +884,7 @@ pub async fn send_outbound_with_fallback<S: OutboundSender + ?Sized>(
                             user = %mask_openid(&target.user_openid),
                             source_message_id = target.msg_id.as_deref().unwrap_or(""),
                             error = %fallback_err.log_summary(),
-                            "image fallback text send failed"
+                            "图片降级文本发送失败"
                         );
                         Err(fallback_err)
                     }
@@ -916,7 +916,7 @@ pub async fn send_group_outbound_with_fallback<S: GroupOutboundSender + ?Sized>(
                     group = %mask_openid(&target.group_openid),
                     source_message_id = target.msg_id.as_deref().unwrap_or(""),
                     error = %err.log_summary(),
-                    "group markdown send failed; falling back to text"
+                    "群聊 Markdown 发送失败，将降级为文本发送"
                 );
                 match sender.send_text(target, fallback_text).await {
                     Ok(message_id) => Ok(message_id),
@@ -925,7 +925,7 @@ pub async fn send_group_outbound_with_fallback<S: GroupOutboundSender + ?Sized>(
                             group = %mask_openid(&target.group_openid),
                             source_message_id = target.msg_id.as_deref().unwrap_or(""),
                             error = %fallback_err.log_summary(),
-                            "group markdown fallback text send failed"
+                            "群聊 Markdown 降级文本发送失败"
                         );
                         Err(fallback_err)
                     }
@@ -943,7 +943,7 @@ pub async fn send_group_outbound_with_fallback<S: GroupOutboundSender + ?Sized>(
                     group = %mask_openid(&target.group_openid),
                     source_message_id = target.msg_id.as_deref().unwrap_or(""),
                     error = %err.log_summary(),
-                    "group image send failed; falling back to text"
+                    "群聊图片发送失败，将降级为文本发送"
                 );
                 sender.send_text(target, fallback_text).await
             }

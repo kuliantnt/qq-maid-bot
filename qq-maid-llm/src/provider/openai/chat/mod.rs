@@ -91,7 +91,7 @@ pub(crate) async fn chat_completions_with_stream_fallback(
                 tracing::warn!(
                     provider,
                     model = %model,
-                    "streaming chat completions returned empty reply; retrying once with non-stream request"
+                    "流式 Chat Completions 返回空回复，将使用非流式请求重试一次"
                 );
             }
             Err(err) => {
@@ -105,7 +105,7 @@ pub(crate) async fn chat_completions_with_stream_fallback(
                     model = %model,
                     error_code = err.code.as_str(),
                     error_stage = err.stage.as_str(),
-                    "streaming chat completions failed; retrying once with non-stream request"
+                    "流式 Chat Completions 失败，将使用非流式请求重试一次"
                 );
             }
         }
@@ -447,7 +447,7 @@ pub(super) async fn send_chat_completions_request(
             elapsed_ms = started.elapsed().as_millis(),
             error_kind = mapped.kind().as_str(),
             error = %err,
-            "LLM Chat Completions transport failed"
+            "LLM Chat Completions 传输失败"
         );
         mapped
     })?;
@@ -819,11 +819,7 @@ fn trace_ignored_chat_stream_content(field: &str, value: Option<&Value>) {
         Value::Array(_) => "array_without_text",
         Value::Object(_) => "object",
     };
-    tracing::trace!(
-        field,
-        kind,
-        "ignored non-text Chat Completions stream content"
-    );
+    tracing::trace!(field, kind, "已忽略非文本的 Chat Completions 流式内容");
 }
 
 pub(super) fn extract_chat_completion_usage(body: &Value) -> Option<TokenUsage> {

@@ -11,7 +11,7 @@ use tokio::{
     time::timeout,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{trace, warn};
 
 use super::super::logging::mask_scope_key;
 // `MessageHandler` 定义在 actor 子模块，actor 通过 `pub(super)` 暴露给 dispatcher
@@ -41,7 +41,7 @@ pub(super) async fn run_worker(mut ctx: WorkerContext) -> WorkerExitReason {
                         scope_key = %mask_scope_key(&ctx.scope_key),
                         generation = ctx.generation,
                         dropped_messages,
-                        "dispatcher worker cancelled with queued messages"
+                        "dispatcher worker 取消时仍有排队消息"
                     );
                 }
                 return WorkerExitReason::Cancelled;
@@ -85,7 +85,7 @@ pub(super) async fn run_worker(mut ctx: WorkerContext) -> WorkerExitReason {
                 scope_key = %mask_scope_key(&ctx.scope_key),
                 generation = ctx.generation,
                 queued_messages = ctx.rx.len(),
-                "dispatcher worker dequeued message but command channel is closed"
+                "dispatcher worker 取出消息时命令通道已关闭"
             );
             return WorkerExitReason::Cancelled;
         }
@@ -103,13 +103,13 @@ pub(super) async fn run_worker(mut ctx: WorkerContext) -> WorkerExitReason {
                 scope_key = %mask_scope_key(&ctx.scope_key),
                 generation = ctx.generation,
                 error = %error,
-                "dispatcher worker failed to handle message"
+                "dispatcher worker 处理消息失败"
             );
         } else {
-            debug!(
+            trace!(
                 scope_key = %mask_scope_key(&ctx.scope_key),
                 generation = ctx.generation,
-                "dispatcher worker handled message"
+                "dispatcher worker 已处理消息"
             );
         }
     }

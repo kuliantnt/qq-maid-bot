@@ -49,7 +49,7 @@ pub(crate) fn handle_openai_chat_stream_event(
                 .get("partial_image_b64")
                 .and_then(|item| item.as_str())
                 .map(str::len),
-            "observed OpenAI Responses image generation stream event"
+            "检测到 OpenAI Responses 图片生成流事件"
         );
     }
 
@@ -92,11 +92,7 @@ fn trace_ignored_responses_stream_delta(event_type: &str, delta: Option<&Value>)
         Value::Array(_) => "array",
         Value::Object(_) => "object",
     };
-    tracing::trace!(
-        event_type,
-        kind,
-        "ignored non-text OpenAI Responses stream delta"
-    );
+    tracing::trace!(event_type, kind, "已忽略非文本的 OpenAI Responses 流式增量");
 }
 
 fn stream_error_message(value: &Value) -> Option<String> {

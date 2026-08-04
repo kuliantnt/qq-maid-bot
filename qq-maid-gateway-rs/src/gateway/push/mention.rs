@@ -97,7 +97,7 @@ pub(super) fn prepare_qq_bot2_content(
         warn!(
             platform = QQ_OFFICIAL_PLATFORM,
             mention_count = mentions.len(),
-            "push mentions ignored because private messages do not support group member mention"
+            "私聊消息不支持提及群成员，已忽略推送中的 mention"
         );
         return PreparedQqBot2Content::unchanged(text, fallback_text);
     }

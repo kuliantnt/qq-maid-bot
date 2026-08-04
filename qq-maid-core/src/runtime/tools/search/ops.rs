@@ -447,7 +447,7 @@ fn log_research_result(
             provider = outcome.provider,
             elapsed_ms,
             status = "success",
-            "web search research item completed"
+            "联网搜索研究项处理完成"
         ),
         Err(err) => tracing::warn!(
             tool = WEB_SEARCH_TOOL_NAME,
@@ -462,7 +462,7 @@ fn log_research_result(
             },
             failure_stage = err.stage,
             error_code = err.code,
-            "web search research item failed"
+            "联网搜索研究项处理失败"
         ),
     }
 }

@@ -325,7 +325,7 @@ async fn openai_auto_stream_with_chat_fallback(
                 model = %req.model,
                 error_code = err.code.as_str(),
                 error_stage = err.stage.as_str(),
-                "OpenAI Responses stream init failed; falling back to Chat Completions stream"
+                "OpenAI Responses 流初始化失败，将降级到 Chat Completions 流"
             );
             chat::chat_completions_stream(
                 req.chat_client,
@@ -424,7 +424,7 @@ async fn next_openai_runtime_fallback_event(
                         model = %state.model,
                         error_code = err.code.as_str(),
                         error_stage = err.stage.as_str(),
-                        "OpenAI Responses stream failed before first delta; falling back to Chat Completions stream"
+                        "OpenAI Responses 流在首个增量前失败，将降级到 Chat Completions 流"
                     );
                     state.responses_stream = None;
                     match chat::chat_completions_stream(
@@ -529,7 +529,7 @@ async fn openai_auto_chat_with_chat_fallback(
                 model = %req.model,
                 error_code = err.code.as_str(),
                 error_stage = err.stage.as_str(),
-                "OpenAI Responses chat failed; falling back to Chat Completions"
+                "OpenAI Responses 对话失败，将降级到 Chat Completions"
             );
             chat_completions_with_stream_fallback(
                 req.stream,

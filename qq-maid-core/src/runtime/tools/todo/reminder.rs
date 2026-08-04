@@ -57,13 +57,13 @@ impl NotificationSentHook for TodoReminderSentHook {
                         task_id = task.id,
                         todo_id = %task.source_id,
                         error = %err,
-                        "recurring todo reminder reschedule failed"
+                        "重新调度重复 Todo 提醒失败"
                     );
                 } else {
                     debug!(
                         task_id = task.id,
                         todo_id = %task.source_id,
-                        "recurring todo reminder rescheduled"
+                        "重复 Todo 提醒已重新调度"
                     );
                 }
             }
@@ -73,7 +73,7 @@ impl NotificationSentHook for TodoReminderSentHook {
                     task_id = task.id,
                     todo_id = %task.source_id,
                     error = %err.message(),
-                    "recurring todo reminder advance failed"
+                    "推进重复 Todo 提醒失败"
                 );
             }
         }

@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::{ApiError, QqApiClient, SendResult};
 
@@ -169,7 +169,7 @@ async fn upload_voice_url(
     let status = response.status();
     if !status.is_success() {
         let _ = response.bytes().await;
-        warn!(scene = scene.label(), status = %status, "QQ voice URL upload returned non-success status");
+        warn!(scene = scene.label(), status = %status, "QQ 语音 URL 上传返回非成功状态码");
         return Err(ApiError::Status {
             status,
             body: String::new(),
@@ -185,8 +185,7 @@ async fn upload_voice_url(
             "voice upload response missing file_info",
         ));
     }
-    debug!(scene = scene.label(), "QQ voice URL upload completed");
-    info!(scene = scene.label(), "QQ voice upload succeeded");
+    info!(scene = scene.label(), "QQ 语音上传成功");
     Ok(VoiceMedia {
         file_info: file_info.to_owned(),
     })

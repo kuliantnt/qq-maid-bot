@@ -565,7 +565,7 @@ fn legacy_author_id_fallback(event_type: &str, author: Option<&RawAuthor>) -> Op
     warn!(
         event_type = %event_type,
         identity = %mask_openid(value),
-        "QQ identity resolved through untrusted author.id fallback"
+        "QQ 身份通过不可信的 author.id 降级路径解析"
     );
     Some(value.to_owned())
 }
