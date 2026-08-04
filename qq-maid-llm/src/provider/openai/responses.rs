@@ -300,8 +300,21 @@ async fn next_responses_stream_event(
                         Ok(event) => event,
                         Err(err) => return Some(Err(err)),
                     }) else {
-                        state.frame_buffer.clear();
-                        continue;
+                        // HTTP 已正常 EOF，但残留字节既没有 SSE 分隔符，也无法解析出
+                        // data frame。此时必须按截断处理，不能清空后让已有文本进入兼容完成。
+                        tracing::warn!(
+                            http_status = state.response.status().as_u16(),
+                            stream_end_kind = "sse_incomplete_frame",
+                            normal_eof = true,
+                            saw_completed = state.saw_completed,
+                            saw_done = state.saw_done,
+                            saw_text_delta = !state.answer.trim().is_empty(),
+                            visible_text_chars = state.answer.chars().count(),
+                            incomplete_frame_bytes = state.frame_buffer.len(),
+                            "OpenAI Responses chat stream ended with an incomplete SSE frame"
+                        );
+                        state.finished = true;
+                        return Some(Err(incomplete_sse_frame_error(&state.answer)));
                     };
                     state.frame_buffer.clear();
                     if is_openai_responses_done_sentinel(&event.data) {
@@ -401,6 +414,19 @@ pub(crate) fn incomplete_stream_eof_error(message: &str, answer: &str) -> LlmErr
         "stream_after_delta"
     };
     LlmError::provider(message, stage)
+}
+
+fn incomplete_sse_frame_error(answer: &str) -> LlmError {
+    let stage = if answer.trim().is_empty() {
+        "stream"
+    } else {
+        "stream_after_delta"
+    };
+    LlmError::new(
+        "sse_incomplete_frame",
+        "OpenAI Responses chat stream ended with an incomplete SSE frame",
+        stage,
+    )
 }
 
 pub(crate) fn stream_transport_error(
@@ -657,6 +683,31 @@ mod tests {
         let outcome = openai_responses_stream_chat(&req).await.unwrap();
 
         assert_eq!(outcome.reply, "半截");
+    }
+
+    #[tokio::test]
+    async fn incomplete_tail_after_text_is_truncated_without_non_stream_retry() {
+        let (base_url, state) = spawn_mock_responses(
+            concat!(
+                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"已完成文本\"}\n\n",
+                "event: response.output_text.delta",
+            )
+            .to_owned(),
+            StatusCode::OK,
+        )
+        .await;
+        let client = qq_maid_common::http_client::client();
+        let messages = [ChatMessage::user("hi")];
+        let req = stream_req(&client, &base_url, &messages);
+
+        let err = openai_responses_chat_with_stream_fallback(req)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, "sse_incomplete_frame");
+        assert_eq!(err.stage, "stream_after_delta");
+        assert!(err.message.contains("incomplete SSE frame"));
+        assert_eq!(state.lock().await.calls, 1);
     }
 
     #[tokio::test]

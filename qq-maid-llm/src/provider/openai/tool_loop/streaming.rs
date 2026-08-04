@@ -313,8 +313,10 @@ pub(super) async fn collect_responses_tool_loop_stream(
     }
     let compatible_eof_completion = !explicit_completion
         && !done_completion
+        && stream_diagnostics.normal_eof
         && !answer.trim().is_empty()
         && active_function_calls.is_empty()
+        && completed_output_items.is_empty()
         && !stream_diagnostics.explicit_failure_event
         && !stream_diagnostics.parse_error
         && !stream_diagnostics.connection_reset;
@@ -334,6 +336,14 @@ pub(super) async fn collect_responses_tool_loop_stream(
             last_sse_event_type = ?stream_diagnostics.last_sse_event_type,
             "OpenAI Responses stream used compatible completion after normal HTTP EOF"
         );
+    } else if !explicit_completion && !completed_output_items.is_empty() {
+        // function call 已完整结束但缺少协议终止事件时，不能执行工具，也不能把同轮
+        // 草稿文本释放成最终回答；保留 completed items 仅用于准确识别该截断边界。
+        const END_KIND: &str = "normal_eof_completed_function_call_without_terminal_event";
+        update_streaming_diagnostics(&diagnostics, |item| {
+            item.stream_end_kind = Some(END_KIND.to_owned());
+        });
+        set_streaming_fallback_reason(&diagnostics, END_KIND);
     } else if !explicit_completion {
         update_streaming_diagnostics(&diagnostics, |item| {
             item.stream_end_kind = Some(if active_function_calls.is_empty() {

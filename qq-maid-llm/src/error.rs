@@ -278,7 +278,7 @@ impl LlmError {
             "provider_error" if matches!(self.stage.as_str(), "json" | "sse" | "stream") => {
                 "invalid_response"
             }
-            "invalid_response" => "invalid_response",
+            "invalid_response" | "sse_incomplete_frame" => "invalid_response",
             _ => "internal_error",
         }
     }

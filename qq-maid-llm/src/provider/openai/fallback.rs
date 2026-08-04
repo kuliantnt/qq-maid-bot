@@ -22,7 +22,7 @@ pub(crate) fn should_retry_non_stream_after_stream_error(err: &LlmError) -> bool
     }
     matches!(
         err.code.as_str(),
-        "provider_error" | "http_error" | "network_error" | "timeout"
+        "provider_error" | "http_error" | "network_error" | "timeout" | "sse_incomplete_frame"
     ) && matches!(
         err.stage.as_str(),
         "provider"

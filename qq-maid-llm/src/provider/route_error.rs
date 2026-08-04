@@ -96,6 +96,7 @@ pub(crate) fn model_error_kind(err: &LlmError) -> &'static str {
         "http_error" | "network_error" => "network",
         "authentication_failed" => "authentication",
         "provider_error" if matches!(err.stage.as_str(), "stream" | "sse") => "stream_error",
+        "sse_incomplete_frame" => "stream_error",
         "provider_error" if err.stage == "json" => "invalid_response",
         "provider_error" if err.stage == "provider_unavailable" => "provider_unavailable",
         "provider_error" => "provider_error",

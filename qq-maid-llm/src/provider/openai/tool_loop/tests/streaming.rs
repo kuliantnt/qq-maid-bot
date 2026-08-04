@@ -206,6 +206,73 @@ async fn normal_eof_with_text_and_no_function_call_is_compatible_completion() {
 }
 
 #[tokio::test]
+async fn normal_eof_with_text_and_completed_function_call_is_not_completion() {
+    let base_url = spawn_static_sse_stream(concat!(
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"草稿\"}\n\n",
+        "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"name\":\"get_weather\",\"call_id\":\"call_weather_1\",\"arguments\":\"{\\\"city\\\":\\\"杭州\\\"}\"}}\n\n",
+    ))
+    .await;
+    let mut session = test_streaming_session(base_url);
+    let deltas = Arc::new(StdMutex::new(Vec::new()));
+
+    // 返回错误意味着既不会产出 FinalAnswer，也不会把 ToolCalls 交给执行层。
+    let err = session
+        .advance_streaming(&[], true, recording_delta_sink(deltas.clone()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.stage, "stream_after_delta");
+    assert!(deltas.lock().unwrap().is_empty());
+    let diagnostics = session.streaming_diagnostics();
+    assert!(diagnostics.normal_eof);
+    assert!(!diagnostics.saw_completed);
+    assert!(!diagnostics.saw_done);
+    assert_eq!(diagnostics.active_function_call_count, 0);
+    assert_eq!(diagnostics.visible_text_chars, 0);
+    assert_eq!(
+        diagnostics.stream_end_kind.as_deref(),
+        Some("normal_eof_completed_function_call_without_terminal_event")
+    );
+    assert_eq!(
+        diagnostics.fallback_reason.as_deref(),
+        Some("normal_eof_completed_function_call_without_terminal_event")
+    );
+}
+
+#[tokio::test]
+async fn normal_eof_with_only_completed_function_call_is_not_completion() {
+    let base_url = spawn_static_sse_stream(
+        "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"name\":\"get_weather\",\"call_id\":\"call_weather_1\",\"arguments\":\"{\\\"city\\\":\\\"杭州\\\"}\"}}\n\n",
+    )
+    .await;
+    let mut session = test_streaming_session(base_url);
+    let deltas = Arc::new(StdMutex::new(Vec::new()));
+
+    // 缺少标准终止事件时，完整 function call 也不能进入工具执行层。
+    let err = session
+        .advance_streaming(&[], true, recording_delta_sink(deltas.clone()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.stage, "stream");
+    assert!(deltas.lock().unwrap().is_empty());
+    let diagnostics = session.streaming_diagnostics();
+    assert!(diagnostics.normal_eof);
+    assert!(!diagnostics.saw_completed);
+    assert!(!diagnostics.saw_done);
+    assert!(!diagnostics.saw_text_delta);
+    assert_eq!(diagnostics.active_function_call_count, 0);
+    assert_eq!(
+        diagnostics.stream_end_kind.as_deref(),
+        Some("normal_eof_completed_function_call_without_terminal_event")
+    );
+    assert_ne!(
+        diagnostics.stream_end_kind.as_deref(),
+        Some("normal_eof_compatible_completion")
+    );
+}
+
+#[tokio::test]
 async fn normal_eof_with_unclosed_function_call_is_not_completion() {
     let base_url = spawn_static_sse_stream(concat!(
         "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"草稿\"}\n\n",

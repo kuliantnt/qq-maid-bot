@@ -68,6 +68,10 @@ pub(super) fn classify_responses_stream_failure(
             "done_without_safe_completion"
         } else if item.normal_eof && item.active_function_call_count > 0 {
             "normal_eof_active_function_call"
+        } else if item.stream_end_kind.as_deref()
+            == Some("normal_eof_completed_function_call_without_terminal_event")
+        {
+            "normal_eof_completed_function_call_without_terminal_event"
         } else if item.normal_eof && item.saw_text_delta {
             "normal_eof_text_not_committed"
         } else if item.normal_eof {
