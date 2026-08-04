@@ -1,5 +1,50 @@
 use super::*;
 
+struct BufferedTextErrorSession {
+    advance_calls: Arc<StdMutex<usize>>,
+}
+
+#[async_trait]
+impl AgentStepSession for BufferedTextErrorSession {
+    fn provider(&self) -> &str {
+        "mock"
+    }
+
+    fn model(&self) -> &str {
+        "m"
+    }
+
+    fn streaming_diagnostics(&self) -> AgentStreamingDiagnostics {
+        AgentStreamingDiagnostics {
+            fallback_reason: Some("sse_parse_error".to_owned()),
+            stream_end_kind: Some("sse_parse_error".to_owned()),
+            parse_error: true,
+            saw_text_delta: true,
+            buffered_delta_count: 2,
+            buffered_text_chars: 4,
+            ..Default::default()
+        }
+    }
+
+    async fn advance(
+        &mut self,
+        _results: &[AgentToolResult],
+        _allow_tool_calls: bool,
+    ) -> Result<AgentStep, LlmError> {
+        *self.advance_calls.lock().unwrap() += 1;
+        Ok(final_reply("must not regenerate"))
+    }
+
+    async fn advance_streaming(
+        &mut self,
+        _results: &[AgentToolResult],
+        _allow_tool_calls: bool,
+        _text_delta_sink: AgentTextDeltaSink,
+    ) -> Result<Option<AgentStep>, LlmError> {
+        Err(LlmError::provider("invalid SSE after text", "sse"))
+    }
+}
+
 #[tokio::test]
 async fn fallback_after_tool_result_does_not_repeat_tool_side_effect() {
     let calls = Arc::new(StdMutex::new(0));
@@ -74,14 +119,17 @@ async fn streaming_advance_error_before_visible_delta_falls_back() {
 async fn unsupported_streaming_advance_falls_back_without_marking_failure() {
     let mut session = ScriptedSession::new("mock", "m", vec![final_reply("fallback")]);
 
-    let advance = super::runner::advance_with_optional_streaming(
+    let advance = crate::agent_loop::streaming::advance_with_optional_streaming(
         &mut session,
         &[],
         true,
-        Some(delta_sink(Arc::new(StdMutex::new(Vec::new())))),
-        std::time::Duration::from_millis(50),
-        std::time::Duration::from_millis(50),
-        0,
+        crate::agent_loop::streaming::StreamingAdvanceOptions {
+            final_delta_sink: Some(delta_sink(Arc::new(StdMutex::new(Vec::new())))),
+            streaming_timeout: std::time::Duration::from_millis(50),
+            non_stream_timeout: std::time::Duration::from_millis(50),
+            round: 0,
+        },
+        &AgentRunHandle::default(),
     )
     .await
     .unwrap();
@@ -119,5 +167,31 @@ async fn streaming_advance_error_after_visible_delta_does_not_fallback() {
 
     assert_eq!(err.stage, "stream_after_delta");
     assert_eq!(*deltas.lock().unwrap(), vec!["半句".to_owned()]);
+    assert_eq!(*advance_calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn buffered_text_error_does_not_regenerate_same_provider_non_stream() {
+    let advance_calls = Arc::new(StdMutex::new(0));
+    let mut session = BufferedTextErrorSession {
+        advance_calls: advance_calls.clone(),
+    };
+
+    let err = crate::agent_loop::streaming::advance_with_optional_streaming(
+        &mut session,
+        &[],
+        true,
+        crate::agent_loop::streaming::StreamingAdvanceOptions {
+            final_delta_sink: Some(delta_sink(Arc::new(StdMutex::new(Vec::new())))),
+            streaming_timeout: std::time::Duration::from_millis(50),
+            non_stream_timeout: std::time::Duration::from_millis(50),
+            round: 0,
+        },
+        &AgentRunHandle::default(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.stage, "sse");
     assert_eq!(*advance_calls.lock().unwrap(), 0);
 }

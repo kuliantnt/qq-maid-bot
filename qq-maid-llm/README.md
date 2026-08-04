@@ -18,7 +18,7 @@ qq-maid-common / reqwest / serde / tokio
 
 ## 当前范围
 
-- OpenAI Responses API 主链路（system/user 用 `input_text`、assistant 用 `output_text`、completed-only 提取、delta/completed/failed/incomplete/error 事件、跨 chunk 与 CRLF 兼容、空流补非流、流式失败后补非流、usage 与 cached token 提取、HTTP 错误正文裁剪、200 但正文为空返回明确错误）。
+- OpenAI Responses API 主链路（system/user 用 `input_text`、assistant 用 `output_text`、标准 completed 提取，以及“正常 HTTP EOF + 非空文本 + 无未闭合 function call/解析错误/显式失败”的兼容完成；支持 delta/completed/failed/incomplete/error、跨 chunk 与 CRLF、受剩余预算约束的空流回退、usage 与 cached token 提取、HTTP 错误正文裁剪、200 但正文为空返回明确错误）。
 - OpenAI Chat Completions 兼容实现（基于 `reqwest`，统一编码文字与 `image_url` 图片输入，支持流式与非流式、`[DONE]`、usage 与 cached token 提取、空流补非流、401/403/429/timeout/5xx 与非标准错误正文分类）。
 - DeepSeek 复用 OpenAI 兼容 Chat Completions adapter，只保留 base URL、认证和模型规则差异。
 - 模型候选链路由：按 `agent.toml` 中的候选顺序调用、成功立即停止、临时错误降级、永久错误终止、全部失败返回聚合错误；OpenAI Responses → Chat Completions fallback 规则不变。
