@@ -37,8 +37,11 @@ async function uploadSelectedFile(input, button, deps) {
     const capabilities = deps.getCapabilities();
     if (capabilities !== null) {
         const validation = validateKnowledgeFile(file, capabilities);
-        if (!validation.ok)
-            deps.setStatus(`警告：${validation.reason}，服务端可能拒绝`);
+        if (!validation.ok) {
+            deps.setStatus(`上传已阻止：${validation.reason}`);
+            input.value = "";
+            return;
+        }
     }
     button.disabled = true;
     deps.setStatus("上传中…");

@@ -21,8 +21,8 @@ function pollingFixture(overrides = {}) {
     isVisible: () => true,
     setTimeout: (fn) => { const id = nextId++; timers.set(id, fn); return id; },
     clearTimeout: (id) => timers.delete(id),
-    fetchPage: async () => page([item("pending")]),
-    onUpdate: (value) => updates.push(value),
+    fetchPages: async () => [page([item("pending")])],
+    onUpdate: (value) => updates.push(value[0]),
     onTransientError: (message) => errors.push(message),
     onTerminalTransition: (message) => transitions.push(message),
     ...overrides,
@@ -44,10 +44,10 @@ test("polling fetches active pages and ignores stale responses", async () => {
   let resolveSecond;
   let calls = 0;
   const fixture = pollingFixture({
-    fetchPage: () => new Promise((resolve) => {
+    fetchPages: () => new Promise((resolve) => {
       calls += 1;
-      if (calls === 1) resolveFirst = resolve;
-      else resolveSecond = resolve;
+      if (calls === 1) resolveFirst = (value) => resolve([value]);
+      else resolveSecond = (value) => resolve([value]);
     }),
   });
   fixture.controller.setPages([item("pending")]);
@@ -65,7 +65,7 @@ test("polling fetches active pages and ignores stale responses", async () => {
 
 test("polling skips hidden pages and stops after terminal result", async () => {
   let fetches = 0;
-  const fixture = pollingFixture({ isVisible: () => false, fetchPage: async () => { fetches += 1; return page([item("ready")]); } });
+   const fixture = pollingFixture({ isVisible: () => false, fetchPages: async () => { fetches += 1; return [page([item("ready")])]; } });
   fixture.controller.setPages([item("pending")]);
   fixture.controller.start({ page: 1, page_size: 20, search: "", status: "all", sort: "updated_at", order: "desc" });
   await runTimer(fixture.timers);
@@ -73,7 +73,7 @@ test("polling skips hidden pages and stops after terminal result", async () => {
   assert.equal(fixture.timers.size, 1);
   fixture.controller.stop();
   fixture.controller.setPages([item("pending")]);
-  const terminal = pollingFixture({ fetchPage: async () => page([item("ready")]) });
+  const terminal = pollingFixture({ fetchPages: async () => [page([item("ready")])] });
   terminal.controller.setPages([item("pending")]);
   terminal.controller.start({ page: 1, page_size: 20, search: "", status: "all", sort: "updated_at", order: "desc" });
   await runTimer(terminal.timers);
@@ -81,7 +81,7 @@ test("polling skips hidden pages and stops after terminal result", async () => {
 });
 
 test("polling stops after three failures and reports terminal transitions", async () => {
-  const fixture = pollingFixture({ fetchPage: async () => { throw new Error("offline"); } });
+  const fixture = pollingFixture({ fetchPages: async () => { throw new Error("offline"); } });
   fixture.controller.setPages([item("pending")]);
   fixture.controller.start({ page: 1, page_size: 20, search: "", status: "all", sort: "updated_at", order: "desc" });
   await runTimer(fixture.timers);
@@ -90,7 +90,7 @@ test("polling stops after three failures and reports terminal transitions", asyn
   assert.deepEqual(fixture.errors, ["状态刷新失败", "状态刷新失败", "状态刷新失败", "状态刷新多次失败，请手动刷新"]);
   assert.equal(fixture.timers.size, 0);
 
-  const transitions = pollingFixture({ fetchPage: async () => page([item("ready"), item("failed", "file-2")]) });
+  const transitions = pollingFixture({ fetchPages: async () => [page([item("ready"), item("failed", "file-2")])] });
   transitions.controller.setPages([item("pending"), item("processing", "file-2")]);
   transitions.controller.start({ page: 1, page_size: 20, search: "", status: "all", sort: "updated_at", order: "desc" });
   await runTimer(transitions.timers);
@@ -110,9 +110,9 @@ test("notifyChange clears the prior poll timer", () => {
 test("updateParams replaces the next polling request and resets its timer", async () => {
   const requests = [];
   const fixture = pollingFixture({
-    fetchPage: async (params) => {
+    fetchPages: async (params) => {
       requests.push(params);
-      return page([item("pending")]);
+      return [page([item("pending")])];
     },
   });
   const initialParams = { page: 1, page_size: 20, search: "", status: "all", sort: "updated_at", order: "desc" };
@@ -127,4 +127,17 @@ test("updateParams replaces the next polling request and resets its timer", asyn
   assert.equal(fixture.timers.size, 1);
   await runTimer(fixture.timers);
   assert.deepEqual(requests, [filteredParams]);
+});
+
+test("polling continues when a later loaded page is still processing", async () => {
+  const fixture = pollingFixture({
+    fetchPages: async () => [
+      page([item("ready", "page-1")]),
+      page([item("processing", "page-2")]),
+    ],
+  });
+  fixture.controller.setPages([item("ready", "page-1"), item("processing", "page-2")]);
+  fixture.controller.start({ page: 2, page_size: 20, search: "", status: "all", sort: "updated_at", order: "desc" });
+  await runTimer(fixture.timers);
+  assert.equal(fixture.timers.size, 1);
 });

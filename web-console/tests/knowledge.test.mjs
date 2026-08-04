@@ -9,7 +9,7 @@ import {
   pageAfterKnowledgeDelete,
 } from "../dist/views/knowledge/knowledge-paging.js";
 import { renderKnowledgeList } from "../dist/views/knowledge/knowledge-list.js";
-import { initializeKnowledge, refreshKnowledgeList } from "../dist/views/knowledge/knowledge.js";
+import { disposeKnowledge, initializeKnowledge, refreshKnowledgeList } from "../dist/views/knowledge/knowledge.js";
 import { ConsoleApiError } from "../dist/api.js";
 import { formatFileSizeLimit, installKnowledgeUpload, validateKnowledgeFile } from "../dist/views/knowledge/knowledge-upload.js";
 import { createFakeDom, installDomGlobals } from "./helpers/fake-dom.mjs";
@@ -94,6 +94,7 @@ test("知识库列表按来源和状态展示安全操作并触发回调", () =>
 });
 
 function setupKnowledgePage() {
+  disposeKnowledge();
   const fake = createFakeDom();
   installDomGlobals(fake);
   document.body = document.createElement("div");
@@ -186,13 +187,13 @@ test("知识库上传失败显示安全代码并恢复按钮", async () => {
   assert.equal(flow.button.disabled, false);
 });
 
-test("知识库上传格式预警仍提交给服务端", async () => {
+test("知识库上传格式预检会阻止请求", async () => {
   const files = [];
   const flow = setupUpload(async (selectedFile) => { files.push(selectedFile); return knowledgeItem({ status: "pending" }); });
   triggerInputChange(flow.input, file("guide.txt", 100));
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(files[0].name, "guide.txt");
-  assert.equal(flow.statuses.includes("警告：仅支持 .md / .markdown 文件，服务端可能拒绝"), true);
+  assert.equal(files.length, 0);
+  assert.equal(flow.statuses.at(-1), "上传已阻止：仅支持 .md / .markdown 文件");
 });
 
 function knowledgeResponse(items = []) {
@@ -274,5 +275,36 @@ test("知识库刷新失败保留现有列表并显示安全错误", async () =>
   await refreshKnowledgeList("upload");
   assert.equal(document.getElementById("knowledge-list").children[0], existing);
   assert.match(document.getElementById("knowledge-result").textContent, /会话已过期|HTTP 401/);
+  delete globalThis.fetch;
+});
+
+test("加载两页后轮询不会丢失后续页", async () => {
+  setupKnowledgePage();
+  const requests = [];
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init.body));
+    requests.push(body);
+    if (requests.length === 1) return new Response(JSON.stringify({ ok: true, data: knowledgeCapabilities() }));
+    const pageNumber = body.page;
+    const itemName = pageNumber === 1 ? "page-1.md" : "page-2.md";
+    return new Response(JSON.stringify({ ok: true, data: { items: [knowledgeItem({ filename: itemName, file_id: `file-${pageNumber}`, status: pageNumber === 2 ? "processing" : "ready" })], page: pageNumber, page_size: 20, total: 2, total_pages: 2 } }));
+  };
+  await initializeKnowledge();
+  document.getElementById("knowledge-pagination").children[0].onclick();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(requests.some((request) => request.page === 2), true);
+  const body = document.getElementById("knowledge-list").children[0].children[1];
+  assert.equal(body.children.some((row) => row.children[0].textContent === "page-2.md"), true);
+  delete globalThis.fetch;
+});
+
+test("首屏列表失败退出加载态并提供重试", async () => {
+  setupKnowledgePage();
+  globalThis.fetch = async () => { throw new Error("列表不可用"); };
+  await refreshKnowledgeList("refresh");
+  assert.equal(document.getElementById("knowledge-list").textContent.includes("正在加载知识库…"), false);
+  assert.equal(document.getElementById("knowledge-list").children[0].textContent, "知识库列表加载失败");
+  assert.match(document.getElementById("knowledge-result").textContent, /列表不可用/);
   delete globalThis.fetch;
 });

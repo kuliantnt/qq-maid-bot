@@ -18,6 +18,14 @@ type KnowledgeActionHandlers = {
   readonly onRetry: (item: KnowledgeFileItem) => void;
 };
 
+let deleteDialog: HTMLDialogElement | null = null;
+let deleteDialogTitle: HTMLElement | null = null;
+let deleteDialogMessage: HTMLElement | null = null;
+let deleteDialogCancel: HTMLButtonElement | null = null;
+let deleteDialogConfirm: HTMLButtonElement | null = null;
+let deleteOpener: HTMLButtonElement | null = null;
+let deleteFileId: string | null = null;
+
 export function triggerBrowserDownload(blob: Blob, filename: string): void {
   if (typeof URL === "undefined" || typeof document === "undefined" || document.body === null) return;
   const href = URL.createObjectURL(blob);
@@ -80,38 +88,18 @@ function openDeleteDialog(item: KnowledgeFileItem, deps: KnowledgeActionDeps, ac
   const fileId = item.file_id;
   const opener = actionButton(item.file_id, "删除");
   if (opener === null || active.has(opener)) return;
-  const dialog = document.createElement("dialog");
-  dialog.setAttribute("role", "alertdialog");
-  dialog.setAttribute("aria-modal", "true");
-  const title = document.createElement("h2");
-  title.id = "knowledge-delete-title";
-  title.textContent = `删除文件：${item.filename}`;
-  const message = document.createElement("p");
-  message.id = "knowledge-delete-message";
-  message.textContent = "删除后，该文件及对应的知识库解析和索引数据将被移除，且无法继续被检索。此操作不可恢复。";
-  dialog.setAttribute("aria-labelledby", title.id);
-  dialog.setAttribute("aria-describedby", message.id);
-  const cancel = document.createElement("button");
-  cancel.type = "button";
-  cancel.textContent = "取消";
-  const confirm = document.createElement("button");
-  confirm.type = "button";
-  confirm.className = "danger";
-  confirm.textContent = "删除";
-  dialog.append(title, message, cancel, confirm);
-  if (document.body) document.body.append(dialog);
-  // 对话框无论取消、成功还是冲突都归还焦点，键盘用户能回到触发删除的那一行。
-  const close = () => {
-    if (typeof dialog.close === "function") dialog.close();
-    else dialog.removeAttribute("open");
-    opener.focus();
-  };
-  cancel.onclick = close;
-  dialog.addEventListener("click", (event) => { if (event.target !== dialog) return; });
-  confirm.onclick = () => void confirmDelete(fileId, confirm, close, deps, active);
+  const dialog = ensureDeleteDialog();
+  deleteOpener = opener;
+  deleteFileId = fileId;
+  if (deleteDialogTitle) deleteDialogTitle.textContent = `删除文件：${item.filename}`;
+  if (deleteDialogMessage) deleteDialogMessage.textContent = "删除后，该文件及对应的知识库解析和索引数据将被移除，且无法继续被检索。此操作不可恢复。";
+  const close = () => closeDeleteDialog(opener, fileId);
+  if (deleteDialogCancel) deleteDialogCancel.onclick = close;
+  const confirmButton = deleteDialogConfirm;
+  if (confirmButton) confirmButton.onclick = () => void confirmDelete(fileId, confirmButton, close, deps, active);
+  deleteDialogCancel?.focus();
   if (typeof dialog.showModal === "function") dialog.showModal();
   else dialog.setAttribute("open", "");
-  cancel.focus();
 }
 
 async function confirmDelete(fileId: string, button: HTMLButtonElement, close: () => void, deps: KnowledgeActionDeps, active: WeakSet<HTMLButtonElement>): Promise<void> {
@@ -131,6 +119,63 @@ async function confirmDelete(fileId: string, button: HTMLButtonElement, close: (
     active.delete(button);
     button.disabled = false;
   }
+}
+
+function ensureDeleteDialog(): HTMLDialogElement {
+  if (deleteDialog !== null && document.querySelector('[role="alertdialog"]') === deleteDialog) return deleteDialog;
+  const dialog = document.createElement("dialog") as HTMLDialogElement;
+  dialog.setAttribute("role", "alertdialog");
+  dialog.setAttribute("aria-modal", "true");
+  const title = document.createElement("h2");
+  title.id = "knowledge-delete-title";
+  const message = document.createElement("p");
+  message.id = "knowledge-delete-message";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.textContent = "取消";
+  const confirm = document.createElement("button");
+  confirm.type = "button";
+  confirm.className = "danger";
+  confirm.textContent = "删除";
+  dialog.setAttribute("aria-labelledby", title.id);
+  dialog.setAttribute("aria-describedby", message.id);
+  dialog.append(title, message, cancel, confirm);
+  document.body?.append(dialog);
+  deleteDialog = dialog;
+  deleteDialogTitle = title;
+  deleteDialogMessage = message;
+  deleteDialogCancel = cancel;
+  deleteDialogConfirm = confirm;
+  dialog.addEventListener("cancel", () => {
+    if (deleteOpener !== null && deleteFileId !== null) closeDeleteDialog(deleteOpener, deleteFileId);
+  });
+  return dialog;
+}
+
+function closeDeleteDialog(opener: HTMLButtonElement, fileId: string): void {
+  if (deleteDialog === null) return;
+  if (typeof deleteDialog.close === "function") deleteDialog.close();
+  else deleteDialog.removeAttribute("open");
+  restoreFocus(opener, fileId);
+}
+
+function restoreFocus(opener: HTMLButtonElement, fileId: string): void {
+  if (opener.isConnected !== false) {
+    opener.focus();
+    return;
+  }
+  const rowButton = actionButton(fileId, "删除") ?? actionButton(fileId, "重新处理") ?? actionButton(fileId, "下载");
+  if (rowButton !== null && rowButton.isConnected !== false) {
+    rowButton.focus();
+    return;
+  }
+  const list = document.getElementById("knowledge-list");
+  if (list instanceof HTMLElement) {
+    list.tabIndex = -1;
+    list.focus();
+    return;
+  }
+  document.getElementById("knowledge-upload-open")?.focus();
 }
 
 function actionButton(fileId: string, label: string): HTMLButtonElement | null {

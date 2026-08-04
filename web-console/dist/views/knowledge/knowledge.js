@@ -7,18 +7,42 @@ import { KnowledgePollingController } from "./knowledge-polling.js";
 import { installKnowledgeUpload } from "./knowledge-upload.js";
 let capabilities = null;
 let pager = initialKnowledgePager();
-let loadedItems = [];
-let currentParams = defaultKnowledgeParams();
+let loadedPages = 0;
+let itemsByPage = new Map();
+let allItems = [];
+let filterParams = defaultKnowledgeParams();
 let uploadFlowInstalled = false;
+let loadMoreInFlight = false;
+let requestGeneration = 0;
+let knowledgeInitialized = false;
+let controlsBound = false;
+let documentListenersBound = false;
+const onVisibilityChange = () => {
+    if (document.visibilityState !== "hidden" && polling.hasActive())
+        polling.notifyChange();
+};
+const onPageHide = () => polling.stop();
 const polling = new KnowledgePollingController({
     isVisible: () => typeof document === "undefined" || document.visibilityState !== "hidden",
     setTimeout: (fn, ms) => window.setTimeout(fn, ms),
     clearTimeout: (id) => window.clearTimeout(id),
-    fetchPage: (params) => listKnowledgeFiles({ ...params, page: 1 }),
-    onUpdate: (page) => {
-        currentParams = { ...currentParams, page: page.page };
-        pager = appendKnowledgePage(initialKnowledgePager(), page);
-        loadedItems = [...page.items];
+    fetchPages: (params, pageCount) => {
+        const generation = ++requestGeneration;
+        return Promise.all(Array.from({ length: pageCount }, (_, index) => listKnowledgeFiles({ ...params, page: index + 1 }))).then((pages) => {
+            if (generation !== requestGeneration || !paramsMatch({ ...params, page: 1 }, { ...filterParams, page: 1 }))
+                return [];
+            return pages;
+        });
+    },
+    onUpdate: (pages) => {
+        if (pages.length === 0)
+            return;
+        for (const page of pages)
+            itemsByPage.set(page.page, [...page.items]);
+        const lastPage = pages[pages.length - 1];
+        if (lastPage === undefined)
+            return;
+        rebuildLoadedState(lastPage);
         renderKnowledgeContent();
     },
     onTransientError: (message) => setText("knowledge-result", message),
@@ -31,10 +55,14 @@ const actions = createKnowledgeActionHandlers({
     deleteFile: deleteKnowledgeFile,
     retryFile: retryKnowledgeFile,
     refresh: (reason) => void refreshKnowledgeList(reason),
-    getItems: () => loadedItems,
+    getItems: () => allItems,
 });
 export async function initializeKnowledge() {
+    if (knowledgeInitialized)
+        return;
+    knowledgeInitialized = true;
     bindKnowledgeControls();
+    bindDocumentListeners();
     try {
         capabilities = await fetchKnowledgeCapabilities();
     }
@@ -42,57 +70,79 @@ export async function initializeKnowledge() {
         showKnowledgeError(cause, "知识库能力加载失败");
     }
     if (!uploadFlowInstalled) {
-        installKnowledgeUpload({
-            inputId: "knowledge-upload-input",
-            buttonId: "knowledge-upload-open",
-            setStatus: (text) => setText("knowledge-result", text),
-            getCapabilities: getKnowledgeCapabilities,
-            upload: uploadKnowledgeFile,
-            onUploaded: () => void refreshKnowledgeList("upload"),
-        });
+        installKnowledgeUpload({ inputId: "knowledge-upload-input", buttonId: "knowledge-upload-open", setStatus: (text) => setText("knowledge-result", text), getCapabilities: getKnowledgeCapabilities, upload: uploadKnowledgeFile, onUploaded: () => void refreshKnowledgeList("upload") });
         uploadFlowInstalled = true;
     }
     await refreshKnowledgeList("refresh");
-    polling.start(currentParams);
+    polling.start({ ...filterParams, page: loadedPages || 1 });
+}
+export function disposeKnowledge() {
+    polling.stop();
+    requestGeneration += 1;
+    if (documentListenersBound && typeof document !== "undefined" && typeof document.removeEventListener === "function")
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+    if (documentListenersBound && typeof window !== "undefined" && typeof window.removeEventListener === "function")
+        window.removeEventListener("pagehide", onPageHide);
+    documentListenersBound = false;
+    const input = typeof document === "undefined" ? null : document.getElementById("knowledge-upload-input");
+    if (input && typeof input.remove === "function")
+        input.remove();
+    capabilities = null;
+    pager = initialKnowledgePager();
+    loadedPages = 0;
+    itemsByPage.clear();
+    allItems = [];
+    filterParams = defaultKnowledgeParams();
+    uploadFlowInstalled = false;
+    knowledgeInitialized = false;
+    controlsBound = false;
+    loadMoreInFlight = false;
     if (typeof document !== "undefined") {
-        document.addEventListener("visibilitychange", () => {
-            if (document.visibilityState !== "hidden" && polling.hasActive())
-                polling.notifyChange();
-        });
-    }
-    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
-        window.addEventListener("pagehide", () => polling.stop());
+        document.getElementById("knowledge-list")?.replaceChildren();
+        document.getElementById("knowledge-pagination")?.replaceChildren();
+        if (document.getElementById("knowledge-result"))
+            setText("knowledge-result", "");
     }
 }
 export function getKnowledgeCapabilities() {
     return capabilities;
 }
 export async function refreshKnowledgeList(reason) {
-    // 各入口共用此刷新边界：筛选和手动刷新从第一页替换，其余操作保留当前筛选条件。
+    const generation = ++requestGeneration;
     const reset = reason === "refresh" || reason === "filter";
     if (reset) {
-        currentParams = { ...currentParams, page: 1 };
+        itemsByPage.clear();
+        loadedPages = 0;
+        allItems = [];
         pager = initialKnowledgePager();
-        loadedItems = [];
     }
-    if (loadedItems.length === 0)
+    if (allItems.length === 0)
         renderKnowledgeLoading();
+    const params = { ...filterParams, page: 1 };
     try {
-        const page = await listKnowledgeFiles({ ...currentParams, page: 1 });
-        currentParams = { ...currentParams, page: page.page };
-        pager = appendKnowledgePage(initialKnowledgePager(), page);
-        loadedItems = [...page.items];
-        // 筛选成功后立即替换轮询参数，防止旧条件的异步结果覆盖当前视图。
-        polling.updateParams(currentParams);
-        polling.setPages(loadedItems);
-        polling.notifyChange();
+        const page = await listKnowledgeFiles(params);
+        if (generation !== requestGeneration || !paramsMatch(params, { ...filterParams, page: 1 }))
+            return;
+        itemsByPage.set(1, [...page.items]);
+        loadedPages = reset ? 1 : Math.max(loadedPages, 1);
+        rebuildLoadedState(page);
+        polling.updateParams({ ...filterParams, page: loadedPages });
+        polling.setPages(allItems);
         renderKnowledgeContent();
+        polling.notifyChange();
     }
     catch (cause) {
+        if (generation !== requestGeneration)
+            return;
         showKnowledgeError(cause, "知识库列表加载失败");
+        if (allItems.length === 0)
+            renderKnowledgeLoadError();
     }
 }
 function bindKnowledgeControls() {
+    if (controlsBound)
+        return;
+    controlsBound = true;
     const search = requiredElement("knowledge-search", HTMLInputElement);
     const status = requiredElement("knowledge-status-filter", HTMLSelectElement);
     const submit = requiredElement("knowledge-filter-submit", HTMLButtonElement);
@@ -107,22 +157,52 @@ function bindKnowledgeControls() {
         apply();
     } });
 }
+function bindDocumentListeners() {
+    if (documentListenersBound)
+        return;
+    documentListenersBound = true;
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    if (typeof window.addEventListener === "function")
+        window.addEventListener("pagehide", onPageHide);
+}
 function syncKnowledgeFilters(search, status) {
-    currentParams = { ...currentParams, page: 1, search: search.value.trim(), status: knowledgeStatusValue(status.value) };
+    requestGeneration += 1;
+    filterParams = { ...filterParams, search: search.value.trim(), status: knowledgeStatusValue(status.value) };
+}
+function rebuildLoadedState(lastPage) {
+    pager = appendKnowledgePage({ ...pager, loadedCount: 0 }, lastPage);
+    pager = { ...pager, page: loadedPages, loadedCount: allPageItems().length, hasMore: loadedPages < lastPage.total_pages };
+    allItems = allPageItems();
+}
+function allPageItems() {
+    return Array.from({ length: loadedPages }, (_, index) => itemsByPage.get(index + 1) ?? []).flat();
+}
+function paramsMatch(left, right) {
+    return left.page_size === right.page_size && left.search === right.search && left.status === right.status && left.sort === right.sort && left.order === right.order;
 }
 function renderKnowledgeLoading() {
-    const target = requiredElement("knowledge-list", HTMLElement);
     const hint = document.createElement("p");
     hint.className = "hint";
     hint.textContent = "正在加载知识库…";
-    target.replaceChildren(hint);
+    requiredElement("knowledge-list", HTMLElement).replaceChildren(hint);
+}
+function renderKnowledgeLoadError() {
+    const target = requiredElement("knowledge-list", HTMLElement);
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = "知识库列表加载失败";
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.textContent = "重试";
+    retry.onclick = () => void refreshKnowledgeList("refresh");
+    target.replaceChildren(hint, retry);
 }
 function renderKnowledgeContent() {
     const target = requiredElement("knowledge-list", HTMLElement);
-    if (loadedItems.length === 0)
+    if (allItems.length === 0)
         renderKnowledgeEmpty(target);
     else
-        renderKnowledgeList(target, loadedItems, actions);
+        renderKnowledgeList(target, allItems, actions);
     renderKnowledgePagination();
 }
 function renderKnowledgePagination() {
@@ -133,33 +213,52 @@ function renderKnowledgePagination() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "secondary";
-    button.textContent = "加载更多";
+    button.textContent = loadMoreInFlight ? "加载中…" : "加载更多";
+    button.disabled = loadMoreInFlight;
     button.onclick = () => void loadMoreKnowledgeFiles();
     target.append(button);
 }
 async function loadMoreKnowledgeFiles() {
-    if (!hasMoreKnowledgePages(pager))
+    if (loadMoreInFlight || !hasMoreKnowledgePages(pager))
         return;
+    const previous = { loadedPages, pager: { ...pager }, allItems: [...allItems] };
+    const generation = ++requestGeneration;
+    const pageNumber = loadedPages + 1;
+    const params = { ...filterParams, page: pageNumber };
+    loadMoreInFlight = true;
+    renderKnowledgePagination();
     try {
-        currentParams = { ...currentParams, page: currentParams.page + 1 };
-        const page = await listKnowledgeFiles(currentParams);
-        pager = appendKnowledgePage(pager, page);
-        loadedItems = [...loadedItems, ...page.items];
-        // 分页也保持控制器快照与页面条件一致；轮询请求仍固定拉取第一页的状态。
-        polling.updateParams(currentParams);
-        polling.setPages(loadedItems);
-        polling.notifyChange();
+        const page = await listKnowledgeFiles(params);
+        if (generation !== requestGeneration || !paramsMatch(params, { ...filterParams, page: pageNumber }))
+            return;
+        itemsByPage.set(pageNumber, [...page.items]);
+        loadedPages = pageNumber;
+        rebuildLoadedState(page);
+        polling.updateParams({ ...filterParams, page: loadedPages });
+        polling.setPages(allItems);
         renderKnowledgeContent();
+        polling.notifyChange();
     }
     catch (cause) {
-        showKnowledgeError(cause, "知识库列表加载失败");
+        if (generation === requestGeneration) {
+            loadedPages = previous.loadedPages;
+            pager = previous.pager;
+            allItems = previous.allItems;
+            showKnowledgeError(cause, "知识库列表加载失败");
+            renderKnowledgeContent();
+        }
+    }
+    finally {
+        loadMoreInFlight = false;
+        if (generation === requestGeneration)
+            renderKnowledgePagination();
     }
 }
 function showKnowledgeError(cause, fallback) {
     setText("knowledge-result", cause instanceof Error ? cause.message : fallback);
 }
 function defaultKnowledgeParams() {
-    return { page: 1, page_size: 20, search: "", status: "all", sort: "updated_at", order: "desc" };
+    return { page_size: 20, search: "", status: "all", sort: "updated_at", order: "desc" };
 }
 function knowledgeStatusValue(value) {
     switch (value) {

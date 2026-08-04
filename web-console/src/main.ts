@@ -26,7 +26,7 @@ import type { BootstrapStatus } from "./types.js";
 import { createThemeController } from "./theme.js";
 import { bindConsoleNavigation } from "./console-shell.js";
 import { initializeTodo } from "./views/todo/todo.js";
-import { initializeKnowledge } from "./views/knowledge/knowledge.js";
+import { disposeKnowledge, initializeKnowledge } from "./views/knowledge/knowledge.js";
 import { createBackgroundController, installBackgroundConsoleUnlock, unlockPreferencePatch, type BackgroundFile } from "./background.js";
 import { cacheFileBlob, clearFileBlobCache, deleteCachedFileBlob, readCachedFileBlob } from "./file-cache.js";
 
@@ -309,6 +309,7 @@ async function logout(): Promise<void> {
   try {
     await logoutAdmin();
   } finally {
+    disposeKnowledge();
     backgroundController.dispose();
     void clearFileBlobCache();
     userDataController = null;

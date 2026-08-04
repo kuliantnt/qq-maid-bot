@@ -52,13 +52,19 @@ export class KnowledgePollingController {
         }
         const generation = ++this.generation;
         try {
-            const page = await this.deps.fetchPage(this.params);
+            const pages = await this.deps.fetchPages(this.params, this.pageCount());
             if (generation !== this.generation)
                 return;
-            this.reportTerminalTransitions(page.items);
-            this.items = [...page.items];
+            if (pages.length === 0) {
+                if (this.hasActive())
+                    this.schedule();
+                return;
+            }
+            const nextItems = pages.flatMap((page) => page.items);
+            this.reportTerminalTransitions(nextItems);
+            this.items = nextItems;
             this.failures = 0;
-            this.deps.onUpdate(page);
+            this.deps.onUpdate(pages);
             if (this.hasActive())
                 this.schedule();
         }
@@ -75,6 +81,9 @@ export class KnowledgePollingController {
                 this.schedule();
             }
         }
+    }
+    pageCount() {
+        return Math.max(1, this.params?.page ?? 1);
     }
     reportTerminalTransitions(nextItems) {
         const previous = new Map(this.items.map((item) => [item.file_id, item.status]));

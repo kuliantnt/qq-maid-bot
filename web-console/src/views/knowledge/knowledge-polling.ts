@@ -4,8 +4,8 @@ export type KnowledgePollingDeps = {
   readonly isVisible: () => boolean;
   readonly setTimeout: (fn: () => void, ms: number) => number;
   readonly clearTimeout: (id: number) => void;
-  readonly fetchPage: (params: KnowledgeFileListParams) => Promise<KnowledgeFilePage>;
-  readonly onUpdate: (page: KnowledgeFilePage) => void;
+  readonly fetchPages: (params: KnowledgeFileListParams, pageCount: number) => Promise<KnowledgeFilePage[]>;
+  readonly onUpdate: (pages: KnowledgeFilePage[]) => void;
   readonly onTransientError: (message: string) => void;
   readonly onTerminalTransition: (message: string) => void;
 };
@@ -69,12 +69,17 @@ export class KnowledgePollingController {
     }
     const generation = ++this.generation;
     try {
-      const page = await this.deps.fetchPage(this.params);
+      const pages = await this.deps.fetchPages(this.params, this.pageCount());
       if (generation !== this.generation) return;
-      this.reportTerminalTransitions(page.items);
-      this.items = [...page.items];
+      if (pages.length === 0) {
+        if (this.hasActive()) this.schedule();
+        return;
+      }
+      const nextItems = pages.flatMap((page) => page.items);
+      this.reportTerminalTransitions(nextItems);
+      this.items = nextItems;
       this.failures = 0;
-      this.deps.onUpdate(page);
+      this.deps.onUpdate(pages);
       if (this.hasActive()) this.schedule();
     } catch (cause) {
       if (generation !== this.generation) return;
@@ -87,6 +92,10 @@ export class KnowledgePollingController {
         this.schedule();
       }
     }
+  }
+
+  private pageCount(): number {
+    return Math.max(1, this.params?.page ?? 1);
   }
 
   private reportTerminalTransitions(nextItems: readonly KnowledgeFileItem[]): void {

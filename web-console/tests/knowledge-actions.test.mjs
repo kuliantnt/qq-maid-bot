@@ -11,6 +11,7 @@ function item(overrides = {}) {
 
 function setup() {
   installDomGlobals(createFakeDom());
+  document.body = document.createElement("div");
   const statuses = [];
   const refreshes = [];
   const handlers = createKnowledgeActionHandlers({
@@ -29,6 +30,7 @@ function button(fileId, label) {
   const value = document.createElement("button");
   value.dataset.fileId = fileId;
   value.textContent = label;
+  document.body?.append(value);
   return value;
 }
 
@@ -150,7 +152,6 @@ test("delete dialog has safe focus, confirmation guard, and conflict feedback", 
   const cancel = dialog.children[2];
   const confirm = dialog.children[3];
   assert.equal(cancel.focused, true);
-  dialog.listeners.get("click")[0]({ target: dialog });
   assert.equal(dialog.getAttribute("open"), "");
   confirm.onclick();
   confirm.onclick();
@@ -175,4 +176,18 @@ test("delete dialog has safe focus, confirmation guard, and conflict feedback", 
   assert.equal(conflict.statuses.at(-1), "文件正在处理中，暂不能删除");
   assert.equal(conflictOpener.focused, true);
   conflictHandlers.onDelete(item({ status: "processing" }));
+});
+
+test("delete dialog is a singleton and Escape restores the opener focus", () => {
+  const { handlers } = setup();
+  const first = button("file-a", "删除");
+  handlers.onDelete(item({ file_id: "file-a", filename: "a.md" }));
+  const dialog = document.querySelector('[role="alertdialog"]');
+  handlers.onDelete(item({ file_id: "file-a", filename: "b.md" }));
+  assert.equal(document.querySelectorAll("#knowledge-delete-title").length, 1);
+  assert.equal(document.querySelectorAll("#knowledge-delete-message").length, 1);
+  assert.equal(document.querySelectorAll('[role="alertdialog"]').length, 1);
+  dialog.listeners.get("cancel")[0]({});
+  assert.equal(dialog.getAttribute("open"), null);
+  assert.equal(first.focused, true);
 });
