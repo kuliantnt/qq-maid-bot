@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { ConsoleApiError } from "../dist/api.js";
-import { createKnowledgeActionHandlers } from "../dist/views/knowledge/knowledge-actions.js";
+import { createKnowledgeActionHandlers, triggerBrowserDownload } from "../dist/views/knowledge/knowledge-actions.js";
 import { createFakeDom, installDomGlobals } from "./helpers/fake-dom.mjs";
 
 function item(overrides = {}) {
@@ -33,6 +33,65 @@ function button(fileId, label) {
 }
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test("browser download attaches the anchor and defers blob URL revocation", () => {
+  const previousDocument = globalThis.document;
+  const previousUrl = globalThis.URL;
+  const previousWindow = globalThis.window;
+  const href = "blob:test-download";
+  const revoked = [];
+  const timers = [];
+  const body = {
+    children: [],
+    append(anchor) {
+      this.children.push(anchor);
+      anchor.parentNode = this;
+    },
+    removeChild(anchor) {
+      this.children.splice(this.children.indexOf(anchor), 1);
+      anchor.parentNode = null;
+    },
+  };
+  const anchor = {
+    style: {},
+    href: "",
+    download: "",
+    parentNode: null,
+    click() {
+      assert.equal(this.parentNode, body);
+      assert.equal(revoked.length, 0);
+    },
+    remove() {
+      this.parentNode.removeChild(this);
+    },
+  };
+  globalThis.document = { body, createElement: () => anchor };
+  globalThis.URL = {
+    createObjectURL: (blob) => {
+      assert.ok(blob instanceof Blob);
+      return href;
+    },
+    revokeObjectURL: (value) => revoked.push(value),
+  };
+  globalThis.window = { setTimeout: (callback, delay) => timers.push({ callback, delay }) };
+
+  try {
+    triggerBrowserDownload(new Blob(["guide"]), "guide.md");
+    assert.equal(anchor.download, "guide.md");
+    assert.equal(anchor.href, href);
+    assert.equal(anchor.style.display, "none");
+    assert.equal(body.children.length, 0);
+    assert.deepEqual(revoked, []);
+    assert.equal(timers.length, 1);
+    assert.equal(timers[0].delay, 60_000);
+    timers[0].callback();
+    assert.deepEqual(revoked, [href]);
+  } finally {
+    globalThis.document = previousDocument;
+    globalThis.URL = previousUrl;
+    globalThis.window = previousWindow;
+  }
+});
 
 test("download guards unavailable rows and disables its own button while running", async () => {
   const { handlers } = setup();

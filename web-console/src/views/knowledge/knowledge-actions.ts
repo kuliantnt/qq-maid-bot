@@ -19,12 +19,16 @@ type KnowledgeActionHandlers = {
 };
 
 export function triggerBrowserDownload(blob: Blob, filename: string): void {
+  if (typeof URL === "undefined" || typeof document === "undefined" || document.body === null) return;
   const href = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = href;
   anchor.download = filename;
+  anchor.style.display = "none";
+  document.body.append(anchor);
   anchor.click();
-  URL.revokeObjectURL(href);
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(href), 60_000);
 }
 
 export function createKnowledgeActionHandlers(deps: KnowledgeActionDeps): KnowledgeActionHandlers {

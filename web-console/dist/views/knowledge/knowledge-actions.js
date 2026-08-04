@@ -1,11 +1,16 @@
 import { ConsoleApiError } from "../../api.js";
 export function triggerBrowserDownload(blob, filename) {
+    if (typeof URL === "undefined" || typeof document === "undefined" || document.body === null)
+        return;
     const href = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = href;
     anchor.download = filename;
+    anchor.style.display = "none";
+    document.body.append(anchor);
     anchor.click();
-    URL.revokeObjectURL(href);
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(href), 60_000);
 }
 export function createKnowledgeActionHandlers(deps) {
     // 操作锁按按钮实例隔离，避免重复点击同一行，同时不阻塞其他文件的独立操作。
