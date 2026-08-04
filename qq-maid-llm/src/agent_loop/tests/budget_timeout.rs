@@ -473,14 +473,17 @@ async fn streaming_advance_timeout_before_visible_delta_falls_back_once() {
     );
     let advance_calls = session.advance_calls.clone();
 
-    let advance = super::runner::advance_with_optional_streaming(
+    let advance = crate::agent_loop::streaming::advance_with_optional_streaming(
         &mut session,
         &[],
         true,
-        Some(delta_sink(Arc::new(StdMutex::new(Vec::new())))),
-        std::time::Duration::from_millis(10),
-        std::time::Duration::from_millis(50),
-        0,
+        crate::agent_loop::streaming::StreamingAdvanceOptions {
+            final_delta_sink: Some(delta_sink(Arc::new(StdMutex::new(Vec::new())))),
+            streaming_timeout: std::time::Duration::from_millis(10),
+            non_stream_timeout: std::time::Duration::from_millis(50),
+            round: 0,
+        },
+        &AgentRunHandle::default(),
     )
     .await
     .unwrap();
@@ -502,14 +505,17 @@ async fn streaming_advance_timeout_after_visible_delta_does_not_fallback() {
     let advance_calls = session.advance_calls.clone();
     let deltas = Arc::new(StdMutex::new(Vec::new()));
 
-    let err = super::runner::advance_with_optional_streaming(
+    let err = crate::agent_loop::streaming::advance_with_optional_streaming(
         &mut session,
         &[],
         false,
-        Some(delta_sink(deltas.clone())),
-        std::time::Duration::from_millis(10),
-        std::time::Duration::from_millis(50),
-        0,
+        crate::agent_loop::streaming::StreamingAdvanceOptions {
+            final_delta_sink: Some(delta_sink(deltas.clone())),
+            streaming_timeout: std::time::Duration::from_millis(10),
+            non_stream_timeout: std::time::Duration::from_millis(50),
+            round: 0,
+        },
+        &AgentRunHandle::default(),
     )
     .await
     .unwrap_err();
@@ -517,6 +523,35 @@ async fn streaming_advance_timeout_after_visible_delta_does_not_fallback() {
     assert_eq!(err.code, "timeout");
     assert_eq!(err.stage, "agent_stream_after_delta");
     assert_eq!(*deltas.lock().unwrap(), vec!["半句".to_owned()]);
+    assert_eq!(*advance_calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn insufficient_remaining_budget_skips_non_stream_fallback() {
+    let mut session = StreamingSession::new(
+        StreamingAction::ErrorBeforeDelta,
+        vec![final_reply("must not start")],
+    );
+    let advance_calls = session.advance_calls.clone();
+    let handle = AgentRunHandle::with_timeout(std::time::Duration::from_millis(20));
+
+    let err = crate::agent_loop::streaming::advance_with_optional_streaming(
+        &mut session,
+        &[],
+        true,
+        crate::agent_loop::streaming::StreamingAdvanceOptions {
+            final_delta_sink: Some(delta_sink(Arc::new(StdMutex::new(Vec::new())))),
+            streaming_timeout: std::time::Duration::from_millis(50),
+            non_stream_timeout: std::time::Duration::from_millis(50),
+            round: 0,
+        },
+        &handle,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.code, "timeout");
+    assert_eq!(err.stage, "agent_loop");
     assert_eq!(*advance_calls.lock().unwrap(), 0);
 }
 

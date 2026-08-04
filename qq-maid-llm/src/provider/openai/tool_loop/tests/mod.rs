@@ -2,7 +2,10 @@ use super::{
     payload::{enforce_tool_loop_budget, openai_tool_loop_payload},
     response::{FunctionCall, extract_function_calls},
     session::ResponsesAgentSession,
-    streaming::{finalize_responses_tool_loop_stream, observe_responses_function_call_event},
+    streaming::{
+        StreamFinalization, finalize_responses_tool_loop_stream,
+        observe_responses_function_call_event,
+    },
 };
 use crate::{
     agent_loop::{
@@ -538,6 +541,57 @@ async fn spawn_never_closing_completed_stream() -> String {
 
 async fn spawn_never_closing_done_stream() -> String {
     let app = Router::new().route("/v1/responses", post(done_stream_that_never_closes));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}/v1")
+}
+
+async fn static_sse_handler(State(body): State<Arc<String>>) -> Response<Body> {
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(Body::from(body.as_str().to_owned()))
+        .unwrap()
+}
+
+async fn spawn_static_sse_stream(body: impl Into<String>) -> String {
+    let body = Arc::new(body.into());
+    let app = Router::new()
+        .route("/v1/responses", post(static_sse_handler))
+        .with_state(body);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}/v1")
+}
+
+async fn reset_sse_handler() -> Response<Body> {
+    let delta = Bytes::from_static(
+        b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+    );
+    let body = Body::from_stream(
+        stream::once(async move { Ok::<Bytes, std::io::Error>(delta) }).chain(stream::once(
+            async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "simulated reset",
+                ))
+            },
+        )),
+    );
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(body)
+        .unwrap()
+}
+
+async fn spawn_reset_sse_stream() -> String {
+    let app = Router::new().route("/v1/responses", post(reset_sse_handler));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {

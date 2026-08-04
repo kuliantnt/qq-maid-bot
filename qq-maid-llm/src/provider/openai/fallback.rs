@@ -12,6 +12,14 @@ pub(crate) fn should_retry_non_stream_after_empty_stream(outcome: &ChatOutcome) 
 
 /// 当流式链路直接失败时，是否应该补一次同 provider 的非流式请求。
 pub(crate) fn should_retry_non_stream_after_stream_error(err: &LlmError) -> bool {
+    // 已经生成过有效文本后再次发送同一完整请求会重复计费且可能生成不一致答案；
+    // 这类失败交给调用方的部分响应/候选策略处理，绝不做同 Provider 非流式重放。
+    if matches!(
+        err.stage.as_str(),
+        "stream_after_delta" | "stream_read_after_delta"
+    ) {
+        return false;
+    }
     matches!(
         err.code.as_str(),
         "provider_error" | "http_error" | "network_error" | "timeout"
@@ -24,9 +32,7 @@ pub(crate) fn should_retry_non_stream_after_stream_error(err: &LlmError) -> bool
             | "http_request_timeout"
             | "response_read"
             | "stream_read"
-            | "stream_read_after_delta"
             | "sse"
-            | "stream_after_delta"
     )
 }
 

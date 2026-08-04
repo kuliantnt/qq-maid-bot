@@ -35,11 +35,13 @@
 //! | [`types`] | 协议无关的 `AgentStep` / `AgentToolCall` / `AgentToolResult` / `AgentSessionRequest` |
 //! | [`session`] | `AgentStepSession` trait（Provider 单步适配契约） |
 //! | [`runner`] | `run_agent_loop` 统一循环控制 + usage 合并 |
+//! | [`streaming`] | 流式单步、可见输出所有权与受预算约束的非流式回退 |
 //! | [`diagnostics`] | 尺寸诊断纯逻辑与 DEBUG 门控日志（Issue #361） |
 
 mod diagnostics;
 pub mod runner;
 pub mod session;
+pub(super) mod streaming;
 pub mod types;
 
 pub(crate) use diagnostics::{log_input_size_after_append, tool_result_chars};

@@ -258,6 +258,23 @@ async fn tool_candidate_failure_then_success_keeps_request_counters() {
 }
 
 #[tokio::test]
+async fn tool_candidate_fallback_is_skipped_when_remaining_budget_is_insufficient() {
+    let (provider, first, second) =
+        handle_route_provider(HandleBehavior::Failed, HandleBehavior::Success);
+    let mut req = tool_request();
+    req.run_handle = Some(AgentRunHandle::with_timeout(
+        std::time::Duration::from_millis(20),
+    ));
+
+    let err = provider.chat_with_tools(req).await.unwrap_err();
+
+    assert_eq!(err.code, "timeout");
+    assert_eq!(err.stage, "agent_loop");
+    assert_eq!(first.calls(), 1);
+    assert_eq!(second.calls(), 0);
+}
+
+#[tokio::test]
 async fn tool_candidate_does_not_fallback_after_tool_side_effect_started() {
     let (provider, first, second) = handle_route_provider(
         HandleBehavior::FailedAfterToolStart,

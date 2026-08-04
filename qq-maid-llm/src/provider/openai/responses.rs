@@ -3,6 +3,8 @@
 //! 这里仅负责 Responses API 的流式/非流式聊天执行，以及在需要时回退到同 provider
 //! 的非流式请求；不直接接触 Chat Completions，以保证 Responses 与 fallback provider 解耦。
 
+use std::error::Error as _;
+
 use futures::stream;
 use serde_json::Value;
 
@@ -302,7 +304,9 @@ async fn next_responses_stream_event(
                         continue;
                     };
                     state.frame_buffer.clear();
-                    if !is_openai_responses_done_sentinel(&event.data) {
+                    if is_openai_responses_done_sentinel(&event.data) {
+                        state.saw_done = true;
+                    } else {
                         state.recorder.mark_event();
                         match handle_openai_chat_stream_event(
                             event,
@@ -328,10 +332,39 @@ async fn next_responses_stream_event(
                     state.recorder.mark_token();
                     return Some(Ok(LlmStreamEvent::TextDelta(answer)));
                 }
+                if state.saw_done && !state.answer.trim().is_empty() {
+                    state.finished = true;
+                    return Some(Ok(LlmStreamEvent::Completed {
+                        usage: None,
+                        finish_reason: None,
+                        fallback_used: false,
+                    }));
+                }
                 if !state.saw_completed {
+                    if !state.answer.trim().is_empty() {
+                        // HTTP body 正常结束、SSE 均已完整解析且已有可用文本时，兼容
+                        // 少数省略 completed/[DONE] 的 Responses 网关；该分支不修改
+                        // saw_completed，日志也明确标记为 compat EOF completion。
+                        tracing::warn!(
+                            http_status = state.response.status().as_u16(),
+                            stream_end_kind = "normal_eof_compatible_completion",
+                            normal_eof = true,
+                            saw_completed = false,
+                            saw_done = state.saw_done,
+                            saw_text_delta = true,
+                            visible_text_chars = state.answer.chars().count(),
+                            "OpenAI Responses chat stream used compatible completion after normal HTTP EOF"
+                        );
+                        state.finished = true;
+                        return Some(Ok(LlmStreamEvent::Completed {
+                            usage: None,
+                            finish_reason: None,
+                            fallback_used: false,
+                        }));
+                    }
                     state.finished = true;
                     return Some(Err(incomplete_stream_eof_error(
-                        "OpenAI Responses chat stream ended before response.completed",
+                        "OpenAI Responses chat stream ended normally without usable content",
                         &state.answer,
                     )));
                 }
@@ -381,6 +414,34 @@ pub(crate) fn stream_transport_error(
         "stream_read_after_delta"
     };
     LlmError::from_error_source(&error, crate::error::LlmErrorKind::Network, stage, context)
+}
+
+/// 只依据底层结构化 I/O error kind 判断连接是否异常中断，不匹配错误文案。
+pub(crate) fn is_connection_reset_error(error: &reqwest::Error) -> bool {
+    // reqwest/hyper 有时把 HTTP body 提前终止保留为 body error，而底层 io::Error
+    // 不再出现在可 downcast 的 source chain；这仍是结构化类别，不依赖文案。
+    if (error.is_body() || error.is_decode()) && !error.is_timeout() {
+        return true;
+    }
+    let mut source = error.source();
+    while let Some(current) = source {
+        if let Some(io_error) = current.downcast_ref::<std::io::Error>()
+            && matches!(
+                io_error.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+            )
+        {
+            return true;
+        }
+        source = current.source();
+    }
+    // 本 helper 只在 `Response::chunk()` 返回 Err 时调用；排除结构化 timeout 后，
+    // 剩余错误都表示 HTTP body 未按正常 EOF 收尾，应归入连接/正文中断，而不是
+    // SSE 解析错误。更具体的 I/O kind 可用时仍由上面的分支优先确认。
+    !error.is_timeout()
 }
 
 #[cfg(test)]
@@ -582,7 +643,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn openai_responses_stream_requires_completed_after_delta() {
+    async fn openai_responses_stream_accepts_normal_eof_after_valid_text_delta() {
         let (base_url, _state) = spawn_mock_responses(
             "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"半截\"}\n\n"
                 .to_owned(),
@@ -593,10 +654,9 @@ mod tests {
         let messages = [ChatMessage::user("hi")];
         let req = stream_req(&client, &base_url, &messages);
 
-        let err = openai_responses_stream_chat(&req).await.unwrap_err();
+        let outcome = openai_responses_stream_chat(&req).await.unwrap();
 
-        assert_eq!(err.stage, "stream_after_delta");
-        assert!(err.message.contains("response.completed"));
+        assert_eq!(outcome.reply, "半截");
     }
 
     #[tokio::test]

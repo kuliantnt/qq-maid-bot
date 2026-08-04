@@ -176,7 +176,7 @@ impl AgentRunHandle {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(reason) = request_termination_reason(&state.diagnostics) {
+        if let Some(reason) = refresh_termination_reason(&mut state) {
             return Err(termination_error(reason, "before model candidate")
                 .with_agent(state.diagnostics.clone()));
         }
@@ -198,7 +198,7 @@ impl AgentRunHandle {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(reason) = request_termination_reason(&state.diagnostics) {
+        if let Some(reason) = refresh_termination_reason(&mut state) {
             return Err(termination_error(reason, "before agent session")
                 .with_agent(state.diagnostics.clone()));
         }
@@ -234,7 +234,7 @@ impl AgentRunHandle {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(reason) = request_termination_reason(&state.diagnostics) {
+        if let Some(reason) = refresh_termination_reason(&mut state) {
             return Err(termination_error(reason, "before model request")
                 .with_agent(state.diagnostics.clone()));
         }
@@ -244,11 +244,11 @@ impl AgentRunHandle {
 
     /// 在异步 provider 调用返回后重新确认请求未被外部终止。
     pub(crate) fn ensure_request_active(&self, context: &str) -> Result<(), LlmError> {
-        let state = self
+        let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(reason) = request_termination_reason(&state.diagnostics) {
+        if let Some(reason) = refresh_termination_reason(&mut state) {
             return Err(termination_error(reason, context).with_agent(state.diagnostics.clone()));
         }
         Ok(())
@@ -264,7 +264,7 @@ impl AgentRunHandle {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(reason) = request_termination_reason(&state.diagnostics) {
+        if let Some(reason) = refresh_termination_reason(&mut state) {
             return Err(termination_error(reason, "before tool execution")
                 .with_agent(state.diagnostics.clone()));
         }
@@ -384,7 +384,7 @@ impl AgentRunHandle {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if request_termination_reason(&state.diagnostics).is_none() {
+        if refresh_termination_reason(&mut state).is_none() {
             state.diagnostics.stop_reason = Some(reason);
         }
         drop(state);
@@ -393,11 +393,11 @@ impl AgentRunHandle {
     }
 
     pub fn is_cancelled(&self) -> bool {
-        let state = self
+        let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        request_termination_reason(&state.diagnostics).is_some()
+        refresh_termination_reason(&mut state).is_some()
     }
 
     pub(crate) async fn cancelled(&self) {
@@ -435,6 +435,22 @@ fn request_termination_reason(diagnostics: &AgentRunDiagnostics) -> Option<Agent
             AgentStopReason::Timeout | AgentStopReason::Cancelled
         )
     })
+}
+
+/// 用 Tokio 单调时钟把 deadline 到期同步为请求级 Timeout，避免候选或内部
+/// fallback 在外层预算耗尽后再启动一次新的上游请求。
+fn refresh_termination_reason(state: &mut AgentRunState) -> Option<AgentStopReason> {
+    if let Some(reason) = request_termination_reason(&state.diagnostics) {
+        return Some(reason);
+    }
+    if state
+        .deadline
+        .is_some_and(|deadline| deadline <= Instant::now())
+    {
+        state.diagnostics.stop_reason = Some(AgentStopReason::Timeout);
+        return Some(AgentStopReason::Timeout);
+    }
+    None
 }
 
 fn termination_error(reason: AgentStopReason, context: &str) -> LlmError {

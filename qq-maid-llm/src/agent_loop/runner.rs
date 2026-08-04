@@ -9,20 +9,16 @@
 //! 非流式语义：返回与改造前等价的完整结果；工具副作用只在此执行一次，不因
 //! 后续模型或发送重试而重复。
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-};
 use std::time::Instant;
 
 use futures::future::{Either, select};
-use tokio::time::{Duration, timeout};
+use tokio::time::Duration;
 use tracing::{debug, warn};
 
 use crate::{
     agent_loop::{
-        AgentRunDiagnostics, AgentRunHandle, AgentStopReason, AgentTextDeltaFuture,
-        AgentTextDeltaSink, ToolLoopProgressSink, tool_result_chars,
+        AgentRunDiagnostics, AgentRunHandle, AgentStopReason, AgentTextDeltaSink,
+        ToolLoopProgressSink, tool_result_chars,
     },
     error::LlmError,
     metrics::MetricsRecorder,
@@ -35,6 +31,7 @@ use crate::{
 };
 
 use super::session::AgentStepSession;
+use super::streaming::{StreamingAdvanceOptions, advance_with_optional_streaming};
 use super::types::AgentAttemptBaseline;
 use super::types::{AgentStep, AgentToolCall, AgentToolResult};
 
@@ -190,21 +187,45 @@ pub(super) async fn run_agent_loop_with_timeouts(
             session.as_mut(),
             &results,
             allow_tool_calls,
-            final_delta_sink.clone(),
-            streaming_timeout,
-            non_stream_timeout,
-            round,
+            StreamingAdvanceOptions {
+                final_delta_sink: final_delta_sink.clone(),
+                streaming_timeout,
+                non_stream_timeout,
+                round,
+            },
+            &run_handle,
         );
         let model_round_started = Instant::now();
         let advance_future = Box::pin(advance_future);
         let cancellation = Box::pin(run_handle.cancelled());
-        let advance_result = match select(advance_future, cancellation).await {
-            Either::Left((result, _)) => result,
-            Either::Right((_, _)) => Err(LlmError::new(
-                "cancelled",
-                "agent run cancelled",
-                "agent_loop",
-            )),
+        let advance_result = if let Some(remaining_budget) = run_handle.remaining_budget() {
+            let advance_or_cancel = Box::pin(async {
+                match select(advance_future, cancellation).await {
+                    Either::Left((result, _)) => result,
+                    Either::Right((_, _)) => Err(LlmError::new(
+                        "cancelled",
+                        "agent run cancelled",
+                        "agent_loop",
+                    )),
+                }
+            });
+            let budget = Box::pin(tokio::time::sleep(remaining_budget));
+            match select(advance_or_cancel, budget).await {
+                Either::Left((result, _)) => result,
+                Either::Right((_, _)) => {
+                    run_handle.cancel(AgentStopReason::Timeout);
+                    Err(LlmError::timeout("agent_loop"))
+                }
+            }
+        } else {
+            match select(advance_future, cancellation).await {
+                Either::Left((result, _)) => result,
+                Either::Right((_, _)) => Err(LlmError::new(
+                    "cancelled",
+                    "agent run cancelled",
+                    "agent_loop",
+                )),
+            }
         };
         debug!(
             provider = provider.as_str(),
@@ -487,221 +508,6 @@ pub(super) async fn run_agent_loop_with_timeouts(
     ))
 }
 
-pub(super) async fn advance_with_optional_streaming(
-    session: &mut (dyn AgentStepSession + Send),
-    results: &[AgentToolResult],
-    allow_tool_calls: bool,
-    final_delta_sink: Option<AgentTextDeltaSink>,
-    streaming_timeout: Duration,
-    non_stream_timeout: Duration,
-    round: usize,
-) -> Result<AgentAdvance, LlmError> {
-    let Some(sink) = final_delta_sink else {
-        return advance_non_stream_with_timeout(
-            session,
-            results,
-            allow_tool_calls,
-            non_stream_timeout,
-        )
-        .await
-        .map(|step| AgentAdvance {
-            step,
-            fallback_used: false,
-        });
-    };
-    let emitted_visible_delta = Arc::new(AtomicBool::new(false));
-    let tracked_sink = track_visible_delta_sink(sink, emitted_visible_delta.clone());
-    let activity_counter = session.streaming_activity_counter();
-    let streaming_started = Instant::now();
-    let streaming = advance_streaming_until_complete_or_first_activity_timeout(
-        session,
-        results,
-        allow_tool_calls,
-        tracked_sink,
-        activity_counter,
-        streaming_timeout,
-    )
-    .await;
-    let streaming_elapsed_ms = streaming_started.elapsed().as_millis();
-    match streaming {
-        StreamingAttempt::Completed(Ok(Some(step))) => Ok(AgentAdvance {
-            step,
-            fallback_used: false,
-        }),
-        StreamingAttempt::Completed(Ok(None)) => {
-            fallback_to_non_stream(
-                session,
-                results,
-                allow_tool_calls,
-                non_stream_timeout,
-                round,
-                streaming_elapsed_ms,
-                "advance_streaming_none",
-                None,
-                false,
-            )
-            .await
-        }
-        StreamingAttempt::Completed(Err(err)) if !emitted_visible_delta.load(Ordering::SeqCst) => {
-            let diagnostics = session.streaming_diagnostics();
-            let fallback_reason = diagnostics
-                .fallback_reason
-                .as_deref()
-                .unwrap_or_else(|| classify_streaming_error(&err));
-            fallback_to_non_stream(
-                session,
-                results,
-                allow_tool_calls,
-                non_stream_timeout,
-                round,
-                streaming_elapsed_ms,
-                fallback_reason,
-                Some(&err),
-                true,
-            )
-            .await
-        }
-        StreamingAttempt::FirstActivityTimedOut
-            if !emitted_visible_delta.load(Ordering::SeqCst) =>
-        {
-            fallback_to_non_stream(
-                session,
-                results,
-                allow_tool_calls,
-                non_stream_timeout,
-                round,
-                streaming_elapsed_ms,
-                "streaming_step_timeout",
-                None,
-                true,
-            )
-            .await
-        }
-        StreamingAttempt::Completed(Err(err)) => Err(err),
-        StreamingAttempt::FirstActivityTimedOut => {
-            Err(LlmError::timeout("agent_stream_after_delta"))
-        }
-    }
-}
-
-enum StreamingAttempt {
-    Completed(Result<Option<AgentStep>, LlmError>),
-    FirstActivityTimedOut,
-}
-
-async fn advance_streaming_until_complete_or_first_activity_timeout(
-    session: &mut (dyn AgentStepSession + Send),
-    results: &[AgentToolResult],
-    allow_tool_calls: bool,
-    tracked_sink: AgentTextDeltaSink,
-    activity_counter: Option<Arc<AtomicUsize>>,
-    first_activity_timeout: Duration,
-) -> StreamingAttempt {
-    let Some(activity_counter) = activity_counter else {
-        return match timeout(
-            first_activity_timeout,
-            session.advance_streaming(results, allow_tool_calls, tracked_sink),
-        )
-        .await
-        {
-            Ok(result) => StreamingAttempt::Completed(result),
-            Err(_) => StreamingAttempt::FirstActivityTimedOut,
-        };
-    };
-
-    let streaming = Box::pin(session.advance_streaming(results, allow_tool_calls, tracked_sink));
-    let deadline = Box::pin(tokio::time::sleep(first_activity_timeout));
-    match select(streaming, deadline).await {
-        Either::Left((result, _)) => StreamingAttempt::Completed(result),
-        Either::Right((_, streaming)) => {
-            if activity_counter.load(Ordering::SeqCst) > 0 {
-                StreamingAttempt::Completed(streaming.await)
-            } else {
-                StreamingAttempt::FirstActivityTimedOut
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(super) struct AgentAdvance {
-    pub(super) step: AgentStep,
-    pub(super) fallback_used: bool,
-}
-
-async fn advance_non_stream_with_timeout(
-    session: &mut (dyn AgentStepSession + Send),
-    results: &[AgentToolResult],
-    allow_tool_calls: bool,
-    step_timeout: Duration,
-) -> Result<AgentStep, LlmError> {
-    timeout(step_timeout, session.advance(results, allow_tool_calls))
-        .await
-        .map_err(|_| LlmError::timeout("agent_step"))?
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn fallback_to_non_stream(
-    session: &mut (dyn AgentStepSession + Send),
-    results: &[AgentToolResult],
-    allow_tool_calls: bool,
-    non_stream_timeout: Duration,
-    round: usize,
-    streaming_elapsed_ms: u128,
-    fallback_reason: &str,
-    err: Option<&LlmError>,
-    fallback_used: bool,
-) -> Result<AgentAdvance, LlmError> {
-    let diagnostics = session.streaming_diagnostics();
-    let fallback_started = Instant::now();
-    let result =
-        advance_non_stream_with_timeout(session, results, allow_tool_calls, non_stream_timeout)
-            .await;
-    let non_stream_fallback_elapsed_ms = fallback_started.elapsed().as_millis();
-    tracing::info!(
-        provider = session.provider(),
-        model = %session.model(),
-        round,
-        allow_tool_calls,
-        follows_tool_results = !results.is_empty(),
-        streaming_elapsed_ms,
-        fallback_reason,
-        error_code = err.map(|item| item.code.as_str()).unwrap_or("none"),
-        error_stage = err.map(|item| item.stage.as_str()).unwrap_or("none"),
-        chunk_count = diagnostics.chunk_count,
-        sse_event_count = diagnostics.sse_event_count,
-        saw_done = diagnostics.saw_done,
-        saw_completed = diagnostics.saw_completed,
-        buffered_delta_count = diagnostics.buffered_delta_count,
-        active_function_call_count = diagnostics.active_function_call_count,
-        non_stream_fallback_elapsed_ms,
-        non_stream_fallback_succeeded = result.is_ok(),
-        "streaming agent fallback completed"
-    );
-    result
-        .map(|step| AgentAdvance {
-            step,
-            fallback_used,
-        })
-        .map_err(|mut err| {
-            if fallback_used {
-                let mut diagnostics = err.agent.take().map(|item| *item).unwrap_or_default();
-                diagnostics.streaming_fallback_used = true;
-                err.with_agent(diagnostics)
-            } else {
-                err
-            }
-        })
-}
-
-fn classify_streaming_error(err: &LlmError) -> &'static str {
-    if err.code == "http_error" || err.stage == "http" || err.stage == "sse" {
-        "http_sse_parse_error"
-    } else {
-        "provider_error_other"
-    }
-}
-
 fn agent_stop_reason(emitted_tools: &[String], executor: &ToolLoopExecutor<'_>) -> AgentStopReason {
     if emitted_tools.is_empty() {
         return AgentStopReason::DirectAnswer;
@@ -797,20 +603,6 @@ fn agent_error(
         stop_reason,
         baseline,
     ))
-}
-
-fn track_visible_delta_sink(
-    sink: AgentTextDeltaSink,
-    emitted_visible_delta: Arc<AtomicBool>,
-) -> AgentTextDeltaSink {
-    Arc::new(move |delta| {
-        let sink = sink.clone();
-        let emitted_visible_delta = emitted_visible_delta.clone();
-        Box::pin(async move {
-            emitted_visible_delta.store(true, Ordering::SeqCst);
-            sink(delta).await
-        }) as AgentTextDeltaFuture
-    })
 }
 
 /// 执行同轮一批工具调用，返回回填给下一轮 `advance` 的结果。
