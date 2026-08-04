@@ -14,12 +14,15 @@ use crate::{
     agent_loop::{AgentStep, AgentStreamingDiagnostics, AgentTextDeltaSink, AgentToolCall},
     error::LlmError,
     metrics::MetricsRecorder,
-    sse::{SseFrame, parse_sse_frame, take_sse_frame},
+    sse::{SseFrame, is_ignorable_sse_eof_tail, parse_sse_frame, take_sse_frame},
 };
 
 use crate::provider::openai::{
     extract::{extract_response_output_text, extract_response_usage},
-    responses::{incomplete_stream_eof_error, is_connection_reset_error, stream_transport_error},
+    responses::{
+        incomplete_sse_frame_error, incomplete_stream_eof_error, is_connection_reset_error,
+        stream_transport_error,
+    },
     stream::{
         handle_openai_chat_stream_event, is_openai_responses_done_sentinel,
         responses_stream_is_complete,
@@ -216,16 +219,14 @@ pub(super) async fn collect_responses_tool_loop_stream(
     }
 
     // `Response::chunk()` 返回 Ok(None) 才表示 HTTP body 正常 EOF。先记录传输层
-    // 事实，再解析尾部残帧；若尾帧损坏，normal_eof 与 parse_error 会同时为 true，
+    // 事实，再检查尾部残帧；若尾帧损坏，normal_eof 与 parse_error 会同时为 true，
     // stream_end_kind 则明确标记 SSE 截断，且绝不会进入兼容完成。
     update_streaming_diagnostics(&diagnostics, |item| item.normal_eof = true);
 
     if !frame_buffer.is_empty() {
-        let Some(event) = parse_sse_frame(&frame_buffer).inspect_err(|_| {
-            mark_stream_parse_error(&diagnostics);
-        })?
-        else {
+        if is_ignorable_sse_eof_tail(&frame_buffer) {
             frame_buffer.clear();
+        } else {
             update_streaming_diagnostics(&diagnostics, |item| {
                 item.parse_error = true;
                 item.stream_end_kind = Some("sse_incomplete_frame".to_owned());
@@ -238,48 +239,7 @@ pub(super) async fn collect_responses_tool_loop_stream(
                 buffered_text_chars(&buffered_deltas),
                 active_function_calls.len(),
             );
-            return Err(incomplete_stream_eof_error(
-                "OpenAI Responses tool loop stream ended with an incomplete SSE frame",
-                &answer,
-            ));
-        };
-        observe_sse_event(&diagnostics, &event);
-        activity_counter.fetch_add(1, Ordering::SeqCst);
-        if is_openai_responses_done_sentinel(&event.data) {
-            update_streaming_diagnostics(&diagnostics, |item| {
-                item.saw_done = true;
-                item.stream_end_kind = Some("done_sentinel".to_owned());
-            });
-        }
-        if !is_openai_responses_done_sentinel(&event.data) {
-            observe_responses_function_call_event(
-                &event,
-                &mut active_function_calls,
-                &mut completed_output_items,
-            )
-            .inspect_err(|_| mark_stream_parse_error(&diagnostics))?;
-            recorder.mark_event();
-            match handle_openai_chat_stream_event(
-                event,
-                &mut recorder,
-                &mut answer,
-                &mut completed_response,
-                &mut saw_completed,
-            )
-            .inspect_err(|err| {
-                if err.stage == "sse" && err.message.starts_with("invalid ") {
-                    mark_stream_parse_error(&diagnostics);
-                }
-            })? {
-                Some(delta) if allow_tool_calls => buffered_deltas.push(delta),
-                Some(delta) => {
-                    update_streaming_diagnostics(&diagnostics, |item| {
-                        item.visible_text_chars += delta.chars().count();
-                    });
-                    text_delta_sink(delta).await?;
-                }
-                None => {}
-            }
+            return Err(incomplete_sse_frame_error(&answer));
         }
     }
 

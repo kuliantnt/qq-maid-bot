@@ -16,7 +16,7 @@ use crate::{
         ChatOutcome, LlmStream, LlmStreamEvent, collect_llm_stream,
         types::{ChatMessage, ReasoningEffort},
     },
-    sse::{parse_sse_frame, take_sse_frame},
+    sse::{is_ignorable_sse_eof_tail, parse_sse_frame, take_sse_frame},
 };
 
 use super::{
@@ -296,12 +296,11 @@ async fn next_responses_stream_event(
             }
             Ok(None) => {
                 if !state.frame_buffer.is_empty() {
-                    let Some(event) = (match parse_sse_frame(&state.frame_buffer) {
-                        Ok(event) => event,
-                        Err(err) => return Some(Err(err)),
-                    }) else {
-                        // HTTP 已正常 EOF，但残留字节既没有 SSE 分隔符，也无法解析出
-                        // data frame。此时必须按截断处理，不能清空后让已有文本进入兼容完成。
+                    if is_ignorable_sse_eof_tail(&state.frame_buffer) {
+                        state.frame_buffer.clear();
+                    } else {
+                        // HTTP 已正常 EOF，但非注释残留没有 SSE frame 分隔符。即使
+                        // parse_sse_frame 能宽松解析出 data，也不能把真实残帧当作完成。
                         tracing::warn!(
                             http_status = state.response.status().as_u16(),
                             stream_end_kind = "sse_incomplete_frame",
@@ -315,23 +314,6 @@ async fn next_responses_stream_event(
                         );
                         state.finished = true;
                         return Some(Err(incomplete_sse_frame_error(&state.answer)));
-                    };
-                    state.frame_buffer.clear();
-                    if is_openai_responses_done_sentinel(&event.data) {
-                        state.saw_done = true;
-                    } else {
-                        state.recorder.mark_event();
-                        match handle_openai_chat_stream_event(
-                            event,
-                            &mut state.recorder,
-                            &mut state.answer,
-                            &mut state.completed_response,
-                            &mut state.saw_completed,
-                        ) {
-                            Ok(Some(delta)) => return Some(Ok(LlmStreamEvent::TextDelta(delta))),
-                            Ok(None) => {}
-                            Err(err) => return Some(Err(err)),
-                        }
                     }
                 }
                 if state.answer.trim().is_empty()
@@ -416,7 +398,7 @@ pub(crate) fn incomplete_stream_eof_error(message: &str, answer: &str) -> LlmErr
     LlmError::provider(message, stage)
 }
 
-fn incomplete_sse_frame_error(answer: &str) -> LlmError {
+pub(crate) fn incomplete_sse_frame_error(answer: &str) -> LlmError {
     let stage = if answer.trim().is_empty() {
         "stream"
     } else {
@@ -669,9 +651,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn openai_responses_stream_accepts_normal_eof_after_valid_text_delta() {
-        let (base_url, _state) = spawn_mock_responses(
-            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"半截\"}\n\n"
+    async fn responses_stream_ignores_extra_newline_at_normal_eof() {
+        let (base_url, state) = spawn_mock_responses(
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"完整文本\"}\n\n\n"
                 .to_owned(),
             StatusCode::OK,
         )
@@ -682,7 +664,30 @@ mod tests {
 
         let outcome = openai_responses_stream_chat(&req).await.unwrap();
 
-        assert_eq!(outcome.reply, "半截");
+        assert_eq!(outcome.reply, "完整文本");
+        assert_eq!(outcome.reply.matches("完整文本").count(), 1);
+        assert_eq!(state.lock().await.calls, 1);
+    }
+
+    #[tokio::test]
+    async fn responses_stream_ignores_keep_alive_comment_at_normal_eof() {
+        let (base_url, state) = spawn_mock_responses(
+            concat!(
+                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"完整文本\"}\n\n",
+                ": keep-alive",
+            )
+            .to_owned(),
+            StatusCode::OK,
+        )
+        .await;
+        let client = qq_maid_common::http_client::client();
+        let messages = [ChatMessage::user("hi")];
+        let req = stream_req(&client, &base_url, &messages);
+
+        let outcome = openai_responses_stream_chat(&req).await.unwrap();
+
+        assert_eq!(outcome.reply, "完整文本");
+        assert_eq!(state.lock().await.calls, 1);
     }
 
     #[tokio::test]

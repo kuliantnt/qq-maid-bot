@@ -170,10 +170,10 @@ fn done_does_not_complete_an_unfinished_function_call() {
 }
 
 #[tokio::test]
-async fn normal_eof_with_text_and_no_function_call_is_compatible_completion() {
+async fn normal_eof_with_text_and_extra_newline_is_compatible_completion() {
     let base_url = spawn_static_sse_stream(concat!(
         "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"你\"}\n\n",
-        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"好\"}\n\n",
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"好\"}\n\n\n",
     ))
     .await;
     let mut session = test_streaming_session(base_url);
@@ -199,6 +199,36 @@ async fn normal_eof_with_text_and_no_function_call_is_compatible_completion() {
     assert_eq!(diagnostics.buffered_text_chars, 2);
     assert_eq!(diagnostics.visible_text_chars, 2);
     assert_eq!(diagnostics.active_function_call_count, 0);
+    assert_eq!(
+        diagnostics.stream_end_kind.as_deref(),
+        Some("normal_eof_compatible_completion")
+    );
+}
+
+#[tokio::test]
+async fn normal_eof_with_text_and_keep_alive_comment_is_compatible_completion() {
+    let base_url = spawn_static_sse_stream(concat!(
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"你好\"}\n\n",
+        ": keep-alive",
+    ))
+    .await;
+    let mut session = test_streaming_session(base_url);
+    let deltas = Arc::new(StdMutex::new(Vec::new()));
+
+    let step = session
+        .advance_streaming(&[], true, recording_delta_sink(deltas.clone()))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let AgentStep::FinalAnswer { reply, .. } = step else {
+        panic!("expected compatible EOF final answer");
+    };
+    assert_eq!(reply, "你好");
+    assert_eq!(*deltas.lock().unwrap(), ["你好"]);
+    let diagnostics = session.streaming_diagnostics();
+    assert!(diagnostics.normal_eof);
+    assert!(!diagnostics.parse_error);
     assert_eq!(
         diagnostics.stream_end_kind.as_deref(),
         Some("normal_eof_compatible_completion")
@@ -326,30 +356,44 @@ async fn sse_parse_error_after_text_is_not_compatible_completion() {
 
 #[tokio::test]
 async fn incomplete_final_sse_frame_after_text_is_not_compatible_completion() {
-    let base_url = spawn_static_sse_stream(concat!(
+    let (base_url, calls) = spawn_counted_static_sse_stream(concat!(
         "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"草稿\"}\n\n",
         "event: response.output_text.delta",
     ))
     .await;
-    let mut session = test_streaming_session(base_url);
+    let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();
+    let deltas = Arc::new(StdMutex::new(Vec::new()));
 
-    let err = session
-        .advance_streaming(
-            &[],
-            true,
-            recording_delta_sink(Arc::new(StdMutex::new(Vec::new()))),
-        )
-        .await
-        .unwrap_err();
+    let err = run_agent_loop(
+        Box::new(
+            ResponsesAgentSession::new(
+                qq_maid_common::http_client::client(),
+                "test-key".to_owned(),
+                Some(base_url),
+                "openai",
+                "gpt-test".to_owned(),
+                10 * 1024 * 1024,
+                1200,
+                None,
+                &[ChatMessage::user("小女仆测试一下")],
+                &registry,
+                None,
+            )
+            .unwrap(),
+        ),
+        registry,
+        test_context(),
+        3,
+        None,
+        Some(recording_delta_sink(deltas.clone())),
+    )
+    .await
+    .unwrap_err();
 
+    assert_eq!(err.code, "sse_incomplete_frame");
     assert_eq!(err.stage, "stream_after_delta");
-    let diagnostics = session.streaming_diagnostics();
-    assert!(diagnostics.normal_eof);
-    assert!(diagnostics.parse_error);
-    assert_eq!(
-        diagnostics.stream_end_kind.as_deref(),
-        Some("sse_incomplete_frame")
-    );
+    assert!(deltas.lock().unwrap().is_empty());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

@@ -549,24 +549,39 @@ async fn spawn_never_closing_done_stream() -> String {
     format!("http://{addr}/v1")
 }
 
-async fn static_sse_handler(State(body): State<Arc<String>>) -> Response<Body> {
+#[derive(Clone)]
+struct StaticSseState {
+    body: Arc<String>,
+    calls: Arc<AtomicUsize>,
+}
+
+async fn static_sse_handler(State(state): State<StaticSseState>) -> Response<Body> {
+    state.calls.fetch_add(1, Ordering::SeqCst);
     Response::builder()
         .header(header::CONTENT_TYPE, "text/event-stream")
-        .body(Body::from(body.as_str().to_owned()))
+        .body(Body::from(state.body.as_str().to_owned()))
         .unwrap()
 }
 
 async fn spawn_static_sse_stream(body: impl Into<String>) -> String {
-    let body = Arc::new(body.into());
+    spawn_counted_static_sse_stream(body).await.0
+}
+
+async fn spawn_counted_static_sse_stream(body: impl Into<String>) -> (String, Arc<AtomicUsize>) {
+    let state = StaticSseState {
+        body: Arc::new(body.into()),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let calls = state.calls.clone();
     let app = Router::new()
         .route("/v1/responses", post(static_sse_handler))
-        .with_state(body);
+        .with_state(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    format!("http://{addr}/v1")
+    (format!("http://{addr}/v1"), calls)
 }
 
 async fn reset_sse_handler() -> Response<Body> {
