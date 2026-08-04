@@ -23,6 +23,10 @@ data/
 # 真实环境变量文件可能残留在旧模块或误运行子目录，显式兜底避免迁移期误提交。
 **/.env
 config/.env
+config/agent.toml
+config/runtime.toml
+config/ops.toml
+config/secrets/
 config/world.md
 config/context_modules.toml
 config/prompts/*.md
