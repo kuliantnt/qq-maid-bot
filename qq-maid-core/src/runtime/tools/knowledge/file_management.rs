@@ -466,7 +466,8 @@ impl KnowledgeFileWorker {
             .claim_next()
             .map_err(map_database_error)?
         else {
-            debug!("知识库托管文件 worker 没有待处理任务");
+            // 队列为空属于正常空闲状态，不输出逐轮日志，避免每 5 秒刷屏；
+            // 有任务时下方会输出领取、处理结果与耗时等日志。
             return Ok(KnowledgeWorkerStats::default());
         };
         let started = Instant::now();
