@@ -1,4 +1,4 @@
-import { AUTH_ROUTES, CONFIGURATION_ROUTES, MARKDOWN_RENDER_ROUTE, RESTART_ROUTE, STATUS_ROUTE, TODO_ROUTES, USER_DATA_ROUTES, } from "./api-routes.js";
+import { AUTH_ROUTES, CONFIGURATION_ROUTES, MARKDOWN_RENDER_ROUTE, KNOWLEDGE_ROUTES, RESTART_ROUTE, STATUS_ROUTE, TODO_ROUTES, USER_DATA_ROUTES, } from "./api-routes.js";
 export class ConsoleApiError extends Error {
     code;
     status;
@@ -136,6 +136,76 @@ export async function readUserFile(file) {
 export async function deleteUserFile(fileId) {
     await mutatingJson(USER_DATA_ROUTES.filesDelete, "POST", { file_id: fileId });
 }
+export async function fetchKnowledgeCapabilities() {
+    const payload = record(await mutatingJson(KNOWLEDGE_ROUTES.capabilities, "POST", {}));
+    const data = record(payload.data);
+    return {
+        supported_extensions: array(data.supported_extensions).map((value) => requiredString(value, "supported_extensions")),
+        max_file_bytes: requiredFiniteNumber(data.max_file_bytes, "max_file_bytes"),
+        max_filename_chars: requiredFiniteNumber(data.max_filename_chars, "max_filename_chars"),
+    };
+}
+export async function listKnowledgeFiles(params) {
+    const payload = record(await mutatingJson(KNOWLEDGE_ROUTES.list, "POST", {
+        page: params.page,
+        page_size: params.page_size,
+        search: params.search,
+        ...(params.status === "all" ? {} : { status: params.status }),
+        sort: params.sort,
+        order: params.order,
+    }));
+    return parseKnowledgeFilePage(payload.data);
+}
+export async function uploadKnowledgeFile(file) {
+    const form = new FormData();
+    form.append("file", file);
+    const response = await fetch(KNOWLEDGE_ROUTES.upload, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { Accept: "application/json", "X-CSRF-Token": csrfToken },
+        body: form,
+    });
+    if (!response.ok)
+        throw await responseError(response);
+    return parseKnowledgeFileItem(record(await response.json()).data);
+}
+export async function downloadKnowledgeFile(item) {
+    if (item.file_id === null)
+        throw new ConsoleApiError("知识库文件缺少标识", "invalid_response");
+    const response = await fetch(KNOWLEDGE_ROUTES.get(item.file_id), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "X-CSRF-Token": csrfToken },
+    });
+    if (!response.ok)
+        throw await responseError(response);
+    return {
+        blob: await response.blob(),
+        filename: filenameFromContentDisposition(response.headers.get("Content-Disposition")) ?? item.filename,
+    };
+}
+export function filenameFromContentDisposition(value) {
+    if (value === null)
+        return null;
+    const encoded = /(?:^|;)\s*filename\*=UTF-8''([^;]+)/i.exec(value);
+    if (encoded?.[1] !== undefined) {
+        try {
+            return decodeURIComponent(encoded[1]);
+        }
+        catch {
+            return null;
+        }
+    }
+    const plain = /(?:^|;)\s*filename="([^"]+)"/i.exec(value);
+    return plain?.[1] ?? null;
+}
+export async function deleteKnowledgeFile(fileId) {
+    await mutatingJson(KNOWLEDGE_ROUTES.delete, "POST", { file_id: fileId });
+}
+export async function retryKnowledgeFile(fileId) {
+    const payload = record(await mutatingJson(KNOWLEDGE_ROUTES.retry, "POST", { file_id: fileId }));
+    return parseKnowledgeFileItem(payload.data);
+}
 export async function fetchConfiguration() {
     const payload = record(await fetchJson(CONFIGURATION_ROUTES.get, {
         headers: { Accept: "application/json" },
@@ -230,6 +300,45 @@ function parseTodoPage(value) {
         pageSize: finiteNumber(data.page_size) ?? 50,
         total: finiteNumber(data.total) ?? 0,
         totalPages: finiteNumber(data.total_pages) ?? 1,
+    };
+}
+function parseKnowledgeFilePage(value) {
+    const data = record(value);
+    return {
+        items: array(data.items).map(parseKnowledgeFileItem),
+        page: finiteNumber(data.page) ?? 1,
+        page_size: finiteNumber(data.page_size) ?? 20,
+        total: finiteNumber(data.total) ?? 0,
+        total_pages: finiteNumber(data.total_pages) ?? 1,
+    };
+}
+export function parseKnowledgeFileItem(value) {
+    const item = record(value);
+    const source = item.source;
+    const status = item.status;
+    if (source !== "managed" && source !== "directory")
+        throw new ConsoleApiError("知识库文件来源无效", "invalid_response");
+    if (status !== "pending" && status !== "processing" && status !== "ready" && status !== "failed") {
+        throw new ConsoleApiError("知识库文件状态无效", "invalid_response");
+    }
+    return {
+        file_id: nullableString(item.file_id),
+        filename: requiredString(item.filename, "filename"),
+        content_type: requiredString(item.content_type, "content_type"),
+        size: finiteNumber(item.size),
+        source: source,
+        source_label: requiredString(item.source_label, "source_label"),
+        status: status,
+        uploaded_at: nullableString(item.uploaded_at),
+        processing_started_at: nullableString(item.processing_started_at),
+        processed_at: nullableString(item.processed_at),
+        updated_at: requiredString(item.updated_at, "updated_at"),
+        error_code: nullableString(item.error_code),
+        error_summary: nullableString(item.error_summary),
+        chunk_count: finiteNumber(item.chunk_count),
+        embedding_count: finiteNumber(item.embedding_count),
+        downloadable: requiredBoolean(item.downloadable, "downloadable"),
+        download_url: nullableString(item.download_url),
     };
 }
 function parseUserPreferences(value) {
@@ -359,6 +468,18 @@ async function mutatingJson(input, method, body, allowEmpty = false) {
         throw new ConsoleApiError(message, code, response.status);
     }
     return await response.json();
+}
+async function responseError(response) {
+    let code = "request_failed";
+    let message = `管理接口请求失败（HTTP ${response.status}）`;
+    try {
+        const payload = record(await response.json());
+        const error = record(payload.error);
+        code = string(error.code, code);
+        message = string(error.message, message);
+    }
+    catch { /* 保留稳定错误。 */ }
+    return new ConsoleApiError(message, code, response.status);
 }
 function parseRuntime(value) {
     const item = record(value);
@@ -536,6 +657,23 @@ function array(value) {
 }
 function string(value, fallback) {
     return typeof value === "string" && value.length > 0 ? value : fallback;
+}
+function requiredString(value, field) {
+    if (typeof value !== "string" || value.length === 0) {
+        throw new ConsoleApiError(`管理接口返回了无效 ${field}`, "invalid_response");
+    }
+    return value;
+}
+function requiredBoolean(value, field) {
+    if (typeof value !== "boolean")
+        throw new ConsoleApiError(`管理接口返回了无效 ${field}`, "invalid_response");
+    return value;
+}
+function requiredFiniteNumber(value, field) {
+    const number = finiteNumber(value);
+    if (number === null)
+        throw new ConsoleApiError(`管理接口返回了无效 ${field}`, "invalid_response");
+    return number;
 }
 function nullableString(value) {
     return typeof value === "string" && value.length > 0 ? value : null;

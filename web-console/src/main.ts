@@ -26,6 +26,7 @@ import type { BootstrapStatus } from "./types.js";
 import { createThemeController } from "./theme.js";
 import { bindConsoleNavigation } from "./console-shell.js";
 import { initializeTodo } from "./views/todo/todo.js";
+import { disposeKnowledge, initializeKnowledge } from "./views/knowledge/knowledge.js";
 import { createBackgroundController, installBackgroundConsoleUnlock, unlockPreferencePatch, type BackgroundFile } from "./background.js";
 import { cacheFileBlob, clearFileBlobCache, deleteCachedFileBlob, readCachedFileBlob } from "./file-cache.js";
 
@@ -238,6 +239,7 @@ async function showConsole(username: string): Promise<void> {
   await Promise.all([refreshStatus(), hydrateUserData()]);
   await refreshConfiguration();
   await initializeTodo();
+  await initializeKnowledge();
 }
 
 async function hydrateUserData(): Promise<void> {
@@ -307,6 +309,7 @@ async function logout(): Promise<void> {
   try {
     await logoutAdmin();
   } finally {
+    disposeKnowledge();
     backgroundController.dispose();
     void clearFileBlobCache();
     userDataController = null;

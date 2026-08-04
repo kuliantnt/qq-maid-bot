@@ -278,6 +278,12 @@ test("prefers-reduced-motion 下不播放动画但完整同步状态", async () 
 test("pageForTarget 映射保持正确", () => {
   assert.equal(pageForTarget("dashboard")?.id, "overview");
   assert.equal(pageForTarget("capabilities")?.id, "platforms");
+  assert.deepEqual(pageForTarget("knowledge"), {
+    id: "knowledge",
+    label: "知识库",
+    icon: "knowledge",
+    targetId: "knowledge",
+  });
   assert.equal(pageForTarget("markdown")?.id, "tools");
   assert.equal(pageForTarget("unknown"), undefined);
 });

@@ -211,6 +211,41 @@ const CONSOLE_ASSETS: &[(&str, &str, &str)] = &[
         "text/javascript; charset=utf-8",
     ),
     (
+        "views/knowledge/knowledge-actions.js",
+        include_str!("../../../web-console/dist/views/knowledge/knowledge-actions.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/knowledge/knowledge-list.js",
+        include_str!("../../../web-console/dist/views/knowledge/knowledge-list.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/knowledge/knowledge-paging.js",
+        include_str!("../../../web-console/dist/views/knowledge/knowledge-paging.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/knowledge/knowledge-polling.js",
+        include_str!("../../../web-console/dist/views/knowledge/knowledge-polling.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/knowledge/knowledge-status.js",
+        include_str!("../../../web-console/dist/views/knowledge/knowledge-status.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/knowledge/knowledge-upload.js",
+        include_str!("../../../web-console/dist/views/knowledge/knowledge-upload.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/knowledge/knowledge.js",
+        include_str!("../../../web-console/dist/views/knowledge/knowledge.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
         "views/dashboard.js",
         include_str!("../../../web-console/dist/views/dashboard.js"),
         "text/javascript; charset=utf-8",
