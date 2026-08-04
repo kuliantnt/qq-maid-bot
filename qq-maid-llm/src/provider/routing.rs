@@ -10,6 +10,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream;
@@ -31,6 +32,8 @@ use super::stream_state::{RouteStreamState, next_route_stream_event};
 use super::{
     ChatOutcome, LlmProvider, LlmStream, ToolCallingProtocol, ToolChatRequest, finish_agent_error,
 };
+
+const MIN_FALLBACK_CANDIDATE_START_BUDGET: Duration = Duration::from_secs(1);
 
 /// 通用模型候选链提供商。
 ///
@@ -241,6 +244,33 @@ impl LlmProvider for ModelRouteProvider {
         let mut failures = Vec::new();
         let visible_final_delta_sent = Arc::new(AtomicBool::new(false));
         for (index, candidate) in candidates.iter().enumerate() {
+            if index > 0
+                && run_handle
+                    .remaining_budget()
+                    .is_some_and(|remaining| remaining < MIN_FALLBACK_CANDIDATE_START_BUDGET)
+            {
+                let remaining_budget = run_handle.remaining_budget();
+                run_handle.cancel(AgentStopReason::Timeout);
+                tracing::warn!(
+                    task,
+                    candidate_index = index,
+                    provider = candidate
+                        .provider
+                        .as_ref()
+                        .unwrap_or(&self.default_provider)
+                        .as_str(),
+                    model = %candidate.name,
+                    candidate_remaining_budget_ms = remaining_budget
+                        .map(|value| value.as_millis()),
+                    fallback_skipped_reason = "insufficient_remaining_budget",
+                    "tool model fallback candidate skipped"
+                );
+                return Err(finish_agent_error(
+                    LlmError::timeout("agent_loop"),
+                    &run_handle,
+                    AgentStopReason::Timeout,
+                ));
+            }
             run_handle.begin_candidate_attempt()?;
             let provider_kind = candidate
                 .provider

@@ -21,11 +21,21 @@ use super::types::{AgentStep, AgentTextDeltaSink, AgentToolResult};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentStreamingDiagnostics {
     pub fallback_reason: Option<String>,
+    pub http_status: Option<u16>,
+    pub stream_end_kind: Option<String>,
+    pub last_sse_event_type: Option<String>,
     pub chunk_count: usize,
     pub sse_event_count: usize,
     pub saw_done: bool,
     pub saw_completed: bool,
+    pub normal_eof: bool,
+    pub connection_reset: bool,
+    pub parse_error: bool,
+    pub explicit_failure_event: bool,
+    pub saw_text_delta: bool,
     pub buffered_delta_count: usize,
+    pub buffered_text_chars: usize,
+    pub visible_text_chars: usize,
     pub active_function_call_count: usize,
 }
 
@@ -83,8 +93,9 @@ pub trait AgentStepSession: Send {
     ///   可以边接收真实 provider delta 边转发。
     /// - 如果本轮产生 tool call，不得向 `text_delta_sink` 发送任何模型草稿。
     /// - 一旦已经发送用户可见 delta，后续错误必须原样返回，不能改走非流式重放。
-    /// - 流式推进失败或超时时，会话状态必须仍可用同一批 `results` 执行一次
-    ///   `advance`；Provider 不得在流式响应完整结束前提交本轮协议状态。
+    /// - 流式推进在尚无有效文本/工具调用且剩余预算充足时，会话状态必须仍可用
+    ///   同一批 `results` 执行一次 `advance`；已有有效文本后不得同 Provider 重生成。
+    ///   Provider 不得在流式响应完整结束前提交本轮协议状态。
     async fn advance_streaming(
         &mut self,
         _results: &[AgentToolResult],
