@@ -252,19 +252,28 @@ async fn c2c_stream_client_posts_official_endpoint_and_commits_only_successful_c
 }
 
 #[tokio::test]
-async fn c2c_stream_client_does_not_advance_cursor_after_http_error() {
+async fn c2c_stream_client_uses_next_index_after_non_retryable_http_error() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let _ = read_http_request(&mut stream);
-        let body = r#"{"err_code":40054014,"message":"stream content too long"}"#;
-        let response = format!(
-            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        stream.write_all(response.as_bytes()).unwrap();
+        let responses = [
+            (
+                "400 Bad Request",
+                r#"{"err_code":40054014,"message":"stream content too long"}"#,
+            ),
+            ("200 OK", r#"{"id":"complete-reply"}"#),
+        ];
+        let mut requests = Vec::new();
+        for (status, body) in responses {
+            let (mut stream, _) = listener.accept().unwrap();
+            requests.push(read_http_request(&mut stream));
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len(),
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+        requests
     });
 
     let auth = crate::auth::AccessTokenManager::new_with_cached_token_for_test(
@@ -285,14 +294,299 @@ async fn c2c_stream_client_does_not_advance_cursor_after_http_error() {
         msg_seq: Some(9),
         index: 4,
     };
-    let before = state.clone();
-    let result = client
+    let failed = client
         .send_c2c_stream_message("user-openid", Some("source-msg"), "累计正文", &mut state, 1)
         .await;
-    server.join().unwrap();
+    let complete = client
+        .send_c2c_stream_message(
+            "user-openid",
+            Some("source-msg"),
+            "累计正文",
+            &mut state,
+            10,
+        )
+        .await;
+    let requests = server.join().unwrap();
+
+    assert!(matches!(failed, Err(ApiError::Status { .. })));
+    assert_eq!(complete.unwrap().message_id, "complete-reply");
+    assert_eq!(state.stream_msg_id.as_deref(), Some("stream-1"));
+    assert_eq!(state.msg_seq, Some(9));
+    assert_eq!(state.index, 6);
+
+    let bodies = requests
+        .into_iter()
+        .map(|(path, body)| {
+            assert_eq!(path, "/v2/users/user-openid/stream_messages");
+            serde_json::from_str::<Value>(&body).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(bodies[0]["index"], 4);
+    assert_eq!(bodies[1]["index"], 5);
+    assert_eq!(bodies[0]["msg_seq"], bodies[1]["msg_seq"]);
+    assert_eq!(bodies[0]["input_state"], 1);
+    assert_eq!(bodies[1]["input_state"], 10);
+}
+
+#[tokio::test]
+async fn c2c_stream_client_uses_next_index_after_network_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut failed_stream, _) = listener.accept().unwrap();
+        let failed_request = read_http_request(&mut failed_stream);
+        drop(failed_stream);
+
+        let (mut complete_stream, _) = listener.accept().unwrap();
+        let complete_request = read_http_request(&mut complete_stream);
+        let body = r#"{"id":"complete-after-network-error"}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len(),
+        );
+        complete_stream.write_all(response.as_bytes()).unwrap();
+        vec![failed_request, complete_request]
+    });
+
+    let auth = crate::auth::AccessTokenManager::new_with_cached_token_for_test(
+        qq_maid_common::http_client::client(),
+        "app-id",
+        "app-secret",
+        Duration::from_secs(5),
+        "token",
+        Duration::from_secs(60),
+    );
+    let client = QqApiClient::new(
+        qq_maid_common::http_client::client(),
+        format!("http://{address}"),
+        auth,
+    );
+    let mut state = C2cStreamTransportState {
+        stream_msg_id: Some("stream-1".to_owned()),
+        msg_seq: Some(9),
+        index: 4,
+    };
+    let failed = client
+        .send_c2c_stream_message(
+            "user-openid",
+            Some("source-msg"),
+            "网络错误前缀",
+            &mut state,
+            1,
+        )
+        .await;
+    let complete = client
+        .send_c2c_stream_message(
+            "user-openid",
+            Some("source-msg"),
+            "网络错误前缀",
+            &mut state,
+            10,
+        )
+        .await;
+    let requests = server.join().unwrap();
+
+    assert!(matches!(failed, Err(ApiError::Http(_))));
+    assert_eq!(complete.unwrap().message_id, "complete-after-network-error");
+    assert_eq!(state.stream_msg_id.as_deref(), Some("stream-1"));
+    assert_eq!(state.msg_seq, Some(9));
+    assert_eq!(state.index, 6);
+
+    let bodies = requests
+        .into_iter()
+        .map(|(_, body)| serde_json::from_str::<Value>(&body).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(bodies[0]["index"], 4);
+    assert_eq!(bodies[1]["index"], 5);
+    assert_eq!(bodies[0]["msg_seq"], bodies[1]["msg_seq"]);
+    assert_eq!(bodies[1]["input_state"], 10);
+}
+
+#[tokio::test]
+async fn c2c_stream_client_retries_http_429_with_a_new_index() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let responses = [
+            (
+                "429 Too Many Requests",
+                r#"{"code":429,"message":"rate limited"}"#,
+            ),
+            ("200 OK", r#"{"id":"stream-after-429"}"#),
+        ];
+        let mut requests = Vec::new();
+        for (status, body) in responses {
+            let (mut stream, _) = listener.accept().unwrap();
+            requests.push(read_http_request(&mut stream));
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len(),
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+        requests
+    });
+
+    let auth = crate::auth::AccessTokenManager::new_with_cached_token_for_test(
+        qq_maid_common::http_client::client(),
+        "app-id",
+        "app-secret",
+        Duration::from_secs(5),
+        "token",
+        Duration::from_secs(60),
+    );
+    let client = QqApiClient::new(
+        qq_maid_common::http_client::client(),
+        format!("http://{address}"),
+        auth,
+    );
+    let mut state = C2cStreamTransportState::new();
+    let result = client
+        .send_c2c_stream_message(
+            "user-openid",
+            Some("source-msg"),
+            "限流后重试",
+            &mut state,
+            1,
+        )
+        .await
+        .unwrap();
+    let requests = server.join().unwrap();
+
+    assert_eq!(result.message_id, "stream-after-429");
+    assert_eq!(state.stream_msg_id.as_deref(), Some("stream-after-429"));
+    assert_eq!(state.msg_seq, Some(1));
+    assert_eq!(state.index, 2);
+
+    let bodies = requests
+        .into_iter()
+        .map(|(_, body)| serde_json::from_str::<Value>(&body).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(bodies[0]["index"], 0);
+    assert_eq!(bodies[1]["index"], 1);
+    assert_eq!(bodies[0]["msg_seq"], bodies[1]["msg_seq"]);
+}
+
+#[tokio::test]
+async fn c2c_stream_client_retries_qq_50002_with_a_new_index() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let responses = [
+            (
+                "400 Bad Request",
+                r#"{"err_code":50002,"message":"rate limited"}"#,
+            ),
+            (
+                "200 OK",
+                r#"{"id":"stream-after-50002","ext_info":{"ref_idx":"REFIDX_50002"}}"#,
+            ),
+        ];
+        let mut requests = Vec::new();
+        for (status, body) in responses {
+            let (mut stream, _) = listener.accept().unwrap();
+            requests.push(read_http_request(&mut stream));
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len(),
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+        requests
+    });
+
+    let auth = crate::auth::AccessTokenManager::new_with_cached_token_for_test(
+        qq_maid_common::http_client::client(),
+        "app-id",
+        "app-secret",
+        Duration::from_secs(5),
+        "token",
+        Duration::from_secs(60),
+    );
+    let client = QqApiClient::new(
+        qq_maid_common::http_client::client(),
+        format!("http://{address}"),
+        auth,
+    );
+    let mut state = C2cStreamTransportState::new();
+    let result = client
+        .send_c2c_stream_message(
+            "user-openid",
+            Some("source-msg"),
+            "QQ 限流后重试",
+            &mut state,
+            1,
+        )
+        .await
+        .unwrap();
+    let requests = server.join().unwrap();
+
+    assert_eq!(result.message_id, "stream-after-50002");
+    assert_eq!(result.ref_index_id.as_deref(), Some("REFIDX_50002"));
+    assert_eq!(state.stream_msg_id.as_deref(), Some("stream-after-50002"));
+    assert_eq!(state.msg_seq, Some(1));
+    assert_eq!(state.index, 2);
+
+    let bodies = requests
+        .into_iter()
+        .map(|(_, body)| serde_json::from_str::<Value>(&body).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(bodies[0]["index"], 0);
+    assert_eq!(bodies[1]["index"], 1);
+    assert_eq!(bodies[0]["msg_seq"], bodies[1]["msg_seq"]);
+}
+
+#[tokio::test]
+async fn c2c_stream_client_stops_after_limited_rate_limit_retries() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let body = r#"{"err_code":50002,"message":"rate limited"}"#;
+        let mut requests = Vec::new();
+        for _ in 0..4 {
+            let (mut stream, _) = listener.accept().unwrap();
+            requests.push(read_http_request(&mut stream));
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len(),
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+        requests
+    });
+
+    let auth = crate::auth::AccessTokenManager::new_with_cached_token_for_test(
+        qq_maid_common::http_client::client(),
+        "app-id",
+        "app-secret",
+        Duration::from_secs(5),
+        "token",
+        Duration::from_secs(60),
+    );
+    let client = QqApiClient::new(
+        qq_maid_common::http_client::client(),
+        format!("http://{address}"),
+        auth,
+    );
+    let mut state = C2cStreamTransportState::new();
+    let result = client
+        .send_c2c_stream_message("user-openid", Some("source-msg"), "限流终止", &mut state, 1)
+        .await;
+    let requests = server.join().unwrap();
 
     assert!(matches!(result, Err(ApiError::Status { .. })));
-    assert_eq!(state, before);
+    assert_eq!(state.index, 4);
+    assert_eq!(state.msg_seq, Some(1));
+    assert!(state.stream_msg_id.is_none());
+    let indexes = requests
+        .into_iter()
+        .map(|(_, body)| {
+            serde_json::from_str::<Value>(&body).unwrap()["index"]
+                .as_u64()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(indexes, vec![0, 1, 2, 3]);
 }
 
 #[test]

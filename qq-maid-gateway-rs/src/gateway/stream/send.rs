@@ -23,9 +23,9 @@ pub(crate) fn response_from_incomplete_stream_text(content: &str) -> CoreRespons
 
 /// 将模型候选全文与已被 QQ 接受的全文对齐。
 ///
-/// replace 模式不能覆盖用户已经看到的前缀。正常增长直接提交新全文；候选切换
-/// 或重生成导致前缀改写时，保留已接受前缀并只追加共同前缀之后可证明的新尾部；
-/// 如果候选全文回退，则由上层结束旧流，不能在原会话中覆盖正文。
+/// replace 模式不能覆盖用户已经看到的正文。正常增长直接提交新全文；只要候选
+/// 改写了已接受正文的任意前缀，就由上层结束旧流并把完整候选作为新的用户可见回复
+/// 发送。这样同长度或更长的重生成也不会被错误拼接到旧正文尾部。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CumulativeTextAction {
     Keep,
@@ -41,23 +41,5 @@ pub(crate) fn reconcile_cumulative_text(accepted: &str, incoming: &str) -> Cumul
         return CumulativeTextAction::Update(incoming.to_owned());
     }
 
-    let accepted_chars = accepted.chars().count();
-    let incoming_chars = incoming.chars().count();
-    if incoming_chars < accepted_chars {
-        return CumulativeTextAction::Rollover(incoming.to_owned());
-    }
-
-    let common_chars = accepted
-        .chars()
-        .zip(incoming.chars())
-        .take_while(|(left, right)| left == right)
-        .count();
-    let suffix = incoming
-        .char_indices()
-        .nth(common_chars)
-        .map(|(index, _)| &incoming[index..])
-        .unwrap_or_default();
-    let mut merged = accepted.to_owned();
-    merged.push_str(suffix);
-    CumulativeTextAction::Update(merged)
+    CumulativeTextAction::Rollover(incoming.to_owned())
 }

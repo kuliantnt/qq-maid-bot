@@ -175,6 +175,37 @@ fn record_stream_ref_index(
     );
 }
 
+/// Rollover 完成旧流后，使用普通回复发送新候选正文。
+///
+/// 旧流和新回复必须分别绑定各自的 QQ `ref_idx`；普通回复成功后才写入新正文，
+/// 不能拿旧流的 stream id 或源消息 id 代替。
+async fn send_rollover_response<S: C2cStreamSender + ?Sized>(
+    sender: &S,
+    context: &StreamFinishContext<'_>,
+    response: &CoreResponse,
+) -> anyhow::Result<()> {
+    let capability = ReplyCapability::qq_official_c2c(context.config);
+    let (sent_ids, fallback_text) = send_c2c_respond_response_with_sender(
+        sender,
+        context.message,
+        response,
+        context.config,
+        &capability,
+    )
+    .await?;
+    if let Some(ref_index) = context.ref_index {
+        record_c2c_bot_outbound_refs(
+            ref_index,
+            context.message,
+            context.config,
+            sent_ids,
+            &fallback_text,
+            response.visible_entity_snapshot.clone(),
+        );
+    }
+    Ok(())
+}
+
 struct StreamFinishContext<'a> {
     user_openid: &'a str,
     msg_id: &'a str,
@@ -183,43 +214,53 @@ struct StreamFinishContext<'a> {
     ref_index: Option<&'a SharedRefIndex>,
 }
 
-/// 完成 Active/BrokenActive 会话。Broken 状态仍会尝试一次串行 complete，但不会伪造成功。
-async fn finish_active_stream<S: C2cStreamSender + ?Sized>(
+/// 处理 Completed 到达时尚未提交的最终候选；只要改写已展示前缀，就转为 Rollover。
+async fn prepare_active_completion<S: C2cStreamSender + ?Sized>(
     sender: &S,
     context: &StreamFinishContext<'_>,
     response: &CoreResponse,
     accumulated: &str,
-    mut state: C2cStreamState,
+    state: &mut C2cStreamState,
     already_broken: bool,
-) -> anyhow::Result<C2cStreamingPhase> {
+) -> (bool, Option<CoreResponse>) {
     let mut stream_failed = already_broken;
+    let mut rollover_response = None;
     if !stream_failed {
         // Completed 事件可能紧跟最后一个 delta；先消费 Gateway 自己的累计全文，
         // 再对齐 Core 最终正文，确保尚未到节流定时器的内容也进入 complete。
         let candidates = [
-            accumulated,
-            completed_response_content(response).unwrap_or_default(),
+            (accumulated, false),
+            (
+                completed_response_content(response).unwrap_or_default(),
+                true,
+            ),
         ];
-        for candidate in candidates {
+        for (candidate, is_completed_response) in candidates {
             if candidate.is_empty() || stream_failed {
                 continue;
             }
             match reconcile_cumulative_text(&state.last_accepted_full, candidate) {
                 CumulativeTextAction::Keep => {}
-                CumulativeTextAction::Rollover(_) => {
+                CumulativeTextAction::Rollover(next_text) => {
                     trace!(
                         source_message_id = %mask_identifier(context.msg_id),
                         accepted_chars = state.last_accepted_full.chars().count(),
                         candidate_chars = candidate.chars().count(),
-                        "模型最终正文回退，完成官方流并保留已接受前缀"
+                        "模型最终正文切换候选，先完成旧官方流再发送新回复"
                     );
+                    rollover_response = Some(if is_completed_response {
+                        response.clone()
+                    } else {
+                        response_from_incomplete_stream_text(&next_text)
+                    });
+                    break;
                 }
                 CumulativeTextAction::Update(next_full) => {
                     if let Err(error) = send_stream_update(
                         sender,
                         context.user_openid,
                         context.msg_id,
-                        &mut state,
+                        state,
                         &next_full,
                     )
                     .await
@@ -237,12 +278,74 @@ async fn finish_active_stream<S: C2cStreamSender + ?Sized>(
             }
         }
     }
+    (stream_failed, rollover_response)
+}
 
-    let complete_result = complete_stream(sender, context.user_openid, context.msg_id, &mut state)
+/// 完成 Active/BrokenActive 会话。Broken 状态仍会尝试一次串行 complete，但不会伪造成功。
+async fn finish_active_stream<S: C2cStreamSender + ?Sized>(
+    sender: &S,
+    context: &StreamFinishContext<'_>,
+    response: &CoreResponse,
+    accumulated: &str,
+    mut state: C2cStreamState,
+    already_broken: bool,
+) -> anyhow::Result<C2cStreamingPhase> {
+    let (stream_failed, rollover_response) = prepare_active_completion(
+        sender,
+        context,
+        response,
+        accumulated,
+        &mut state,
+        already_broken,
+    )
+    .await;
+
+    let complete_error = complete_stream(sender, context.user_openid, context.msg_id, &mut state)
         .await
-        .map_err(|error| anyhow::anyhow!("QQ 官方 C2C 流 complete 失败: {}", error.log_summary()));
-    match complete_result {
-        Ok(_) if !stream_failed => {
+        .err()
+        .map(|error| anyhow::anyhow!("QQ 官方 C2C 流 complete 失败: {}", error.log_summary()));
+
+    if let Some(rollover_response) = rollover_response {
+        if complete_error.is_none() {
+            record_stream_ref_index(
+                context.ref_index,
+                context.message,
+                context.config,
+                &state,
+                // Completed 的实体快照属于新候选；旧流只记录自己实际展示的正文。
+                None,
+            );
+        }
+        let rollover_error = send_rollover_response(sender, context, &rollover_response)
+            .await
+            .err();
+        if let Some(error) = rollover_error {
+            return Err(match complete_error {
+                Some(complete_error) => anyhow::anyhow!(
+                    "QQ 官方 C2C 流 complete 失败且 Rollover 普通回复失败: {complete_error}; {error}"
+                ),
+                None => anyhow::anyhow!("QQ 官方 C2C Rollover 普通回复失败: {error}"),
+            });
+        }
+        if let Some(error) = complete_error {
+            return Err(error);
+        }
+        info!(
+            source_message_id = %mask_identifier(context.msg_id),
+            stream_state = "completed_with_rollover",
+            content_chars = rollover_response
+                .text_content()
+                .or_else(|| rollover_response.markdown_content())
+                .unwrap_or_default()
+                .chars()
+                .count(),
+            "QQ C2C 官方流式旧会话已完成并发送新候选普通回复"
+        );
+        return Ok(C2cStreamingPhase::Completed);
+    }
+
+    match (complete_error, stream_failed) {
+        (None, false) => {
             record_stream_ref_index(
                 context.ref_index,
                 context.message,
@@ -256,19 +359,15 @@ async fn finish_active_stream<S: C2cStreamSender + ?Sized>(
                 source_message_id = %mask_identifier(context.msg_id),
                 stream_state = "completed",
                 content_chars = state.last_accepted_full.chars().count(),
-                ref_index_written = state
-                    .final_result
-                    .as_ref()
-                    .and_then(|result| result.ref_index_id.as_deref())
-                    .is_some(),
+                ref_index_written = state.last_successful_ref_index_id.is_some(),
                 "QQ C2C 官方流式回复已完成"
             );
             Ok(C2cStreamingPhase::Completed)
         }
-        Ok(_) => Err(anyhow::anyhow!(
+        (None, true) => Err(anyhow::anyhow!(
             "QQ C2C 流式更新已失败，complete 已结束会话但不能报告为成功"
         )),
-        Err(error) => Err(error),
+        (Some(error), _) => Err(error),
     }
 }
 

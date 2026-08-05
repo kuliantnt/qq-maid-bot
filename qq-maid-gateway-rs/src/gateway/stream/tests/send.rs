@@ -21,10 +21,18 @@ fn candidate_rollback_requests_a_new_reply_instead_of_overwriting_prefix() {
 }
 
 #[test]
-fn mismatched_candidate_only_appends_a_safe_tail() {
+fn same_length_candidate_rewrite_requests_a_new_reply() {
     assert_eq!(
         reconcile_cumulative_text("你 好", "你 呀"),
-        CumulativeTextAction::Update("你 好呀".to_owned())
+        CumulativeTextAction::Rollover("你 呀".to_owned())
+    );
+}
+
+#[test]
+fn longer_candidate_rewrite_requests_a_new_reply() {
+    assert_eq!(
+        reconcile_cumulative_text("你 好", "你 呀，请稍后"),
+        CumulativeTextAction::Rollover("你 呀，请稍后".to_owned())
     );
 }
 

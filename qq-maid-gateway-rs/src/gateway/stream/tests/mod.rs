@@ -197,13 +197,19 @@ impl C2cStreamSender for FakeStreamSender {
         stream_state: &'a mut C2cStreamState,
         input_state: u8,
     ) -> StreamSendFuture<'a> {
-        let transport = &stream_state.transport;
+        // 模拟真实客户端：请求开始就预留 index/msg_seq，失败也不能让后续 complete
+        // 复用可能已经被平台消费的 index。
+        let transport = &mut stream_state.transport;
+        let msg_seq = *transport.msg_seq.get_or_insert(1);
+        let index = transport.index;
+        transport.index = transport.index.saturating_add(1);
+        let stream_msg_id = transport.stream_msg_id.clone();
         self.calls.lock().unwrap().push(FakeCall::Stream {
             content: content_raw.to_owned(),
             msg_id: msg_id.map(str::to_owned),
-            stream_msg_id: transport.stream_msg_id.clone(),
-            msg_seq: transport.msg_seq.unwrap_or(1),
-            index: transport.index,
+            stream_msg_id,
+            msg_seq,
+            index,
             input_state,
         });
         let in_flight = Arc::clone(&self.in_flight);
@@ -217,12 +223,10 @@ impl C2cStreamSender for FakeStreamSender {
                 .unwrap()
                 .pop_front()
                 .unwrap_or_else(|| Err(ApiError::Unsupported("stream")));
-            if let Ok(response) = &result {
-                stream_state.transport.msg_seq.get_or_insert(1);
-                if stream_state.transport.stream_msg_id.is_none() {
-                    stream_state.transport.stream_msg_id = Some(response.message_id.clone());
-                }
-                stream_state.transport.index += 1;
+            if let Ok(response) = &result
+                && stream_state.transport.stream_msg_id.is_none()
+            {
+                stream_state.transport.stream_msg_id = Some(response.message_id.clone());
             }
             in_flight.fetch_sub(1, Ordering::SeqCst);
             result
@@ -485,33 +489,132 @@ async fn completed_stream_writes_complete_ref_idx_with_accepted_text() {
 }
 
 #[tokio::test]
-async fn candidate_rollback_keeps_platform_accepted_prefix() {
+async fn candidate_rollover_completes_old_once_and_sends_new_reply() {
     let events = FakeEventStream::new([
-        CoreResponseEvent::TextDelta("ABCDE".to_owned()),
-        CoreResponseEvent::Completed(Box::new(respond_response("AB"))),
+        CoreResponseEvent::TextDelta("正在查询相关资料……".to_owned()),
+        CoreResponseEvent::Completed(Box::new(respond_response("查询失败，请稍后重试"))),
     ]);
     let sender = FakeStreamSender::new([
-        stream_response("stream-1", None),
-        stream_response("reply-complete", None),
+        stream_response("stream-old", Some("REFIDX_old_update")),
+        stream_response("reply-old", Some("REFIDX_old_complete")),
     ]);
+    let config = test_config();
+    let ref_index = crate::gateway::ref_index::ref_index();
 
-    stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
-        .await
-        .unwrap();
+    stream_respond_c2c_with_sender_and_ref_index(
+        events,
+        &sender,
+        &c2c_message(),
+        &config,
+        &ref_index,
+    )
+    .await
+    .unwrap();
 
-    let contents = sender
-        .calls()
-        .into_iter()
-        .filter_map(|call| match call {
-            FakeCall::Stream {
-                content,
-                input_state: 10,
-                ..
-            } => Some(content),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(contents, vec!["ABCDE"]);
+    let calls = sender.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| matches!(
+                call,
+                FakeCall::Stream {
+                    input_state: 10,
+                    ..
+                }
+            ))
+            .count(),
+        1,
+        "旧官方流只能完成一次"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter_map(|call| match call {
+                FakeCall::Stream {
+                    content,
+                    input_state: 10,
+                    ..
+                } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["正在查询相关资料……"]
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter_map(|call| match call {
+                FakeCall::Markdown { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["查询失败，请稍后重试"]
+    );
+    assert!(!calls.iter().any(|call| matches!(
+        call,
+        FakeCall::Stream {
+            content,
+            input_state: 10,
+            ..
+        } if content == "查询失败，请稍后重试"
+    )));
+    assert_eq!(
+        quoted_lookup_found(&ref_index, &config, "REFIDX_old_complete").as_deref(),
+        Some("正在查询相关资料……")
+    );
+    assert_eq!(
+        quoted_lookup_found(&ref_index, &config, "REFIDX_old_update"),
+        None
+    );
+    assert_eq!(
+        quoted_lookup_found(&ref_index, &config, "REFIDX_ordinary_markdown").as_deref(),
+        Some("查询失败，请稍后重试")
+    );
+    assert_eq!(quoted_lookup_found(&ref_index, &config, "stream-old"), None);
+}
+
+#[tokio::test]
+async fn candidate_prefix_rewrite_rolls_over_for_equal_and_longer_text() {
+    for candidate in ["ABXDE", "ABXDEFG"] {
+        let events = FakeEventStream::new([
+            CoreResponseEvent::TextDelta("ABCDE".to_owned()),
+            CoreResponseEvent::Completed(Box::new(respond_response(candidate))),
+        ]);
+        let sender = FakeStreamSender::new([
+            stream_response("stream-old", None),
+            stream_response("reply-old", None),
+        ]);
+
+        stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
+            .await
+            .unwrap();
+
+        let calls = sender.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .filter_map(|call| match call {
+                    FakeCall::Stream {
+                        content,
+                        input_state: 10,
+                        ..
+                    } => Some(content.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["ABCDE"]
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter_map(|call| match call {
+                    FakeCall::Markdown { content, .. } => Some(content.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![candidate]
+        );
+    }
 }
 
 #[tokio::test]

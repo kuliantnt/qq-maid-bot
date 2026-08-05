@@ -11,6 +11,7 @@ use reqwest::StatusCode;
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
+use tokio::time::sleep;
 use tracing::{info, trace, warn};
 
 mod image;
@@ -220,7 +221,9 @@ pub(crate) struct C2cStreamResponse {
 /// 官方 StreamSession 的传输游标。
 ///
 /// 正文、生命周期和发送所有权由 Gateway 状态机维护；这里仅维护官方请求需要的
-/// `stream_msg_id/msg_seq/index`，且只在 QQ 成功响应后推进。
+/// `stream_msg_id/msg_seq/index`。`index` 是下一个请求要使用的值，每次实际发起 HTTP
+/// 请求前都会预留并推进；这样网络错误或不确定响应后，后续 complete 不会复用可能已被
+/// QQ 消费的旧 index。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct C2cStreamTransportState {
     pub(crate) stream_msg_id: Option<String>,
@@ -236,6 +239,10 @@ impl C2cStreamTransportState {
 
 /// 官方 C2C 流式发送结果；成功响应必须包含平台返回的消息 ID。
 pub(crate) type StreamSendResult = Result<C2cStreamResponse, ApiError>;
+
+/// QQ 流式接口只对明确的限流响应做有限重试；其它错误不能在不知道服务端状态时盲目重放。
+const STREAM_RATE_LIMIT_MAX_RETRIES: usize = 3;
+const STREAM_RATE_LIMIT_BACKOFF_BASE_MS: u64 = 50;
 
 pub trait OutboundSender: Send + Sync {
     fn send_text<'a>(&'a self, target: &'a C2cReplyTarget, text: &'a str) -> SendFuture<'a>;
@@ -354,8 +361,8 @@ impl QqApiClient {
     /// 通过官方 `/stream_messages` 发送一次累计全文更新或完成请求。
     ///
     /// `input_state=1` 表示持续生成，`input_state=10` 表示完成。所有请求都携带同一
-    /// `msg_seq`，首个成功响应的 `id` 作为后续 `stream_msg_id`；失败请求不会推进
-    /// `index`、会话 ID 或成功正文。
+    /// `msg_seq`，首个成功响应的 `id` 作为后续 `stream_msg_id`。每次实际发起的请求
+    /// 都消费一个连续 index；429 和 QQ `err_code=50002` 使用新的 index 重试。
     pub(crate) async fn send_c2c_stream_message(
         &self,
         user_openid: &str,
@@ -367,11 +374,57 @@ impl QqApiClient {
         let msg_id = msg_id.ok_or(ApiError::InvalidStreamResponse(
             "passive C2C stream requires source msg_id",
         ))?;
-        let msg_seq = stream_state.msg_seq.unwrap_or_else(|| self.next_msg_seq());
-        let payload =
-            build_c2c_stream_payload(content_raw, msg_id, msg_seq, stream_state, input_state);
-        self.post_c2c_stream_message(user_openid, msg_id, stream_state, msg_seq, &payload)
-            .await
+        // 认证失败发生在 HTTP 请求之前，不应凭空消费 index；成功取得 token 后才开始
+        // 预留请求游标。后续网络错误则必须保留已预留的 index，避免重用不确定请求。
+        let authorization = self.auth.authorization_header().await?;
+        let msg_seq = *stream_state
+            .msg_seq
+            .get_or_insert_with(|| self.next_msg_seq());
+        let mut rate_limit_retries = 0_usize;
+
+        loop {
+            let payload =
+                build_c2c_stream_payload(content_raw, msg_id, msg_seq, stream_state, input_state);
+            let request_index = stream_state.index;
+            // index 在请求开始时消费，而不是等响应成功后才消费。响应不确定时，
+            // 下一个请求必须使用新的连续 index。
+            stream_state.index = stream_state.index.saturating_add(1);
+            let result = self
+                .post_c2c_stream_message(
+                    user_openid,
+                    msg_id,
+                    stream_state,
+                    msg_seq,
+                    &authorization,
+                    &payload,
+                )
+                .await;
+            match result {
+                Ok(response) => return Ok(response),
+                Err(error)
+                    if is_stream_rate_limit_error(&error)
+                        && rate_limit_retries < STREAM_RATE_LIMIT_MAX_RETRIES =>
+                {
+                    rate_limit_retries += 1;
+                    let delay = stream_rate_limit_backoff(rate_limit_retries);
+                    warn!(
+                        user = %mask_openid(user_openid),
+                        source_message_id = %mask_identifier(msg_id),
+                        endpoint = "stream_messages",
+                        input_state,
+                        failed_index = request_index,
+                        next_index = stream_state.index,
+                        msg_seq,
+                        retry_count = rate_limit_retries,
+                        backoff_ms = delay.as_millis(),
+                        error = %error.log_summary(),
+                        "QQ 官方流式请求触发限流，将使用新的 index 重试"
+                    );
+                    sleep(delay).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// 官方 StreamSession 的底层 HTTP POST。
@@ -381,6 +434,7 @@ impl QqApiClient {
         msg_id: &str,
         stream_state: &mut C2cStreamTransportState,
         msg_seq: u32,
+        authorization: &str,
         payload: &Value,
     ) -> StreamSendResult {
         let url = format!("{}/v2/users/{user_openid}/stream_messages", self.api_base);
@@ -399,7 +453,7 @@ impl QqApiClient {
         let response = self
             .client
             .post(url)
-            .header("Authorization", self.auth.authorization_header().await?)
+            .header("Authorization", authorization)
             .json(payload)
             .send()
             .await
@@ -416,6 +470,7 @@ impl QqApiClient {
                     http_status = "",
                     qq_code = "",
                     qq_message = "",
+                    index_reserved = true,
                     index_committed = false,
                     msg_seq_committed = false,
                     error = %reqwest_error_summary(&error),
@@ -440,6 +495,7 @@ impl QqApiClient {
                 http_status = %status,
                 qq_code = qq_code.as_deref().unwrap_or(""),
                 qq_message = qq_message.as_deref().unwrap_or(""),
+                index_reserved = true,
                 index_committed = false,
                 msg_seq_committed = false,
                 error_summary = %qq_api_error_body_summary(&body),
@@ -481,12 +537,11 @@ impl QqApiClient {
             returned_ref_index_id = %ref_index_id.as_deref().map(mask_identifier).unwrap_or_default(),
             "QQ 官方 C2C 流式请求成功"
         );
-        // 只有状态码、响应体和消息 ID 都确认成功后，才推进 StreamSession 游标。
+        // 请求开始时已经预留 index；成功响应只负责提交会话 ID 和成功结果。
         stream_state.msg_seq.get_or_insert(msg_seq);
         if stream_state.stream_msg_id.is_none() {
             stream_state.stream_msg_id = Some(message_id.clone());
         }
-        stream_state.index = stream_state.index.saturating_add(1);
         Ok(C2cStreamResponse {
             message_id,
             ref_index_id,
@@ -694,6 +749,21 @@ fn stream_payload_content_chars(payload: &Value) -> usize {
         .and_then(Value::as_str)
         .map(|content| content.chars().count())
         .unwrap_or(0)
+}
+
+fn is_stream_rate_limit_error(error: &ApiError) -> bool {
+    let ApiError::Status { status, body } = error else {
+        return false;
+    };
+    *status == StatusCode::TOO_MANY_REQUESTS
+        || qq_api_error_fields(body).0.as_deref() == Some("50002")
+}
+
+fn stream_rate_limit_backoff(retry_number: usize) -> std::time::Duration {
+    // 最多 3 次重试，等待总和为 350ms；限流不会无限占用 Agent 的收尾时间预算。
+    let shift = retry_number.saturating_sub(1).min(6) as u32;
+    let multiplier = 1_u64 << shift;
+    std::time::Duration::from_millis(STREAM_RATE_LIMIT_BACKOFF_BASE_MS.saturating_mul(multiplier))
 }
 
 pub async fn send_outbound_with_fallback<S: OutboundSender + ?Sized>(
