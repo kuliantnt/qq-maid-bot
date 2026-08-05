@@ -49,11 +49,15 @@ async fn main() -> ExitCode {
 
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            tracing::error!(error = %error, "qq-maid-bot 执行失败");
-            ExitCode::FAILURE
-        }
+        Err(error) => exit_for_error(error),
     }
+}
+
+/// 顶层失败只在这里记录一次；`{error:#}` 是 Display 的 alternate 格式，会展开
+/// anyhow 的完整 `caused by:` 错误链，且不包含 backtrace，避免记录无关调用栈或泄露敏感上下文。
+fn exit_for_error(error: anyhow::Error) -> ExitCode {
+    tracing::error!(error = %format_args!("{error:#}"), "qq-maid-bot 执行失败");
+    ExitCode::FAILURE
 }
 
 async fn run() -> anyhow::Result<()> {
@@ -336,8 +340,63 @@ mod tests {
     use qq_maid_core::config::center::{
         ManagedConfigChange, SECRET_MISSING_REVISION, SecretConfigChange,
     };
-    use std::path::{Path, PathBuf};
+    use std::{
+        io::Write,
+        path::{Path, PathBuf},
+        sync::{Arc, Mutex},
+    };
     use toml::Value;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    /// 捕获 tracing fmt 输出到内存，用于验证顶层错误日志的完整错误链。
+    #[derive(Clone)]
+    struct RecordingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl MakeWriter<'_> for RecordingWriter {
+        type Writer = RecordingWriterGuard;
+
+        fn make_writer(&self) -> Self::Writer {
+            RecordingWriterGuard(self.0.clone())
+        }
+    }
+
+    struct RecordingWriterGuard(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for RecordingWriterGuard {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn top_level_error_logs_full_anyhow_chain_once() {
+        // 构造带 Context 的嵌套错误：外层上下文包裹底层根因。
+        let error =
+            anyhow::anyhow!("底层根因：备份目标目录不可写").context("外层上下文：创建备份失败");
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(RecordingWriter(recorded.clone()))
+                .with_ansi(false),
+        );
+        let code = tracing::subscriber::with_default(subscriber, || exit_for_error(error));
+
+        assert_ne!(code, ExitCode::SUCCESS);
+        let recorded = recorded.lock().unwrap();
+        let stderr = String::from_utf8_lossy(&recorded);
+        assert!(stderr.contains("外层上下文：创建备份失败"), "{stderr}");
+        assert!(stderr.contains("底层根因：备份目标目录不可写"), "{stderr}");
+        assert_eq!(
+            stderr.matches("qq-maid-bot 执行失败").count(),
+            1,
+            "{stderr}"
+        );
+    }
 
     struct TestDirectory(PathBuf);
 

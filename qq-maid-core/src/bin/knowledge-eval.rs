@@ -50,7 +50,8 @@ fn main() -> ExitCode {
             }
         }
         Err(error) => {
-            tracing::error!(error = %error, "knowledge eval failed");
+            // 与主程序统一：Display alternate 格式输出完整错误链（当前为 String 时等价于普通 Display）。
+            tracing::error!(error = %format_args!("{error:#}"), "knowledge eval failed");
             ExitCode::FAILURE
         }
     }
