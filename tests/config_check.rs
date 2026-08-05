@@ -99,3 +99,43 @@ fn config_check_validates_existing_default_agent_config() {
         "stderr: {stderr}"
     );
 }
+
+#[test]
+fn config_check_reports_invalid_ops_file_and_safe_field_reason() {
+    let directory = TestDirectory::new("invalid-ops");
+    let ops_file = directory.path().join("ops.toml");
+    fs::write(
+        &ops_file,
+        r#"
+enabled = true
+
+[private]
+enabled = true
+allowed_user_ids = ["do-not-print-this-id"]
+
+[codex]
+enabled = true
+program = "/definitely/missing/codex"
+working_directory = "/definitely/missing/workspace"
+"#,
+    )
+    .unwrap();
+
+    let output = run_config_check(directory.path(), &[("OPS_CONFIG_FILE", &ops_file)]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("component=ops"), "stderr: {stderr}");
+    assert!(
+        stderr.contains(&format!("file={}", ops_file.display())),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("codex.program"), "stderr: {stderr}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!format!("{stdout}{stderr}").contains("do-not-print-this-id"));
+    assert_eq!(
+        stderr.matches("qq-maid-bot 执行失败").count(),
+        1,
+        "{stderr}"
+    );
+}

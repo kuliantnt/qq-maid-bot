@@ -178,7 +178,7 @@ v0.20.x 起推荐新部署通过 `/console/` 网页完成配置，也可在安�
 
 聊天命令默认使用 `/` 前缀；可在 Web 控制台“命令设置”中通过下拉框改为 `#` 或 `*`，也可设置 `runtime.toml` 的 `command.prefix` / 环境变量 `CHAT_COMMAND_PREFIX`。前缀必须是一个可见非空白字符，修改后重启生效；自定义后旧 `/` 不再触发命令。
 
-未配置 Provider 或平台入口的新实例会以 `setup_required` 启动。访问默认同源 `/console/`，读取服务器本地 `config/secrets/bootstrap.token` 建立首位部署管理员后，可分步保存 Provider、QQ/OneBot/微信入口、主要功能开关、模型路线和 Tool Calling；普通值与人工编辑共享受管 TOML，secret 不回传原文。约 22 字符的短时单次 Bootstrap token 在新生成时同时写入权限受限文件并向启动控制台输出一次；状态查询、有效 token 复用和后续重启不会重复输出，成功使用后文件立即删除。忘记密码时可在登录页生成同路径的一次性重置 token，完成重置后旧管理员会话全部失效。完成配置后按当前部署方式重启，完整预检通过才进入机器人正常运行态。
+未配置 Provider 或平台入口的新实例会以 `setup_required` 启动。访问默认同源 `/console/`，读取服务器本地 `config/secrets/bootstrap.token` 建立首位部署管理员后，可分步保存 Provider、QQ/OneBot/微信入口、主要功能开关、模型路线和 Tool Calling；普通值与人工编辑共享受管 TOML，secret 不回传原文。约 22 字符的短时单次 Bootstrap token 在新生成时同时写入权限受限文件，并通过一次 `info` 启动日志事件输出；状态查询、有效 token 复用和后续重启不会重复输出，成功使用后文件立即删除。忘记密码时可在登录页生成同路径的一次性重置 token，完成重置后旧管理员会话全部失效。完成配置后按当前部署方式重启，完整预检通过才进入机器人正常运行态。
 
 生产反向代理必须保留原始 `Host`、协议（`X-Forwarded-Proto`）并设置 `WEB_CONSOLE_TRUSTED_PROXY_IPS` 为代理实际连接 IP；应用不会直接信任客户端伪造的转发头。HTTPS 生产请显式设置 `WEB_CONSOLE_SECURE_COOKIES=true`，控制台会使用 `Secure`、`HttpOnly`、`SameSite=Strict` 和 `__Host-` Cookie；本机 HTTP 开发保持默认关闭。
 

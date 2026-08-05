@@ -3,8 +3,13 @@ use std::{env, fs, process::ExitCode};
 use qq_maid_core::runtime::tools::knowledge::eval::{
     parse_dataset, run_fts5_baseline, run_knowledge_v3,
 };
-
 fn main() -> ExitCode {
+    qq_maid_core::app::load_dotenv_files();
+    if let Err(error) = qq_maid_core::app::init_tracing() {
+        eprintln!("tracing 初始化失败: {error}");
+        return ExitCode::FAILURE;
+    }
+
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     let semantic = arguments.iter().any(|argument| argument == "--semantic");
     let embedding_cache_dir = arguments
@@ -45,7 +50,8 @@ fn main() -> ExitCode {
             }
         }
         Err(error) => {
-            eprintln!("knowledge eval failed: {error}");
+            // 与主程序统一：Display alternate 格式输出完整错误链（当前为 String 时等价于普通 Display）。
+            tracing::error!(error = %format_args!("{error:#}"), "knowledge eval failed");
             ExitCode::FAILURE
         }
     }

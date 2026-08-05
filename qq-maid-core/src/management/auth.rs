@@ -1077,10 +1077,12 @@ impl AdminAuth {
 
 fn print_bootstrap_token(token: &str, ttl: Duration) {
     // 只在令牌新生成时调用；状态读取、有效令牌复用和重启不得重复输出。
-    // 令牌不进入结构化 tracing 字段或持久状态，文件权限与平台边界见部署文档。
-    eprintln!(
-        "\n[qq-maid] 部署管理员 Bootstrap / 密码重置令牌（{} 分钟内有效，仅可使用一次）：\n{token}\n[qq-maid] 使用后令牌立即失效；请勿转发或长期保留启动日志。\n",
-        ttl.as_secs() / 60
+    // 令牌仅进入这一条 info 日志，不写入 API 响应或长期状态；文件权限与平台边界
+    // 见部署文档。
+    tracing::info!(
+        token = %token,
+        ttl_minutes = ttl.as_secs() / 60,
+        "部署管理员 Bootstrap / 密码重置令牌已生成（仅可使用一次）；请勿转发或长期保留启动日志"
     );
 }
 
