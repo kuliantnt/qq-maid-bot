@@ -141,6 +141,7 @@ pub(crate) fn start_core_response_stream(
                             &tx,
                             &producer_cancelled,
                             &producer_visible_text_sent,
+                            delivery.provider_stream_enabled,
                             &producer_buffered_final_text,
                         )
                         .await;
@@ -441,8 +442,14 @@ async fn run_agent_runtime_respond(
         Err(error) => {
             // 只有模型最终轮已经产生草稿、但整轮最终化失败时，才释放暂存正文；
             // 这样上层仍能按原语义报告“已有部分回复后失败”。
-            flush_buffered_final_text(&tx, &cancelled, &visible_text_sent, &buffered_final_text)
-                .await?;
+            flush_buffered_final_text(
+                &tx,
+                &cancelled,
+                &visible_text_sent,
+                provider_stream_enabled,
+                &buffered_final_text,
+            )
+            .await?;
             return Err(error);
         }
     };
@@ -461,6 +468,8 @@ async fn run_agent_runtime_respond(
         &cancelled,
         &visible_text_sent,
         &buffered_final_text,
+        provider_stream_enabled,
+        &tool_activity_started,
         &response,
     )
     .await?;
@@ -562,10 +571,17 @@ async fn send_postprocessed_agent_response(
     cancelled: &Arc<AtomicBool>,
     visible_text_sent: &Arc<AtomicBool>,
     buffered_final_text: &Arc<Mutex<String>>,
+    provider_stream_enabled: bool,
+    tool_activity_started: &Arc<AtomicBool>,
     response: &RespondResponse,
 ) -> Result<(), LlmError> {
+    // `ProgressThenComplete` 的 Provider 没有可用的文本传输通道，最终正文只能
+    // 由外层 `Completed` 交付；即使诊断里存在工具结果，也不能在这里伪造 delta。
+    if !provider_stream_enabled {
+        return Ok(());
+    }
     let buffered = take_buffered_final_text(buffered_final_text)?;
-    if !response_has_tool_results(response) {
+    if !tool_activity_started.load(Ordering::SeqCst) {
         if buffered.trim().is_empty() {
             return Ok(());
         }
@@ -593,8 +609,12 @@ async fn flush_buffered_final_text(
     tx: &mpsc::Sender<CoreResponseEvent>,
     cancelled: &Arc<AtomicBool>,
     visible_text_sent: &Arc<AtomicBool>,
+    provider_stream_enabled: bool,
     buffered_final_text: &Arc<Mutex<String>>,
 ) -> Result<(), LlmError> {
+    if !provider_stream_enabled {
+        return Ok(());
+    }
     let buffered = take_buffered_final_text(buffered_final_text)?;
     if buffered.trim().is_empty() {
         return Ok(());
@@ -617,15 +637,6 @@ fn agent_final_text_buffer_error(action: &str) -> LlmError {
         format!("{action} Agent 最终文本缓冲区失败"),
         "stream",
     )
-}
-
-fn response_has_tool_results(response: &RespondResponse) -> bool {
-    response
-        .diagnostics
-        .as_ref()
-        .and_then(|diagnostics| diagnostics.get("agent_tool_results"))
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|results| !results.is_empty())
 }
 
 async fn send_core_delta(
