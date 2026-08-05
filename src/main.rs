@@ -3,7 +3,7 @@
 //! 该入口一次性完成 dotenv / tracing 初始化，组装 CoreHandle、Gateway 和主动推送
 //! sink。Core 与 Gateway 之间只走进程内强类型调用，不再通过 localhost HTTP 探活或通信。
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, process::ExitCode, sync::Arc, time::Duration};
 
 use anyhow::anyhow;
 use qq_maid_core::{
@@ -40,12 +40,26 @@ const BUILD_COMMIT: &str = match option_env!("QQ_MAID_BUILD_COMMIT") {
 };
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> ExitCode {
     qq_maid_core::app::load_dotenv_files();
+    if let Err(error) = init_tracing() {
+        eprintln!("tracing 初始化失败: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            tracing::error!(error = %error, "qq-maid-bot 执行失败");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> anyhow::Result<()> {
     if cli::dispatch(std::env::args_os().skip(1).collect())? {
         return Ok(());
     }
-    init_tracing()?;
     info!(
         version = env!("CARGO_PKG_VERSION"),
         commit = BUILD_COMMIT,
@@ -296,6 +310,9 @@ fn init_tracing() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(
             fmt::layer()
+                // 日志写入 stderr，避免污染 config check 等机器可读 stdout。
+                .with_writer(std::io::stderr)
+                .with_ansi(false)
                 .with_target(false)
                 .with_timer(shanghai_log_timer()),
         )

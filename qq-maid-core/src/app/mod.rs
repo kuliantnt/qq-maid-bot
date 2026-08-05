@@ -273,6 +273,9 @@ pub fn init_tracing() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(
             fmt::layer()
+                // 独立 Core/评测入口也不能把日志混入 CLI 的机器可读 stdout。
+                .with_writer(std::io::stderr)
+                .with_ansi(false)
                 .with_target(false)
                 .with_timer(shanghai_log_timer()),
         )

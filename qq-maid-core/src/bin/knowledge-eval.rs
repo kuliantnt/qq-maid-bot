@@ -4,6 +4,12 @@ use qq_maid_core::runtime::tools::knowledge::eval::{
     parse_dataset, run_fts5_baseline, run_knowledge_v3,
 };
 fn main() -> ExitCode {
+    qq_maid_core::app::load_dotenv_files();
+    if let Err(error) = qq_maid_core::app::init_tracing() {
+        eprintln!("tracing 初始化失败: {error}");
+        return ExitCode::FAILURE;
+    }
+
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     let semantic = arguments.iter().any(|argument| argument == "--semantic");
     let embedding_cache_dir = arguments
@@ -44,11 +50,7 @@ fn main() -> ExitCode {
             }
         }
         Err(error) => {
-            if tracing::dispatcher::has_been_set() {
-                tracing::error!(error = %error, "knowledge eval failed");
-            } else {
-                eprintln!("knowledge eval failed: {error}");
-            }
+            tracing::error!(error = %error, "knowledge eval failed");
             ExitCode::FAILURE
         }
     }

@@ -131,5 +131,11 @@ working_directory = "/definitely/missing/workspace"
         "stderr: {stderr}"
     );
     assert!(stderr.contains("codex.program"), "stderr: {stderr}");
-    assert!(!stderr.contains("do-not-print-this-id"), "stderr: {stderr}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!format!("{stdout}{stderr}").contains("do-not-print-this-id"));
+    assert_eq!(
+        stderr.matches("qq-maid-bot 执行失败").count(),
+        1,
+        "{stderr}"
+    );
 }

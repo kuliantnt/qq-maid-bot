@@ -111,8 +111,8 @@ fn config_check() -> anyhow::Result<()> {
         println!(
             "提示：当前实例尚需初始化或执行 migration；本次 check 保持只读，未创建文件或更新数据库。"
         );
-        if let Err(error) = agent {
-            bail!("Agent 配置无效：{error}");
+        if agent.is_err() {
+            bail!("Agent 配置无效；详情见上方");
         }
         if !file_issues.is_empty() {
             bail!("检测到 {} 个无效配置文件，详情见上方", file_issues.len());
@@ -152,19 +152,12 @@ fn config_check() -> anyhow::Result<()> {
 
 fn print_config_file_issues(issues: &[ConfigFileIssue]) {
     for issue in issues {
-        if tracing::dispatcher::has_been_set() {
-            tracing::error!(
-                component = %issue.component,
-                file = %issue.path,
-                reason = %issue.reason,
-                "配置文件预检失败"
-            );
-        } else {
-            eprintln!(
-                "配置文件预检失败: component={} file={} reason={}",
-                issue.component, issue.path, issue.reason
-            );
-        }
+        tracing::error!(
+            component = %issue.component,
+            file = %issue.path,
+            reason = %issue.reason,
+            "配置文件预检失败"
+        );
     }
 }
 
