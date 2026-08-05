@@ -2,6 +2,27 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.23.6] - 2026-08-05
+
+### Release Focus
+
+* **QQ 官方 `/stream_messages` 流式协议迁移**：将 C2C 流式回复收敛到官方累计替换模型，补齐候选切换、官方游标和引用索引语义，避免长回复、重生成和限流场景下丢正文或重复发送。
+
+### Changed
+
+* **官方累计替换发送**（PR #649）：`input_mode=replace` 持续提交累计全文，首个成功响应建立 StreamSession，后续请求复用同一 `stream_msg_id` 和 `msg_seq`；完成请求只发送一次 `input_state=10`。
+* **官方游标与限流重试**（PR #649）：请求开始即消费连续 `index`，成功、网络错误和普通不可重试错误都不复用可能已被服务端消费的游标；HTTP 429 与 QQ `err_code=50002` 以有限指数退避和新 index 重试，普通 4xx、鉴权错误和其他错误不重试。
+* **候选正文 Rollover**（PR #649）：当最终候选改写已展示正文的前缀时，先完成旧 StreamSession，再以一次新的普通用户可见回复发送完整候选；长度回退、同长度改写和更长改写都不会静默丢弃候选或重复旧正文。
+
+### Fixed
+
+* **QQ C2C `ref_idx` 保留**（PR #649）：状态保存最近一次成功响应返回的非空 `ext_info.ref_idx`；complete 返回新值时覆盖，缺失时沿用此前值，绝不使用 stream message ID、消息 ID 或源消息 ID 伪造引用索引。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.23.6`，实际修改的 `qq-maid-gateway-rs` 提升到 `0.1.15`，`qq-maid-common`、`qq-maid-core` 和 `qq-maid-llm` 版本保持不变。
+* 本版本不新增 SQLite migration、配置迁移或新的运行时入口；继续使用官方 `/stream_messages`，不恢复旧的流式协议路径。升级前按常规备份运行配置、数据库和主密钥。
+
 ## [v0.23.5] - 2026-08-05
 
 ### Release Focus
