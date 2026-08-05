@@ -1,10 +1,8 @@
 use std::{future::Future, pin::Pin};
 
 use super::super::{outbound::RuntimeRecordingSender, typing::TypingStopReason};
-use crate::{
-    api::{C2cStreamState, OutboundSender, StreamSendResult},
-    markdown::MarkdownPayload,
-};
+use super::types::C2cStreamState;
+use crate::api::{OutboundSender, StreamSendResult};
 use qq_maid_core::service::{
     CoreFailureKind, CoreOutputPolicy, CoreRespondFailure, CoreResponseEvent,
 };
@@ -38,10 +36,9 @@ pub(crate) trait C2cStreamSender: OutboundSender {
         &'a self,
         user_openid: &'a str,
         msg_id: Option<&'a str>,
-        markdown: &'a MarkdownPayload,
+        content_raw: &'a str,
         stream_state: &'a mut C2cStreamState,
-        stream_state_value: u8,
-        reset: Option<bool>,
+        input_state: u8,
     ) -> StreamSendFuture<'a>;
 }
 
@@ -50,21 +47,19 @@ impl C2cStreamSender for RuntimeRecordingSender<'_> {
         &'a self,
         user_openid: &'a str,
         msg_id: Option<&'a str>,
-        markdown: &'a MarkdownPayload,
+        content_raw: &'a str,
         stream_state: &'a mut C2cStreamState,
-        stream_state_value: u8,
-        reset: Option<bool>,
+        input_state: u8,
     ) -> StreamSendFuture<'a> {
         Box::pin(async move {
             let result = self
                 .inner
-                .send_c2c_markdown_stream(
+                .send_c2c_stream_message(
                     user_openid,
                     msg_id,
-                    markdown,
-                    stream_state,
-                    stream_state_value,
-                    reset,
+                    content_raw,
+                    &mut stream_state.transport,
+                    input_state,
                 )
                 .await;
             match &result {

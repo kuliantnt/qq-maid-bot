@@ -5,6 +5,7 @@
 
 mod delivery;
 mod event_stream;
+mod progress;
 mod send;
 mod types;
 
@@ -13,15 +14,17 @@ pub(crate) use event_stream::RespondEventStream;
 
 #[cfg(test)]
 pub(super) use delivery::{
-    STREAM_THROTTLE_MS, stream_respond_c2c_with_sender,
-    stream_respond_c2c_with_sender_and_ref_index, stream_respond_c2c_with_sender_and_typing,
+    stream_respond_c2c_with_sender, stream_respond_c2c_with_sender_and_ref_index,
+    stream_respond_c2c_with_sender_and_typing,
 };
 #[cfg(test)]
 pub(super) use event_stream::{C2cStreamSender, RespondEventFuture, StreamSendFuture};
 #[cfg(test)]
-pub(super) use send::{STREAM_FINAL_MARKER, send_stream_chunk, send_stream_end};
+pub(super) use progress::STREAM_THROTTLE_MS;
 #[cfg(test)]
-pub(super) use types::C2cStreamingPhase;
+pub(super) use send::{CumulativeTextAction, reconcile_cumulative_text};
+#[cfg(test)]
+pub(super) use types::{C2cStreamState, C2cStreamingPhase};
 
 #[cfg(test)]
 mod tests;
