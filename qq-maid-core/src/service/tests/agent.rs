@@ -144,7 +144,9 @@ async fn core_tool_loop_streams_only_final_answer_after_tool_status() {
         }
     };
 
-    assert_eq!(deltas, vec!["最终".to_owned(), "回答".to_owned()]);
+    // Agent 最终正文要等工具结果完成领域投影后再对外发送，因此同一轮暂存为
+    // 一个可信增量，避免平台先收到模型草稿、随后又收到确定性回执。
+    assert_eq!(deltas, vec!["最终回答".to_owned()]);
     assert_eq!(response.text_content(), Some("最终回答"));
     assert!(status_kinds.contains(&CoreResponseStatusKind::AgentStarted));
     assert!(status_kinds.contains(&CoreResponseStatusKind::AgentFinalizing));

@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -57,6 +57,14 @@ struct AgentStreamControl {
     cancelled: Arc<AtomicBool>,
     run_handle: Option<AgentRunHandle>,
     visible_text_sent: Arc<AtomicBool>,
+    buffered_final_text: Arc<Mutex<String>>,
+}
+
+#[derive(Clone)]
+struct AgentFinalTextState {
+    tool_activity_started: Arc<AtomicBool>,
+    visible_text_sent: Arc<AtomicBool>,
+    buffered_final_text: Arc<Mutex<String>>,
 }
 
 pub(crate) fn start_core_response_stream(
@@ -81,6 +89,8 @@ pub(crate) fn start_core_response_stream(
     let producer_agent_run_handle = agent_run_handle.clone();
     let visible_text_sent = Arc::new(AtomicBool::new(false));
     let producer_visible_text_sent = visible_text_sent.clone();
+    let buffered_final_text = Arc::new(Mutex::new(String::new()));
+    let producer_buffered_final_text = buffered_final_text.clone();
     tokio::spawn(async move {
         if producer_cancelled.load(Ordering::SeqCst) {
             let _ = tx
@@ -100,6 +110,7 @@ pub(crate) fn start_core_response_stream(
                     cancelled: producer_cancelled.clone(),
                     run_handle: producer_agent_run_handle.clone(),
                     visible_text_sent: producer_visible_text_sent.clone(),
+                    buffered_final_text: producer_buffered_final_text.clone(),
                 },
                 delivery.provider_stream_enabled,
                 progress_status,
@@ -123,6 +134,17 @@ pub(crate) fn start_core_response_stream(
                     // 结果未知的写操作保留有限清理窗口，避免中断后伪装成未执行；
                     // 纯只读调用可立即取消，不额外占用副作用工具的 15 秒预算。
                     cleanup_timed_out_agent_task(&mut task, needs_side_effect_cleanup).await;
+                    if !producer_cancelled.load(Ordering::SeqCst) {
+                        // Agent 任务被超时清理后不再有机会走内部错误分支；释放已经
+                        // 产生的最终草稿，继续保留“部分回复 + 超时提示”的兼容语义。
+                        let _ = flush_buffered_final_text(
+                            &tx,
+                            &producer_cancelled,
+                            &producer_visible_text_sent,
+                            &producer_buffered_final_text,
+                        )
+                        .await;
+                    }
                     Err(producer_agent_run_handle
                         .as_ref()
                         .map(|handle| err.clone().with_agent(handle.snapshot()))
@@ -139,6 +161,7 @@ pub(crate) fn start_core_response_stream(
                     cancelled: producer_cancelled.clone(),
                     run_handle: producer_agent_run_handle.clone(),
                     visible_text_sent: producer_visible_text_sent.clone(),
+                    buffered_final_text: producer_buffered_final_text.clone(),
                 },
                 delivery.provider_stream_enabled,
                 progress_status,
@@ -339,6 +362,7 @@ async fn run_agent_runtime_respond(
     let cancelled = control.cancelled;
     let agent_run_handle = control.run_handle;
     let visible_text_sent = control.visible_text_sent;
+    let buffered_final_text = control.buffered_final_text;
     let eager_agent_status = planned.should_emit_eager_agent_status();
     if eager_agent_status {
         send_core_status(
@@ -356,6 +380,14 @@ async fn run_agent_runtime_respond(
     }
 
     let tool_activity_started = Arc::new(AtomicBool::new(false));
+    // 工具结果还要经过领域投影；在投影完成前不能把模型最终草稿直接发给平台，
+    // 否则失败回执会被 Gateway 视为第二条回复。工具执行异常时再把暂存草稿原样
+    // 释放，保留“已发出部分正文后不能伪造重放”的既有流式语义。
+    let final_text_state = AgentFinalTextState {
+        tool_activity_started: tool_activity_started.clone(),
+        visible_text_sent: visible_text_sent.clone(),
+        buffered_final_text: buffered_final_text.clone(),
+    };
     let progress_sink = tool_loop_progress_sink(
         tx.clone(),
         cancelled.clone(),
@@ -371,8 +403,7 @@ async fn run_agent_runtime_respond(
             progress_status.clone(),
             finalizing_status_sent.clone(),
             eager_agent_status,
-            tool_activity_started.clone(),
-            visible_text_sent,
+            final_text_state,
         ))
     } else {
         None
@@ -387,9 +418,9 @@ async fn run_agent_runtime_respond(
     tokio::pin!(respond_future);
     let mut running_status_sent = false;
 
-    let response = loop {
+    let response = match loop {
         tokio::select! {
-            result = &mut respond_future => break result?,
+            result = &mut respond_future => break result,
             _ = tokio::time::sleep(AGENT_RUNNING_STATUS_DELAY), if eager_agent_status && !running_status_sent => {
                 running_status_sent = true;
                 send_core_status(
@@ -405,6 +436,15 @@ async fn run_agent_runtime_respond(
                 ).await?;
             }
         }
+    } {
+        Ok(response) => response,
+        Err(error) => {
+            // 只有模型最终轮已经产生草稿、但整轮最终化失败时，才释放暂存正文；
+            // 这样上层仍能按原语义报告“已有部分回复后失败”。
+            flush_buffered_final_text(&tx, &cancelled, &visible_text_sent, &buffered_final_text)
+                .await?;
+            return Err(error);
+        }
     };
 
     send_agent_finalizing_status_once(
@@ -414,6 +454,14 @@ async fn run_agent_runtime_respond(
         &finalizing_status_sent,
         eager_agent_status,
         &tool_activity_started,
+    )
+    .await?;
+    send_postprocessed_agent_response(
+        &tx,
+        &cancelled,
+        &visible_text_sent,
+        &buffered_final_text,
+        &response,
     )
     .await?;
 
@@ -469,16 +517,14 @@ fn agent_final_delta_sink(
     progress_status: ProgressStatusConfig,
     finalizing_status_sent: Arc<AtomicBool>,
     eager_agent_status: bool,
-    tool_activity_started: Arc<AtomicBool>,
-    visible_text_sent: Arc<AtomicBool>,
+    final_text_state: AgentFinalTextState,
 ) -> AgentTextDeltaSink {
     Arc::new(move |delta| {
         let tx = tx.clone();
         let cancelled = cancelled.clone();
         let progress_status = progress_status.clone();
         let finalizing_status_sent = finalizing_status_sent.clone();
-        let tool_activity_started = tool_activity_started.clone();
-        let visible_text_sent = visible_text_sent.clone();
+        let final_text_state = final_text_state.clone();
         Box::pin(async move {
             send_agent_finalizing_status_once(
                 &tx,
@@ -486,14 +532,100 @@ fn agent_final_delta_sink(
                 &progress_status,
                 &finalizing_status_sent,
                 eager_agent_status,
-                &tool_activity_started,
+                &final_text_state.tool_activity_started,
             )
             .await?;
+            if final_text_state
+                .tool_activity_started
+                .load(Ordering::SeqCst)
+            {
+                let mut buffered = final_text_state
+                    .buffered_final_text
+                    .lock()
+                    .map_err(|_| agent_final_text_buffer_error("写入"))?;
+                buffered.push_str(&delta);
+                return Ok(());
+            }
             send_core_delta(&tx, &cancelled, delta).await?;
-            visible_text_sent.store(true, Ordering::SeqCst);
+            final_text_state
+                .visible_text_sent
+                .store(true, Ordering::SeqCst);
             Ok(())
         }) as AgentTextDeltaFuture
     })
+}
+
+/// 工具调用结束后，`RespondResponse` 已经包含领域可信回执和必要的模型总结，
+/// 因此只发送这一份最终正文，让 Gateway 能把累计正文与 Completed 对齐。
+async fn send_postprocessed_agent_response(
+    tx: &mpsc::Sender<CoreResponseEvent>,
+    cancelled: &Arc<AtomicBool>,
+    visible_text_sent: &Arc<AtomicBool>,
+    buffered_final_text: &Arc<Mutex<String>>,
+    response: &RespondResponse,
+) -> Result<(), LlmError> {
+    let buffered = take_buffered_final_text(buffered_final_text)?;
+    if !response_has_tool_results(response) {
+        if buffered.trim().is_empty() {
+            return Ok(());
+        }
+        send_core_delta(tx, cancelled, buffered).await?;
+        visible_text_sent.store(true, Ordering::SeqCst);
+        return Ok(());
+    }
+    if !response.ok {
+        return Ok(());
+    }
+    let Some(content) =
+        response_visible_content(response).filter(|content| !content.trim().is_empty())
+    else {
+        return Ok(());
+    };
+    // `buffered` 仅用于保留异常路径的草稿；正常完成时必须丢弃，不能把未投影的
+    // 模型文本与确定性工具回执再次拼接。
+    let _ = buffered;
+    send_core_delta(tx, cancelled, content.to_owned()).await?;
+    visible_text_sent.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+async fn flush_buffered_final_text(
+    tx: &mpsc::Sender<CoreResponseEvent>,
+    cancelled: &Arc<AtomicBool>,
+    visible_text_sent: &Arc<AtomicBool>,
+    buffered_final_text: &Arc<Mutex<String>>,
+) -> Result<(), LlmError> {
+    let buffered = take_buffered_final_text(buffered_final_text)?;
+    if buffered.trim().is_empty() {
+        return Ok(());
+    }
+    send_core_delta(tx, cancelled, buffered).await?;
+    visible_text_sent.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+fn take_buffered_final_text(buffered_final_text: &Arc<Mutex<String>>) -> Result<String, LlmError> {
+    let mut buffered = buffered_final_text
+        .lock()
+        .map_err(|_| agent_final_text_buffer_error("读取"))?;
+    Ok(std::mem::take(&mut *buffered))
+}
+
+fn agent_final_text_buffer_error(action: &str) -> LlmError {
+    LlmError::new(
+        "internal_error",
+        format!("{action} Agent 最终文本缓冲区失败"),
+        "stream",
+    )
+}
+
+fn response_has_tool_results(response: &RespondResponse) -> bool {
+    response
+        .diagnostics
+        .as_ref()
+        .and_then(|diagnostics| diagnostics.get("agent_tool_results"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|results| !results.is_empty())
 }
 
 async fn send_core_delta(

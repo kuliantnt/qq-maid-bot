@@ -246,7 +246,11 @@ fn parse_optional_enum(
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(text)) => {
             let text = text.trim().to_ascii_lowercase();
-            if allowed.contains(&text.as_str()) {
+            if text == "null" {
+                // 部分模型会把 schema 中的 null 序列化成字符串；可选枚举字段
+                // 按未设置处理，避免把兼容性问题误报成上游搜索故障。
+                Ok(None)
+            } else if allowed.contains(&text.as_str()) {
                 Ok(Some(text))
             } else {
                 Err(WebSearchArgumentError::new(

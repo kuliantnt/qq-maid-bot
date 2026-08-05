@@ -80,6 +80,32 @@ async fn agent_web_search_invalid_arguments_are_structured_and_skip_executor() {
     assert!(requests.lock().unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn string_null_time_range_is_treated_as_unset() {
+    let executor = MockWebSearchExecutor::default();
+    let requests = executor.requests.clone();
+    let tool =
+        WebSearchTool::new(Arc::new(executor)).with_backend_override(WebSearchBackend::Tavily);
+    let registry = ToolRegistry::new().register(tool).unwrap();
+    let mut context = test_context();
+    context.tool_call_id = Some("task-string-null:call-1".to_owned());
+
+    let serialized = registry
+        .execute_json(
+            &context,
+            WEB_SEARCH_TOOL_NAME,
+            r#"{"query":"safe query","time_range":"null"}"#,
+        )
+        .await
+        .unwrap();
+    let output: Value = serde_json::from_str(&serialized).unwrap();
+
+    assert_eq!(output["ok"], true);
+    assert_eq!(output["execution_succeeded"], true);
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    assert_eq!(requests.lock().unwrap()[0].time_range, None);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn invalid_argument_log_has_field_diagnostics_without_search_content() {
     let bytes = Arc::new(Mutex::new(Vec::new()));
