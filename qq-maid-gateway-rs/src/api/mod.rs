@@ -242,7 +242,7 @@ pub(crate) type StreamSendResult = Result<C2cStreamResponse, ApiError>;
 
 /// QQ 流式接口只对明确的限流响应做有限重试；其它错误不能在不知道服务端状态时盲目重放。
 const STREAM_RATE_LIMIT_MAX_RETRIES: usize = 3;
-const STREAM_RATE_LIMIT_BACKOFF_BASE_MS: u64 = 50;
+const STREAM_RATE_LIMIT_BACKOFF_BASE_MS: u64 = 1_000;
 
 pub trait OutboundSender: Send + Sync {
     fn send_text<'a>(&'a self, target: &'a C2cReplyTarget, text: &'a str) -> SendFuture<'a>;
@@ -760,7 +760,7 @@ fn is_stream_rate_limit_error(error: &ApiError) -> bool {
 }
 
 fn stream_rate_limit_backoff(retry_number: usize) -> std::time::Duration {
-    // 最多 3 次重试，等待总和为 350ms；限流不会无限占用 Agent 的收尾时间预算。
+    // 最多 3 次重试，等待总和为 7 秒；限流不会无限占用 Agent 的收尾时间预算。
     let shift = retry_number.saturating_sub(1).min(6) as u32;
     let multiplier = 1_u64 << shift;
     std::time::Duration::from_millis(STREAM_RATE_LIMIT_BACKOFF_BASE_MS.saturating_mul(multiplier))

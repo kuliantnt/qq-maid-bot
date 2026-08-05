@@ -122,6 +122,14 @@ fn official_c2c_stream_payload_uses_cumulative_replace_shape() {
     assert_eq!(final_payload["index"], 2);
 }
 
+#[test]
+fn stream_rate_limit_backoff_matches_node_sdk_and_retry_budget_is_bounded() {
+    assert_eq!(stream_rate_limit_backoff(1), Duration::from_millis(1_000));
+    assert_eq!(stream_rate_limit_backoff(2), Duration::from_millis(2_000));
+    assert_eq!(stream_rate_limit_backoff(3), Duration::from_millis(4_000));
+    assert_eq!(STREAM_RATE_LIMIT_MAX_RETRIES, 3);
+}
+
 fn read_http_request(stream: &mut TcpStream) -> (String, String) {
     let mut bytes = Vec::new();
     let header_end = loop {
@@ -575,6 +583,7 @@ async fn c2c_stream_client_stops_after_limited_rate_limit_retries() {
     let requests = server.join().unwrap();
 
     assert!(matches!(result, Err(ApiError::Status { .. })));
+    assert_eq!(requests.len(), STREAM_RATE_LIMIT_MAX_RETRIES + 1);
     assert_eq!(state.index, 4);
     assert_eq!(state.msg_seq, Some(1));
     assert!(state.stream_msg_id.is_none());
