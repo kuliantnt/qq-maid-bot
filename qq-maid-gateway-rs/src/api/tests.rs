@@ -1,4 +1,10 @@
-use std::sync::Mutex;
+use std::{
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+    sync::Mutex,
+    thread,
+    time::Duration,
+};
 
 use super::*;
 use crate::{markdown::MarkdownPayload, media::ImagePayload, render::OutboundMessage};
@@ -40,10 +46,11 @@ fn extracts_message_id_and_refidx_without_mixing_semantics() {
     );
     assert_eq!(nested.message_id.as_deref(), Some("bot-msg-2"));
     assert_eq!(nested.ref_index_id.as_deref(), Some("REFIDX_bot_2"));
-    assert_eq!(
-        extract_sent_message_id(r#"{"id":"bot-msg-1","msg_idx":"REFIDX_bot_1"}"#).as_deref(),
-        Some("bot-msg-1")
-    );
+
+    let official =
+        extract_sent_message_ids(r#"{"id":"bot-msg-3","ext_info":{"ref_idx":"REFIDX_bot_3"}}"#);
+    assert_eq!(official.message_id.as_deref(), Some("bot-msg-3"));
+    assert_eq!(official.ref_index_id.as_deref(), Some("REFIDX_bot_3"));
 }
 
 #[test]
@@ -71,240 +78,248 @@ fn c2c_typing_payload_uses_native_typing_message_type() {
 }
 
 #[test]
-fn c2c_markdown_stream_payload_matches_reference_shape() {
-    let first_markdown = MarkdownPayload::new("**hello**");
-    let first_payload = build_c2c_markdown_stream_payload(
-        &first_markdown,
-        Some("msg-1"),
+fn official_c2c_stream_payload_uses_cumulative_replace_shape() {
+    let first_state = C2cStreamTransportState::new();
+    let first = build_c2c_stream_payload("你好", "msg-1", 6, &first_state, 1);
+    assert_eq!(first["input_mode"], "replace");
+    assert_eq!(first["input_state"], 1);
+    assert_eq!(first["content_type"], "markdown");
+    assert_eq!(first["content_raw"], "你好");
+    assert_eq!(first["event_id"], "msg-1");
+    assert_eq!(first["msg_id"], "msg-1");
+    assert_eq!(first["msg_seq"], 6);
+    assert_eq!(first["index"], 0);
+    assert!(first.get("stream_msg_id").is_none());
+    assert!(first.get("markdown").is_none());
+    assert!(first.get("stream").is_none());
+    assert!(first.get("msg_type").is_none());
+
+    let middle_state = C2cStreamTransportState {
+        stream_msg_id: Some("stream-1".to_owned()),
+        msg_seq: Some(6),
+        index: 1,
+    };
+    let middle = build_c2c_stream_payload("你好，这是", "msg-1", 6, &middle_state, 1);
+    assert_eq!(middle["content_raw"], "你好，这是");
+    assert_eq!(middle["stream_msg_id"], "stream-1");
+    assert_eq!(middle["msg_seq"], 6);
+    assert_eq!(middle["index"], 1);
+
+    let final_payload = build_c2c_stream_payload(
+        "你好，这是最终内容",
+        "msg-1",
         6,
-        &C2cStreamState {
-            stream_id: None,
-            index: 0,
-            ..C2cStreamState::new()
-        },
-        1,
-        Some(false),
-    );
-    assert_eq!(first_payload["msg_type"], 2);
-    assert_eq!(first_payload["markdown"]["content"], "**hello**");
-    assert_eq!(first_payload["msg_id"], "msg-1");
-    assert_eq!(first_payload["msg_seq"], 6);
-    assert!(first_payload.get("content").is_none());
-    assert!(first_payload["stream"]["id"].is_null());
-    assert_eq!(first_payload["stream"]["index"], 0);
-    assert_eq!(first_payload["stream"]["state"], 1);
-    assert!(first_payload["stream"].get("done").is_none());
-    assert!(first_payload["stream"].get("type").is_none());
-    assert_eq!(first_payload["stream"]["reset"], false);
-
-    let middle_markdown = MarkdownPayload::new(" delta");
-    let middle_payload = build_c2c_markdown_stream_payload(
-        &middle_markdown,
-        Some("msg-1"),
-        7,
-        &C2cStreamState {
-            stream_id: Some("stream-1".to_owned()),
-            index: 1,
-            ..C2cStreamState::new()
-        },
-        1,
-        Some(false),
-    );
-
-    // 被动回复 msg_id 和流式续接 id 分属两个协议字段，缺一都会导致 QQ 端退化或续接失败。
-    assert_eq!(middle_payload["msg_type"], 2);
-    assert_eq!(middle_payload["markdown"]["content"], " delta");
-    assert!(middle_payload.get("content").is_none());
-    assert_eq!(middle_payload["stream"]["id"], "stream-1");
-    assert_eq!(middle_payload["stream"]["index"], 1);
-    assert_eq!(middle_payload["stream"]["state"], 1);
-    assert!(middle_payload["stream"].get("done").is_none());
-    assert!(middle_payload["stream"].get("type").is_none());
-    assert_eq!(middle_payload["stream"]["reset"], false);
-
-    let middle_json = serde_json::to_string(&middle_payload).unwrap();
-    assert!(middle_json.contains("\"state\":1"));
-    assert!(!middle_json.contains("\"type\":1"));
-
-    let final_markdown = MarkdownPayload::new("**hello** delta");
-    let final_payload = build_c2c_markdown_stream_payload(
-        &final_markdown,
-        Some("msg-1"),
-        8,
-        &C2cStreamState {
-            stream_id: Some("stream-1".to_owned()),
+        &C2cStreamTransportState {
+            stream_msg_id: Some("stream-1".to_owned()),
+            msg_seq: Some(6),
             index: 2,
-            ..C2cStreamState::new()
         },
         10,
-        Some(false),
     );
-    assert_eq!(final_payload["msg_type"], 2);
-    assert_eq!(final_payload["markdown"]["content"], "**hello** delta");
-    assert!(final_payload.get("content").is_none());
-    assert_eq!(final_payload["stream"]["id"], "stream-1");
-    assert_eq!(final_payload["stream"]["index"], 2);
-    assert_eq!(final_payload["stream"]["state"], 10);
-    assert_eq!(final_payload["stream"]["reset"], false);
-    assert!(final_payload["stream"].get("done").is_none());
-    assert!(final_payload["stream"].get("type").is_none());
-
-    let final_json = serde_json::to_string(&final_payload).unwrap();
-    assert!(final_json.contains("\"state\":10"));
-    assert!(final_json.contains("\"id\":\"stream-1\""));
-    assert!(final_json.contains("\"index\":2"));
-    assert!(final_json.contains("\"reset\":false"));
-    assert!(!final_json.contains("\"type\":10"));
-    assert!(!final_json.contains("\"done\""));
-    assert!(final_json.contains("\"markdown\":{"));
-    assert!(final_json.contains("\"content\":\"**hello** delta\""));
-    assert_ne!(middle_payload["msg_seq"], final_payload["msg_seq"]);
+    assert_eq!(final_payload["input_state"], 10);
+    assert_eq!(final_payload["content_raw"], "你好，这是最终内容");
+    assert_eq!(final_payload["stream_msg_id"], "stream-1");
+    assert_eq!(final_payload["index"], 2);
 }
 
-#[test]
-fn c2c_stream_response_uses_typed_top_level_id_only() {
-    assert_eq!(
-        extract_c2c_text_stream_id(r#"{"id":"stream-1","code":0}"#).as_deref(),
-        Some("stream-1")
-    );
-    assert_eq!(
-        extract_c2c_text_stream_id(r#"{"data":{"id":"ordinary-message"}}"#),
-        None
-    );
-    assert_eq!(extract_c2c_text_stream_id(r#"{"msg_id":"msg-1"}"#), None);
-}
-
-#[test]
-fn stream_request_log_fields_report_index_commit_semantics() {
-    let first_state = C2cStreamState {
-        stream_id: None,
-        index: 0,
-        ..C2cStreamState::new()
-    };
-    let first_attempt = C2cStreamMsgSeqAttempt {
-        key: C2cStreamMsgSeqKey {
-            state: 1,
-            stream_index: Some(0),
-        },
-        msg_seq: 11,
-        previous_success_msg_seq: None,
-    };
-    assert_eq!(
-        stream_request_log_fields(1, &first_state, first_attempt, true),
-        StreamRequestLogFields {
-            previous_success_index: None,
-            next_index: 1,
-            msg_seq: 11,
-            previous_success_msg_seq: None,
-            index_committed: true,
-            msg_seq_committed: true,
+fn read_http_request(stream: &mut TcpStream) -> (String, String) {
+    let mut bytes = Vec::new();
+    let header_end = loop {
+        let mut chunk = [0_u8; 4096];
+        let read = stream.read(&mut chunk).unwrap();
+        assert!(read > 0, "test HTTP server received an incomplete request");
+        bytes.extend_from_slice(&chunk[..read]);
+        if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            break index + 4;
         }
-    );
+    };
+    let headers = String::from_utf8_lossy(&bytes[..header_end]).into_owned();
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("content-length:")
+                .or_else(|| line.strip_prefix("Content-Length:"))
+        })
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or_default();
+    while bytes.len() < header_end + content_length {
+        let mut chunk = [0_u8; 4096];
+        let read = stream.read(&mut chunk).unwrap();
+        assert!(read > 0, "test HTTP server received an incomplete body");
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+    let path = headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or_default()
+        .to_owned();
+    let body = String::from_utf8(bytes[header_end..header_end + content_length].to_vec()).unwrap();
+    (path, body)
+}
 
-    let middle_state = C2cStreamState {
-        stream_id: Some("stream-1".to_owned()),
-        index: 1,
-        ..C2cStreamState::new()
-    };
-    let middle_attempt = C2cStreamMsgSeqAttempt {
-        key: C2cStreamMsgSeqKey {
-            state: 1,
-            stream_index: Some(1),
-        },
-        msg_seq: 12,
-        previous_success_msg_seq: Some(11),
-    };
-    assert_eq!(
-        stream_request_log_fields(1, &middle_state, middle_attempt, false),
-        StreamRequestLogFields {
-            previous_success_index: Some(0),
-            next_index: 1,
-            msg_seq: 12,
-            previous_success_msg_seq: Some(11),
-            index_committed: false,
-            msg_seq_committed: false,
+#[tokio::test]
+async fn c2c_stream_client_posts_official_endpoint_and_commits_only_successful_cursor() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let responses = [
+            r#"{"id":"stream-1","timestamp":1}"#,
+            r#"{"id":"reply-2","timestamp":2}"#,
+            r#"{"id":"reply-3","timestamp":3,"ext_info":{"ref_idx":"REFIDX_3"}}"#,
+        ];
+        let mut requests = Vec::new();
+        for response_body in responses {
+            let (mut stream, _) = listener.accept().unwrap();
+            requests.push(read_http_request(&mut stream));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
         }
-    );
+        requests
+    });
 
-    // 终包也携带连续 index；只有 QQ 明确接受后才提交 next_index。
-    let final_state = C2cStreamState {
-        stream_id: Some("stream-1".to_owned()),
-        index: 2,
-        ..C2cStreamState::new()
-    };
-    let final_attempt = C2cStreamMsgSeqAttempt {
-        key: C2cStreamMsgSeqKey {
-            state: 10,
-            stream_index: None,
-        },
-        msg_seq: 13,
-        previous_success_msg_seq: Some(12),
-    };
-    assert_eq!(
-        stream_request_log_fields(10, &final_state, final_attempt, true),
-        StreamRequestLogFields {
-            previous_success_index: Some(1),
-            msg_seq: 13,
-            previous_success_msg_seq: Some(12),
-            next_index: 3,
-            index_committed: true,
-            msg_seq_committed: true,
-        }
+    let auth = crate::auth::AccessTokenManager::new_with_cached_token_for_test(
+        qq_maid_common::http_client::client(),
+        "app-id",
+        "app-secret",
+        Duration::from_secs(5),
+        "token",
+        Duration::from_secs(60),
     );
+    let client = QqApiClient::new(
+        qq_maid_common::http_client::client(),
+        format!("http://{address}"),
+        auth,
+    );
+    let mut state = C2cStreamTransportState::new();
+    let first = client
+        .send_c2c_stream_message("user-openid", Some("source-msg"), "你好", &mut state, 1)
+        .await
+        .unwrap();
+    let second = client
+        .send_c2c_stream_message(
+            "user-openid",
+            Some("source-msg"),
+            "你好，这是",
+            &mut state,
+            1,
+        )
+        .await
+        .unwrap();
+    let complete = client
+        .send_c2c_stream_message(
+            "user-openid",
+            Some("source-msg"),
+            "你好，这是最终",
+            &mut state,
+            10,
+        )
+        .await
+        .unwrap();
+    let requests = server.join().unwrap();
+
+    assert_eq!(first.message_id, "stream-1");
+    assert_eq!(second.message_id, "reply-2");
+    assert_eq!(complete.ref_index_id.as_deref(), Some("REFIDX_3"));
+    assert_eq!(state.stream_msg_id.as_deref(), Some("stream-1"));
+    assert_eq!(state.msg_seq, Some(1));
+    assert_eq!(state.index, 3);
+
+    let bodies = requests
+        .into_iter()
+        .map(|(path, body)| {
+            assert_eq!(path, "/v2/users/user-openid/stream_messages");
+            serde_json::from_str::<Value>(&body).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(bodies[0]["input_mode"], "replace");
+    assert_eq!(bodies[0]["input_state"], 1);
+    assert_eq!(bodies[0]["content_raw"], "你好");
+    assert!(bodies[0].get("stream_msg_id").is_none());
+    assert_eq!(bodies[0]["index"], 0);
+    assert_eq!(bodies[1]["content_raw"], "你好，这是");
+    assert_eq!(bodies[1]["stream_msg_id"], "stream-1");
+    assert_eq!(bodies[1]["msg_seq"], bodies[0]["msg_seq"]);
+    assert_eq!(bodies[1]["index"], 1);
+    assert_eq!(bodies[2]["input_state"], 10);
+    assert_eq!(bodies[2]["content_raw"], "你好，这是最终");
+    assert_eq!(bodies[2]["stream_msg_id"], "stream-1");
+    assert_eq!(bodies[2]["index"], 2);
+}
+
+#[tokio::test]
+async fn c2c_stream_client_does_not_advance_cursor_after_http_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        let body = r#"{"err_code":40054014,"message":"stream content too long"}"#;
+        let response = format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let auth = crate::auth::AccessTokenManager::new_with_cached_token_for_test(
+        qq_maid_common::http_client::client(),
+        "app-id",
+        "app-secret",
+        Duration::from_secs(5),
+        "token",
+        Duration::from_secs(60),
+    );
+    let client = QqApiClient::new(
+        qq_maid_common::http_client::client(),
+        format!("http://{address}"),
+        auth,
+    );
+    let mut state = C2cStreamTransportState {
+        stream_msg_id: Some("stream-1".to_owned()),
+        msg_seq: Some(9),
+        index: 4,
+    };
+    let before = state.clone();
+    let result = client
+        .send_c2c_stream_message("user-openid", Some("source-msg"), "累计正文", &mut state, 1)
+        .await;
+    server.join().unwrap();
+
+    assert!(matches!(result, Err(ApiError::Status { .. })));
+    assert_eq!(state, before);
 }
 
 #[test]
-fn stream_msg_seq_reuses_same_value_for_same_failed_request_retry() {
-    let mut state = C2cStreamState {
-        stream_id: Some("stream-1".to_owned()),
-        index: 1,
-        ..C2cStreamState::new()
-    };
-    let mut next = 40;
-
-    let first = state.begin_msg_seq_attempt(1, || {
-        next += 1;
-        next
-    });
-    let retry = state.begin_msg_seq_attempt(1, || {
-        next += 1;
-        next
-    });
-
-    assert_eq!(first.msg_seq, 41);
-    assert_eq!(retry.msg_seq, 41);
-    assert_eq!(next, 41);
-    assert_eq!(retry.previous_success_msg_seq, None);
+fn official_stream_response_extracts_ref_idx_only_from_ext_info() {
+    assert_eq!(
+        extract_c2c_stream_response(
+            r#"{"id":"reply-1","timestamp":1700000000,"ext_info":{"ref_idx":"REFIDX_1"}}"#
+        ),
+        Some(("reply-1".to_owned(), Some("REFIDX_1".to_owned())))
+    );
+    assert_eq!(
+        extract_c2c_stream_response(r#"{"id":"reply-2","msg_id":"wrong"}"#),
+        Some(("reply-2".to_owned(), None))
+    );
+    assert_eq!(extract_c2c_stream_response(r#"{"msg_id":"wrong"}"#), None);
 }
 
 #[test]
-fn stream_final_msg_seq_does_not_reuse_previous_success_or_failed_middle() {
-    let mut state = C2cStreamState {
-        stream_id: Some("stream-1".to_owned()),
-        index: 1,
-        ..C2cStreamState::new()
-    };
-    let mut next = 50;
-
-    let middle = state.begin_msg_seq_attempt(1, || {
-        next += 1;
-        next
-    });
-    state.commit_msg_seq_attempt(middle);
-    state.index = 2;
-    let failed_middle_retry_key = state.begin_msg_seq_attempt(1, || {
-        next += 1;
-        next
-    });
-    let final_attempt = state.begin_msg_seq_attempt(10, || {
-        next += 1;
-        next
-    });
-
-    assert_ne!(middle.msg_seq, final_attempt.msg_seq);
-    assert_ne!(failed_middle_retry_key.msg_seq, final_attempt.msg_seq);
-    assert_eq!(final_attempt.previous_success_msg_seq, Some(middle.msg_seq));
-    assert!(final_attempt.key.stream_index.is_none());
+fn qq_error_fields_accept_err_code_and_redact_sensitive_text() {
+    let body = serde_json::json!({
+        "err_code": 40054014,
+        "message": "stream content too long; OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz123456"
+    })
+    .to_string();
+    let (code, message) = qq_api_error_fields(&body);
+    assert_eq!(code.as_deref(), Some("40054014"));
+    assert!(message.unwrap().contains("OPENAI_API_KEY=<redacted>"));
 }
 
 #[derive(Debug, Default)]
@@ -386,45 +401,31 @@ fn group_target() -> GroupReplyTarget {
     }
 }
 
-/// 合并 2 个 send 回退测试为表驱动测试。
 #[tokio::test]
 async fn send_failure_falls_back_to_text() {
-    struct Case {
-        name: &'static str,
-        outbound: OutboundMessage,
-        expected_calls: &'static [&'static str],
-    }
-
     let cases = [
-        Case {
-            name: "markdown_send_failure_falls_back_to_text",
-            outbound: OutboundMessage::Markdown {
+        (
+            OutboundMessage::Markdown {
                 markdown: MarkdownPayload::new("# hello"),
                 fallback_text: "hello".to_owned(),
             },
-            expected_calls: &["markdown", "text:hello"],
-        },
-        Case {
-            name: "image_send_failure_falls_back_to_text",
-            outbound: OutboundMessage::Image {
+            vec!["markdown", "text:hello"],
+        ),
+        (
+            OutboundMessage::Image {
                 image: ImagePayload::new("file-info"),
                 fallback_text: "image fallback".to_owned(),
             },
-            expected_calls: &["image", "text:image fallback"],
-        },
+            vec!["image", "text:image fallback"],
+        ),
     ];
 
-    for case in &cases {
+    for (outbound, expected_calls) in cases {
         let sender = MockSender::default();
-        send_outbound_with_fallback(&sender, &target(), &case.outbound)
+        send_outbound_with_fallback(&sender, &target(), &outbound)
             .await
-            .unwrap_or_else(|e| panic!("case '{}' failed: {:?}", case.name, e));
-        assert_eq!(
-            sender.calls(),
-            case.expected_calls,
-            "case '{}' failed: calls mismatch",
-            case.name
-        );
+            .unwrap();
+        assert_eq!(sender.calls(), expected_calls);
     }
 }
 

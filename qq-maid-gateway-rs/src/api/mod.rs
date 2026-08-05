@@ -21,7 +21,7 @@ pub use voice::{VoiceMedia, build_c2c_voice_payload, build_group_voice_payload};
 
 #[cfg(test)]
 use response::extract_sent_message_id;
-use response::{extract_c2c_text_stream_id, extract_sent_message_ids, qq_api_error_fields};
+use response::{extract_c2c_stream_response, extract_sent_message_ids, qq_api_error_fields};
 
 use crate::{
     auth::{AccessTokenManager, AuthError},
@@ -69,6 +69,8 @@ pub enum ApiError {
     VoiceUpload(#[source] Box<ApiError>),
     #[error("QQ voice message send failed")]
     VoiceSend(#[source] Box<ApiError>),
+    #[error("invalid QQ C2C stream response: {0}")]
+    InvalidStreamResponse(&'static str),
 }
 
 impl ApiError {
@@ -88,6 +90,9 @@ impl ApiError {
             Self::InvalidMedia(reason) => format!("invalid media payload: {reason}"),
             Self::VoiceUpload(source) => format!("voice_upload: {}", source.log_summary()),
             Self::VoiceSend(source) => format!("voice_send: {}", source.log_summary()),
+            Self::InvalidStreamResponse(reason) => {
+                format!("invalid QQ C2C stream response: {reason}")
+            }
         }
     }
 }
@@ -183,126 +188,54 @@ impl SendMessageIds {
 pub type SendResult = Result<SendMessageIds, ApiError>;
 pub type SendFuture<'a> = Pin<Box<dyn Future<Output = SendResult> + Send + 'a>>;
 
-/// QQ C2C Markdown 流式消息载荷。
+/// 官方 C2C StreamSession 请求载荷。
 ///
-/// 内容分片只发送 `msg_type=2` 和 `markdown.content`，禁止同时携带顶层 `content`，
-/// 避免 QQ 端把同一帧解释为普通文本流。真实环境要求结束包的 Markdown 非空，
-/// 因此结束包也携带完整最终正文，并沿用同一套 stream id/index/reset 字段。
+/// `/stream_messages` 的 replace 模式接收累计全文；它与普通 `/messages` 的
+/// `msg_type/markdown` 载荷不同，不能把模型 delta 放进 `content_raw`，也不能携带
+/// 旧协议的 `stream` 对象。
 #[derive(Debug, Serialize)]
-struct C2cMarkdownStreamPayload<'a> {
-    msg_type: u8,
-    markdown: &'a MarkdownPayload,
+struct C2cStreamPayload<'a> {
+    input_mode: &'static str,
+    input_state: u8,
+    content_type: &'static str,
+    content_raw: &'a str,
+    event_id: &'a str,
+    msg_id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    msg_id: Option<&'a str>,
+    stream_msg_id: Option<&'a str>,
     msg_seq: u32,
-    stream: StreamInfo<'a>,
-}
-
-/// QQ 流式消息的 stream 控制字段。
-///
-/// - `state`: 1 = 生成中, 10 = 结束流式消息；真实环境确认 JSON 字段名必须是 `state`
-/// - `id`: 首帧必须为 JSON null，后续使用首帧响应返回的真实 stream id 续接
-/// - `index`: 从 0 开始递增；完成包使用下一个连续 index
-/// - `reset`: 参考实现中生成中和完成包都携带，当前统一使用 false 续接同一条消息
-#[derive(Debug, Serialize)]
-struct StreamInfo<'a> {
-    state: u8,
-    id: Option<&'a str>,
     index: u32,
-    reset: bool,
 }
 
-/// C2C 流式发送的结果：成功时返回 API 返回的消息 id。
+/// 一次官方流式请求成功后返回的消息信息。
 ///
-/// 注意：首帧返回的 id 才作为本次流的续接 id；后续分片即使继续返回 id，
-/// 也不能覆盖既有 stream id，否则最终帧可能因 id/index 序列不匹配被 QQ 拒绝。
-pub type StreamSendResult = Result<Option<String>, ApiError>;
+/// 官方 StreamSession 以首个成功响应的 `id` 作为后续 `stream_msg_id`，而
+/// `ext_info.ref_idx` 是可写入引用索引的独立字段。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct C2cStreamResponse {
+    pub(crate) message_id: String,
+    pub(crate) ref_index_id: Option<String>,
+}
 
-/// C2C 流式发送状态管理。
+/// 官方 StreamSession 的传输游标。
 ///
-/// 在一次流式会话中维护首帧 stream_id 和下一次内容分片要使用的 index。
-/// index 只在 QQ 明确接受对应 stream 帧后推进；完成包也使用并提交连续 index。
-#[derive(Debug, Default)]
-pub(crate) struct C2cStreamState {
-    pub(crate) stream_id: Option<String>,
+/// 正文、生命周期和发送所有权由 Gateway 状态机维护；这里仅维护官方请求需要的
+/// `stream_msg_id/msg_seq/index`，且只在 QQ 成功响应后推进。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct C2cStreamTransportState {
+    pub(crate) stream_msg_id: Option<String>,
+    pub(crate) msg_seq: Option<u32>,
     pub(crate) index: u32,
-    msg_seq: C2cStreamMsgSeqState,
 }
 
-impl C2cStreamState {
+impl C2cStreamTransportState {
     pub(crate) fn new() -> Self {
         Self::default()
     }
-
-    fn begin_msg_seq_attempt(
-        &mut self,
-        stream_state_value: u8,
-        next_msg_seq: impl FnOnce() -> u32,
-    ) -> C2cStreamMsgSeqAttempt {
-        let key = C2cStreamMsgSeqKey {
-            state: stream_state_value,
-            // final 虽然携带 stream.index，但本轮不改变外层 msg_seq 重试粒度；
-            // 这里继续只按 state 区分完成包，避免把协议形状调整扩大到 msg_seq 语义。
-            stream_index: (stream_state_value != 10).then_some(self.index),
-        };
-        if let Some(pending) = self.msg_seq.pending.filter(|pending| pending.key == key) {
-            return C2cStreamMsgSeqAttempt {
-                key,
-                msg_seq: pending.msg_seq,
-                previous_success_msg_seq: pending.previous_success_msg_seq,
-            };
-        }
-
-        let attempt = C2cStreamMsgSeqAttempt {
-            key,
-            msg_seq: next_msg_seq(),
-            previous_success_msg_seq: self.msg_seq.previous_success_msg_seq,
-        };
-        self.msg_seq.pending = Some(C2cStreamPendingMsgSeq {
-            key,
-            msg_seq: attempt.msg_seq,
-            previous_success_msg_seq: attempt.previous_success_msg_seq,
-        });
-        attempt
-    }
-
-    fn commit_msg_seq_attempt(&mut self, attempt: C2cStreamMsgSeqAttempt) {
-        self.msg_seq.previous_success_msg_seq = Some(attempt.msg_seq);
-        if self
-            .msg_seq
-            .pending
-            .is_some_and(|pending| pending.key == attempt.key && pending.msg_seq == attempt.msg_seq)
-        {
-            self.msg_seq.pending = None;
-        }
-    }
 }
 
-#[derive(Debug, Default)]
-struct C2cStreamMsgSeqState {
-    previous_success_msg_seq: Option<u32>,
-    pending: Option<C2cStreamPendingMsgSeq>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct C2cStreamMsgSeqKey {
-    state: u8,
-    stream_index: Option<u32>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct C2cStreamPendingMsgSeq {
-    key: C2cStreamMsgSeqKey,
-    msg_seq: u32,
-    previous_success_msg_seq: Option<u32>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct C2cStreamMsgSeqAttempt {
-    key: C2cStreamMsgSeqKey,
-    msg_seq: u32,
-    previous_success_msg_seq: Option<u32>,
-}
+/// 官方 C2C 流式发送结果；成功响应必须包含平台返回的消息 ID。
+pub(crate) type StreamSendResult = Result<C2cStreamResponse, ApiError>;
 
 pub trait OutboundSender: Send + Sync {
     fn send_text<'a>(&'a self, target: &'a C2cReplyTarget, text: &'a str) -> SendFuture<'a>;
@@ -418,58 +351,51 @@ impl QqApiClient {
             .await
     }
 
-    /// 发送 C2C Markdown 流式消息分片。
+    /// 通过官方 `/stream_messages` 发送一次累计全文更新或完成请求。
     ///
-    /// 这里的 `msg_id` 是被动回复绑定的原始 QQ 消息 ID，不能当作 stream id 使用；
-    /// stream id 只来自首帧响应的顶层 `id`。
-    pub(crate) async fn send_c2c_markdown_stream(
+    /// `input_state=1` 表示持续生成，`input_state=10` 表示完成。所有请求都携带同一
+    /// `msg_seq`，首个成功响应的 `id` 作为后续 `stream_msg_id`；失败请求不会推进
+    /// `index`、会话 ID 或成功正文。
+    pub(crate) async fn send_c2c_stream_message(
         &self,
         user_openid: &str,
         msg_id: Option<&str>,
-        markdown: &MarkdownPayload,
-        stream_state: &mut C2cStreamState,
-        stream_state_value: u8,
-        reset: Option<bool>,
+        content_raw: &str,
+        stream_state: &mut C2cStreamTransportState,
+        input_state: u8,
     ) -> StreamSendResult {
-        let msg_seq_attempt =
-            stream_state.begin_msg_seq_attempt(stream_state_value, || self.next_msg_seq());
-        let payload = build_c2c_markdown_stream_payload(
-            markdown,
-            msg_id,
-            msg_seq_attempt.msg_seq,
-            stream_state,
-            stream_state_value,
-            reset,
-        );
-        self.post_c2c_stream_message(
-            user_openid,
-            msg_id,
-            stream_state_value,
-            stream_state,
-            msg_seq_attempt,
-            &payload,
-        )
-        .await
+        let msg_id = msg_id.ok_or(ApiError::InvalidStreamResponse(
+            "passive C2C stream requires source msg_id",
+        ))?;
+        let msg_seq = stream_state.msg_seq.unwrap_or_else(|| self.next_msg_seq());
+        let payload =
+            build_c2c_stream_payload(content_raw, msg_id, msg_seq, stream_state, input_state);
+        self.post_c2c_stream_message(user_openid, msg_id, stream_state, msg_seq, &payload)
+            .await
     }
 
-    /// 发送 C2C 流式消息底层的 HTTP POST，返回提取的消息 id。
+    /// 官方 StreamSession 的底层 HTTP POST。
     async fn post_c2c_stream_message(
         &self,
         user_openid: &str,
-        msg_id: Option<&str>,
-        stream_state_value: u8,
-        stream_state: &mut C2cStreamState,
-        msg_seq_attempt: C2cStreamMsgSeqAttempt,
+        msg_id: &str,
+        stream_state: &mut C2cStreamTransportState,
+        msg_seq: u32,
         payload: &Value,
     ) -> StreamSendResult {
-        let url = format!("{}/v2/users/{user_openid}/messages", self.api_base);
+        let url = format!("{}/v2/users/{user_openid}/stream_messages", self.api_base);
         let masked_user = mask_openid(user_openid);
-        let masked_message_id = msg_id.map(mask_identifier).unwrap_or_default();
-        let reset = stream_reset_log_value(payload);
-        let index_present = stream_payload_index(payload).is_some();
-        let reset_present = reset.is_some();
-        let request_fields =
-            stream_request_log_fields(stream_state_value, stream_state, msg_seq_attempt, false);
+        let masked_message_id = mask_identifier(msg_id);
+        let input_state = payload
+            .get("input_state")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        let index = payload
+            .get("index")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        let content_chars = stream_payload_content_chars(payload);
+        let has_stream_msg_id = stream_state.stream_msg_id.is_some();
         let response = self
             .client
             .post(url)
@@ -481,26 +407,19 @@ impl QqApiClient {
                 warn!(
                     user = %masked_user,
                     source_message_id = %masked_message_id,
-                    phase = %stream_log_phase(stream_state_value, stream_state.index),
-                    msg_seq = request_fields.msg_seq,
-                    previous_success_msg_seq = ?request_fields.previous_success_msg_seq,
-                    state = stream_state_value,
-                    stream_state_value,
-                    index_present,
-                    reset_present,
-                    stream_index = ?stream_payload_index(payload),
-                    reset = ?reset,
-                    previous_success_index = ?request_fields.previous_success_index,
-                    next_index = request_fields.next_index,
-                    has_stream_id = stream_state.stream_id.is_some(),
-                    content_chars = stream_payload_content_chars(payload),
+                    endpoint = "stream_messages",
+                    input_state,
+                    index,
+                    msg_seq,
+                    has_stream_msg_id,
+                    content_chars,
                     http_status = "",
                     qq_code = "",
                     qq_message = "",
-                    index_committed = request_fields.index_committed,
-                    msg_seq_committed = request_fields.msg_seq_committed,
+                    index_committed = false,
+                    msg_seq_committed = false,
                     error = %reqwest_error_summary(&error),
-                    "QQ 流式发送请求失败"
+                    "QQ 官方 C2C 流式请求失败"
                 );
                 ApiError::Http(error)
             })?;
@@ -509,69 +428,69 @@ impl QqApiClient {
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             let (qq_code, qq_message) = qq_api_error_fields(&body);
-            let failed_fields =
-                stream_request_log_fields(stream_state_value, stream_state, msg_seq_attempt, false);
             warn!(
                 user = %masked_user,
                 source_message_id = %masked_message_id,
-                phase = %stream_log_phase(stream_state_value, stream_state.index),
-                msg_seq = failed_fields.msg_seq,
-                previous_success_msg_seq = ?failed_fields.previous_success_msg_seq,
-                state = stream_state_value,
-                stream_state_value,
-                index_present,
-                reset_present,
-                stream_index = ?stream_payload_index(payload),
-                reset = ?reset,
-                previous_success_index = ?failed_fields.previous_success_index,
-                next_index = failed_fields.next_index,
-                has_stream_id = stream_state.stream_id.is_some(),
-                content_chars = stream_payload_content_chars(payload),
+                endpoint = "stream_messages",
+                input_state,
+                index,
+                msg_seq,
+                has_stream_msg_id,
+                content_chars,
                 http_status = %status,
                 qq_code = qq_code.as_deref().unwrap_or(""),
                 qq_message = qq_message.as_deref().unwrap_or(""),
-                index_committed = failed_fields.index_committed,
-                msg_seq_committed = failed_fields.msg_seq_committed,
+                index_committed = false,
+                msg_seq_committed = false,
                 error_summary = %qq_api_error_body_summary(&body),
-                "QQ 流式发送返回非成功状态码"
+                "QQ 官方 C2C 流式请求返回非成功状态码"
             );
             return Err(ApiError::Status { status, body });
         }
 
         let body = response.text().await.map_err(ApiError::Http)?;
-        let sent_stream_id = extract_c2c_text_stream_id(&body);
-        // 只有 HTTP 响应体也成功读完，底层发送 helper 才会收到 Ok；将 msg_seq 的
-        // 提交放在这里，避免本地读取失败时把尚未向上层确认成功的分片误标为已发送。
-        stream_state.commit_msg_seq_attempt(msg_seq_attempt);
+        let Some((message_id, ref_index_id)) = extract_c2c_stream_response(&body) else {
+            warn!(
+                user = %masked_user,
+                source_message_id = %masked_message_id,
+                endpoint = "stream_messages",
+                input_state,
+                index,
+                msg_seq,
+                has_stream_msg_id,
+                content_chars,
+                http_status = %status,
+                "QQ 官方 C2C 流式成功响应缺少消息 id"
+            );
+            return Err(ApiError::InvalidStreamResponse("missing response id"));
+        };
         let (qq_code, qq_message) = qq_api_error_fields(&body);
-        let success_fields =
-            stream_request_log_fields(stream_state_value, stream_state, msg_seq_attempt, true);
         trace!(
             user = %masked_user,
             source_message_id = %masked_message_id,
-            phase = %stream_log_phase(stream_state_value, stream_state.index),
-            msg_seq = success_fields.msg_seq,
-            previous_success_msg_seq = ?success_fields.previous_success_msg_seq,
-            state = stream_state_value,
-            stream_state_value,
-            index_present,
-            reset_present,
-            stream_index = ?stream_payload_index(payload),
-            reset = ?reset,
-            previous_success_index = ?success_fields.previous_success_index,
-            next_index = success_fields.next_index,
-            has_stream_id = stream_state.stream_id.is_some(),
-            content_chars = stream_payload_content_chars(payload),
+            endpoint = "stream_messages",
+            input_state,
+            index,
+            msg_seq,
+            has_stream_msg_id,
+            content_chars,
             http_status = %status,
             qq_code = qq_code.as_deref().unwrap_or(""),
             qq_message = qq_message.as_deref().unwrap_or(""),
-            index_committed = success_fields.index_committed,
-            msg_seq_committed = success_fields.msg_seq_committed,
-            returned_stream_id = %sent_stream_id.as_deref().map(mask_identifier).unwrap_or_default(),
-            returned_stream_id_present = sent_stream_id.is_some(),
-            "QQ 流式发送成功"
+            returned_message_id = %mask_identifier(&message_id),
+            returned_ref_index_id = %ref_index_id.as_deref().map(mask_identifier).unwrap_or_default(),
+            "QQ 官方 C2C 流式请求成功"
         );
-        Ok(sent_stream_id)
+        // 只有状态码、响应体和消息 ID 都确认成功后，才推进 StreamSession 游标。
+        stream_state.msg_seq.get_or_insert(msg_seq);
+        if stream_state.stream_msg_id.is_none() {
+            stream_state.stream_msg_id = Some(message_id.clone());
+        }
+        stream_state.index = stream_state.index.saturating_add(1);
+        Ok(C2cStreamResponse {
+            message_id,
+            ref_index_id,
+        })
     }
 
     async fn post_c2c_message(
@@ -712,28 +631,28 @@ impl OutboundSender for QqApiClient {
     }
 }
 
-/// 构建 C2C Markdown 流式载荷的 JSON Value。
-fn build_c2c_markdown_stream_payload(
-    markdown: &MarkdownPayload,
-    msg_id: Option<&str>,
+/// 构建官方 `/stream_messages` 请求载荷。
+fn build_c2c_stream_payload(
+    content_raw: &str,
+    msg_id: &str,
     msg_seq: u32,
-    stream_state: &C2cStreamState,
-    stream_state_value: u8,
-    reset: Option<bool>,
+    stream_state: &C2cStreamTransportState,
+    input_state: u8,
 ) -> Value {
-    serde_json::to_value(C2cMarkdownStreamPayload {
-        msg_type: 2,
-        markdown,
+    serde_json::to_value(C2cStreamPayload {
+        input_mode: "replace",
+        input_state,
+        content_type: "markdown",
+        content_raw,
+        // SDK 默认把 event_id 绑定到被动回复的源消息 ID；Gateway 当前可用的事件
+        // 标识就是 C2C 入站 msg_id，不能用 stream_msg_id 或 ref_idx 替代。
+        event_id: msg_id,
         msg_id,
+        stream_msg_id: stream_state.stream_msg_id.as_deref(),
         msg_seq,
-        stream: StreamInfo {
-            state: stream_state_value,
-            id: stream_state.stream_id.as_deref(),
-            index: stream_state.index,
-            reset: reset.unwrap_or(false),
-        },
+        index: stream_state.index,
     })
-    .expect("C2C markdown stream payload should serialize")
+    .expect("official C2C stream payload should serialize")
 }
 
 pub fn build_c2c_text_payload(text: &str, msg_id: Option<&str>, msg_seq: u32) -> Value {
@@ -769,68 +688,12 @@ pub fn build_group_text_payload(text: &str, msg_id: Option<&str>, msg_seq: u32) 
     .expect("group text payload should serialize")
 }
 
-fn stream_log_phase(stream_state_value: u8, index: u32) -> &'static str {
-    match (stream_state_value, index) {
-        (10, _) => "final_chunk",
-        (_, 0) => "first_chunk",
-        _ => "middle_chunk",
-    }
-}
-
 fn stream_payload_content_chars(payload: &Value) -> usize {
     payload
-        .get("markdown")
-        .and_then(|markdown| markdown.get("content"))
-        .or_else(|| payload.get("content"))
+        .get("content_raw")
         .and_then(Value::as_str)
         .map(|content| content.chars().count())
         .unwrap_or(0)
-}
-
-fn stream_reset_log_value(payload: &Value) -> Option<bool> {
-    payload
-        .get("stream")
-        .and_then(|stream| stream.get("reset"))
-        .and_then(Value::as_bool)
-}
-
-fn stream_payload_index(payload: &Value) -> Option<u64> {
-    payload
-        .get("stream")
-        .and_then(|stream| stream.get("index"))
-        .and_then(Value::as_u64)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct StreamRequestLogFields {
-    previous_success_index: Option<u32>,
-    next_index: u32,
-    msg_seq: u32,
-    previous_success_msg_seq: Option<u32>,
-    index_committed: bool,
-    msg_seq_committed: bool,
-}
-
-fn stream_request_log_fields(
-    _stream_state_value: u8,
-    stream_state: &C2cStreamState,
-    msg_seq_attempt: C2cStreamMsgSeqAttempt,
-    request_succeeded: bool,
-) -> StreamRequestLogFields {
-    // `stream_state.index` 表示下一次 stream 帧要使用的 index；完成包成功后也提交该 index。
-    let index_committed = request_succeeded;
-    StreamRequestLogFields {
-        previous_success_index: stream_state.index.checked_sub(1),
-        next_index: if index_committed {
-            stream_state.index.saturating_add(1)
-        } else {
-            stream_state.index
-        },
-        msg_seq: msg_seq_attempt.msg_seq,
-        previous_success_msg_seq: msg_seq_attempt.previous_success_msg_seq,
-        index_committed,
-        msg_seq_committed: request_succeeded,
-    }
 }
 
 pub async fn send_outbound_with_fallback<S: OutboundSender + ?Sized>(

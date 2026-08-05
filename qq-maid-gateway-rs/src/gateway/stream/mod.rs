@@ -22,11 +22,9 @@ pub(super) use event_stream::{C2cStreamSender, RespondEventFuture, StreamSendFut
 #[cfg(test)]
 pub(super) use progress::STREAM_THROTTLE_MS;
 #[cfg(test)]
-pub(super) use send::{
-    STREAM_CHUNK_CHAR_LIMIT, STREAM_FINAL_MARKER, send_stream_chunk, send_stream_end,
-};
+pub(super) use send::{CumulativeTextAction, reconcile_cumulative_text};
 #[cfg(test)]
-pub(super) use types::C2cStreamingPhase;
+pub(super) use types::{C2cStreamState, C2cStreamingPhase};
 
 #[cfg(test)]
 mod tests;

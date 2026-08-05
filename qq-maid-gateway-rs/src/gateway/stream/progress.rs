@@ -13,13 +13,13 @@ pub(crate) const STREAM_THROTTLE_MS: u64 = 500;
 
 pub(super) fn stream_flush_wait(
     phase: &C2cStreamingPhase,
-    pending_delta: &str,
+    has_pending_update: bool,
     last_send_at: Instant,
 ) -> Option<Duration> {
     // delta 事件可能连续到达且一直让 receiver 就绪；若只在取到新事件时检查节流，
-    // 生成结束前没有下一事件就会把整段正文留到 completed_flush。这里给活跃流设置
-    // 可取消的读取超时，让无论事件是否持续到达，未发送增量都能按周期排空。
-    if !matches!(phase, C2cStreamingPhase::Active(_)) || pending_delta.is_empty() {
+    // 生成结束前没有下一事件就会把累计全文留到 complete。这里给活跃流设置可取消的
+    // 读取超时，让未提交的全文按周期刷新，同时所有请求仍在同一个事件循环中串行执行。
+    if !matches!(phase, C2cStreamingPhase::Active(_)) || !has_pending_update {
         return None;
     }
     Some(Duration::from_millis(STREAM_THROTTLE_MS).saturating_sub(last_send_at.elapsed()))

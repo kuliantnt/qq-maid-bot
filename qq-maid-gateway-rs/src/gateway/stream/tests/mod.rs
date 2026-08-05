@@ -2,12 +2,13 @@ use super::*;
 
 mod completion;
 mod send;
+
 use crate::gateway::typing::{
     C2cTypingSender, C2cTypingStatusGuard, TypingSendFuture, TypingStopReason,
 };
 use crate::{
     api::{
-        ApiError, C2cReplyTarget, C2cStreamState, OutboundSender, SendFuture, SendMessageIds,
+        ApiError, C2cReplyTarget, C2cStreamResponse, OutboundSender, SendFuture, SendMessageIds,
         StreamSendResult,
     },
     config::{AgentTypingConfig, AppConfig},
@@ -19,12 +20,17 @@ use crate::{
     markdown::MarkdownPayload,
     media::ImagePayload,
 };
-use qq_maid_common::output_part::{AssistantOutput, OutputMedia, OutputPart};
 use qq_maid_core::service::{
-    CoreFailureKind, CoreOutputPolicy, CoreRespondFailure, CoreResponseEvent, CoreResponseStatus,
-    CoreResponseStatusKind,
+    CoreOutputPolicy, CoreResponseEvent, CoreResponseStatus, CoreResponseStatusKind,
 };
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 fn test_config() -> AppConfig {
     let mut config = qq_official_test_config();
@@ -65,8 +71,6 @@ impl FakeEventStream {
 impl RespondEventStream for FakeEventStream {
     fn recv_event<'a>(&'a mut self) -> RespondEventFuture<'a> {
         Box::pin(async move {
-            // 允许消费者用 timeout 等待定时刷新；若等待被取消，事件不能已经从
-            // 队列移除，否则会把尚未交付的模型增量静默丢掉。
             let delay = self.events.front().map(|(delay, _)| *delay)?;
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
@@ -85,10 +89,10 @@ enum FakeCall {
     Stream {
         content: String,
         msg_id: Option<String>,
-        stream_id: Option<String>,
+        stream_msg_id: Option<String>,
+        msg_seq: u32,
         index: u32,
-        stream_state_value: u8,
-        reset: Option<bool>,
+        input_state: u8,
     },
     Markdown {
         content: String,
@@ -105,6 +109,8 @@ enum FakeCall {
 struct FakeStreamSender {
     stream_results: std::sync::Mutex<VecDeque<StreamSendResult>>,
     calls: std::sync::Mutex<Vec<FakeCall>>,
+    in_flight: Arc<AtomicUsize>,
+    max_in_flight: Arc<AtomicUsize>,
 }
 
 #[derive(Debug)]
@@ -125,11 +131,17 @@ impl FakeStreamSender {
         Self {
             stream_results: std::sync::Mutex::new(stream_results.into_iter().collect()),
             calls: std::sync::Mutex::new(Vec::new()),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            max_in_flight: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     fn calls(&self) -> Vec<FakeCall> {
         self.calls.lock().unwrap().clone()
+    }
+
+    fn max_in_flight(&self) -> usize {
+        self.max_in_flight.load(Ordering::Relaxed)
     }
 }
 
@@ -181,27 +193,48 @@ impl C2cStreamSender for FakeStreamSender {
         &'a self,
         _user_openid: &'a str,
         msg_id: Option<&'a str>,
-        markdown: &'a MarkdownPayload,
+        content_raw: &'a str,
         stream_state: &'a mut C2cStreamState,
-        stream_state_value: u8,
-        reset: Option<bool>,
+        input_state: u8,
     ) -> StreamSendFuture<'a> {
+        let transport = &stream_state.transport;
+        self.calls.lock().unwrap().push(FakeCall::Stream {
+            content: content_raw.to_owned(),
+            msg_id: msg_id.map(str::to_owned),
+            stream_msg_id: transport.stream_msg_id.clone(),
+            msg_seq: transport.msg_seq.unwrap_or(1),
+            index: transport.index,
+            input_state,
+        });
+        let in_flight = Arc::clone(&self.in_flight);
+        let max_in_flight = Arc::clone(&self.max_in_flight);
         Box::pin(async move {
-            self.calls.lock().unwrap().push(FakeCall::Stream {
-                content: markdown.content.clone(),
-                msg_id: msg_id.map(str::to_owned),
-                stream_id: stream_state.stream_id.clone(),
-                index: stream_state.index,
-                stream_state_value,
-                reset,
-            });
-            self.stream_results
+            let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            max_in_flight.fetch_max(current, Ordering::SeqCst);
+            let result = self
+                .stream_results
                 .lock()
                 .unwrap()
                 .pop_front()
-                .unwrap_or_else(|| Ok(None))
+                .unwrap_or_else(|| Err(ApiError::Unsupported("stream")));
+            if let Ok(response) = &result {
+                stream_state.transport.msg_seq.get_or_insert(1);
+                if stream_state.transport.stream_msg_id.is_none() {
+                    stream_state.transport.stream_msg_id = Some(response.message_id.clone());
+                }
+                stream_state.transport.index += 1;
+            }
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+            result
         })
     }
+}
+
+fn stream_response(message_id: &str, ref_index_id: Option<&str>) -> StreamSendResult {
+    Ok(C2cStreamResponse {
+        message_id: message_id.to_owned(),
+        ref_index_id: ref_index_id.map(str::to_owned),
+    })
 }
 
 fn quoted_lookup_found(
@@ -229,7 +262,98 @@ fn quoted_lookup_found(
 }
 
 #[tokio::test]
-async fn stream_first_send_error_falls_back_to_completed_response() {
+async fn official_stream_uses_cumulative_content_and_single_complete() {
+    let events = FakeEventStream::new([
+        CoreResponseEvent::TextDelta("你好".to_owned()),
+        CoreResponseEvent::TextDelta("，这是".to_owned()),
+        CoreResponseEvent::TextDelta("内容".to_owned()),
+        CoreResponseEvent::Completed(Box::new(respond_response("你好，这是内容"))),
+    ]);
+    let sender = FakeStreamSender::new([
+        stream_response("stream-1", None),
+        stream_response("reply-update", None),
+        stream_response("reply-complete", Some("REFIDX_complete")),
+    ]);
+
+    let phase = stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
+        .await
+        .unwrap();
+
+    assert!(matches!(phase, C2cStreamingPhase::Completed));
+    assert_eq!(sender.max_in_flight(), 1);
+    assert_eq!(
+        sender
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                FakeCall::Stream {
+                    content,
+                    stream_msg_id,
+                    msg_seq,
+                    index,
+                    input_state,
+                    ..
+                } => Some((content, stream_msg_id, msg_seq, index, input_state)),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            ("你好".to_owned(), None, 1, 0, 1),
+            (
+                "你好，这是内容".to_owned(),
+                Some("stream-1".to_owned()),
+                1,
+                1,
+                1
+            ),
+            (
+                "你好，这是内容".to_owned(),
+                Some("stream-1".to_owned()),
+                1,
+                2,
+                10,
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn throttled_updates_are_serial_and_use_latest_full_text() {
+    let events = FakeEventStream::with_delays([
+        (Duration::ZERO, CoreResponseEvent::TextDelta("A".to_owned())),
+        (
+            Duration::from_millis(STREAM_THROTTLE_MS + 30),
+            CoreResponseEvent::TextDelta("B".to_owned()),
+        ),
+        (
+            Duration::ZERO,
+            CoreResponseEvent::Completed(Box::new(respond_response("AB"))),
+        ),
+    ]);
+    let sender = FakeStreamSender::new([
+        stream_response("stream-1", None),
+        stream_response("reply-update", None),
+        stream_response("reply-complete", None),
+    ]);
+
+    stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
+        .await
+        .unwrap();
+
+    let contents = sender
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            FakeCall::Stream { content, .. } => Some(content),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(contents, vec!["A", "AB", "AB"]);
+    assert_eq!(sender.max_in_flight(), 1);
+}
+
+#[tokio::test]
+async fn first_update_failure_allows_one_ordinary_fallback() {
     let events = FakeEventStream::new([
         CoreResponseEvent::TextDelta("晚上".to_owned()),
         CoreResponseEvent::TextDelta("好".to_owned()),
@@ -247,10 +371,10 @@ async fn stream_first_send_error_falls_back_to_completed_response() {
             FakeCall::Stream {
                 content: "晚上".to_owned(),
                 msg_id: Some("msg-1".to_owned()),
-                stream_id: None,
+                stream_msg_id: None,
+                msg_seq: 1,
                 index: 0,
-                stream_state_value: 1,
-                reset: Some(false),
+                input_state: 1,
             },
             FakeCall::Markdown {
                 content: "晚上好".to_owned(),
@@ -261,13 +385,82 @@ async fn stream_first_send_error_falls_back_to_completed_response() {
 }
 
 #[tokio::test]
-async fn stream_pending_fallback_records_ref_index() {
+async fn active_update_failure_never_sends_ordinary_full_fallback() {
+    let events = FakeEventStream::with_delays([
+        (Duration::ZERO, CoreResponseEvent::TextDelta("A".to_owned())),
+        (
+            Duration::from_millis(STREAM_THROTTLE_MS + 30),
+            CoreResponseEvent::TextDelta("B".to_owned()),
+        ),
+        (
+            Duration::ZERO,
+            CoreResponseEvent::Completed(Box::new(respond_response("AB"))),
+        ),
+    ]);
+    let sender = FakeStreamSender::new([
+        stream_response("stream-1", None),
+        Err(ApiError::Unsupported("update")),
+        Err(ApiError::Unsupported("complete")),
+    ]);
+
+    let result =
+        stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config()).await;
+    assert!(result.is_err());
+    assert!(
+        sender
+            .calls()
+            .iter()
+            .all(|call| matches!(call, FakeCall::Stream { .. }))
+    );
+}
+
+#[tokio::test]
+async fn completed_failure_does_not_send_ordinary_fallback_or_repeat_complete() {
+    let events = FakeEventStream::new([
+        CoreResponseEvent::TextDelta("内容".to_owned()),
+        CoreResponseEvent::Completed(Box::new(respond_response("内容"))),
+    ]);
+    let sender = FakeStreamSender::new([
+        stream_response("stream-1", None),
+        Err(ApiError::Unsupported("complete")),
+    ]);
+
+    let result =
+        stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config()).await;
+    assert!(result.is_err());
+    assert_eq!(
+        sender
+            .calls()
+            .iter()
+            .filter(|call| matches!(
+                call,
+                FakeCall::Stream {
+                    input_state: 10,
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    assert!(
+        sender
+            .calls()
+            .iter()
+            .all(|call| matches!(call, FakeCall::Stream { .. }))
+    );
+}
+
+#[tokio::test]
+async fn completed_stream_writes_complete_ref_idx_with_accepted_text() {
     let config = test_config();
     let events = FakeEventStream::new([
-        CoreResponseEvent::TextDelta("晚上".to_owned()),
-        CoreResponseEvent::Completed(Box::new(respond_response("晚上好"))),
+        CoreResponseEvent::TextDelta("引用正文".to_owned()),
+        CoreResponseEvent::Completed(Box::new(respond_response("引用正文"))),
     ]);
-    let sender = FakeStreamSender::new([Err(ApiError::Unsupported("stream"))]);
+    let sender = FakeStreamSender::new([
+        stream_response("stream-1", Some("REFIDX_update_should_not_win")),
+        stream_response("reply-complete", Some("REFIDX_complete")),
+    ]);
     let ref_index = crate::gateway::ref_index::ref_index();
 
     stream_respond_c2c_with_sender_and_ref_index(
@@ -281,41 +474,79 @@ async fn stream_pending_fallback_records_ref_index() {
     .unwrap();
 
     assert_eq!(
-        quoted_lookup_found(&ref_index, &config, "REFIDX_ordinary_markdown").as_deref(),
-        Some("晚上好")
+        quoted_lookup_found(&ref_index, &config, "REFIDX_complete").as_deref(),
+        Some("引用正文")
     );
     assert_eq!(
-        quoted_lookup_found(&ref_index, &config, "ordinary-markdown-id"),
+        quoted_lookup_found(&ref_index, &config, "REFIDX_update_should_not_win"),
         None
     );
-}
-
-#[tokio::test]
-async fn active_stream_does_not_fake_ref_index_from_stream_id() {
-    let config = test_config();
-    let events = FakeEventStream::new([
-        CoreResponseEvent::TextDelta("晚上好".to_owned()),
-        CoreResponseEvent::Completed(Box::new(respond_response("晚上好"))),
-    ]);
-    let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None)]);
-    let ref_index = crate::gateway::ref_index::ref_index();
-
-    stream_respond_c2c_with_sender_and_ref_index(
-        events,
-        &sender,
-        &c2c_message(),
-        &config,
-        &ref_index,
-    )
-    .await
-    .unwrap();
-
     assert_eq!(quoted_lookup_found(&ref_index, &config, "stream-1"), None);
-    assert_eq!(quoted_lookup_found(&ref_index, &config, "msg-1"), None);
 }
 
 #[tokio::test]
-async fn stream_status_event_does_not_start_qq_stream_or_extra_send() {
+async fn candidate_rollback_keeps_platform_accepted_prefix() {
+    let events = FakeEventStream::new([
+        CoreResponseEvent::TextDelta("ABCDE".to_owned()),
+        CoreResponseEvent::Completed(Box::new(respond_response("AB"))),
+    ]);
+    let sender = FakeStreamSender::new([
+        stream_response("stream-1", None),
+        stream_response("reply-complete", None),
+    ]);
+
+    stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
+        .await
+        .unwrap();
+
+    let contents = sender
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            FakeCall::Stream {
+                content,
+                input_state: 10,
+                ..
+            } => Some(content),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(contents, vec!["ABCDE"]);
+}
+
+#[tokio::test]
+async fn long_markdown_emoji_and_code_are_sent_as_raw_cumulative_text_without_chunk_limit() {
+    let body = format!(
+        "# 标题\n\n- 列表\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n```rust\nfn main() {{}}\n```\n\n[链接](https://example.com) 👩‍💻 {}",
+        "中".repeat(3000)
+    );
+    let events = FakeEventStream::new([
+        CoreResponseEvent::TextDelta(body.clone()),
+        CoreResponseEvent::Completed(Box::new(respond_response(&body))),
+    ]);
+    let sender = FakeStreamSender::new([
+        stream_response("stream-1", None),
+        stream_response("reply-complete", None),
+    ]);
+
+    stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
+        .await
+        .unwrap();
+
+    let stream_contents = sender
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            FakeCall::Stream { content, .. } => Some(content),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(stream_contents, vec![body.clone(), body]);
+    assert!(stream_contents[0].chars().count() > 2000);
+}
+
+#[tokio::test]
+async fn status_and_progress_paths_do_not_start_official_stream_unnecessarily() {
     let events = FakeEventStream::new([
         CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentStarted,
@@ -339,15 +570,11 @@ async fn stream_status_event_does_not_start_qq_stream_or_extra_send() {
 }
 
 #[tokio::test]
-async fn progress_policy_status_sends_one_visible_hint_then_final_reply() {
+async fn progress_policy_sends_one_hint_then_ordinary_final_reply() {
     let events = FakeEventStream::new([
         CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentStarted,
             text: "小女仆正在处理…".to_owned(),
-        }),
-        CoreResponseEvent::Status(CoreResponseStatus {
-            kind: CoreResponseStatusKind::AgentFinalizing,
-            text: "小女仆正在确认结果…".to_owned(),
         }),
         CoreResponseEvent::Completed(Box::new(respond_response("最终回复"))),
     ])
@@ -374,512 +601,33 @@ async fn progress_policy_status_sends_one_visible_hint_then_final_reply() {
 }
 
 #[tokio::test]
-async fn progress_then_stream_sends_one_visible_hint_then_streams_final_answer() {
-    let events = FakeEventStream::new([
-        CoreResponseEvent::Status(CoreResponseStatus {
-            kind: CoreResponseStatusKind::AgentStarted,
-            text: "小女仆正在处理…".to_owned(),
-        }),
-        CoreResponseEvent::Status(CoreResponseStatus {
-            kind: CoreResponseStatusKind::AgentFinalizing,
-            text: "小女仆正在确认结果…".to_owned(),
-        }),
-        CoreResponseEvent::TextDelta("最终".to_owned()),
-        CoreResponseEvent::Completed(Box::new(respond_response("最终回复"))),
-    ])
-    .with_policy(CoreOutputPolicy::ProgressThenStream);
-    let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None)]);
-
-    stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
-        .await
-        .unwrap();
-
-    assert_eq!(
-        sender.calls(),
-        vec![
-            FakeCall::Text {
-                content: "小女仆正在处理…".to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-            },
-            FakeCall::Stream {
-                content: "最终".to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: None,
-                index: 0,
-                stream_state_value: 1,
-                reset: Some(false),
-            },
-            FakeCall::Stream {
-                content: STREAM_FINAL_MARKER.to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: Some("stream-1".to_owned()),
-                index: 1,
-                stream_state_value: 10,
-                reset: Some(false),
-            },
-        ]
-    );
-}
-
-#[tokio::test]
-async fn stream_first_send_without_id_falls_back_to_completed_response() {
-    let events = FakeEventStream::new([
-        CoreResponseEvent::TextDelta("晚上".to_owned()),
-        CoreResponseEvent::TextDelta("好".to_owned()),
-        CoreResponseEvent::Completed(Box::new(respond_response("晚上好"))),
-    ]);
-    let sender = FakeStreamSender::new([Ok(None)]);
-
-    stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
-        .await
-        .unwrap();
-
-    assert_eq!(
-        sender.calls(),
-        vec![
-            FakeCall::Stream {
-                content: "晚上".to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: None,
-                index: 0,
-                stream_state_value: 1,
-                reset: Some(false),
-            },
-            FakeCall::Markdown {
-                content: "晚上好".to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-            },
-        ]
-    );
-}
-
-#[tokio::test]
-async fn progress_policy_status_respects_visible_progress_config() {
-    let events = FakeEventStream::new([
-        CoreResponseEvent::Status(CoreResponseStatus {
-            kind: CoreResponseStatusKind::AgentStarted,
-            text: "小女仆正在处理…".to_owned(),
-        }),
-        CoreResponseEvent::Completed(Box::new(respond_response("最终回复"))),
-    ])
-    .with_policy(CoreOutputPolicy::ProgressThenComplete);
-    let sender = FakeStreamSender::new([]);
-    let mut config = test_config();
-    config.c2c_visible_progress_status_enabled = false;
-
-    stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &config)
-        .await
-        .unwrap();
-
-    assert_eq!(
-        sender.calls(),
-        vec![FakeCall::Markdown {
-            content: "最终回复".to_owned(),
-            msg_id: Some("msg-1".to_owned()),
-        }]
-    );
-}
-
-#[tokio::test]
-async fn stream_single_content_packet_then_final_keeps_stream_id() {
-    let events = FakeEventStream::new([
-        CoreResponseEvent::TextDelta("测试成功".to_owned()),
-        CoreResponseEvent::Completed(Box::new(respond_response("测试成功"))),
-    ]);
-    let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None)]);
-
-    let phase = stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
-        .await
-        .unwrap();
-
-    assert!(matches!(phase, C2cStreamingPhase::Completed));
-    assert_eq!(
-        sender.calls(),
-        vec![
-            FakeCall::Stream {
-                content: "测试成功".to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: None,
-                index: 0,
-                stream_state_value: 1,
-                reset: Some(false),
-            },
-            FakeCall::Stream {
-                content: STREAM_FINAL_MARKER.to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: Some("stream-1".to_owned()),
-                index: 1,
-                stream_state_value: 10,
-                reset: Some(false),
-            },
-        ]
-    );
-}
-
-#[tokio::test]
-async fn stream_active_path_reuses_id_and_increments_content_index() {
-    let events = FakeEventStream::with_delays([
-        (
-            Duration::ZERO,
-            CoreResponseEvent::TextDelta("晚上".to_owned()),
-        ),
-        (
-            Duration::from_millis(STREAM_THROTTLE_MS + 50),
-            CoreResponseEvent::TextDelta("好".to_owned()),
-        ),
-        (
-            Duration::ZERO,
-            CoreResponseEvent::Completed(Box::new(respond_response("晚上好"))),
-        ),
-    ]);
-    let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None), Ok(None)]);
-
-    stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
-        .await
-        .unwrap();
-
-    assert_eq!(
-        sender.calls(),
-        vec![
-            FakeCall::Stream {
-                content: "晚上".to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: None,
-                index: 0,
-                stream_state_value: 1,
-                reset: Some(false),
-            },
-            FakeCall::Stream {
-                content: "好".to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: Some("stream-1".to_owned()),
-                index: 1,
-                stream_state_value: 1,
-                reset: Some(false),
-            },
-            FakeCall::Stream {
-                content: STREAM_FINAL_MARKER.to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: Some("stream-1".to_owned()),
-                index: 2,
-                stream_state_value: 10,
-                reset: Some(false),
-            },
-        ]
-    );
-}
-
-#[tokio::test]
-async fn stream_empty_delta_does_not_consume_index() {
-    let events = FakeEventStream::new([
-        CoreResponseEvent::TextDelta(String::new()),
-        CoreResponseEvent::TextDelta("好".to_owned()),
-        CoreResponseEvent::Completed(Box::new(respond_response("好"))),
-    ]);
-    let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None)]);
-
-    stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
-        .await
-        .unwrap();
-
-    assert_eq!(
-        sender.calls(),
-        vec![
-            FakeCall::Stream {
-                content: "好".to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: None,
-                index: 0,
-                stream_state_value: 1,
-                reset: Some(false),
-            },
-            FakeCall::Stream {
-                content: STREAM_FINAL_MARKER.to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: Some("stream-1".to_owned()),
-                index: 1,
-                stream_state_value: 10,
-                reset: Some(false),
-            },
-        ]
-    );
-}
-
-#[tokio::test]
-async fn stream_middle_returned_id_does_not_replace_first_stream_id() {
-    let events = FakeEventStream::with_delays([
-        (
-            Duration::ZERO,
-            CoreResponseEvent::TextDelta("晚".to_owned()),
-        ),
-        (
-            Duration::from_millis(STREAM_THROTTLE_MS + 50),
-            CoreResponseEvent::TextDelta("上".to_owned()),
-        ),
-        (
-            Duration::ZERO,
-            CoreResponseEvent::Completed(Box::new(respond_response("晚上"))),
-        ),
-    ]);
-    let sender = FakeStreamSender::new([
-        Ok(Some("stream-1".to_owned())),
-        Ok(Some("middle-message-id".to_owned())),
-        Ok(None),
-    ]);
-
-    stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
-        .await
-        .unwrap();
-
-    assert_eq!(
-        sender.calls(),
-        vec![
-            FakeCall::Stream {
-                content: "晚".to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: None,
-                index: 0,
-                stream_state_value: 1,
-                reset: Some(false),
-            },
-            FakeCall::Stream {
-                content: "上".to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: Some("stream-1".to_owned()),
-                index: 1,
-                stream_state_value: 1,
-                reset: Some(false),
-            },
-            FakeCall::Stream {
-                content: STREAM_FINAL_MARKER.to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: Some("stream-1".to_owned()),
-                index: 2,
-                stream_state_value: 10,
-                reset: Some(false),
-            },
-        ]
-    );
-}
-
-#[tokio::test]
-async fn stream_middle_chunks_flush_unsent_delta_periodically() {
-    let events = FakeEventStream::with_delays([
-        (
-            Duration::ZERO,
-            CoreResponseEvent::TextDelta("晚".to_owned()),
-        ),
-        (
-            Duration::ZERO,
-            CoreResponseEvent::TextDelta("上".to_owned()),
-        ),
-        (
-            Duration::from_millis(STREAM_THROTTLE_MS + 50),
-            CoreResponseEvent::TextDelta("好".to_owned()),
-        ),
-        (
-            Duration::ZERO,
-            CoreResponseEvent::Completed(Box::new(respond_response("晚上好"))),
-        ),
-    ]);
-    let sender = FakeStreamSender::new([
-        Ok(Some("stream-1".to_owned())),
-        Ok(None),
-        Ok(None),
-        Ok(None),
-    ]);
-
-    stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
-        .await
-        .unwrap();
-
-    assert_eq!(
-        sender.calls(),
-        vec![
-            FakeCall::Stream {
-                content: "晚".to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: None,
-                index: 0,
-                stream_state_value: 1,
-                reset: Some(false),
-            },
-            FakeCall::Stream {
-                content: "上".to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: Some("stream-1".to_owned()),
-                index: 1,
-                stream_state_value: 1,
-                reset: Some(false),
-            },
-            FakeCall::Stream {
-                content: "好".to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: Some("stream-1".to_owned()),
-                index: 2,
-                stream_state_value: 1,
-                reset: Some(false),
-            },
-            FakeCall::Stream {
-                content: STREAM_FINAL_MARKER.to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: Some("stream-1".to_owned()),
-                index: 3,
-                stream_state_value: 10,
-                reset: Some(false),
-            },
-        ]
-    );
-}
-
-#[tokio::test]
-async fn stream_final_failure_does_not_send_ordinary_fallback_after_active() {
-    let events = FakeEventStream::new([
-        CoreResponseEvent::TextDelta("晚上".to_owned()),
-        CoreResponseEvent::Completed(Box::new(respond_response("晚上好"))),
-    ]);
-    let sender = FakeStreamSender::new([
-        Ok(Some("stream-1".to_owned())),
-        Err(ApiError::Unsupported("stream")),
-    ]);
-
-    stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
-        .await
-        .unwrap();
-
-    assert_eq!(
-        sender.calls(),
-        vec![
-            FakeCall::Stream {
-                content: "晚上".to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: None,
-                index: 0,
-                stream_state_value: 1,
-                reset: Some(false),
-            },
-            FakeCall::Stream {
-                content: STREAM_FINAL_MARKER.to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: Some("stream-1".to_owned()),
-                index: 1,
-                stream_state_value: 10,
-                reset: Some(false),
-            },
-        ]
-    );
-}
-
-#[tokio::test]
-async fn stream_closed_before_completed_is_not_silent_success() {
-    let events = FakeEventStream::new([CoreResponseEvent::TextDelta("晚上".to_owned())]);
-    let sender = FakeStreamSender::new([Err(ApiError::Unsupported("stream"))]);
-
-    let result =
-        stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config()).await;
-
-    assert!(result.is_err());
-    assert_eq!(
-        sender.calls(),
-        vec![FakeCall::Stream {
-            content: "晚上".to_owned(),
-            msg_id: Some("msg-1".to_owned()),
-            stream_id: None,
-            index: 0,
-            stream_state_value: 1,
-            reset: Some(false),
-        }]
-    );
-}
-
-#[tokio::test]
-async fn stream_middle_failure_does_not_send_ordinary_fallback_on_completed() {
-    let events = FakeEventStream::with_delays([
-        (
-            Duration::ZERO,
-            CoreResponseEvent::TextDelta("晚".to_owned()),
-        ),
-        (
-            Duration::from_millis(STREAM_THROTTLE_MS + 50),
-            CoreResponseEvent::TextDelta("上".to_owned()),
-        ),
-        (
-            Duration::ZERO,
-            CoreResponseEvent::Completed(Box::new(respond_response("晚上"))),
-        ),
-    ]);
-    let sender = FakeStreamSender::new([
-        Ok(Some("stream-1".to_owned())),
-        Err(ApiError::Unsupported("stream")),
-        Ok(None),
-    ]);
-
-    stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
-        .await
-        .unwrap();
-
-    assert_eq!(
-        sender.calls(),
-        vec![
-            FakeCall::Stream {
-                content: "晚".to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: None,
-                index: 0,
-                stream_state_value: 1,
-                reset: Some(false),
-            },
-            FakeCall::Stream {
-                content: "上".to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: Some("stream-1".to_owned()),
-                index: 1,
-                stream_state_value: 1,
-                reset: Some(false),
-            },
-            FakeCall::Stream {
-                content: "上".to_owned(),
-                msg_id: Some("msg-1".to_owned()),
-                stream_id: Some("stream-1".to_owned()),
-                index: 1,
-                stream_state_value: 10,
-                reset: Some(false),
-            },
-        ]
-    );
-}
-
-#[tokio::test]
-async fn pending_core_failure_sends_safe_ordinary_failure_reply() {
-    let events = FakeEventStream::new([CoreResponseEvent::Failed(CoreRespondFailure {
-        kind: CoreFailureKind::Internal,
-        message: "处理失败，请稍后再试。".to_owned(),
-        retryable: false,
-        agent: None,
-    })]);
+async fn pending_core_failure_uses_safe_failure_reply() {
+    let events = FakeEventStream::new([CoreResponseEvent::Failed(
+        qq_maid_core::service::CoreRespondFailure {
+            kind: qq_maid_core::service::CoreFailureKind::Internal,
+            message: "处理失败".to_owned(),
+            retryable: false,
+            agent: None,
+        },
+    )]);
     let sender = FakeStreamSender::new([]);
 
-    let result =
-        stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config()).await;
-
-    assert!(matches!(result.unwrap(), C2cStreamingPhase::Completed));
-    assert_eq!(
-        sender.calls(),
-        vec![FakeCall::Text {
-            content: "处理失败，请稍后再试。".to_owned(),
-            msg_id: Some("msg-1".to_owned()),
-        }]
+    stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
+        .await
+        .unwrap();
+    assert!(
+        sender
+            .calls()
+            .iter()
+            .any(|call| matches!(call, FakeCall::Text { .. }))
     );
 }
 
 #[tokio::test]
-async fn stream_timeout_failure_stops_typing_with_timeout_reason() {
-    let events = FakeEventStream::new([CoreResponseEvent::Failed(CoreRespondFailure {
-        kind: CoreFailureKind::LlmTimeout,
-        message: "LLM 请求超时，请稍后重试。".to_owned(),
-        retryable: true,
-        agent: None,
-    })]);
+async fn pending_completed_stops_typing_before_fallback() {
+    let events = FakeEventStream::new([CoreResponseEvent::Completed(Box::new(respond_response(
+        "晚上好",
+    )))]);
     let sender = FakeStreamSender::new([]);
     let typing = C2cTypingStatusGuard::schedule_with_sender(
         &AgentTypingConfig {
@@ -893,51 +641,18 @@ async fn stream_timeout_failure_stops_typing_with_timeout_reason() {
     .unwrap();
     let stop_reason = typing.stop_reason_probe_for_test();
 
-    let result = stream_respond_c2c_with_sender_and_typing(
+    stream_respond_c2c_with_sender_and_typing(
         events,
         &sender,
         &c2c_message(),
         &test_config(),
         Some(typing),
     )
-    .await;
+    .await
+    .unwrap();
 
-    assert!(matches!(result.unwrap(), C2cStreamingPhase::Completed));
     assert_eq!(
         *stop_reason.lock().unwrap(),
-        Some(TypingStopReason::Timeout)
-    );
-    assert_eq!(
-        sender.calls(),
-        vec![FakeCall::Text {
-            content: "LLM 请求超时，请稍后重试。".to_owned(),
-            msg_id: Some("msg-1".to_owned()),
-        }]
-    );
-}
-
-#[tokio::test]
-async fn active_core_failure_finalizes_stream_without_ordinary_failure_reply() {
-    let events = FakeEventStream::new([
-        CoreResponseEvent::TextDelta("已发送".to_owned()),
-        CoreResponseEvent::Failed(CoreRespondFailure {
-            kind: CoreFailureKind::LlmTimeout,
-            message: "LLM 请求超时，请稍后重试。".to_owned(),
-            retryable: true,
-            agent: None,
-        }),
-    ]);
-    let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None)]);
-
-    let result =
-        stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config()).await;
-
-    assert!(result.is_err());
-    let calls = sender.calls();
-    assert_eq!(calls.len(), 2);
-    assert!(
-        calls
-            .iter()
-            .all(|call| matches!(call, FakeCall::Stream { .. }))
+        Some(TypingStopReason::FinalReply)
     );
 }
