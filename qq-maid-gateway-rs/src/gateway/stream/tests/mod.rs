@@ -1,6 +1,7 @@
 use super::*;
 
 mod completion;
+mod send;
 use crate::gateway::typing::{
     C2cTypingSender, C2cTypingStatusGuard, TypingSendFuture, TypingStopReason,
 };
@@ -64,11 +65,13 @@ impl FakeEventStream {
 impl RespondEventStream for FakeEventStream {
     fn recv_event<'a>(&'a mut self) -> RespondEventFuture<'a> {
         Box::pin(async move {
-            let (delay, event) = self.events.pop_front()?;
+            // 允许消费者用 timeout 等待定时刷新；若等待被取消，事件不能已经从
+            // 队列移除，否则会把尚未交付的模型增量静默丢掉。
+            let delay = self.events.front().map(|(delay, _)| *delay)?;
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
             }
-            Some(event)
+            self.events.pop_front().map(|(_, event)| event)
         })
     }
 
@@ -660,7 +663,7 @@ async fn stream_middle_returned_id_does_not_replace_first_stream_id() {
 }
 
 #[tokio::test]
-async fn stream_middle_chunks_coalesce_only_unsent_delta() {
+async fn stream_middle_chunks_flush_unsent_delta_periodically() {
     let events = FakeEventStream::with_delays([
         (
             Duration::ZERO,
@@ -679,7 +682,12 @@ async fn stream_middle_chunks_coalesce_only_unsent_delta() {
             CoreResponseEvent::Completed(Box::new(respond_response("晚上好"))),
         ),
     ]);
-    let sender = FakeStreamSender::new([Ok(Some("stream-1".to_owned())), Ok(None), Ok(None)]);
+    let sender = FakeStreamSender::new([
+        Ok(Some("stream-1".to_owned())),
+        Ok(None),
+        Ok(None),
+        Ok(None),
+    ]);
 
     stream_respond_c2c_with_sender(events, &sender, &c2c_message(), &test_config())
         .await
@@ -697,7 +705,7 @@ async fn stream_middle_chunks_coalesce_only_unsent_delta() {
                 reset: Some(false),
             },
             FakeCall::Stream {
-                content: "上好".to_owned(),
+                content: "上".to_owned(),
                 msg_id: Some("msg-1".to_owned()),
                 stream_id: Some("stream-1".to_owned()),
                 index: 1,
@@ -705,10 +713,18 @@ async fn stream_middle_chunks_coalesce_only_unsent_delta() {
                 reset: Some(false),
             },
             FakeCall::Stream {
-                content: STREAM_FINAL_MARKER.to_owned(),
+                content: "好".to_owned(),
                 msg_id: Some("msg-1".to_owned()),
                 stream_id: Some("stream-1".to_owned()),
                 index: 2,
+                stream_state_value: 1,
+                reset: Some(false),
+            },
+            FakeCall::Stream {
+                content: STREAM_FINAL_MARKER.to_owned(),
+                msg_id: Some("msg-1".to_owned()),
+                stream_id: Some("stream-1".to_owned()),
+                index: 3,
                 stream_state_value: 10,
                 reset: Some(false),
             },
@@ -751,70 +767,6 @@ async fn stream_final_failure_does_not_send_ordinary_fallback_after_active() {
                 reset: Some(false),
             },
         ]
-    );
-}
-
-#[tokio::test]
-async fn stream_chunk_failure_does_not_advance_next_index() {
-    let sender = FakeStreamSender::new([Err(ApiError::Unsupported("stream"))]);
-    let mut stream_state = C2cStreamState::new();
-    stream_state.stream_id = Some("stream-1".to_owned());
-    stream_state.index = 1;
-
-    let result = send_stream_chunk(
-        &sender,
-        "user-1",
-        Some("msg-1"),
-        "失败分片",
-        &mut stream_state,
-        1,
-        false,
-    )
-    .await;
-
-    assert!(result.is_err());
-    assert_eq!(stream_state.index, 1);
-    assert_eq!(
-        sender.calls(),
-        vec![FakeCall::Stream {
-            content: "失败分片".to_owned(),
-            msg_id: Some("msg-1".to_owned()),
-            stream_id: Some("stream-1".to_owned()),
-            index: 1,
-            stream_state_value: 1,
-            reset: Some(false),
-        }]
-    );
-}
-
-#[tokio::test]
-async fn stream_final_success_commits_next_index() {
-    let sender = FakeStreamSender::new([Ok(None)]);
-    let mut stream_state = C2cStreamState::new();
-    stream_state.stream_id = Some("stream-1".to_owned());
-    stream_state.index = 2;
-
-    send_stream_end(
-        &sender,
-        "user-1",
-        Some("msg-1"),
-        "最终正文",
-        &mut stream_state,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(stream_state.index, 3);
-    assert_eq!(
-        sender.calls(),
-        vec![FakeCall::Stream {
-            content: "最终正文".to_owned(),
-            msg_id: Some("msg-1".to_owned()),
-            stream_id: Some("stream-1".to_owned()),
-            index: 2,
-            stream_state_value: 10,
-            reset: Some(false),
-        }]
     );
 }
 

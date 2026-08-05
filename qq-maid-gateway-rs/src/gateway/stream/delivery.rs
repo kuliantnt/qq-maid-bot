@@ -1,17 +1,21 @@
 use std::time::{Duration, Instant};
 
-use tracing::{debug, info, trace, warn};
+use tokio::time::timeout;
+use tracing::{info, trace, warn};
 
 use super::{
     event_stream::{C2cStreamSender, RespondEventStream, failure_stop_reason},
+    progress::{
+        STREAM_THROTTLE_MS, send_progress_status, should_send_progress_status, stream_flush_wait,
+    },
     send::{
         completed_response_content, response_from_incomplete_stream_text, send_stream_chunk,
-        send_stream_end, stream_final_packet_content,
+        send_stream_end,
     },
     types::C2cStreamingPhase,
 };
 use crate::{
-    api::{C2cReplyTarget, C2cStreamState, QqApiClient},
+    api::{C2cStreamState, QqApiClient},
     config::AppConfig,
     gateway::{
         event::C2cMessage,
@@ -27,14 +31,7 @@ use crate::{
     },
     render::{OutboundMessage, render_respond_response_parts_for_profile},
 };
-use qq_maid_core::service::{
-    CoreOutputPolicy, CoreResponse, CoreResponseEvent, CoreResponseStatus,
-};
-
-/// QQ C2C 流式发送的节流间隔（毫秒）。
-///
-/// 避免每个 LLM delta 都请求一次 QQ API，减少接口压力。
-pub(crate) const STREAM_THROTTLE_MS: u64 = 500;
+use qq_maid_core::service::{CoreResponse, CoreResponseEvent};
 
 async fn send_completed_media_after_stream<S: C2cStreamSender + ?Sized>(
     sender: &S,
@@ -198,7 +195,78 @@ where
     let mut status_event_count = 0_usize;
     let mut progress_status_send_attempted = false;
 
-    while let Some(event) = stream.recv_event().await {
+    loop {
+        let event = match stream_flush_wait(&phase, &pending_delta, last_send_at) {
+            Some(wait) => match timeout(wait, stream.recv_event()).await {
+                Ok(event) => event,
+                Err(_) => {
+                    let C2cStreamingPhase::Active(mut stream_state) = phase else {
+                        continue;
+                    };
+                    let index = stream_state.index;
+                    let had_stream_id = stream_state.stream_id.is_some();
+                    let chunk_chars = pending_delta.chars().count();
+                    match send_stream_chunk(
+                        sender,
+                        user_openid,
+                        Some(reply_msg_id),
+                        &mut pending_delta,
+                        &mut stream_state,
+                        1,
+                        false,
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            last_send_at = Instant::now();
+                            trace!(
+                                user = %masked_user,
+                                reply_msg_id = %masked_reply_msg_id,
+                                phase = "middle_chunk_timer",
+                                response_delivery_mode = output_policy.as_str(),
+                                stream_state = "active",
+                                stream_state_value = 1_u8,
+                                reset = false,
+                                index,
+                                has_stream_id_before_send = had_stream_id,
+                                has_stream_id_after_send = stream_state.stream_id.is_some(),
+                                text_delta_count,
+                                stream_entered_active = true,
+                                chunk_chars,
+                                accumulated_chars = accumulated.chars().count(),
+                                "QQ 流式定时刷新待发送增量成功"
+                            );
+                            phase = C2cStreamingPhase::Active(stream_state);
+                        }
+                        Err(err) => {
+                            warn!(
+                                user = %masked_user,
+                                reply_msg_id = %masked_reply_msg_id,
+                                phase = "middle_chunk_timer",
+                                response_delivery_mode = output_policy.as_str(),
+                                stream_state = "broken_active",
+                                stream_state_value = 1_u8,
+                                reset = false,
+                                index,
+                                has_stream_id_before_send = had_stream_id,
+                                text_delta_count,
+                                stream_entered_active = true,
+                                content_chars = chunk_chars,
+                                error = %err.log_summary(),
+                                accumulated_chars = accumulated.chars().count(),
+                                "QQ 流式定时刷新失败，stream id 创建后禁止降级为普通回复"
+                            );
+                            phase = C2cStreamingPhase::BrokenActive(stream_state);
+                        }
+                    }
+                    continue;
+                }
+            },
+            None => stream.recv_event().await,
+        };
+        let Some(event) = event else {
+            break;
+        };
         match event {
             CoreResponseEvent::Status(status) => {
                 status_event_count += 1;
@@ -246,11 +314,12 @@ where
                         stream_first_attempted = true;
                         let index = stream_state.index;
                         let had_stream_id = stream_state.stream_id.is_some();
+                        let content_chars = pending_delta.chars().count();
                         match send_stream_chunk(
                             sender,
                             user_openid,
                             Some(reply_msg_id),
-                            &pending_delta,
+                            &mut pending_delta,
                             &mut stream_state,
                             1,
                             false,
@@ -261,8 +330,6 @@ where
                                 if let Some(typing) = typing.as_mut() {
                                     typing.stop(TypingStopReason::FirstFrame);
                                 }
-                                let content_chars = pending_delta.chars().count();
-                                pending_delta.clear();
                                 last_send_at = Instant::now();
                                 trace!(
                                     user = %masked_user,
@@ -330,14 +397,14 @@ where
                         if elapsed >= Duration::from_millis(STREAM_THROTTLE_MS)
                             && !pending_delta.is_empty()
                         {
-                            let chunk = pending_delta.clone();
                             let index = stream_state.index;
                             let had_stream_id = stream_state.stream_id.is_some();
+                            let chunk_chars = pending_delta.chars().count();
                             match send_stream_chunk(
                                 sender,
                                 user_openid,
                                 Some(reply_msg_id),
-                                &chunk,
+                                &mut pending_delta,
                                 &mut stream_state,
                                 1,
                                 false,
@@ -345,7 +412,6 @@ where
                             .await
                             {
                                 Ok(_) => {
-                                    pending_delta.clear();
                                     last_send_at = Instant::now();
                                     trace!(
                                         user = %masked_user,
@@ -361,7 +427,7 @@ where
                                         text_delta_count,
                                         stream_entered_active = true,
                                         sent_len = accumulated.len(),
-                                        chunk_chars = chunk.chars().count(),
+                                        chunk_chars,
                                         "QQ 流式中间帧发送成功"
                                     );
                                     phase = C2cStreamingPhase::Active(stream_state);
@@ -379,7 +445,7 @@ where
                                         has_stream_id_before_send = had_stream_id,
                                         text_delta_count,
                                         stream_entered_active = true,
-                                        content_chars = chunk.chars().count(),
+                                        content_chars = chunk_chars,
                                         error = %err.log_summary(),
                                         accumulated_chars = accumulated.chars().count(),
                                         "QQ 流式中间帧发送失败，stream id 创建后禁止降级为普通回复"
@@ -417,14 +483,14 @@ where
                         // 若后续通过真实 QQ 事件确认 DONE 回包里的某个字段会被 quote 回传，
                         // 再在该字段处补充 ref_index 回填和回归测试。
                         if !pending_delta.is_empty() {
-                            let chunk = pending_delta.clone();
                             let index = stream_state.index;
                             let had_stream_id = stream_state.stream_id.is_some();
+                            let chunk_chars = pending_delta.chars().count();
                             match send_stream_chunk(
                                 sender,
                                 user_openid,
                                 Some(reply_msg_id),
-                                &chunk,
+                                &mut pending_delta,
                                 &mut stream_state,
                                 1,
                                 false,
@@ -432,7 +498,6 @@ where
                             .await
                             {
                                 Ok(_) => {
-                                    pending_delta.clear();
                                     trace!(
                                         user = %masked_user,
                                         reply_msg_id = %masked_reply_msg_id,
@@ -445,7 +510,7 @@ where
                                         has_stream_id_after_send = stream_state.stream_id.is_some(),
                                         text_delta_count,
                                         qq_stream_send_count = stream_state.index,
-                                        content_chars = chunk.chars().count(),
+                                        content_chars = chunk_chars,
                                         final_chars,
                                         "QQ 流式待发送增量已在最终帧前刷新"
                                     );
@@ -464,7 +529,7 @@ where
                                         qq_stream_send_count = stream_state.index,
                                         accumulated_chars = accumulated.chars().count(),
                                         elapsed_ms = started_at.elapsed().as_millis(),
-                                        content_chars = chunk.chars().count(),
+                                        content_chars = chunk_chars,
                                         error = %err.log_summary(),
                                         final_chars,
                                         "QQ 流式待发送增量刷新失败，禁止降级为普通回复"
@@ -473,7 +538,7 @@ where
                                         sender,
                                         user_openid,
                                         Some(reply_msg_id),
-                                        stream_final_packet_content(&pending_delta),
+                                        &mut pending_delta,
                                         &mut stream_state,
                                     )
                                     .await
@@ -559,7 +624,7 @@ where
                             sender,
                             user_openid,
                             Some(reply_msg_id),
-                            stream_final_packet_content(&pending_delta),
+                            &mut pending_delta,
                             &mut stream_state,
                         )
                         .await
@@ -627,7 +692,7 @@ where
                             sender,
                             user_openid,
                             Some(reply_msg_id),
-                            stream_final_packet_content(&pending_delta),
+                            &mut pending_delta,
                             &mut stream_state,
                         )
                         .await
@@ -808,7 +873,7 @@ where
                             sender,
                             user_openid,
                             Some(reply_msg_id),
-                            stream_final_packet_content(&pending_delta),
+                            &mut pending_delta,
                             &mut stream_state,
                         )
                         .await
@@ -859,7 +924,7 @@ where
                 sender,
                 user_openid,
                 Some(reply_msg_id),
-                stream_final_packet_content(&pending_delta),
+                &mut pending_delta,
                 &mut stream_state,
             )
             .await?;
@@ -891,52 +956,4 @@ where
     Err(anyhow::anyhow!(
         "core respond stream closed before Completed; accumulated_chars={accumulated_chars}"
     ))
-}
-
-fn should_send_progress_status(enabled: bool, policy: CoreOutputPolicy, attempted: bool) -> bool {
-    enabled
-        && !attempted
-        && matches!(
-            policy,
-            CoreOutputPolicy::ProgressThenComplete | CoreOutputPolicy::ProgressThenStream
-        )
-}
-
-async fn send_progress_status<S: C2cStreamSender + ?Sized>(
-    sender: &S,
-    message: &C2cMessage,
-    status: &CoreResponseStatus,
-    masked_user: &str,
-    masked_reply_msg_id: &str,
-    stream_state: &str,
-) {
-    let target = C2cReplyTarget {
-        user_openid: message.user_openid.clone(),
-        msg_id: Some(message.message_id.clone()),
-    };
-    // Status 是系统短文案，独立普通文本发送；失败只记日志，不影响 Tool Loop 和最终回复。
-    match sender.send_text(&target, &status.text).await {
-        Ok(_) => {
-            debug!(
-                user = %masked_user,
-                reply_msg_id = %masked_reply_msg_id,
-                status_kind = status.kind.as_str(),
-                response_delivery_mode = "progress_status",
-                stream_state,
-                status_chars = status.text.chars().count(),
-                "C2C 进度状态已发送"
-            );
-        }
-        Err(err) => {
-            warn!(
-                user = %masked_user,
-                reply_msg_id = %masked_reply_msg_id,
-                status_kind = status.kind.as_str(),
-                response_delivery_mode = "progress_status",
-                stream_state,
-                error = %err.log_summary(),
-                "C2C 进度状态发送失败，将继续发送最终回复"
-            );
-        }
-    }
 }

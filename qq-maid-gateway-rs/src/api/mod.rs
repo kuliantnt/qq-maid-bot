@@ -538,9 +538,11 @@ impl QqApiClient {
             return Err(ApiError::Status { status, body });
         }
 
-        stream_state.commit_msg_seq_attempt(msg_seq_attempt);
         let body = response.text().await.map_err(ApiError::Http)?;
         let sent_stream_id = extract_c2c_text_stream_id(&body);
+        // 只有 HTTP 响应体也成功读完，底层发送 helper 才会收到 Ok；将 msg_seq 的
+        // 提交放在这里，避免本地读取失败时把尚未向上层确认成功的分片误标为已发送。
+        stream_state.commit_msg_seq_attempt(msg_seq_attempt);
         let (qq_code, qq_message) = qq_api_error_fields(&body);
         let success_fields =
             stream_request_log_fields(stream_state_value, stream_state, msg_seq_attempt, true);
