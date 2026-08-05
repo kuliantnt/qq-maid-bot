@@ -3,7 +3,6 @@ use std::{env, fs, process::ExitCode};
 use qq_maid_core::runtime::tools::knowledge::eval::{
     parse_dataset, run_fts5_baseline, run_knowledge_v3,
 };
-
 fn main() -> ExitCode {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     let semantic = arguments.iter().any(|argument| argument == "--semantic");
@@ -45,7 +44,11 @@ fn main() -> ExitCode {
             }
         }
         Err(error) => {
-            eprintln!("knowledge eval failed: {error}");
+            if tracing::dispatcher::has_been_set() {
+                tracing::error!(error = %error, "knowledge eval failed");
+            } else {
+                eprintln!("knowledge eval failed: {error}");
+            }
             ExitCode::FAILURE
         }
     }

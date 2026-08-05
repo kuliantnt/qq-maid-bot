@@ -94,7 +94,7 @@ Todo 提醒当前支持分钟/小时级调度边界：自然语言可以创建�
 
 ### 部署管理控制台
 
-仅当 `WEB_CONSOLE_ENABLED=true` 时注册。新实例没有 Provider 或平台凭据时进入 `setup_required`，仍保留 `/healthz` 和受保护的 `/console/`，但不构造业务 Provider、Worker 或 Gateway。首次启动会在 `config/secrets/bootstrap.token` 生成约 22 字符、短时单次的 token，并向启动控制台输出一次；普通状态请求、有效 token 复用和重启不会重复输出，初始化成功后文件立即删除。登录页也可按相同边界生成密码重置 token，提交成功后撤销全部旧 Admin 会话。
+仅当 `WEB_CONSOLE_ENABLED=true` 时注册。新实例没有 Provider 或平台凭据时进入 `setup_required`，仍保留 `/healthz` 和受保护的 `/console/`，但不构造业务 Provider、Worker 或 Gateway。首次启动会在 `config/secrets/bootstrap.token` 生成约 22 字符、短时单次的 token，并通过一次 `info` 启动日志事件输出；普通状态请求、有效 token 复用和重启不会重复输出，初始化成功后文件立即删除。登录页也可按相同边界生成密码重置 token，提交成功后撤销全部旧 Admin 会话。
 
 配置详情和写接口要求独立于聊天 session 的部署管理员服务端会话。密码最少 6 个字符并使用 Argon2id 哈希；登录/初始化/重置受限流、SameSite HttpOnly cookie、CSRF、会话轮换/过期和脱敏审计保护。普通字段写入受管 `runtime.toml`，secret 认证加密写入 SQLite，Agent 路线与 Tool Calling 结构化修改现有 `agent.toml`。所有修改携带 revision；冲突不会覆盖人工新文件。分步首次向导允许保存整体尚未完成的配置，但页面和 `/healthz` 会继续报告 `setup_required`，直至重启后完整预检通过。
 

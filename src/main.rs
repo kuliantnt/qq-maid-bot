@@ -27,10 +27,11 @@ use qq_maid_gateway_rs::{
 use time::{UtcOffset, macros::format_description};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod cli;
+mod config_diagnostics;
 
 const OPS_HTTP_SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 const BUILD_COMMIT: &str = match option_env!("QQ_MAID_BUILD_COMMIT") {
@@ -79,17 +80,26 @@ async fn main() -> anyhow::Result<()> {
         config_center = config_center.with_running_agent_config(config.agent_config.clone())?;
     }
     let gateway_config = GatewayConfig::from_map(&resolved_environment);
-    let runtime_ready = core_config.is_ok()
-        && gateway_config
-            .as_ref()
-            .is_ok_and(GatewayConfig::has_enabled_channel)
-        && preflight_candidate_startup(&resolved_environment, None).is_ok();
+    let gateway_channel_enabled = gateway_config
+        .as_ref()
+        .is_ok_and(GatewayConfig::has_enabled_channel);
+    let provider_preflight = CoreConfig::preflight_environment(&resolved_environment, None);
+    let runtime_ready =
+        core_config.is_ok() && gateway_channel_enabled && provider_preflight.is_ok();
     if !runtime_ready {
-        warn!(
+        info!(
             state = "setup_required",
             core_config_valid = core_config.is_ok(),
             gateway_config_valid = gateway_config.is_ok(),
+            gateway_channel_enabled,
+            provider_preflight_valid = provider_preflight.is_ok(),
             "业务配置尚未完成，仅启动受保护管理入口"
+        );
+        log_startup_config_diagnostics(
+            &resolved_environment,
+            &core_config,
+            &gateway_config,
+            &provider_preflight,
         );
         return ManagementRuntime::new(
             management_bootstrap,
@@ -183,6 +193,56 @@ async fn main() -> anyhow::Result<()> {
             let _ = tokio::time::timeout(OPS_HTTP_SHUTDOWN_WAIT, &mut core_http_handle).await;
             Err(task_exit_error("qq-maid-gateway-rs", result))
         }
+    }
+}
+
+/// setup_required 仍需告诉部署者应检查哪个文件；secret 值和可能携带值的通用错误正文
+/// 不进入日志。Agent/Ops 文件诊断已在专用 helper 中截断 TOML 源码片段。
+fn log_startup_config_diagnostics(
+    environment: &HashMap<String, String>,
+    core_config: &Result<CoreConfig, qq_maid_llm::LlmError>,
+    gateway_config: &Result<GatewayConfig, qq_maid_gateway_rs::config::ConfigError>,
+    provider_preflight: &Result<(), qq_maid_llm::LlmError>,
+) {
+    let file_issues = config_diagnostics::collect_config_file_issues(environment);
+    for issue in &file_issues {
+        info!(
+            component = issue.component,
+            config_file = %issue.path,
+            reason = %issue.reason,
+            "启动配置文件预检失败"
+        );
+    }
+    if core_config.is_err() && file_issues.is_empty() {
+        info!(
+            component = "core",
+            config_source = "config/.env|config/runtime.toml|encrypted_secret_store",
+            reason = "invalid_core_configuration",
+            "Core 配置解析失败；请运行 `qq-maid-bot config check` 查看分项结果"
+        );
+    } else if core_config.is_ok() && provider_preflight.is_err() {
+        info!(
+            component = "provider",
+            config_source =
+                "config/agent.toml|config/.env|config/runtime.toml|encrypted_secret_store",
+            reason = "invalid_provider_route_or_credential",
+            "Provider 启动预检失败；请检查模型路线与对应凭证"
+        );
+    }
+    match gateway_config {
+        Err(_) => info!(
+            component = "gateway",
+            config_source = "config/.env|config/runtime.toml|encrypted_secret_store",
+            reason = "invalid_gateway_configuration",
+            "Gateway 配置解析失败；请运行 `qq-maid-bot config check` 查看分项结果"
+        ),
+        Ok(config) if !config.has_enabled_channel() => info!(
+            component = "gateway",
+            config_source = "config/.env|config/runtime.toml|encrypted_secret_store",
+            reason = "no_enabled_channel",
+            "Gateway 没有启用且凭证完整的入口"
+        ),
+        Ok(_) => {}
     }
 }
 

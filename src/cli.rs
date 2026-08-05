@@ -1,5 +1,6 @@
 use std::{collections::HashMap, ffi::OsString, path::PathBuf};
 
+use crate::config_diagnostics::{ConfigFileIssue, collect_config_file_issues};
 use anyhow::{anyhow, bail};
 use qq_maid_core::{
     config::{
@@ -97,6 +98,8 @@ fn config_check() -> anyhow::Result<()> {
         "agent_config={}",
         if agent.is_ok() { "valid" } else { "invalid" }
     );
+    let file_issues = collect_config_file_issues(&environment);
+    print_config_file_issues(&file_issues);
 
     let paths = ConfigCenterPaths::from_environment(&environment);
     let prerequisites_exist = migration.database_exists
@@ -110,6 +113,9 @@ fn config_check() -> anyhow::Result<()> {
         );
         if let Err(error) = agent {
             bail!("Agent 配置无效：{error}");
+        }
+        if !file_issues.is_empty() {
+            bail!("检测到 {} 个无效配置文件，详情见上方", file_issues.len());
         }
         return Ok(());
     }
@@ -131,11 +137,35 @@ fn config_check() -> anyhow::Result<()> {
         "gateway_preflight={}",
         if gateway_valid { "valid" } else { "invalid" }
     );
-    core.map_err(|_| anyhow!("Core/Provider 配置预检失败（敏感值已隐藏）"))?;
+    core.map_err(|_| {
+        if file_issues.is_empty() {
+            anyhow!("Core/Provider 配置预检失败（敏感值已隐藏）")
+        } else {
+            anyhow!("Core/Provider 配置预检失败；无效配置文件详情见上方")
+        }
+    })?;
     if !gateway_valid {
         bail!("Gateway 配置预检失败或没有启用入口（敏感值已隐藏）");
     }
     Ok(())
+}
+
+fn print_config_file_issues(issues: &[ConfigFileIssue]) {
+    for issue in issues {
+        if tracing::dispatcher::has_been_set() {
+            tracing::error!(
+                component = %issue.component,
+                file = %issue.path,
+                reason = %issue.reason,
+                "配置文件预检失败"
+            );
+        } else {
+            eprintln!(
+                "配置文件预检失败: component={} file={} reason={}",
+                issue.component, issue.path, issue.reason
+            );
+        }
+    }
 }
 
 fn config_sources() -> anyhow::Result<()> {
