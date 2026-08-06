@@ -21,7 +21,122 @@
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
+## 快速开始
+
+想先把小女仆叫来值班？选一种顺手的部署方式即可。运行机器人至少需要启用一个消息入口，并配置一个可用的模型 Provider；使用 QQ 官方入口时，还需要准备 QQ 开放平台的 AppID 和 AppSecret。
+
+| 我想这样部署 | 建议入口 |
+| --- | --- |
+| Linux 主机，省心安装 | [Linux 一键安装](#linux-一键安装推荐) |
+| 已有 Docker / Compose 环境 | [Docker 部署 · 人话版](./docs/deployment/docker-simple.md)，5 分钟按步骤跑起来 |
+| Windows 主机 | [Windows 一键安装](#windows-一键安装) |
+| 参与开发或调试源码 | [从源码运行](#从源码运行) |
+
+拿不准就选 Linux 一键安装；熟悉容器的话，直接跟着 Docker 人话版走。
+
+### Linux 一键安装（推荐）
+
+安装脚本会根据 CPU 架构下载最新 Release，无需安装 Rust：
+
+```bash
+curl -fsSL https://github.com/kuliantnt/qq-maid-bot/raw/refs/heads/master/scripts/qbot.sh -o /tmp/qbot.sh
+bash /tmp/qbot.sh deploy
+
+qbot install                 # 交互询问是否启用 Web 控制台
+# qbot install --web false   # 仅 CLI / 文件配置，不启用 /console/
+qbot config bot
+qbot config ai
+qbot start
+qbot status
+```
+
+安装完成后，小女仆的日常值班状态可以这样查看：
+
+```bash
+qbot log       # 跟随日志
+qbot health    # 健康检查
+qbot restart   # 重启服务
+qbot update    # 更新版本
+```
+
+<details>
+<summary>GitHub 下载不稳定？展开配置可信代理</summary>
+
+可设置 `QBOT_GITHUB_PROXY`（单个代理前缀）或 `QBOT_GITHUB_PROXIES`（空格分隔的多个代理前缀）指向自己信任的加速源。安装器会依次尝试官方源和所有代理；任一来源失败会自动尝试下一个，且只有压缩包格式有效、SHA-256 校验通过才会继续安装：
+
+```bash
+export QBOT_GITHUB_PROXIES="https://gh-proxy-a.example.com https://gh-proxy-b.example.com"
+qbot install
+```
+
+代理前缀必须是 `https://域名/` 形式的完整前缀，脚本会把它拼接在 `https://github.com/<仓库>/releases/download/<版本>/<文件>` 前面后再下载。
+
+</details>
+
+### Windows 一键安装
+
+在 PowerShell 中下载安装器：
+
+```powershell
+$p = "$env:TEMP\qbot.ps1"
+Invoke-WebRequest `
+  https://github.com/kuliantnt/qq-maid-bot/raw/refs/heads/master/scripts/qbot.ps1 `
+  -OutFile $p `
+  -UseBasicParsing
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $p install
+```
+
+Windows 端支持与 Linux 相同的代理变量（`QBOT_GITHUB_PROXY` / `QBOT_GITHUB_PROXIES`）。下载失败时同样会自动尝试下一个来源，并校验 ZIP 与 SHA-256：
+
+```powershell
+$env:QBOT_GITHUB_PROXIES = "https://gh-proxy-a.example.com https://gh-proxy-b.example.com"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\qbot.ps1" install
+```
+
+然后编辑配置并启动：
+
+```powershell
+& "$HOME\qq-maid-bot\qbot.cmd" config path
+notepad "$HOME\qq-maid-bot\config\.env"
+& "$HOME\qq-maid-bot\qbot.cmd" start
+& "$HOME\qq-maid-bot\qbot.cmd" status
+```
+
+当前 Windows Release 仅提供 x86_64 版本。更完整的安装与排障说明见 Wiki [安装手册](https://github.com/kuliantnt/qq-maid-bot/wiki/安装手册)；手动下载 Release、开机启动和更新细节也可对照 [runtime 运行文档](./runtime/README.md#release-包)。
+
+### Docker Compose
+
+第一次用 Docker 部署？直接打开 **[Docker 部署 · 人话版](./docs/deployment/docker-simple.md)**，跟着步骤走，大部分配置都可以在网页里完成。
+
+服务器部署推荐使用 GHCR 镜像与 Docker Compose。运行镜像不包含 Rust 或 Node.js，默认不映射管理端口，并以非 root 用户运行。首次启动、持久化目录、按 digest 升级回滚、多实例和测试环境自动部署见 [Docker 与 Compose 部署](./docs/deployment/docker.md)；配置迁移、备份恢复与 schema 回滚边界见 [配置迁移、备份恢复与安全升级](./docs/deployment/migration-backup.md)。
+
+普通用户也可以直接从 Docker Hub 拉取最新正式镜像：
+
+```bash
+docker pull kuliantnt/qq-maid-bot:latest
+```
+
+### 从源码运行
+
+需要已安装 Rust 工具链：
+
+```bash
+git clone https://github.com/kuliantnt/qq-maid-bot.git
+cd qq-maid-bot
+cp runtime/config/.env.example runtime/config/.env
+vim runtime/config/.env
+make local
+runtime/botctl.sh status
+```
+
+开发调试、Windows 源码构建和测试命令见 Wiki [开发维护文档](https://github.com/kuliantnt/qq-maid-bot/wiki/开发维护文档) 或仓库 [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)。
+
 ## 23.x 版本线更新
+
+当前稳定版本为 `v0.23.8`。需要查看本版本线的详细变更和升级提示时，再展开下面的更新记录：
+
+<details>
+<summary>展开查看 23.x / 22.x 版本更新</summary>
 
 - **群消息轻量入站与工具流降级收口**（v0.23.8）：QQ 官方群消息先完成轻量去重、触发判定与被忽略消息的引用观察，再进入按群串行的重型回复队列，并修复去重记录提前提交导致的丢消息；工具活动后的未验真文本严格缓冲，`response.incomplete` 等失败直接丢弃且不阻止候选降级，联网搜索结果数按配置硬上限收敛。
 - **启动诊断与联网查询稳定性**（v0.23.7，PR #650、#652）：启动配置预检补充安全的 Agent / Ops 文件诊断和完整错误链日志；联网查询正确处理模型传入的空 `time_range`，并收紧 Tool Loop 最终正文发送边界，避免错误回执与模型草稿重复出站。
@@ -45,6 +160,8 @@
 
 完整变更与升级说明见 [CHANGELOG.md](./CHANGELOG.md)。
 
+</details>
+
 ## 能做什么
 
 - **聊天与上下文**：管理多轮会话，理解图片，并结合引用消息继续追问；共享群聊历史会区分发言成员，降低昵称、偏好和身份信息串线风险。
@@ -63,105 +180,6 @@
 | 微信服务号 | 可选 | 明文/AES 文本回调、同步回复和慢请求客服补发 |
 
 OneBot 11 当前主要面向 NapCat，详细限制与接入步骤见 Wiki [用 NapCat 接入小女仆](https://github.com/kuliantnt/qq-maid-bot/wiki/Napcat接入)（仓库技术版：[OneBot 11 接入文档](./docs/development/onebot11-napcat.md)）。微信服务号默认关闭，配置方式见 [runtime 运行文档](./runtime/README.md#微信服务号文本回调配置)。
-
-## 快速开始
-
-运行机器人至少需要启用一个入口，并配置一个可用的模型 Provider。使用 QQ 官方入口时，还需要 QQ 开放平台提供的 AppID 和 AppSecret。
-
-### Linux 一键安装
-
-安装脚本会根据 CPU 架构下载最新 Release，无需安装 Rust：
-
-```bash
-curl -fsSL https://github.com/kuliantnt/qq-maid-bot/raw/refs/heads/master/scripts/qbot.sh -o /tmp/qbot.sh
-bash /tmp/qbot.sh deploy
-
-qbot install                 # 交互询问是否启用 Web 控制台
-# qbot install --web false   # 仅 CLI / 文件配置，不启用 /console/
-qbot config bot
-qbot config ai
-qbot start
-qbot status
-```
-
-常用运维命令：
-
-```bash
-qbot log       # 跟随日志
-qbot health    # 健康检查
-qbot restart   # 重启服务
-qbot update    # 更新版本
-```
-
-GitHub 下载不稳定时可设置 `QBOT_GITHUB_PROXY`（单个代理前缀）或
-`QBOT_GITHUB_PROXIES`（空格分隔的多个代理前缀）指向自己信任的加速源；安装器会依次尝试
-官方源和所有代理，任一来源失败自动回退下一来源，并且只有压缩包格式有效且 SHA-256
-校验通过才会继续安装：
-
-```bash
-export QBOT_GITHUB_PROXIES="https://gh-proxy-a.example.com https://gh-proxy-b.example.com"
-qbot install
-```
-
-代理前缀必须是 `https://域名/` 形式的完整前缀，脚本会把它拼接在
-`https://github.com/<仓库>/releases/download/<版本>/<文件>` 前面后再下载。
-
-### Windows 一键安装
-
-在 PowerShell 中下载安装器：
-
-```powershell
-$p="$env:TEMP\qbot.ps1"; Invoke-WebRequest https://github.com/kuliantnt/qq-maid-bot/raw/refs/heads/master/scripts/qbot.ps1 -OutFile $p -UseBasicParsing; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $p install
-```
-
-Windows 端支持与 Linux 相同的代理变量（`QBOT_GITHUB_PROXY` / `QBOT_GITHUB_PROXIES`），
-下载失败时同样会自动回退到下一来源并校验 ZIP 与 SHA-256：
-
-```powershell
-$env:QBOT_GITHUB_PROXIES = "https://gh-proxy-a.example.com https://gh-proxy-b.example.com"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\qbot.ps1" install
-```
-
-然后编辑配置并启动：
-
-```powershell
-& "$HOME\qq-maid-bot\qbot.cmd" config path
-notepad "$HOME\qq-maid-bot\config\.env"
-& "$HOME\qq-maid-bot\qbot.cmd" start
-& "$HOME\qq-maid-bot\qbot.cmd" status
-```
-
-当前 Windows Release 仅提供 x86_64 版本。更完整的安装与排障说明见 Wiki [安装手册](https://github.com/kuliantnt/qq-maid-bot/wiki/安装手册)；手动下载 Release、开机启动和更新细节也可对照 [runtime 运行文档](./runtime/README.md#release-包)。
-
-### Docker Compose
-
-服务器推荐使用 GHCR 镜像与 Docker Compose：运行镜像不包含 Rust 或 Node.js，默认不映射
-管理端口，并以非 root 用户运行。首次启动、持久化目录、按 digest 升级回滚、多实例和
-测试环境自动部署见 [Docker 与 Compose 部署](./docs/deployment/docker.md)；只想快速跑起来、
-大部分配置在网页里完成的话，直接看 [Docker 部署 · 人话版](./docs/deployment/docker-simple.md)。
-配置迁移、备份恢复与 schema 回滚边界见
-[配置迁移、备份恢复与安全升级](./docs/deployment/migration-backup.md)。
-
-普通用户也可以直接从 Docker Hub 拉取最新正式镜像：
-
-```bash
-docker pull kuliantnt/qq-maid-bot:latest
-```
-
-### 从源码运行
-
-需要已安装 Rust 工具链：
-
-```bash
-git clone https://github.com/kuliantnt/qq-maid-bot.git
-cd qq-maid-bot
-cp runtime/config/.env.example runtime/config/.env
-vim runtime/config/.env
-make local
-runtime/botctl.sh status
-```
-
-开发调试、Windows 源码构建和测试命令见 Wiki [开发维护文档](https://github.com/kuliantnt/qq-maid-bot/wiki/开发维护文档) 或仓库 [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)。
 
 ## 配置方式
 
