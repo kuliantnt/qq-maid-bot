@@ -372,8 +372,9 @@ async fn run_agent_runtime_respond(
 
     let tool_activity_started = Arc::new(AtomicBool::new(false));
     // 工具结果还要经过领域投影；在投影完成前不能把模型最终草稿直接发给平台，
-    // 否则失败回执会被 Gateway 视为第二条回复。工具执行异常时再把暂存草稿原样
-    // 释放，保留“已发出部分正文后不能伪造重放”的既有流式语义。
+    // 否则失败回执会被 Gateway 视为第二条回复。工具活动后的 Provider 文本一律
+    // 先进入未验真草稿缓冲：整轮成功并完成领域投影后才外发可信正文；失败、
+    // 超时或 response.incomplete 时直接丢弃，不再把暂存草稿释放成“部分正文”。
     let final_text_state = AgentFinalTextState {
         tool_activity_started: tool_activity_started.clone(),
         visible_text_sent: visible_text_sent.clone(),
@@ -580,8 +581,8 @@ async fn send_postprocessed_agent_response(
     else {
         return Ok(());
     };
-    // `buffered` 仅用于保留异常路径的草稿；正常完成时必须丢弃，不能把未投影的
-    // 模型文本与确定性工具回执再次拼接。
+    // `buffered` 只承载工具活动后的未验真草稿；整轮成功时必须以领域投影后的
+    // 可信正文为准并丢弃草稿，不能把未投影的模型文本与确定性工具回执再次拼接。
     let _ = buffered;
     send_core_delta(tx, cancelled, content.to_owned()).await?;
     visible_text_sent.store(true, Ordering::SeqCst);

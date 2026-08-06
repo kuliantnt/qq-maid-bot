@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::json;
 
 #[tokio::test]
 async fn core_private_weather_chat_with_tool_capability_completes_without_synthetic_delta() {
@@ -559,6 +560,86 @@ async fn core_streaming_web_search_argument_failure_sends_only_projected_error_d
     assert!(!response.text_content().unwrap().contains(draft));
     assert!(!expected.contains("联网查询服务暂时不可用"));
     assert!(!expected.contains("网络"));
+}
+
+#[tokio::test]
+async fn core_agent_buffered_draft_incomplete_falls_back_to_second_candidate_without_leak() {
+    const DRAFT: &str = "第一候选未验真草稿：不应外发。";
+    const FINAL: &str = "第二候选最终正文";
+    let provider = RouteFallbackTestProvider::new(DRAFT, FINAL);
+    let state = test_state_with_route_fallback_and_query_executor(
+        provider.clone(),
+        5,
+        Arc::new(MockWebSearchExecutor::default()),
+    );
+    let service = CoreHandle::new(state);
+
+    let mut stream = expect_stream(
+        service
+            .respond(private_request("帮我搜索公开项目"))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(stream.output_policy(), CoreOutputPolicy::ProgressThenStream);
+
+    let mut status_kinds = Vec::new();
+    let mut deltas = Vec::new();
+    let mut completed = 0;
+    let response = loop {
+        let Some(event) = stream.recv().await else {
+            panic!("stream ended before completed response");
+        };
+        match event {
+            CoreResponseEvent::Status(status) => status_kinds.push(status.kind),
+            CoreResponseEvent::TextDelta(delta) => deltas.push(delta),
+            CoreResponseEvent::Completed(response) => {
+                completed += 1;
+                break *response;
+            }
+            CoreResponseEvent::Failed(failure) => panic!("unexpected failure: {failure:?}"),
+        }
+    };
+
+    // 第一候选草稿不得产生用户可见 TextDelta，也不得混入第二候选最终正文。
+    assert!(
+        deltas.iter().all(|delta| !delta.contains(DRAFT)),
+        "first-candidate draft leaked into visible deltas: {deltas:?}"
+    );
+    assert!(
+        !response
+            .text_content()
+            .is_some_and(|text| text.contains(DRAFT)),
+        "first-candidate draft leaked into final response"
+    );
+    // 第二候选最终正文只出现一次；领域投影后的可信正文（web_search 结果 + 模型
+    // 总结）取代缓冲草稿，且不会与第一候选草稿拼接。
+    assert_eq!(
+        deltas.len(),
+        1,
+        "final body must appear exactly once: {deltas:?}"
+    );
+    let projected = &deltas[0];
+    assert!(projected.starts_with("【联网查询】"), "{projected}");
+    assert!(projected.contains("web answer: 公开项目"), "{projected}");
+    assert!(projected.ends_with(FINAL), "{projected}");
+    assert_eq!(response.text_content(), Some(projected.as_str()));
+    // Completed 只出现一次，且之后不再产生事件。
+    assert_eq!(completed, 1);
+    assert!(
+        stream.recv().await.is_none(),
+        "Completed 后不得重复产生事件"
+    );
+    // fallback 确实发生：两个候选各被调用一次，草稿投递为 Buffered 不阻断降级。
+    assert!(provider.fallback_taken());
+    assert_eq!(provider.first_tool_calls(), 1);
+    assert_eq!(provider.second_tool_calls(), 1);
+    // 已执行只读 web_search 不会被错误识别为副作用工具。
+    assert!(status_kinds.contains(&CoreResponseStatusKind::ToolCallStarted));
+    let diagnostics = response.diagnostics.as_ref().unwrap();
+    assert_eq!(diagnostics["agent_executed_tools"], json!(["web_search"]));
+    assert_eq!(diagnostics["agent_tool_results"][0]["name"], "web_search");
+    assert_eq!(diagnostics["agent_tool_results"][0]["succeeded"], true);
+    assert_eq!(diagnostics["tool_execution_attempted"], true);
 }
 
 #[tokio::test]
