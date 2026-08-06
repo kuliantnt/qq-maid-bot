@@ -197,7 +197,7 @@ pub(crate) fn contains_active_keyword(content: &str, keywords: &[String]) -> boo
 }
 
 /// 判断消息是否为回复机器人发出的消息（通过 outbound 缓存匹配 reply.message_id）。
-fn is_reply_to_bot(
+pub(crate) fn is_reply_to_bot(
     message: &GroupMessage,
     bot_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
 ) -> bool {

@@ -17,6 +17,12 @@ use tracing::{debug, info, warn};
 
 use super::voice::{VoiceDeliveryAttempt, try_group_voice_delivery};
 
+mod ingress;
+
+#[cfg(test)]
+pub(crate) use ingress::GroupIngressFacts;
+pub(crate) use ingress::{GroupIngressPreprocessor, PreparedGroupMessage};
+
 fn empty_group_reply_fallback_text(bot_display_name: &str) -> String {
     format!("唔，{bot_display_name}刚刚没整理出可用回复。可以再说一次。")
 }
@@ -30,18 +36,15 @@ fn group_cooldown_hint_text(bot_display_name: &str) -> String {
 }
 
 #[cfg(test)]
-use super::super::group_filter::should_process_group_message;
 use super::super::{
-    bot_identity::SharedBotIdentity,
+    bot_identity::SharedBotIdentity, dedupe::MessageDedupe,
+    group_filter::should_process_group_message,
+};
+use super::super::{
     cache::BotOutboundCache,
     command::{GatewayCommandContext, GatewayCommandConversation, GatewayCommandService},
-    dedupe::{MessageDedupe, dedupe_qq_composite_key},
     event::{GroupEventType, GroupMessage},
-    group_filter::{
-        GroupCooldowns, group_message_addresses_bot, mentions_current_bot,
-        normalize_current_bot_mentions, should_ignore_group_message,
-        should_process_group_message_with_prefix,
-    },
+    group_filter::{GroupCooldowns, group_message_addresses_bot, mentions_current_bot},
     logging::{group_message_log_summary, mask_openid},
     media_fetch::{
         MediaFetchContext, fetch_qq_official_image_attachments, fetch_qq_official_quoted_images,
@@ -63,7 +66,7 @@ use crate::{
         plan_qq_passive_reply_outbounds, send_group_outbound_chunked,
     },
     render::{OutboundMessage, render_respond_response_parts_for_profile},
-    respond::{RespondClient, build_group_command_content_with_prefix, respond_error_to_qq_text},
+    respond::{RespondClient, respond_error_to_qq_text},
     tts::provider_from_config,
 };
 
@@ -159,16 +162,29 @@ pub(super) async fn handle_group_message_for_test(
 ) -> anyhow::Result<()> {
     let commands =
         GatewayCommandService::from_config(config.clone(), runtime.clone(), respond.clone());
-    handle_group_message(
+    let Some(mut message) = ingress::preprocess_group_message(
+        message,
+        config,
+        respond,
+        dedupe,
+        group_outbound_cache,
+        bot_identity,
+        ref_index,
+    ) else {
+        return Ok(());
+    };
+    // 测试 helper 直接绕过 Dispatcher，视为已经确认接收重型消息。
+    if let Some(reservation) = message.dedupe_reservation.take() {
+        reservation.commit();
+    }
+    handle_prepared_group_message(
         message,
         config,
         &commands,
         respond,
         api,
-        dedupe,
         group_outbound_cache,
         group_cooldowns,
-        bot_identity,
         runtime,
         ref_index,
     )
@@ -176,58 +192,45 @@ pub(super) async fn handle_group_message_for_test(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_group_message(
-    mut message: GroupMessage,
+pub(crate) async fn handle_prepared_group_message(
+    prepared: PreparedGroupMessage,
     config: &AppConfig,
     commands: &GatewayCommandService,
     respond: &RespondClient,
     api: &QqApiClient,
-    dedupe: &MessageDedupe,
     group_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
     group_cooldowns: &Arc<Mutex<GroupCooldowns>>,
-    bot_identity: &SharedBotIdentity,
     runtime: &GatewayRuntimeStatus,
     ref_index: &SharedRefIndex,
 ) -> anyhow::Result<()> {
-    normalize_current_bot_mentions(&mut message, bot_identity);
-    log_group_message_received(&message, config.verbose_log);
+    let PreparedGroupMessage {
+        mut message,
+        respond_content,
+        command_content,
+        facts,
+        dedupe_checked,
+        passive_observed,
+        dedupe_reservation,
+    } = prepared;
+    debug_assert!(
+        dedupe_reservation.is_none(),
+        "重型群消息进入 worker 前必须完成 reservation 提交或回滚"
+    );
+    debug_assert!(dedupe_checked, "重型群消息必须先完成复合去重");
+    debug_assert!(
+        !passive_observed,
+        "进入重型队列的群消息不得提前写入 passive observation"
+    );
     let masked_group = mask_openid(&message.group_openid);
-    let respond_content = crate::respond::build_group_respond_content_with_prefix(
-        &message,
-        &config.group_active_keywords,
-        config.command_prefix,
+    debug!(
+        message_id = %message.message_id,
+        group = %masked_group,
+        local_command_candidate = facts.local_command_candidate,
+        mentions_current_bot = facts.mentions_current_bot,
+        active_keyword = facts.active_keyword,
+        replies_to_bot = facts.replies_to_bot,
+        "群聊消息已进入重型回复阶段"
     );
-    let command_content = build_group_command_content_with_prefix(
-        &message,
-        &config.group_active_keywords,
-        config.command_prefix,
-    );
-    if should_ignore_group_message(
-        &message,
-        &respond_content,
-        &masked_group,
-        group_outbound_cache,
-    ) {
-        return Ok(());
-    }
-    // 使用 QQ 复合去重键（platform + scene + peer_id + message_id + msg_idx），
-    // 避免仅凭 message_id 错误去重（同一 message_id 可能对应多条拆分消息）。
-    let dedupe_key = dedupe_qq_composite_key(
-        "group",
-        &message.group_openid,
-        &message.message_id,
-        message.current_msg_idx.as_deref(),
-    );
-    if !dedupe_key.is_empty()
-        && dedupe.check_and_insert_many([dedupe_key], std::time::Instant::now())
-    {
-        info!(
-            message_id = %message.message_id,
-            group = %masked_group,
-            "重复的群聊消息已忽略"
-        );
-        return Ok(());
-    }
     let command_context = GatewayCommandContext {
         platform_name: "QQ 官方机器人",
         platform_code: "qq_official_gateway_rs",
@@ -256,27 +259,6 @@ pub(crate) async fn handle_group_message(
             output.render(&ReplyCapability::qq_official_group(config)),
         )
         .await?;
-        return Ok(());
-    }
-    if !should_process_group_message_with_prefix(
-        config.group_message_mode,
-        &config.group_active_keywords,
-        config.command_prefix,
-        &message,
-        &command_content,
-        bot_identity,
-        group_outbound_cache,
-    ) {
-        observe_mode_ignored_group_message_ref_index(&message, config, respond, ref_index);
-        let active_keyword_count = config.group_active_keywords.len();
-        debug!(
-            message_id = %message.message_id,
-            group = %masked_group,
-            event_type = message.event_type.as_respond_event_type(),
-            mode = ?config.group_message_mode,
-            active_keyword_count,
-            "群聊消息已按模式策略忽略"
-        );
         return Ok(());
     }
     // 只用轻量、身份完整的 Core request 读取确定性命令和当前 actor 可见 Pending；
@@ -615,38 +597,6 @@ async fn send_group_respond_response(
         }
     }
     Ok(())
-}
-
-/// 对策略忽略但未来仍可能被引用的群消息做轻量观察。
-///
-/// 这里只保存事件已携带的标准化正文和轻量媒体引用，不下载媒体、不补全成员信息、
-/// 不调用 Core。正常处理的消息不会经过此分支，避免同一消息以不同阶段内容重复写入。
-fn observe_mode_ignored_group_message_ref_index(
-    message: &GroupMessage,
-    config: &AppConfig,
-    respond: &RespondClient,
-    ref_index: &SharedRefIndex,
-) {
-    let has_current_ref_id = message
-        .current_msg_idx
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty());
-    if !has_current_ref_id {
-        return;
-    }
-    let inbound = respond.prepare_inbound(crate::respond::normalized_group_inbound_with_prefix(
-        message,
-        &config.group_active_keywords,
-        config.command_prefix,
-    ));
-    match ref_index.lock() {
-        Ok(mut index) => index.insert_passive_observation(&inbound),
-        Err(_) => warn!(
-            message_id = %message.message_id,
-            group = %mask_openid(&message.group_openid),
-            "ref_index 锁已中毒，跳过记录被模式策略忽略的群聊入站消息"
-        ),
-    }
 }
 
 fn record_group_bot_outbound_send(

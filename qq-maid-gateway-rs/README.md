@@ -98,7 +98,7 @@ flowchart LR
 - `src/gateway/command/`：Gateway 共享本地命令识别、上下文与平台能力降级；当前注册 `/ping`。
 - `src/gateway/qq_official/c2c/`：QQ 官方 C2C 私聊消息处理管道，负责 Signal Layer 回填、本地命令、Core 调用和普通回复发送。
 - `src/gateway/stream.rs`：C2C Markdown 流式发送状态机，负责分片、终包、QQ stream id/index 续接和普通回复 fallback 边界。
-- `src/gateway/qq_official/group/`：QQ 官方群消息处理管道，负责本地命令、群消息到 Core 的调用、群回复发送和群 at 回复前缀。
+- `src/gateway/qq_official/group/`：QQ 官方群消息处理管道；`ingress.rs` 在群级重型队列前按到达顺序完成 mention 归一化、复合去重、触发判定和被忽略消息的 RefIndex 轻量观察，重型阶段再负责本地命令、Core/媒体/LLM 调用、群回复发送和群 at 回复前缀。
 - `src/gateway/group_filter.rs`：群消息过滤、触发策略和群/成员冷却判定。
 - `src/gateway/outbound.rs`：QQ 出站发送包装和 runtime 发送状态记录，保持“真实发送结果再记录状态”的约束。
 - `src/respond.rs`：gateway 到 CoreService 的进程内桥接层，负责 CoreRequest 映射、错误脱敏，以及 reply block / 附件备注拼接。
@@ -161,7 +161,7 @@ QQ_SECRET=你的QQ机器人AppSecret
 
 `GROUP_AT_MESSAGE_CREATE` 事件本身表示 @ 当前机器人；普通 `GROUP_MESSAGE_CREATE` 事件优先保留 QQ 结构化的当前机器人标记，并用 mention 的 `target_id` 与 READY 学到的机器人身份及 `QQ_MAID_BOT_MENTION_IDS` 补充匹配。没有当前机器人结构化证据的 mention（包括其它机器人）不触发；CQ 文本和 `<@...>` 文本本身不作为身份依据。不要把真实 ID 写入公开文档或提交到仓库。
 
-普通群消息会过滤自己发送的消息、可识别的其它机器人消息、空内容/无附件消息和重复 `message_id`，并使用群级与群成员级内存冷却避免刷屏；但发送给 Core 的 `scope_key` 仍保持群会话维度，actor 仅表示群内发言人，避免同一个用户的私聊与群聊 session / pending / visible snapshot / ref_index 串用。只有 QQ 官方实际推送且 payload 带 `current_msg_idx / msg_idx` 的群消息，才能提前登记到运行期 ref_index；平台未推送或缺字段时，后续引用只能依赖当前引用事件 payload 兜底或已有索引。
+普通群消息会在进入群级重型回复队列前过滤自己发送的消息、可识别的其它机器人消息、空内容/无附件消息和 QQ 复合去重键；确定不触发回复的消息会立即把事件已携带的正文和轻量媒体引用写入 RefIndex，不下载媒体、不补全成员、不调用 Core。真正触发回复的消息才进入按群串行的重型队列，并继续使用群级与群成员级内存冷却避免刷屏；发送给 Core 的 `scope_key` 仍保持群会话维度，actor 仅表示群内发言人，避免同一个用户的私聊与群聊 session / pending / visible snapshot / ref_index 串用。只有 QQ 官方实际推送且 payload 带 `current_msg_idx / msg_idx` 的群消息，才能提前登记到运行期 ref_index；平台未推送或缺字段时，后续引用只能依赖当前引用事件 payload 兜底或已有索引。
 
 `QQ_MAID_C2C_VISIBLE_PROGRESS_STATUS_ENABLED` 控制私聊 Tool Loop 的可见进度文本，默认开启，只在 Core 输出策略为 `progress_then_complete` / `progress_then_stream` 时发送一次受控短提示。它不是 QQ 原生 typing 状态；原生 typing 由 `QQ_MAID_AGENT_TYPING_ENABLED` / `QQ_MAID_AGENT_TYPING_DELAY_MS` 单独控制。
 

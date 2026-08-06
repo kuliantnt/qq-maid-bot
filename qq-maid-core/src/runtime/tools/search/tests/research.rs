@@ -147,6 +147,34 @@ async fn multi_entity_research_runs_independent_searches_with_bounded_concurrenc
             .as_deref()
             .is_some_and(|question| question.contains("不要在本次搜索中生成跨实体对比"))
     }));
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.max_results == Some(2))
+    );
+}
+
+#[tokio::test]
+async fn multi_entity_research_clamps_every_target_to_server_limit() {
+    let executor = ResearchExecutor::default();
+    let requests = executor.requests.clone();
+    let tool = WebSearchTool::new(Arc::new(executor));
+    let mut arguments = research_arguments(&[
+        ("目标一", "目标一公开资料"),
+        ("目标二", "目标二公开资料"),
+        ("目标三", "目标三公开资料"),
+    ]);
+    arguments["max_results"] = json!(10);
+
+    tool.execute(test_context(), arguments).await.unwrap();
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.max_results == Some(5))
+    );
 }
 
 #[tokio::test]

@@ -1,5 +1,10 @@
 use super::*;
+mod group_dedupe;
 use crate::auth::AccessTokenManager;
+use crate::gateway::bot_identity::BotIdentity;
+use crate::gateway::qq_official::group::{
+    GroupIngressFacts, GroupIngressPreprocessor, PreparedGroupMessage,
+};
 use crate::gateway::test_support::qq_official_test_config;
 use crate::respond::{RespondClient, scope_key_from_c2c_message, scope_key_from_group_message};
 use qq_maid_core::service::{
@@ -88,9 +93,10 @@ impl MessageHandler for RecordingHandler {
                 InboundEnvelope::C2c(message) => {
                     (scope_key_from_c2c_message(&message), message.message_id)
                 }
-                InboundEnvelope::Group(message) => {
-                    (scope_key_from_group_message(&message), message.message_id)
-                }
+                InboundEnvelope::Group(message) => (
+                    scope_key_from_group_message(&message.message),
+                    message.message.message_id,
+                ),
             };
             self.events
                 .lock()
@@ -204,10 +210,41 @@ fn queued_group(id: &str, group_openid: &str) -> QueuedMessage {
             group_openid: message.group_openid.clone(),
             message_id: message.message_id.clone(),
         },
-        envelope: InboundEnvelope::Group(message),
+        envelope: InboundEnvelope::Group(PreparedGroupMessage {
+            respond_content: message.content.clone(),
+            command_content: message.content.clone(),
+            message,
+            facts: GroupIngressFacts {
+                local_command_candidate: false,
+                mentions_current_bot: true,
+                active_keyword: false,
+                replies_to_bot: false,
+            },
+            dedupe_checked: true,
+            passive_observed: false,
+            dedupe_reservation: None,
+        }),
         processed_ack: None,
         notify_on_reject: true,
     }
+}
+
+fn test_group_ingress_with(
+    config: AppConfig,
+    ref_index: SharedRefIndex,
+) -> Arc<GroupIngressPreprocessor> {
+    Arc::new(GroupIngressPreprocessor::new(
+        config,
+        test_respond_client().with_qq_official_account_id("appid"),
+        Arc::new(MessageDedupe::new(Duration::from_secs(60))),
+        Arc::new(Mutex::new(BotOutboundCache::default())),
+        Arc::new(BotIdentity::new("appid", &[])),
+        ref_index,
+    ))
+}
+
+fn test_group_ingress() -> Arc<GroupIngressPreprocessor> {
+    test_group_ingress_with(test_config(), crate::gateway::ref_index::ref_index())
 }
 
 fn test_actor_with_handler(
@@ -305,6 +342,35 @@ async fn same_scope_messages_keep_fifo_order() {
         handler.max_for_scope("platform:qq_official:account:-:private:user-a"),
         1
     );
+}
+
+#[tokio::test]
+async fn same_group_heavy_messages_keep_fifo_order() {
+    let handler = Arc::new(RecordingHandler::default());
+    let (mut actor, mut command_rx, _) = test_actor_with_handler(test_config(), handler.clone());
+    let scope = "platform:qq_official:account:-:group:group-a".to_owned();
+
+    actor
+        .enqueue(scope.clone(), queued_group("g1", "group-a"))
+        .await
+        .unwrap();
+    actor
+        .enqueue(scope.clone(), queued_group("g2", "group-a"))
+        .await
+        .unwrap();
+    drain_worker_commands(&mut actor, &mut command_rx, 2).await;
+    wait_for_events(&handler, 4).await;
+
+    assert_eq!(
+        handler.events(),
+        vec![
+            "start:platform:qq_official:account:-:group:group-a:g1",
+            "end:platform:qq_official:account:-:group:group-a:g1",
+            "start:platform:qq_official:account:-:group:group-a:g2",
+            "end:platform:qq_official:account:-:group:group-a:g2",
+        ]
+    );
+    assert_eq!(handler.max_for_scope(&scope), 1);
 }
 
 #[tokio::test]
@@ -536,6 +602,7 @@ async fn command_queue_full_applies_backpressure_until_capacity_frees() {
         command_tx: command_tx.clone(),
         reject_tx,
         respond: test_respond_client(),
+        group_ingress: test_group_ingress(),
     };
     command_tx
         .try_send(DispatcherCommand::WorkerDequeued {
@@ -591,6 +658,7 @@ async fn closed_command_channel_returns_error_without_busy_reject() {
         command_tx,
         reject_tx,
         respond: test_respond_client(),
+        group_ingress: test_group_ingress(),
     };
     drop(command_rx);
 
@@ -668,11 +736,164 @@ async fn group_reject_target_keeps_own_message_id() {
         .await;
 
     let first = reject_rx.recv().await.unwrap();
-    let second = reject_rx.recv().await.unwrap();
-    match (first.target, second.target) {
-        (RejectTarget::Group { message_id: a, .. }, RejectTarget::Group { message_id: b, .. }) => {
-            assert_eq!((a, b), ("g1".to_owned(), "g2".to_owned()))
-        }
-        _ => panic!("expected group reject targets"),
+    match first.target {
+        RejectTarget::Group { message_id, .. } => assert_eq!(message_id, "g1"),
+        _ => panic!("expected group reject target"),
     }
+    assert!(reject_rx.try_recv().is_err());
+    assert_eq!(actor.reject_metrics.total.load(Ordering::Relaxed), 2);
+    assert_eq!(actor.reject_metrics.suppressed.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn group_reject_cooldown_is_scoped_and_keeps_all_metrics() {
+    let handler = Arc::new(RecordingHandler::default());
+    let (mut actor, _command_rx, mut reject_rx) = test_actor_with_handler(test_config(), handler);
+
+    for (scope, group, message) in [
+        ("scope-a", "group-a", "a-1"),
+        ("scope-a", "group-a", "a-2"),
+        ("scope-b", "group-b", "b-1"),
+    ] {
+        assert!(
+            actor
+                .reject(
+                    scope.to_owned(),
+                    RejectTarget::Group {
+                        group_openid: group.to_owned(),
+                        message_id: message.to_owned(),
+                    },
+                    "conversation_queue_full",
+                )
+                .await
+        );
+    }
+
+    let mut notified = vec![
+        reject_rx.recv().await.unwrap().scope_key,
+        reject_rx.recv().await.unwrap().scope_key,
+    ];
+    notified.sort();
+    assert_eq!(notified, ["scope-a", "scope-b"]);
+    assert!(reject_rx.try_recv().is_err());
+    assert_eq!(actor.reject_metrics.total.load(Ordering::Relaxed), 3);
+    assert_eq!(actor.reject_metrics.suppressed.load(Ordering::Relaxed), 1);
+    assert_eq!(actor.reject_metrics.dropped.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn blocked_group_heavy_worker_does_not_delay_passive_observation() {
+    let config = test_config();
+    let ref_index = crate::gateway::ref_index::ref_index();
+    let handler = Arc::new(RecordingHandler {
+        block: true,
+        ..RecordingHandler::default()
+    });
+    let (command_tx, command_rx) = mpsc::channel(32);
+    let (reject_tx, reject_rx) = mpsc::channel(32);
+    let metrics = Arc::new(RejectMetrics::default());
+    let auth = AccessTokenManager::new(
+        qq_maid_common::http_client::client(),
+        config.app_id.clone().unwrap(),
+        config.app_secret.clone().unwrap(),
+        config.token_refresh_margin,
+    );
+    let api = QqApiClient::new(
+        qq_maid_common::http_client::client(),
+        config.api_base.clone(),
+        auth,
+    );
+    let shutdown = CancellationToken::new();
+    let actor = DispatcherActor::new(
+        config.clone(),
+        api,
+        GatewayRuntimeStatus::new(),
+        command_rx,
+        command_tx.clone(),
+        reject_tx.clone(),
+        reject_rx,
+        metrics,
+        handler.clone(),
+        shutdown.clone(),
+    );
+    let respond = test_respond_client().with_qq_official_account_id("appid");
+    let handle = MessageDispatcherHandle {
+        command_tx,
+        reject_tx,
+        respond: respond.clone(),
+        group_ingress: test_group_ingress_with(config, ref_index.clone()),
+    };
+    let actor_task = tokio::spawn(actor.run());
+
+    handle
+        .enqueue_group(group("heavy-1", "group-a"))
+        .await
+        .unwrap();
+    wait_for_events(&handler, 1).await;
+
+    for index in 0..20 {
+        let mut message = group(&format!("passive-{index}"), "group-a");
+        message.event_type = super::super::event::GroupEventType::GroupMessage;
+        message.content = format!("长任务期间普通消息 {index}");
+        message.input_parts = vec![qq_maid_common::input_part::MessageInputPart::text(
+            message.content.clone(),
+        )];
+        message.current_msg_idx = Some(format!("REFIDX_blocked_{index}"));
+        timeout(Duration::from_millis(50), handle.enqueue_group(message))
+            .await
+            .expect("被动观察不应等待同群重型 worker")
+            .unwrap();
+    }
+
+    assert_eq!(handler.events().len(), 1);
+    for index in [0, 7, 19] {
+        let mut quoted = group(&format!("quote-passive-{index}"), "group-a");
+        quoted.reply = Some(super::super::event::MessageReply {
+            message_id: format!("payload-passive-{index}"),
+            ref_msg_idx: Some(format!("REFIDX_blocked_{index}")),
+            content: None,
+            input_parts: Vec::new(),
+            media_summaries: Vec::new(),
+        });
+        let mut inbound = respond.prepare_inbound(
+            crate::gateway::platform::qq_official::inbound_from_group(&quoted),
+        );
+        ref_index.lock().unwrap().enrich_inbound(&mut inbound);
+        let expected = format!("长任务期间普通消息 {index}");
+        assert_eq!(
+            inbound.quoted.unwrap().text_summary.as_deref(),
+            Some(expected.as_str())
+        );
+    }
+
+    handle
+        .enqueue_group(group("heavy-2", "group-a"))
+        .await
+        .unwrap();
+    handler.release_all();
+    wait_for_events(&handler, 4).await;
+    assert_eq!(
+        handler.max_for_scope("platform:qq_official:account:-:group:group-a"),
+        1
+    );
+    let heavy_events = handler
+        .events()
+        .into_iter()
+        .filter(|event| event.contains("heavy-"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        heavy_events,
+        [
+            "start:platform:qq_official:account:-:group:group-a:heavy-1",
+            "end:platform:qq_official:account:-:group:group-a:heavy-1",
+            "start:platform:qq_official:account:-:group:group-a:heavy-2",
+            "end:platform:qq_official:account:-:group:group-a:heavy-2",
+        ]
+    );
+
+    shutdown.cancel();
+    timeout(Duration::from_secs(2), actor_task)
+        .await
+        .expect("dispatcher actor should stop")
+        .unwrap();
 }
