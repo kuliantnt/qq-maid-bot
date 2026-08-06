@@ -11,7 +11,10 @@ use std::{
 use serde_json::{Value, json};
 
 use crate::{
-    agent_loop::{AgentStep, AgentStreamingDiagnostics, AgentTextDeltaSink, AgentToolCall},
+    agent_loop::{
+        AgentStep, AgentStreamingDiagnostics, AgentTextDeltaDelivery, AgentTextDeltaSink,
+        AgentToolCall,
+    },
     error::LlmError,
     metrics::MetricsRecorder,
     sse::{SseFrame, is_ignorable_sse_eof_tail, parse_sse_frame, take_sse_frame},
@@ -25,7 +28,7 @@ use crate::provider::openai::{
     },
     stream::{
         handle_openai_chat_stream_event, is_openai_responses_done_sentinel,
-        responses_stream_is_complete,
+        response_incomplete_reason, responses_event_type, responses_stream_is_complete,
     },
     tool_calls_disabled_error,
 };
@@ -156,10 +159,16 @@ pub(super) async fn collect_responses_tool_loop_stream(
             })? {
                 Some(delta) if allow_tool_calls => buffered_deltas.push(delta),
                 Some(delta) => {
+                    let delta_chars = delta.chars().count();
                     update_streaming_diagnostics(&diagnostics, |item| {
-                        item.visible_text_chars += delta.chars().count();
+                        item.saw_text_delta = true;
                     });
-                    text_delta_sink(delta).await?;
+                    let delivery = text_delta_sink(delta).await?;
+                    if delivery == AgentTextDeltaDelivery::Visible {
+                        update_streaming_diagnostics(&diagnostics, |item| {
+                            item.visible_text_chars += delta_chars;
+                        });
+                    }
                 }
                 None => {}
             }
@@ -332,17 +341,24 @@ pub(super) async fn collect_responses_tool_loop_stream(
 }
 
 fn observe_sse_event(diagnostics: &Arc<Mutex<AgentStreamingDiagnostics>>, event: &SseFrame) {
+    let parsed = (!is_openai_responses_done_sentinel(&event.data))
+        .then(|| serde_json::from_str::<Value>(&event.data).ok())
+        .flatten();
+    // JSON type 是权威协议字段，避免外层 event header 错配污染诊断和正文分类。
     let event_type = if is_openai_responses_done_sentinel(&event.data) {
         Some("[DONE]".to_owned())
     } else {
-        event.event.clone().or_else(|| {
-            serde_json::from_str::<Value>(&event.data)
-                .ok()
-                .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned))
-        })
+        parsed
+            .as_ref()
+            .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned))
+            .or_else(|| event.event.clone())
     };
+    let incomplete_reason = parsed.as_ref().and_then(response_incomplete_reason);
     update_streaming_diagnostics(diagnostics, |item| {
         item.sse_event_count += 1;
+        if incomplete_reason.is_some() {
+            item.incomplete_reason = incomplete_reason;
+        }
         if let Some(event_type) = event_type {
             item.explicit_failure_event |= matches!(
                 event_type.as_str(),
@@ -382,11 +398,7 @@ pub(super) fn observe_responses_function_call_event(
             "sse",
         )
     })?;
-    let event_type = event
-        .event
-        .as_deref()
-        .or_else(|| value.get("type").and_then(Value::as_str))
-        .unwrap_or("");
+    let event_type = responses_event_type(event, &value)?;
     let call_key = function_call_key(&value);
     match event_type {
         "response.output_item.added" => {
@@ -499,16 +511,22 @@ pub(super) async fn finalize_responses_tool_loop_stream(
     }
     if allow_tool_calls {
         if buffered_deltas.is_empty() {
-            update_streaming_diagnostics(&diagnostics, |item| {
-                item.visible_text_chars += answer.chars().count();
-            });
-            text_delta_sink(answer.clone()).await?;
+            let answer_chars = answer.chars().count();
+            let delivery = text_delta_sink(answer.clone()).await?;
+            if delivery == AgentTextDeltaDelivery::Visible {
+                update_streaming_diagnostics(&diagnostics, |item| {
+                    item.visible_text_chars += answer_chars;
+                });
+            }
         } else {
             for delta in buffered_deltas {
-                update_streaming_diagnostics(&diagnostics, |item| {
-                    item.visible_text_chars += delta.chars().count();
-                });
-                text_delta_sink(delta).await?;
+                let delta_chars = delta.chars().count();
+                let delivery = text_delta_sink(delta).await?;
+                if delivery == AgentTextDeltaDelivery::Visible {
+                    update_streaming_diagnostics(&diagnostics, |item| {
+                        item.visible_text_chars += delta_chars;
+                    });
+                }
             }
         }
     }

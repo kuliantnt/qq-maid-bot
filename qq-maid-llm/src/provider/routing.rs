@@ -16,7 +16,9 @@ use async_trait::async_trait;
 use futures::stream;
 
 use crate::{
-    agent_loop::{AgentStopReason, AgentTextDeltaFuture, AgentTextDeltaSink},
+    agent_loop::{
+        AgentStopReason, AgentTextDeltaDelivery, AgentTextDeltaFuture, AgentTextDeltaSink,
+    },
     error::LlmError,
     provider::{
         DynLlmProvider,
@@ -96,11 +98,13 @@ fn track_visible_final_delta_sink(
             let sink = sink.clone();
             let visible_delta_sent = visible_delta_sent.clone();
             Box::pin(async move {
-                if !delta.is_empty() {
-                    // 候选链共用用户可见流；一旦外发最终回答 delta，就不能再切到后续候选。
+                let has_visible_text = !delta.is_empty();
+                let delivery = sink(delta).await?;
+                if has_visible_text && delivery == AgentTextDeltaDelivery::Visible {
+                    // 候选链共用用户可见流；只有下游确认正文已外发，才禁止切换候选。
                     visible_delta_sent.store(true, Ordering::SeqCst);
                 }
-                sink(delta).await
+                Ok(delivery)
             }) as AgentTextDeltaFuture
         }) as AgentTextDeltaSink
     })
@@ -366,17 +370,33 @@ impl LlmProvider for ModelRouteProvider {
                 Err(err) => {
                     run_handle.set_stop_reason_if_unset(AgentStopReason::Failed);
                     let visible_delta_sent = visible_final_delta_sent.load(Ordering::SeqCst);
+                    let agent_diagnostics = run_handle.snapshot();
                     let tool_side_effect_started = {
-                        let diagnostics = run_handle.snapshot();
+                        let diagnostics = &agent_diagnostics;
                         !diagnostics.side_effecting_tools_started.is_empty()
                             || !diagnostics.tools_with_unknown_result.is_empty()
                     };
                     // 只有可恢复的上游错误才切换候选。本地预算/请求构造错误对等价
                     // payload 必然重复失败，必须原样返回，不能误报为候选 Provider 不可用。
-                    let fallback = index + 1 < candidates.len()
-                        && should_try_next_model(&err)
+                    let has_next_candidate = index + 1 < candidates.len();
+                    let retryable_for_candidate = should_try_next_model(&err);
+                    let fallback = has_next_candidate
+                        && retryable_for_candidate
                         && !visible_delta_sent
                         && !tool_side_effect_started;
+                    let fallback_blocked_reason = if fallback {
+                        "none"
+                    } else if !has_next_candidate {
+                        "no_next_candidate"
+                    } else if !retryable_for_candidate {
+                        "error_not_fallback_eligible"
+                    } else if visible_delta_sent {
+                        "visible_answer_sent"
+                    } else if tool_side_effect_started {
+                        "side_effect_tool_started"
+                    } else {
+                        "unknown"
+                    };
                     tracing::warn!(
                         task,
                         candidate_index = index,
@@ -386,9 +406,13 @@ impl LlmProvider for ModelRouteProvider {
                         error_code = err.code.as_str(),
                         error_stage = err.stage.as_str(),
                         error_kind = model_error_kind(&err),
+                        incomplete_reason = err.incomplete_reason().unwrap_or("none"),
+                        tool_execution_attempted = agent_diagnostics.tool_execution_attempted,
+                        tool_executed = !agent_diagnostics.executed_tools.is_empty(),
                         visible_delta_sent,
                         tool_side_effect_started,
                         fallback,
+                        fallback_blocked_reason,
                         "工具模型候选请求失败"
                     );
                     if visible_delta_sent {

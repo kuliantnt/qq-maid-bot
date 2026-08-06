@@ -55,6 +55,206 @@ async fn streaming_tool_call_does_not_release_buffered_text_delta() {
 }
 
 #[tokio::test]
+async fn responses_tool_events_never_become_visible_text() {
+    let arguments = r#"{"query":"华为手机价格","rawquestion":"继续查具体型号","maxresults":5,"contextsize":"medium","topic":"general","timerange":"month","time_range":"month"}"#;
+    let function_call = json!({
+        "type": "function_call",
+        "id": "fc_1",
+        "name": "web_search",
+        "call_id": "call_search_1",
+        "arguments": arguments
+    });
+    let events = [
+        (
+            "response.output_text.delta",
+            json!({
+                "type": "response.output_text.delta",
+                "delta": "再查一下",
+                "sequence_number": 0,
+                "output_index": 0,
+                "content_index": 0
+            }),
+        ),
+        (
+            "response.output_item.added",
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 1,
+                "sequence_number": 1,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "name": "web_search",
+                    "call_id": "call_search_1",
+                    "arguments": ""
+                }
+            }),
+        ),
+        (
+            "response.function_call_arguments.delta",
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "output_index": 1,
+                "sequence_number": 2,
+                "delta": arguments
+            }),
+        ),
+        (
+            "response.content_part.done",
+            json!({
+                "type": "response.content_part.done",
+                "output_index": 0,
+                "content_index": 0,
+                "sequence_number": 3,
+                "part": {"type": "output_text", "text": "再查一下"}
+            }),
+        ),
+        (
+            "response.output_item.done",
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 1,
+                "sequence_number": 4,
+                "item": function_call.clone()
+            }),
+        ),
+        (
+            "response.completed",
+            json!({
+                "type": "response.completed",
+                "response": {"output": [function_call]},
+                "sequence_number": 5
+            }),
+        ),
+    ];
+    let body = events
+        .into_iter()
+        .map(|(event_type, value)| format!("event: {event_type}\ndata: {value}\n\n"))
+        .collect::<String>();
+    let base_url = spawn_static_sse_stream(body).await;
+    let mut session = test_streaming_session(base_url);
+    let deltas = Arc::new(StdMutex::new(Vec::new()));
+
+    let step = session
+        .advance_streaming(&[], true, recording_delta_sink(deltas.clone()))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let AgentStep::ToolCalls { calls, .. } = step else {
+        panic!("expected tool calls");
+    };
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "web_search");
+    assert_eq!(calls[0].arguments, arguments);
+    assert!(deltas.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn parallel_function_argument_deltas_stay_isolated_and_invisible() {
+    let calls = (0..3)
+        .map(|index| {
+            json!({
+                "type": "function_call",
+                "name": "web_search",
+                "call_id": format!("call_{index}"),
+                "arguments": format!(r#"{{"query":"phone-{index}","time_range":"month"}}"#)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut frames = String::new();
+    for index in 0..3 {
+        frames.push_str(&format!(
+            "event: response.output_item.added\ndata: {}\n\n",
+            json!({
+                "type": "response.output_item.added",
+                "output_index": index,
+                "sequence_number": index * 3,
+                "item": {"type": "function_call", "id": format!("fc_{index}")}
+            })
+        ));
+    }
+    for index in 0..3 {
+        frames.push_str(&format!(
+            "event: response.function_call_arguments.delta\ndata: {}\n\n",
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "output_index": index,
+                "sequence_number": index * 3 + 1,
+                "delta": format!(r#"{{"query":"phone-{index}","time_range":"month"}}"#)
+            })
+        ));
+    }
+    for (index, call) in calls.iter().enumerate() {
+        frames.push_str(&format!(
+            "event: response.output_item.done\ndata: {}\n\n",
+            json!({
+                "type": "response.output_item.done",
+                "output_index": index,
+                "sequence_number": index * 3 + 2,
+                "item": call
+            })
+        ));
+    }
+    frames.push_str(&format!(
+        "event: response.completed\ndata: {}\n\n",
+        json!({
+            "type": "response.completed",
+            "response": {"output": calls},
+            "sequence_number": 10
+        })
+    ));
+    let base_url = spawn_static_sse_stream(frames).await;
+    let mut session = test_streaming_session(base_url);
+    let deltas = Arc::new(StdMutex::new(Vec::new()));
+
+    let step = session
+        .advance_streaming(&[], true, recording_delta_sink(deltas.clone()))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let AgentStep::ToolCalls { calls, .. } = step else {
+        panic!("expected parallel tool calls");
+    };
+    assert_eq!(calls.len(), 3);
+    for (index, call) in calls.iter().enumerate() {
+        assert_eq!(call.call_id, format!("call_{index}"));
+        assert_eq!(
+            call.arguments,
+            format!(r#"{{"query":"phone-{index}","time_range":"month"}}"#)
+        );
+    }
+    assert!(deltas.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn response_incomplete_records_structured_reason_without_completion() {
+    let base_url = spawn_static_sse_stream(concat!(
+        "event: response.incomplete\n",
+        "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[]},\"sequence_number\":7}\n\n",
+    ))
+    .await;
+    let mut session = test_streaming_session(base_url);
+    let deltas = Arc::new(StdMutex::new(Vec::new()));
+
+    let err = session
+        .advance_streaming(&[], true, recording_delta_sink(deltas.clone()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.stage, "sse");
+    assert_eq!(err.incomplete_reason(), Some("max_output_tokens"));
+    let diagnostics = session.streaming_diagnostics();
+    assert!(diagnostics.explicit_failure_event);
+    assert_eq!(
+        diagnostics.incomplete_reason.as_deref(),
+        Some("max_output_tokens")
+    );
+    assert!(deltas.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn agent_stream_finishes_on_completed_without_waiting_for_http_eof() {
     let base_url = spawn_never_closing_completed_stream().await;
     let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();

@@ -10,8 +10,8 @@ use tokio::{sync::mpsc, time::timeout};
 use tracing::{debug, warn};
 
 use qq_maid_llm::agent_loop::{
-    AgentRunDiagnostics, AgentRunHandle, AgentStopReason, AgentTextDeltaFuture, AgentTextDeltaSink,
-    ToolLoopProgressEvent, ToolLoopProgressSink,
+    AgentRunDiagnostics, AgentRunHandle, AgentStopReason, AgentTextDeltaDelivery,
+    AgentTextDeltaFuture, AgentTextDeltaSink, ToolLoopProgressEvent, ToolLoopProgressSink,
 };
 use qq_maid_llm::tool::DEFAULT_TOOL_TIMEOUT;
 
@@ -134,18 +134,8 @@ pub(crate) fn start_core_response_stream(
                     // 结果未知的写操作保留有限清理窗口，避免中断后伪装成未执行；
                     // 纯只读调用可立即取消，不额外占用副作用工具的 15 秒预算。
                     cleanup_timed_out_agent_task(&mut task, needs_side_effect_cleanup).await;
-                    if !producer_cancelled.load(Ordering::SeqCst) {
-                        // Agent 任务被超时清理后不再有机会走内部错误分支；释放已经
-                        // 产生的最终草稿，继续保留“部分回复 + 超时提示”的兼容语义。
-                        let _ = flush_buffered_final_text(
-                            &tx,
-                            &producer_cancelled,
-                            &producer_visible_text_sent,
-                            delivery.provider_stream_enabled,
-                            &producer_buffered_final_text,
-                        )
-                        .await;
-                    }
+                    // 工具活动后的 Provider 文本仍是未验真的最终草稿。超时路径必须
+                    // 丢弃而非释放，避免把工具参数或不完整回答升级成用户正文。
                     Err(producer_agent_run_handle
                         .as_ref()
                         .map(|handle| err.clone().with_agent(handle.snapshot()))
@@ -440,16 +430,9 @@ async fn run_agent_runtime_respond(
     } {
         Ok(response) => response,
         Err(error) => {
-            // 只有模型最终轮已经产生草稿、但整轮最终化失败时，才释放暂存正文；
-            // 这样上层仍能按原语义报告“已有部分回复后失败”。
-            flush_buffered_final_text(
-                &tx,
-                &cancelled,
-                &visible_text_sent,
-                provider_stream_enabled,
-                &buffered_final_text,
-            )
-            .await?;
+            // 工具执行后的暂存文本只有在整轮成功并完成领域投影后才能外发。
+            // response.incomplete、协议错误或超时都直接丢弃，不能伪装成部分正文。
+            let _ = take_buffered_final_text(&buffered_final_text)?;
             return Err(error);
         }
     };
@@ -553,13 +536,13 @@ fn agent_final_delta_sink(
                     .lock()
                     .map_err(|_| agent_final_text_buffer_error("写入"))?;
                 buffered.push_str(&delta);
-                return Ok(());
+                return Ok(AgentTextDeltaDelivery::Buffered);
             }
             send_core_delta(&tx, &cancelled, delta).await?;
             final_text_state
                 .visible_text_sent
                 .store(true, Ordering::SeqCst);
-            Ok(())
+            Ok(AgentTextDeltaDelivery::Visible)
         }) as AgentTextDeltaFuture
     })
 }
@@ -601,25 +584,6 @@ async fn send_postprocessed_agent_response(
     // 模型文本与确定性工具回执再次拼接。
     let _ = buffered;
     send_core_delta(tx, cancelled, content.to_owned()).await?;
-    visible_text_sent.store(true, Ordering::SeqCst);
-    Ok(())
-}
-
-async fn flush_buffered_final_text(
-    tx: &mpsc::Sender<CoreResponseEvent>,
-    cancelled: &Arc<AtomicBool>,
-    visible_text_sent: &Arc<AtomicBool>,
-    provider_stream_enabled: bool,
-    buffered_final_text: &Arc<Mutex<String>>,
-) -> Result<(), LlmError> {
-    if !provider_stream_enabled {
-        return Ok(());
-    }
-    let buffered = take_buffered_final_text(buffered_final_text)?;
-    if buffered.trim().is_empty() {
-        return Ok(());
-    }
-    send_core_delta(tx, cancelled, buffered).await?;
     visible_text_sent.store(true, Ordering::SeqCst);
     Ok(())
 }

@@ -9,7 +9,8 @@ use super::{
 };
 use crate::{
     agent_loop::{
-        AgentStep, AgentStepSession, AgentTextDeltaFuture, AgentTextDeltaSink, run_agent_loop,
+        AgentStep, AgentStepSession, AgentTextDeltaDelivery, AgentTextDeltaFuture,
+        AgentTextDeltaSink, run_agent_loop,
     },
     context_budget::ContextBudgetConfig,
     error::LlmError,
@@ -43,7 +44,7 @@ fn recording_delta_sink(deltas: Arc<StdMutex<Vec<String>>>) -> AgentTextDeltaSin
         let deltas = deltas.clone();
         Box::pin(async move {
             deltas.lock().unwrap().push(delta);
-            Ok(())
+            Ok(AgentTextDeltaDelivery::Visible)
         }) as AgentTextDeltaFuture
     })
 }

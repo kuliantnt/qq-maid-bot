@@ -43,7 +43,7 @@ pub(super) fn sync_responses_stream_diagnostics(
         item.saw_completed = saw_completed;
         item.buffered_delta_count = buffered_delta_count;
         item.buffered_text_chars = buffered_text_chars;
-        item.saw_text_delta = buffered_text_chars > 0 || item.visible_text_chars > 0;
+        item.saw_text_delta |= buffered_text_chars > 0 || item.visible_text_chars > 0;
         item.active_function_call_count = active_function_call_count;
     });
 }

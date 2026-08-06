@@ -466,6 +466,18 @@ fn web_search_tool_requires_context_complete_query() {
     assert!(description.contains("不要先搜索泛化问题"));
 }
 
+#[test]
+fn web_search_schema_exposes_only_canonical_time_range_field() {
+    let parameters = WebSearchTool::new(Arc::new(MockWebSearchExecutor::default()))
+        .metadata()
+        .parameters;
+    let properties = parameters["properties"].as_object().unwrap();
+
+    assert!(properties.contains_key("time_range"));
+    assert!(!properties.contains_key("timerange"));
+    assert_eq!(parameters["additionalProperties"], false);
+}
+
 struct DelayedStreamExecutor {
     first_delta_delay: Duration,
     completion_delay: Duration,

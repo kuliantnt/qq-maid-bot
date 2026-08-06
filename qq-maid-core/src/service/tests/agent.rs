@@ -36,6 +36,10 @@ async fn core_private_weather_chat_with_tool_capability_completes_without_synthe
     assert_eq!(response.text_content(), Some("工具完整回复"));
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert!(
+        stream.recv().await.is_none(),
+        "Completed 后不得重复产生事件"
+    );
 }
 
 #[tokio::test]
@@ -206,10 +210,14 @@ async fn core_tool_loop_streams_only_final_answer_after_tool_status() {
     );
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert!(
+        stream.recv().await.is_none(),
+        "最终正文 Completed 后不得重复产生事件"
+    );
 }
 
 #[tokio::test]
-async fn core_tool_loop_stream_failure_after_delta_does_not_complete_or_replay() {
+async fn core_tool_loop_stream_failure_discards_buffered_tool_round_delta() {
     let provider = TestProvider::streaming(vec![
         Ok(LlmStreamEvent::TextDelta("部分回答".to_owned())),
         Err(LlmError::provider(
@@ -228,7 +236,6 @@ async fn core_tool_loop_stream_failure_after_delta_does_not_complete_or_replay()
             .unwrap(),
     );
 
-    let mut saw_delta = false;
     loop {
         let Some(event) = stream.recv().await else {
             panic!("stream ended before failure");
@@ -236,11 +243,9 @@ async fn core_tool_loop_stream_failure_after_delta_does_not_complete_or_replay()
         match event {
             CoreResponseEvent::Status(_) => {}
             CoreResponseEvent::TextDelta(delta) => {
-                assert_eq!(delta, "部分回答");
-                saw_delta = true;
+                panic!("buffered tool-round delta must not be visible: {delta}");
             }
             CoreResponseEvent::Failed(failure) => {
-                assert!(saw_delta);
                 assert_eq!(failure.kind, CoreFailureKind::LlmFailed);
                 break;
             }
@@ -252,7 +257,7 @@ async fn core_tool_loop_stream_failure_after_delta_does_not_complete_or_replay()
 }
 
 #[tokio::test]
-async fn core_tool_loop_timeout_after_delta_appends_visible_termination_notice() {
+async fn core_tool_loop_timeout_discards_buffered_delta_without_partial_notice() {
     let provider = TestProvider::partial_then_delayed("部分回答", Duration::from_secs(2))
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let mut state = test_state_with_tool_calling(provider, 1, true);
@@ -282,9 +287,7 @@ async fn core_tool_loop_timeout_after_delta_appends_visible_termination_notice()
     };
 
     assert_eq!(failure.kind, CoreFailureKind::LlmTimeout);
-    assert_eq!(deltas.len(), 2);
-    assert_eq!(deltas[0], "部分回答");
-    assert!(deltas[1].contains("本次回答未完整完成"));
+    assert!(deltas.is_empty());
     assert!(started_at.elapsed() < Duration::from_secs(3));
     assert!(stream.recv().await.is_none());
 }

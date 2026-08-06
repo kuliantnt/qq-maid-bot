@@ -36,11 +36,7 @@ pub(crate) fn handle_openai_chat_stream_event(
     let value = serde_json::from_str::<Value>(&event.data).map_err(|err| {
         LlmError::provider(format!("invalid OpenAI chat stream JSON: {err}"), "sse")
     })?;
-    let event_type = event
-        .event
-        .as_deref()
-        .or_else(|| value.get("type").and_then(Value::as_str))
-        .unwrap_or("");
+    let event_type = responses_event_type(&event, &value)?;
 
     if event_type.starts_with("response.image_generation_call.") {
         tracing::debug!(
@@ -69,7 +65,13 @@ pub(crate) fn handle_openai_chat_stream_event(
             *saw_completed = true;
             *completed_response = extract_completed_response(&value);
         }
-        "response.failed" | "response.incomplete" | "error" => {
+        "response.incomplete" => {
+            let reason = response_incomplete_reason(&value).unwrap_or_else(|| "unknown".to_owned());
+            let message = stream_error_message(&value)
+                .unwrap_or_else(|| format!("OpenAI chat stream response incomplete: {reason}"));
+            return Err(LlmError::provider(message, "sse").with_incomplete_reason(reason));
+        }
+        "response.failed" | "error" => {
             let message = stream_error_message(&value)
                 .unwrap_or_else(|| format!("OpenAI chat stream event {event_type}"));
             return Err(LlmError::provider(message, "sse"));
@@ -78,6 +80,61 @@ pub(crate) fn handle_openai_chat_stream_event(
     }
 
     Ok(None)
+}
+
+/// JSON `type` 是 Responses 事件的协议权威字段。SSE `event:` 仅作外层路由提示；
+/// 两者冲突时不能按 header 把 function arguments 的 `delta` 当成回答正文。
+pub(crate) fn responses_event_type<'a>(
+    event: &'a SseFrame,
+    value: &'a Value,
+) -> Result<&'a str, LlmError> {
+    let payload_type = value.get("type").and_then(Value::as_str);
+    let header_type = event.event.as_deref().filter(|item| !item.is_empty());
+    if payload_type.is_none()
+        && header_type.is_some_and(|event_type| event_type.starts_with("response."))
+    {
+        return Err(LlmError::provider(
+            "OpenAI Responses SSE payload is missing event type",
+            "sse",
+        ));
+    }
+    if let (Some(payload_type), Some(header_type)) = (payload_type, header_type)
+        && header_type != "message"
+        && header_type != payload_type
+    {
+        return Err(LlmError::provider(
+            "OpenAI Responses SSE event type does not match payload type",
+            "sse",
+        ));
+    }
+    Ok(payload_type.or(header_type).unwrap_or(""))
+}
+
+pub(crate) fn response_incomplete_reason(value: &Value) -> Option<String> {
+    let reason = value
+        .get("response")
+        .and_then(|response| response.get("incomplete_details"))
+        .and_then(|details| details.get("reason"))
+        .or_else(|| {
+            value
+                .get("incomplete_details")
+                .and_then(|details| details.get("reason"))
+        })
+        .and_then(Value::as_str)?;
+    Some(sanitize_incomplete_reason(reason))
+}
+
+fn sanitize_incomplete_reason(reason: &str) -> String {
+    let reason = reason.trim();
+    if reason.is_empty()
+        || reason.chars().count() > 64
+        || !reason.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+    {
+        return "unknown".to_owned();
+    }
+    reason.to_owned()
 }
 
 fn trace_ignored_responses_stream_delta(event_type: &str, delta: Option<&Value>) {
@@ -180,6 +237,77 @@ mod tests {
                     .map(str::to_owned)
             }),
             Some("你好".to_owned())
+        );
+    }
+
+    #[test]
+    fn rejects_mismatched_event_header_without_exposing_argument_delta() {
+        let mut recorder = MetricsRecorder::start();
+        let mut answer = String::new();
+        let mut completed_response = None;
+        let mut saw_completed = false;
+
+        let err = handle_openai_chat_stream_event(
+            SseFrame {
+                event: Some("response.output_text.delta".to_owned()),
+                data: serde_json::json!({
+                    "type": "response.function_call_arguments.delta",
+                    "delta": "{\"query\":\"secret\"}",
+                    "sequence_number": 7
+                })
+                .to_string(),
+            },
+            &mut recorder,
+            &mut answer,
+            &mut completed_response,
+            &mut saw_completed,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.stage, "sse");
+        assert!(answer.is_empty());
+    }
+
+    #[test]
+    fn rejects_typed_header_with_untyped_delta_payload() {
+        let mut recorder = MetricsRecorder::start();
+        let mut answer = String::new();
+        let mut completed_response = None;
+        let mut saw_completed = false;
+
+        let err = handle_openai_chat_stream_event(
+            SseFrame {
+                event: Some("response.output_text.delta".to_owned()),
+                data: r#"{"delta":"must not be exposed","sequence_number":8}"#.to_owned(),
+            },
+            &mut recorder,
+            &mut answer,
+            &mut completed_response,
+            &mut saw_completed,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.stage, "sse");
+        assert!(answer.is_empty());
+    }
+
+    #[test]
+    fn extracts_and_sanitizes_response_incomplete_reason() {
+        let value = serde_json::json!({
+            "type": "response.incomplete",
+            "response": {"incomplete_details": {"reason": "max_output_tokens"}}
+        });
+        assert_eq!(
+            response_incomplete_reason(&value).as_deref(),
+            Some("max_output_tokens")
+        );
+
+        let unsafe_value = serde_json::json!({
+            "response": {"incomplete_details": {"reason": "private detail: user text"}}
+        });
+        assert_eq!(
+            response_incomplete_reason(&unsafe_value).as_deref(),
+            Some("unknown")
         );
     }
 }
