@@ -160,6 +160,7 @@ pub struct WebSearchConfig {
     pub default_backend: WebSearchBackend,
     /// 默认搜索模型；provider_native/openai/gemini route 使用。
     pub default_model: String,
+    /// 每个底层搜索子请求的结果数硬上限。
     pub max_results: u8,
     pub search_depth: WebSearchDepth,
     pub topic: WebSearchTopic,
@@ -294,6 +295,12 @@ pub trait WebSearchExecutor: Send + Sync {
     }
 
     fn provider_name(&self) -> &'static str;
+
+    /// 服务端允许每个底层搜索子请求返回的结果数上限。路由执行器返回运行配置中的
+    /// 硬上限；独立兼容执行器沿用公开默认值。
+    fn max_results_limit(&self) -> u8 {
+        DEFAULT_MAX_RESULTS
+    }
 }
 
 pub type DynWebSearchExecutor = Arc<dyn WebSearchExecutor>;

@@ -13,7 +13,9 @@ use qq_maid_common::identity_context::{
 };
 use qq_maid_llm::{
     tool::ToolContext,
-    web_search::{WebSearchExecutor, WebSearchOutcome, WebSearchRequest, WebSearchSource},
+    web_search::{
+        DEFAULT_MAX_RESULTS, WebSearchExecutor, WebSearchOutcome, WebSearchRequest, WebSearchSource,
+    },
 };
 use tokio::sync::mpsc;
 
@@ -23,6 +25,7 @@ use crate::error::LlmError;
 pub(super) struct MockWebSearchExecutor {
     pub(super) requests: Arc<Mutex<Vec<WebSearchRequest>>>,
     pub(super) stream_calls: Arc<AtomicUsize>,
+    pub(super) max_results_limit: Option<u8>,
 }
 
 #[async_trait]
@@ -54,6 +57,10 @@ impl WebSearchExecutor for MockWebSearchExecutor {
 
     fn provider_name(&self) -> &'static str {
         "mock-query"
+    }
+
+    fn max_results_limit(&self) -> u8 {
+        self.max_results_limit.unwrap_or(DEFAULT_MAX_RESULTS)
     }
 }
 

@@ -49,6 +49,7 @@ candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-flash", "mimo:mimo-v2.5"
 # Gemini 或声明为 openai_responses 的自定义 Provider，不按模型名猜测。
 [tools.web_search]
 backend = "provider_native"
+# 每个底层搜索子请求的结果数硬上限；多目标调研逐目标应用，模型只能下调。
 max_results = 5
 search_depth = "basic"
 topic = "general"

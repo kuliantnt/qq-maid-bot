@@ -187,7 +187,7 @@ impl MockDispatcher {
                     message.message_id.clone(),
                     "当前消息较多，请稍后再试。".to_owned(),
                 ));
-                return Some(DispatcherEnqueueError::RejectedAndNotified { reason });
+                return Some(DispatcherEnqueueError::RejectedAndHandled { reason });
             }
             return Some(DispatcherEnqueueError::Unavailable {
                 reason: "dispatcher_reject_suppressed",

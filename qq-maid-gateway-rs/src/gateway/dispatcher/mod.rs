@@ -61,6 +61,7 @@ use super::{
     event::{C2cMessage, GroupMessage},
     group_filter::GroupCooldowns,
     ping::GatewayRuntimeStatus,
+    qq_official::group::GroupIngressPreprocessor,
     ref_index::SharedRefIndex,
 };
 use crate::{api::QqApiClient, config::AppConfig, respond::RespondClient};
@@ -70,6 +71,7 @@ pub(super) struct MessageDispatcherHandle {
     command_tx: mpsc::Sender<DispatcherCommand>,
     reject_tx: mpsc::Sender<RejectNotification>,
     respond: RespondClient,
+    group_ingress: Arc<GroupIngressPreprocessor>,
 }
 
 impl MessageDispatcherHandle {
@@ -112,10 +114,13 @@ impl MessageDispatcherHandle {
     }
 
     pub(super) async fn enqueue_group(&self, message: GroupMessage) -> DispatcherEnqueueResult {
-        let scope_key = self.respond.scope_key_from_group_message(&message);
+        let Some(message) = self.group_ingress.preprocess(message) else {
+            return Ok(());
+        };
+        let scope_key = self.respond.scope_key_from_group_message(&message.message);
         let target = RejectTarget::Group {
-            group_openid: message.group_openid.clone(),
-            message_id: message.message_id.clone(),
+            group_openid: message.message.group_openid.clone(),
+            message_id: message.message.message_id.clone(),
         };
         self.enqueue(
             InboundEnvelope::Group(message),
@@ -215,6 +220,14 @@ impl MessageDispatcher {
         let handle_reject_tx = reject_tx.clone();
         let reject_metrics = Arc::new(RejectMetrics::default());
         let handle_respond = respond.clone();
+        let group_ingress = Arc::new(GroupIngressPreprocessor::new(
+            config.clone(),
+            respond.clone(),
+            dedupe.clone(),
+            group_outbound_cache.clone(),
+            bot_identity.clone(),
+            ref_index.clone(),
+        ));
         let handler = RealMessageHandler::new(
             config.clone(),
             commands,
@@ -224,7 +237,6 @@ impl MessageDispatcher {
             ref_index,
             group_outbound_cache,
             group_cooldowns,
-            bot_identity,
             runtime.clone(),
         );
         let actor = DispatcherActor::new(
@@ -245,6 +257,7 @@ impl MessageDispatcher {
                 command_tx,
                 reject_tx: handle_reject_tx,
                 respond: handle_respond,
+                group_ingress,
             },
             join_handle,
             shutdown_token,

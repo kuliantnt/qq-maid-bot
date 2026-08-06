@@ -710,10 +710,11 @@ impl AggregatorActor {
         message: &C2cMessage,
         error: Option<&DispatcherEnqueueError>,
     ) {
-        // Dispatcher 容量拒绝已排队“当前消息较多”提示；Aggregator 只补齐未提示的不可用类失败，避免同一次失败双提示。
+        // Dispatcher 已排队“当前消息较多”提示，或按群冷却合并了重复提示；
+        // Aggregator 只补齐未处理的不可用类失败，避免同一次失败双提示。
         if matches!(
             error,
-            Some(DispatcherEnqueueError::RejectedAndNotified { .. })
+            Some(DispatcherEnqueueError::RejectedAndHandled { .. })
         ) {
             return;
         }

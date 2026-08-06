@@ -29,20 +29,20 @@ use tracing::{debug, info, warn};
 
 use super::super::{
     BotOutboundCache,
-    bot_identity::SharedBotIdentity,
     command::GatewayCommandService,
     dedupe::MessageDedupe,
     group_filter::GroupCooldowns,
     logging::mask_scope_key,
     ping::GatewayRuntimeStatus,
-    qq_official::{c2c::handle_c2c_message, group::handle_group_message},
+    qq_official::{c2c::handle_c2c_message, group::handle_prepared_group_message},
     ref_index::SharedRefIndex,
 };
 use super::reject::run_reject_worker;
 use super::types::{
-    DispatcherCommand, DispatcherEnqueueError, DispatcherEnqueueResult, IdleDecision,
-    InboundEnvelope, QueuedMessage, REJECT_QUEUE_TEXT, RejectMetrics, RejectNotification,
-    RejectTarget, SHUTDOWN_DRAIN_TIMEOUT_SECS, ScopeEntry, ScopeState, WORKER_CANCEL_TIMEOUT_SECS,
+    DispatcherCommand, DispatcherEnqueueError, DispatcherEnqueueResult,
+    GROUP_REJECT_NOTIFICATION_COOLDOWN, GroupRejectNoticeState, IdleDecision, InboundEnvelope,
+    QueuedMessage, REJECT_QUEUE_TEXT, RejectMetrics, RejectNotification, RejectTarget,
+    SHUTDOWN_DRAIN_TIMEOUT_SECS, ScopeEntry, ScopeState, WORKER_CANCEL_TIMEOUT_SECS,
     WorkerExitReason,
 };
 use super::worker::{WorkerContext, run_worker};
@@ -66,7 +66,6 @@ pub(super) struct RealMessageHandler {
     ref_index: SharedRefIndex,
     group_outbound_cache: Arc<std::sync::Mutex<BotOutboundCache>>,
     group_cooldowns: Arc<std::sync::Mutex<GroupCooldowns>>,
-    bot_identity: SharedBotIdentity,
     runtime: GatewayRuntimeStatus,
 }
 
@@ -84,7 +83,6 @@ impl RealMessageHandler {
         ref_index: SharedRefIndex,
         group_outbound_cache: Arc<std::sync::Mutex<BotOutboundCache>>,
         group_cooldowns: Arc<std::sync::Mutex<GroupCooldowns>>,
-        bot_identity: SharedBotIdentity,
         runtime: GatewayRuntimeStatus,
     ) -> Arc<dyn MessageHandler> {
         Arc::new(Self {
@@ -96,7 +94,6 @@ impl RealMessageHandler {
             ref_index,
             group_outbound_cache,
             group_cooldowns,
-            bot_identity,
             runtime,
         })
     }
@@ -120,16 +117,14 @@ impl MessageHandler for RealMessageHandler {
                     .await
                 }
                 InboundEnvelope::Group(message) => {
-                    handle_group_message(
+                    handle_prepared_group_message(
                         message,
                         &self.config,
                         &self.commands,
                         &self.respond,
                         &self.api,
-                        &self.dedupe,
                         &self.group_outbound_cache,
                         &self.group_cooldowns,
-                        &self.bot_identity,
                         &self.runtime,
                         &self.ref_index,
                     )
@@ -154,8 +149,9 @@ pub(super) struct DispatcherActor {
     reject_rx: mpsc::Receiver<RejectNotification>,
     pub(super) worker_slots: Arc<Semaphore>,
     active_workers: Arc<AtomicU64>,
-    reject_metrics: Arc<RejectMetrics>,
+    pub(super) reject_metrics: Arc<RejectMetrics>,
     handler: Arc<dyn MessageHandler>,
+    group_reject_notices: HashMap<String, GroupRejectNoticeState>,
     pub(super) scopes: HashMap<String, ScopeEntry>,
     pub(super) shutdown_token: CancellationToken,
 }
@@ -186,6 +182,7 @@ impl DispatcherActor {
             reject_rx,
             reject_metrics,
             handler,
+            group_reject_notices: HashMap::new(),
             scopes: HashMap::new(),
             shutdown_token,
         }
@@ -280,7 +277,7 @@ impl DispatcherActor {
                         .reject(scope_key, message.reject_target, "conversation_queue_full")
                         .await
                 {
-                    return Err(DispatcherEnqueueError::RejectedAndNotified {
+                    return Err(DispatcherEnqueueError::RejectedAndHandled {
                         reason: "conversation_queue_full",
                     });
                 }
@@ -327,7 +324,7 @@ impl DispatcherActor {
                         .reject(scope_key, message.reject_target, "worker_slot_exhausted")
                         .await
                 {
-                    return Err(DispatcherEnqueueError::RejectedAndNotified {
+                    return Err(DispatcherEnqueueError::RejectedAndHandled {
                         reason: "worker_slot_exhausted",
                     });
                 }
@@ -517,13 +514,41 @@ impl DispatcherActor {
         tx
     }
 
-    async fn reject(
+    pub(super) async fn reject(
         &mut self,
         scope_key: String,
         target: RejectTarget,
         reason: &'static str,
     ) -> bool {
         self.reject_metrics.total.fetch_add(1, Ordering::Relaxed);
+        let is_group = matches!(&target, RejectTarget::Group { .. });
+        if is_group {
+            let now = Instant::now();
+            // worker slot 拒绝可能来自大量不同群；每次群拒绝顺手淘汰过期 scope，
+            // 避免固定冷却表因一次性目标持续增长。
+            self.group_reject_notices.retain(|_, state| {
+                now.duration_since(state.last_notified_at) < GROUP_REJECT_NOTIFICATION_COOLDOWN
+            });
+            if let Some(state) = self.group_reject_notices.get_mut(&scope_key) {
+                state.suppressed += 1;
+                let reject_total = self.reject_metrics.total.load(Ordering::Relaxed);
+                let reject_suppressed = self
+                    .reject_metrics
+                    .suppressed
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1;
+                debug!(
+                    scope_key = %mask_scope_key(&scope_key),
+                    reject_total,
+                    reject_suppressed,
+                    scope_suppressed = state.suppressed,
+                    cooldown_ms = GROUP_REJECT_NOTIFICATION_COOLDOWN.as_millis(),
+                    reason,
+                    "dispatcher 已合并群聊容量拒绝提示"
+                );
+                return true;
+            }
+        }
         let notification = RejectNotification {
             scope_key: scope_key.clone(),
             target,
@@ -540,6 +565,15 @@ impl DispatcherActor {
                 "dispatcher 拒绝队列已满"
             );
             return false;
+        }
+        if is_group {
+            self.group_reject_notices.insert(
+                scope_key,
+                GroupRejectNoticeState {
+                    last_notified_at: Instant::now(),
+                    suppressed: 0,
+                },
+            );
         }
         true
     }
@@ -564,12 +598,14 @@ impl DispatcherActor {
                 remaining_scopes,
                 active_workers = self.active_workers.load(Ordering::Relaxed),
                 reject_total = self.reject_metrics.total.load(Ordering::Relaxed),
+                reject_suppressed = self.reject_metrics.suppressed.load(Ordering::Relaxed),
                 reject_dropped = self.reject_metrics.dropped.load(Ordering::Relaxed),
                 "dispatcher 关闭排空后仍有剩余任务"
             );
         } else {
             info!(
                 reject_total = self.reject_metrics.total.load(Ordering::Relaxed),
+                reject_suppressed = self.reject_metrics.suppressed.load(Ordering::Relaxed),
                 reject_dropped = self.reject_metrics.dropped.load(Ordering::Relaxed),
                 "dispatcher 已完成关闭"
             );
