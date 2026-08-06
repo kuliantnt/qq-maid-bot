@@ -2,7 +2,7 @@
 
 本文面向项目开发者和维护者，保留仓库级架构边界、开发命令、维护约定和检查规则。运行目录、部署、私有配置和运行数据细节已经分流到 [runtime/README.md](../runtime/README.md)；QQ 官方 gateway 细节见 [qq-maid-gateway-rs/README.md](../qq-maid-gateway-rs/README.md)；Rust Core 模块细节见 [qq-maid-core/README.md](../qq-maid-core/README.md)。
 
-当前稳定版本线为 `23.x`（`v0.23.7`）；发布变更与升级边界见 [CHANGELOG.md](../CHANGELOG.md)。
+当前稳定版本线为 `23.x`（`v0.23.8`）；发布变更与升级边界见 [CHANGELOG.md](../CHANGELOG.md)。
 
 如果只是第一次了解项目，请先阅读 [README.md](../README.md)。
 
