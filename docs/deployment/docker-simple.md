@@ -10,8 +10,22 @@
 
 ## 开始前：装好 Docker
 
-先装 [Docker Engine](https://docs.docker.com/engine/install/) 和
-[Docker Compose plugin](https://docs.docker.com/compose/install/linux/)，然后确认：
+**Debian / Ubuntu 等 Linux 系统**用官方一键脚本（会一并装好 Compose 插件）：
+
+```bash
+curl -fsSL https://get.docker.com | sudo sh
+```
+
+装好后把当前用户加进 `docker` 组，之后不用每次敲 `sudo`（重新登录生效）：
+
+```bash
+sudo usermod -aG docker $USER
+```
+
+> 其他系统（Windows / macOS / 其他 Linux 发行版）按
+> [Docker 官方安装文档](https://docs.docker.com/engine/install/) 安装即可。
+
+确认装好了：
 
 ```bash
 docker version
@@ -42,12 +56,16 @@ sudo chown -R 10001:10001 runtime/config runtime/data runtime/media
 
 然后做两件小事：
 
-1. 编辑 `compose.env`，把 `QQ_MAID_IMAGE=` 后面的内容换成最新版本号。
-   去 [Releases 页面](https://github.com/kuliantnt/qq-maid-bot/releases) 看最新版，例如：
+1. 编辑 `compose.env`，把 `QQ_MAID_IMAGE=` 后面的内容换成镜像地址。
+   小白直接用 `latest` 最省事（会跟着新版本走），默认用 Docker Hub 源（国内好拉）：
 
    ```text
-   QQ_MAID_IMAGE=ghcr.io/kuliantnt/qq-maid-bot:v0.23.8
+   QQ_MAID_IMAGE=docker.io/kuliantnt/qq-maid-bot:latest
    ```
+
+   想固定版本就换成 [Releases 页面](https://github.com/kuliantnt/qq-maid-bot/releases)
+   上的版本号，例如 `docker.io/kuliantnt/qq-maid-bot:v0.23.8`；想用 GHCR 源就把
+   `docker.io` 换成 `ghcr.io`。
 
 2. 编辑 `runtime/config/.env`，加这一行（不加的话网页控制台打不开）：
 
@@ -70,6 +88,34 @@ docker compose --project-directory . --env-file compose.env \
 ```
 
 没有报错退出、日志正常滚动，就说明跑起来了。
+
+## 拉不动镜像？配个镜像加速（国内常用）
+
+第 3 步如果卡在下载镜像（或报 `timeout`、`429`），说明网络访问 Docker 仓库不顺畅。
+给 Docker 配一个镜像加速即可：
+
+编辑 `/etc/docker/daemon.json`（没有就新建），写入：
+
+```json
+{
+  "registry-mirrors": [
+    "https://docker.m.daocloud.io",
+    "https://docker.mirrors.ustc.edu.cn"
+  ]
+}
+```
+
+保存后重启 Docker，再重新执行一次第 3 步的 `up -d`：
+
+```bash
+sudo systemctl restart docker
+```
+
+> 注意：
+> - 镜像加速只对 Docker Hub（`docker.io`）有效；公共加速源随时可能失效，失效就换一个。
+> - 云厂商（阿里云 / 腾讯云）控制台里通常有专属加速地址，最稳定。
+> - 拉不到 `ghcr.io` 的镜像时，把 `QQ_MAID_IMAGE` 换成上面的
+>   `docker.io/kuliantnt/qq-maid-bot:latest` 即可，两个仓库都有官方镜像。
 
 ## 第 4 步：打开网页，把所有配置填完
 
@@ -118,9 +164,10 @@ docker compose ... down        # 停止并删除容器（数据保留在 runtime
 | 现象 | 怎么办 |
 | --- | --- |
 | 启动报 `permission denied` | 第 2 步的 `sudo chown -R 10001:10001 ...` 有没有执行？ |
+| 拉镜像超时 / `429` | 见上文「拉不动镜像？配个镜像加速」，或把 `QQ_MAID_IMAGE` 换成 Docker Hub 地址 |
 | 网页打不开 | `runtime/config/.env` 里有没有 `LLM_SERVER_HOST=0.0.0.0`？启动命令有没有带 `-f docker/compose.console.yaml`？ |
 | 容器一直 `unhealthy` | `docker compose ... logs bot` 看日志，按提示补配置（多半是模型 API Key 没填） |
 | 只想接微信 / OneBot 11 | 要额外加载对应 override 并改容器内监听地址，详见[完整版](./docker.md) |
-| 想要更稳的镜像 | 去 GHCR 包页面复制 `@sha256:...` 完整 digest，替换 `QQ_MAID_IMAGE` |
+| 想要更稳的镜像 | 固定版本号（如 `:v0.23.8`），或去 GHCR 包页面复制 `@sha256:...` 完整 digest 替换 `QQ_MAID_IMAGE` |
 
 其他问题、备份、安全加固请看[完整版 Docker 部署](./docker.md)。
