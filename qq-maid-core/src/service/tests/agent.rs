@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::json;
 
 #[tokio::test]
 async fn core_private_weather_chat_with_tool_capability_completes_without_synthetic_delta() {
@@ -36,6 +37,10 @@ async fn core_private_weather_chat_with_tool_capability_completes_without_synthe
     assert_eq!(response.text_content(), Some("工具完整回复"));
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert!(
+        stream.recv().await.is_none(),
+        "Completed 后不得重复产生事件"
+    );
 }
 
 #[tokio::test]
@@ -206,10 +211,14 @@ async fn core_tool_loop_streams_only_final_answer_after_tool_status() {
     );
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert!(
+        stream.recv().await.is_none(),
+        "最终正文 Completed 后不得重复产生事件"
+    );
 }
 
 #[tokio::test]
-async fn core_tool_loop_stream_failure_after_delta_does_not_complete_or_replay() {
+async fn core_tool_loop_stream_failure_discards_buffered_tool_round_delta() {
     let provider = TestProvider::streaming(vec![
         Ok(LlmStreamEvent::TextDelta("部分回答".to_owned())),
         Err(LlmError::provider(
@@ -228,7 +237,6 @@ async fn core_tool_loop_stream_failure_after_delta_does_not_complete_or_replay()
             .unwrap(),
     );
 
-    let mut saw_delta = false;
     loop {
         let Some(event) = stream.recv().await else {
             panic!("stream ended before failure");
@@ -236,11 +244,9 @@ async fn core_tool_loop_stream_failure_after_delta_does_not_complete_or_replay()
         match event {
             CoreResponseEvent::Status(_) => {}
             CoreResponseEvent::TextDelta(delta) => {
-                assert_eq!(delta, "部分回答");
-                saw_delta = true;
+                panic!("buffered tool-round delta must not be visible: {delta}");
             }
             CoreResponseEvent::Failed(failure) => {
-                assert!(saw_delta);
                 assert_eq!(failure.kind, CoreFailureKind::LlmFailed);
                 break;
             }
@@ -252,7 +258,7 @@ async fn core_tool_loop_stream_failure_after_delta_does_not_complete_or_replay()
 }
 
 #[tokio::test]
-async fn core_tool_loop_timeout_after_delta_appends_visible_termination_notice() {
+async fn core_tool_loop_timeout_discards_buffered_delta_without_partial_notice() {
     let provider = TestProvider::partial_then_delayed("部分回答", Duration::from_secs(2))
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let mut state = test_state_with_tool_calling(provider, 1, true);
@@ -282,9 +288,7 @@ async fn core_tool_loop_timeout_after_delta_appends_visible_termination_notice()
     };
 
     assert_eq!(failure.kind, CoreFailureKind::LlmTimeout);
-    assert_eq!(deltas.len(), 2);
-    assert_eq!(deltas[0], "部分回答");
-    assert!(deltas[1].contains("本次回答未完整完成"));
+    assert!(deltas.is_empty());
     assert!(started_at.elapsed() < Duration::from_secs(3));
     assert!(stream.recv().await.is_none());
 }
@@ -556,6 +560,86 @@ async fn core_streaming_web_search_argument_failure_sends_only_projected_error_d
     assert!(!response.text_content().unwrap().contains(draft));
     assert!(!expected.contains("联网查询服务暂时不可用"));
     assert!(!expected.contains("网络"));
+}
+
+#[tokio::test]
+async fn core_agent_buffered_draft_incomplete_falls_back_to_second_candidate_without_leak() {
+    const DRAFT: &str = "第一候选未验真草稿：不应外发。";
+    const FINAL: &str = "第二候选最终正文";
+    let provider = RouteFallbackTestProvider::new(DRAFT, FINAL);
+    let state = test_state_with_route_fallback_and_query_executor(
+        provider.clone(),
+        5,
+        Arc::new(MockWebSearchExecutor::default()),
+    );
+    let service = CoreHandle::new(state);
+
+    let mut stream = expect_stream(
+        service
+            .respond(private_request("帮我搜索公开项目"))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(stream.output_policy(), CoreOutputPolicy::ProgressThenStream);
+
+    let mut status_kinds = Vec::new();
+    let mut deltas = Vec::new();
+    let mut completed = 0;
+    let response = loop {
+        let Some(event) = stream.recv().await else {
+            panic!("stream ended before completed response");
+        };
+        match event {
+            CoreResponseEvent::Status(status) => status_kinds.push(status.kind),
+            CoreResponseEvent::TextDelta(delta) => deltas.push(delta),
+            CoreResponseEvent::Completed(response) => {
+                completed += 1;
+                break *response;
+            }
+            CoreResponseEvent::Failed(failure) => panic!("unexpected failure: {failure:?}"),
+        }
+    };
+
+    // 第一候选草稿不得产生用户可见 TextDelta，也不得混入第二候选最终正文。
+    assert!(
+        deltas.iter().all(|delta| !delta.contains(DRAFT)),
+        "first-candidate draft leaked into visible deltas: {deltas:?}"
+    );
+    assert!(
+        !response
+            .text_content()
+            .is_some_and(|text| text.contains(DRAFT)),
+        "first-candidate draft leaked into final response"
+    );
+    // 第二候选最终正文只出现一次；领域投影后的可信正文（web_search 结果 + 模型
+    // 总结）取代缓冲草稿，且不会与第一候选草稿拼接。
+    assert_eq!(
+        deltas.len(),
+        1,
+        "final body must appear exactly once: {deltas:?}"
+    );
+    let projected = &deltas[0];
+    assert!(projected.starts_with("【联网查询】"), "{projected}");
+    assert!(projected.contains("web answer: 公开项目"), "{projected}");
+    assert!(projected.ends_with(FINAL), "{projected}");
+    assert_eq!(response.text_content(), Some(projected.as_str()));
+    // Completed 只出现一次，且之后不再产生事件。
+    assert_eq!(completed, 1);
+    assert!(
+        stream.recv().await.is_none(),
+        "Completed 后不得重复产生事件"
+    );
+    // fallback 确实发生：两个候选各被调用一次，草稿投递为 Buffered 不阻断降级。
+    assert!(provider.fallback_taken());
+    assert_eq!(provider.first_tool_calls(), 1);
+    assert_eq!(provider.second_tool_calls(), 1);
+    // 已执行只读 web_search 不会被错误识别为副作用工具。
+    assert!(status_kinds.contains(&CoreResponseStatusKind::ToolCallStarted));
+    let diagnostics = response.diagnostics.as_ref().unwrap();
+    assert_eq!(diagnostics["agent_executed_tools"], json!(["web_search"]));
+    assert_eq!(diagnostics["agent_tool_results"][0]["name"], "web_search");
+    assert_eq!(diagnostics["agent_tool_results"][0]["succeeded"], true);
+    assert_eq!(diagnostics["tool_execution_attempted"], true);
 }
 
 #[tokio::test]

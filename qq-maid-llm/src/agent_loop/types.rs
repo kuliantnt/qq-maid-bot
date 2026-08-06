@@ -538,8 +538,18 @@ pub type ToolLoopProgressFuture =
 pub type ToolLoopProgressSink =
     Arc<dyn Fn(ToolLoopProgressEvent) -> ToolLoopProgressFuture + Send + Sync + 'static>;
 
+/// 最终回答增量交给下游后的真实投递状态。
+///
+/// `Buffered` 表示正文仍停留在业务投影缓冲区，尚未进入用户可见发送链路；
+/// 候选路由不得据此禁止 fallback。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentTextDeltaDelivery {
+    Visible,
+    Buffered,
+}
+
 pub type AgentTextDeltaFuture =
-    Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send + 'static>>;
+    Pin<Box<dyn Future<Output = Result<AgentTextDeltaDelivery, LlmError>> + Send + 'static>>;
 
 /// Tool Loop 最终用户可见正文增量接收器。
 ///

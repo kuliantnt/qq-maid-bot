@@ -1,5 +1,5 @@
 use super::*;
-use crate::agent_loop::{AgentTextDeltaFuture, run_agent_loop};
+use crate::agent_loop::{AgentTextDeltaDelivery, AgentTextDeltaFuture, run_agent_loop};
 use crate::context_budget::estimated_json_chars;
 use crate::provider::test_support::{WeatherToolStub, test_tool_context};
 use crate::tool::{Tool, ToolContext, ToolMetadata, ToolOutput};
@@ -21,7 +21,7 @@ fn recording_delta_sink(deltas: Arc<StdMutex<Vec<String>>>) -> AgentTextDeltaSin
         let deltas = deltas.clone();
         Box::pin(async move {
             deltas.lock().unwrap().push(delta);
-            Ok(())
+            Ok(AgentTextDeltaDelivery::Visible)
         }) as AgentTextDeltaFuture
     })
 }

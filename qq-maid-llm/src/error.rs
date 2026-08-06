@@ -68,6 +68,8 @@ pub struct LlmError {
     pub upstream_status: Option<u16>,
     /// 搜索上游的低敏路由身份；装箱避免增大每个通用错误返回值。
     upstream_context: Option<Box<UpstreamErrorContext>>,
+    /// Responses `response.incomplete` 的低敏协议原因；不进入用户错误正文。
+    incomplete_reason: Option<String>,
     /// Agent Runtime 失败时已经发生的可信执行轨迹。
     pub agent: Option<Box<AgentRunDiagnostics>>,
 }
@@ -85,6 +87,7 @@ impl LlmError {
             stage: stage.into(),
             upstream_status: None,
             upstream_context: None,
+            incomplete_reason: None,
             agent: None,
         }
     }
@@ -227,6 +230,16 @@ impl LlmError {
         self.upstream_context
             .as_deref()
             .map(|context| context.model.as_str())
+    }
+
+    /// 附加 Responses API 返回的稳定 incomplete reason，供候选诊断使用。
+    pub fn with_incomplete_reason(mut self, reason: impl Into<String>) -> Self {
+        self.incomplete_reason = Some(reason.into());
+        self
+    }
+
+    pub fn incomplete_reason(&self) -> Option<&str> {
+        self.incomplete_reason.as_deref()
     }
 
     /// 返回跨 Provider 统一的错误分类。
