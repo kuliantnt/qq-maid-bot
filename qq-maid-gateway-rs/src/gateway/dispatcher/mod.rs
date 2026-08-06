@@ -114,22 +114,40 @@ impl MessageDispatcherHandle {
     }
 
     pub(super) async fn enqueue_group(&self, message: GroupMessage) -> DispatcherEnqueueResult {
-        let Some(message) = self.group_ingress.preprocess(message) else {
+        let Some(mut message) = self.group_ingress.preprocess(message) else {
             return Ok(());
         };
+        // reservation 不进入 worker，只覆盖“预处理完成 -> Dispatcher 确认接收”的窗口。
+        let reservation = message.dedupe_reservation.take();
         let scope_key = self.respond.scope_key_from_group_message(&message.message);
         let target = RejectTarget::Group {
             group_openid: message.message.group_openid.clone(),
             message_id: message.message.message_id.clone(),
         };
-        self.enqueue(
-            InboundEnvelope::Group(message),
-            scope_key,
-            target,
-            None,
-            true,
-        )
-        .await
+        let result = self
+            .enqueue(
+                InboundEnvelope::Group(message),
+                scope_key,
+                target,
+                None,
+                true,
+            )
+            .await;
+        match result {
+            Ok(()) => {
+                if let Some(reservation) = reservation {
+                    reservation.commit();
+                }
+                Ok(())
+            }
+            Err(error) => {
+                // 失败时显式回滚；Drop 仍作为异常退出时的兜底，避免提前留下 committed 记录。
+                if let Some(reservation) = reservation {
+                    reservation.rollback();
+                }
+                Err(error)
+            }
+        }
     }
 
     async fn enqueue(

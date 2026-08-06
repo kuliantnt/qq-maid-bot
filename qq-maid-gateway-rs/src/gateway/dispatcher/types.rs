@@ -75,7 +75,7 @@ pub(super) enum DispatcherCommand {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) enum InboundEnvelope {
     C2c(C2cMessage),
     /// QQ 群消息只能由轻量入站阶段构造，worker 不再接收未过滤的原始群事件。

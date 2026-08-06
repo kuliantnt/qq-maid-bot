@@ -1,4 +1,5 @@
 use super::*;
+mod group_dedupe;
 use crate::auth::AccessTokenManager;
 use crate::gateway::bot_identity::BotIdentity;
 use crate::gateway::qq_official::group::{
@@ -221,6 +222,7 @@ fn queued_group(id: &str, group_openid: &str) -> QueuedMessage {
             },
             dedupe_checked: true,
             passive_observed: false,
+            dedupe_reservation: None,
         }),
         processed_ack: None,
         notify_on_reject: true,

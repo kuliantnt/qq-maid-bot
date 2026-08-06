@@ -12,7 +12,7 @@ use crate::{
     gateway::{
         BotOutboundCache,
         bot_identity::SharedBotIdentity,
-        dedupe::{MessageDedupe, dedupe_qq_composite_key},
+        dedupe::{MessageDedupe, MessageReservation, dedupe_qq_composite_key},
         event::GroupMessage,
         group_filter::{
             contains_active_keyword, is_reply_to_bot, mentions_current_bot,
@@ -38,7 +38,7 @@ pub(crate) struct GroupIngressFacts {
 }
 
 /// 只有确实需要回复的 QQ 群消息才能构造此类型。
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct PreparedGroupMessage {
     pub(crate) message: GroupMessage,
     pub(crate) respond_content: String,
@@ -46,6 +46,8 @@ pub(crate) struct PreparedGroupMessage {
     pub(crate) facts: GroupIngressFacts,
     pub(crate) dedupe_checked: bool,
     pub(crate) passive_observed: bool,
+    /// 重型消息入队前暂存的 reservation；Dispatcher 确认接收后才提交。
+    pub(crate) dedupe_reservation: Option<MessageReservation>,
 }
 
 /// Dispatcher handle 持有的轻量预处理依赖。所有方法都不调用 Core 或外部网络。
@@ -129,16 +131,17 @@ pub(crate) fn preprocess_group_message(
         &message.message_id,
         message.current_msg_idx.as_deref(),
     );
-    if !dedupe_key.is_empty()
-        && dedupe.check_and_insert_many([dedupe_key], std::time::Instant::now())
-    {
-        info!(
-            message_id = %message.message_id,
-            group = %masked_group,
-            "重复的群聊消息已在轻量入站阶段忽略"
-        );
-        return None;
-    }
+    let reservation = match dedupe.reserve_many([dedupe_key], std::time::Instant::now()) {
+        Ok(reservation) => reservation,
+        Err(_) => {
+            info!(
+                message_id = %message.message_id,
+                group = %masked_group,
+                "重复的群聊消息已在轻量入站阶段忽略"
+            );
+            return None;
+        }
+    };
 
     let mentions_current_bot = mentions_current_bot(&message);
     let facts = GroupIngressFacts {
@@ -158,6 +161,8 @@ pub(crate) fn preprocess_group_message(
         group_outbound_cache,
     ) {
         observe_passive_group_message(&message, config, respond, ref_index);
+        // 被动消息不会进入 Dispatcher，轻量观察完成即达到去重提交边界。
+        reservation.commit();
         debug!(
             message_id = %message.message_id,
             group = %masked_group,
@@ -179,6 +184,7 @@ pub(crate) fn preprocess_group_message(
         facts,
         dedupe_checked: true,
         passive_observed: false,
+        dedupe_reservation: Some(reservation),
     })
 }
 

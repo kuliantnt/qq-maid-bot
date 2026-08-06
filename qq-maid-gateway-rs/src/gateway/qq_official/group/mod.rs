@@ -162,7 +162,7 @@ pub(super) async fn handle_group_message_for_test(
 ) -> anyhow::Result<()> {
     let commands =
         GatewayCommandService::from_config(config.clone(), runtime.clone(), respond.clone());
-    let Some(message) = ingress::preprocess_group_message(
+    let Some(mut message) = ingress::preprocess_group_message(
         message,
         config,
         respond,
@@ -173,6 +173,10 @@ pub(super) async fn handle_group_message_for_test(
     ) else {
         return Ok(());
     };
+    // 测试 helper 直接绕过 Dispatcher，视为已经确认接收重型消息。
+    if let Some(reservation) = message.dedupe_reservation.take() {
+        reservation.commit();
+    }
     handle_prepared_group_message(
         message,
         config,
@@ -206,7 +210,12 @@ pub(crate) async fn handle_prepared_group_message(
         facts,
         dedupe_checked,
         passive_observed,
+        dedupe_reservation,
     } = prepared;
+    debug_assert!(
+        dedupe_reservation.is_none(),
+        "重型群消息进入 worker 前必须完成 reservation 提交或回滚"
+    );
     debug_assert!(dedupe_checked, "重型群消息必须先完成复合去重");
     debug_assert!(
         !passive_observed,
