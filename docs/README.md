@@ -15,6 +15,7 @@
 
 | 文档 | 用途 |
 | --- | --- |
+| [Docker 部署 · 人话版](./deployment/docker-simple.md) | 5 分钟跑起来，大白话步骤，大部分配置在网页完成 |
 | [Docker 与 Compose 部署](./deployment/docker.md) | 镜像、持久化、多实例、自动部署与回滚 |
 | [配置迁移、备份恢复与安全升级](./deployment/migration-backup.md) | 旧配置迁移、SQLite 一致性备份、恢复与 schema 边界 |
 | [测试服务器 Docker 部署](./deployment/test_server.md) | 测试环境初始化、GHCR、GitHub Actions 和自动回滚 |

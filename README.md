@@ -137,8 +137,10 @@ notepad "$HOME\qq-maid-bot\config\.env"
 
 服务器推荐使用 GHCR 镜像与 Docker Compose：运行镜像不包含 Rust 或 Node.js，默认不映射
 管理端口，并以非 root 用户运行。首次启动、持久化目录、按 digest 升级回滚、多实例和
-测试环境自动部署见 [Docker 与 Compose 部署](./docs/deployment/docker.md)。配置迁移、
-备份恢复与 schema 回滚边界见 [配置迁移、备份恢复与安全升级](./docs/deployment/migration-backup.md)。
+测试环境自动部署见 [Docker 与 Compose 部署](./docs/deployment/docker.md)；只想快速跑起来、
+大部分配置在网页里完成的话，直接看 [Docker 部署 · 人话版](./docs/deployment/docker-simple.md)。
+配置迁移、备份恢复与 schema 回滚边界见
+[配置迁移、备份恢复与安全升级](./docs/deployment/migration-backup.md)。
 
 普通用户也可以直接从 Docker Hub 拉取最新正式镜像：
 
@@ -298,6 +300,7 @@ flowchart LR
 | Wiki [插件开发](https://github.com/kuliantnt/qq-maid-bot/wiki/插件开发) | 自己写一个 Tool / 插件 |
 | [docs 文档导航](./docs/README.md) | 仓库内开发、部署、设计、调研和任务归档的完整索引 |
 | [runtime/README.md](./runtime/README.md) | 运行目录、环境变量、控制脚本和诊断细节 |
+| [Docker 部署 · 人话版](./docs/deployment/docker-simple.md) | 5 分钟跑起来，大白话步骤，大部分配置在网页完成 |
 | [Docker 与 Compose 部署](./docs/deployment/docker.md) | GHCR、容器首次启动、持久化、多实例、测试部署和回滚 |
 | [配置迁移、备份恢复与安全升级](./docs/deployment/migration-backup.md) | CLI 预检、旧配置 dry-run、SQLite 一致性备份、恢复和 schema 回滚边界 |
 | [控制台用户数据 API](./docs/development/console-user-data-api.md) | 独立前端使用的用户偏好与通用文件接口契约 |
