@@ -39,6 +39,54 @@ async fn core_private_weather_chat_with_tool_capability_completes_without_synthe
 }
 
 #[tokio::test]
+async fn core_non_streaming_agent_tool_results_only_complete_without_text_delta() {
+    let provider = TestProvider::agent_web_search_invalid_arguments()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_progress_tool_name("web_search");
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let service = CoreHandle::new(state);
+
+    let mut stream = expect_stream(
+        service
+            .respond(private_request("搜索公开项目"))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        stream.output_policy(),
+        CoreOutputPolicy::ProgressThenComplete
+    );
+
+    let mut status_kinds = Vec::new();
+    let mut deltas = Vec::new();
+    let response = loop {
+        let Some(event) = stream.recv().await else {
+            panic!("stream ended before completed response");
+        };
+        match event {
+            CoreResponseEvent::Status(status) => status_kinds.push(status.kind),
+            CoreResponseEvent::TextDelta(delta) => deltas.push(delta),
+            CoreResponseEvent::Completed(response) => break response,
+            CoreResponseEvent::Failed(failure) => panic!("unexpected failure: {failure:?}"),
+        }
+    };
+
+    assert!(!status_kinds.is_empty());
+    assert!(deltas.is_empty());
+    assert_eq!(
+        response.text_content(),
+        Some("【联网查询】\n\n本次联网查询的参数无效，查询未执行。请换一种说法再试。")
+    );
+    assert_eq!(
+        response.diagnostics.as_ref().unwrap()["agent_tool_results"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn core_private_tool_status_uses_configured_display_name() {
     let provider = TestProvider::replying("工具完整回复")
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
@@ -144,7 +192,9 @@ async fn core_tool_loop_streams_only_final_answer_after_tool_status() {
         }
     };
 
-    assert_eq!(deltas, vec!["最终".to_owned(), "回答".to_owned()]);
+    // Agent 最终正文要等工具结果完成领域投影后再对外发送，因此同一轮暂存为
+    // 一个可信增量，避免平台先收到模型草稿、随后又收到确定性回执。
+    assert_eq!(deltas, vec!["最终回答".to_owned()]);
     assert_eq!(response.text_content(), Some("最终回答"));
     assert!(status_kinds.contains(&CoreResponseStatusKind::AgentStarted));
     assert!(status_kinds.contains(&CoreResponseStatusKind::AgentFinalizing));
@@ -466,6 +516,46 @@ async fn core_private_general_chat_agent_direct_answer_streams_text_deltas() {
     assert_eq!(diagnostics["agent_result"], "direct_answer");
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn core_streaming_web_search_argument_failure_sends_only_projected_error_delta() {
+    let provider = TestProvider::agent_web_search_invalid_arguments()
+        .with_stream_enabled(true)
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_progress_tool_name("web_search");
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let service = CoreHandle::new(state);
+
+    let mut stream = expect_stream(
+        service
+            .respond(private_request("搜索公开项目"))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(stream.output_policy(), CoreOutputPolicy::ProgressThenStream);
+
+    let mut deltas = Vec::new();
+    let response = loop {
+        let Some(event) = stream.recv().await else {
+            panic!("stream ended before completed response");
+        };
+        match event {
+            CoreResponseEvent::Status(_) => {}
+            CoreResponseEvent::TextDelta(delta) => deltas.push(delta),
+            CoreResponseEvent::Completed(response) => break response,
+            CoreResponseEvent::Failed(failure) => panic!("unexpected failure: {failure:?}"),
+        }
+    };
+
+    let expected = "【联网查询】\n\n本次联网查询的参数无效，查询未执行。请换一种说法再试。";
+    let draft = "模型草稿：联网查询已经成功完成，不应直接发送。";
+    assert_eq!(deltas, vec![expected.to_owned()]);
+    assert_eq!(response.text_content(), Some(expected));
+    assert!(!deltas.iter().any(|delta| delta.contains(draft)));
+    assert!(!response.text_content().unwrap().contains(draft));
+    assert!(!expected.contains("联网查询服务暂时不可用"));
+    assert!(!expected.contains("网络"));
 }
 
 #[tokio::test]

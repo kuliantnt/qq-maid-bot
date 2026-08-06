@@ -43,6 +43,10 @@ const WEB_SEARCH_REWRITE_CONTEXT_MAX_CHARS: usize = 1200;
 const WEB_SEARCH_EMPTY_RESULT_REPLY: &str = "【联网查询】
 
 没查到明确结果。可以换一个关键词再试。";
+// 模型工具参数错误只说明本次调用未执行，不能误导为上游或网络故障。
+const WEB_SEARCH_ARGUMENT_ERROR_REPLY: &str = "【联网查询】
+
+本次联网查询的参数无效，查询未执行。请换一种说法再试。";
 // 联网查询未配置时的回复
 const WEB_SEARCH_CONFIG_ERROR_REPLY: &str = "【联网查询】
 
@@ -856,6 +860,7 @@ pub(crate) fn format_web_search_error_reply(err: &LlmError) -> String {
         "rate_limited" => WEB_SEARCH_RATE_LIMIT_REPLY.to_owned(),
         "quota_exhausted" => WEB_SEARCH_QUOTA_REPLY.to_owned(),
         "empty_result" => WEB_SEARCH_EMPTY_RESULT_REPLY.to_owned(),
+        "invalid_arguments" | "bad_tool_arguments" => WEB_SEARCH_ARGUMENT_ERROR_REPLY.to_owned(),
         "timeout" => WEB_SEARCH_TIMEOUT_REPLY.to_owned(),
         _ => WEB_SEARCH_UPSTREAM_ERROR_REPLY.to_owned(),
     }

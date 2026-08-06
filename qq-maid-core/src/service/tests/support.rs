@@ -10,8 +10,8 @@ use std::{
 use qq_maid_common::identity_context::IdentitySource;
 use qq_maid_llm::{
     agent_loop::{
-        AgentStep, AgentStepSession, AgentToolCall, AgentToolResult, ToolLoopProgressEvent,
-        run_agent_loop_with_handle,
+        AgentRunDiagnostics, AgentStep, AgentStepSession, AgentStopReason, AgentToolCall,
+        AgentToolResult, ToolExecutionResult, ToolLoopProgressEvent, run_agent_loop_with_handle,
     },
     provider::{
         ChatOutcome, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol, ToolChatRequest,
@@ -20,6 +20,7 @@ use qq_maid_llm::{
     },
     web_search::{WebSearchExecutor, WebSearchOutcome, WebSearchRequest},
 };
+use serde_json::{Value, json};
 
 use crate::{
     app::{CoreExecutors, CoreRuntimeState, CoreStores},
@@ -117,6 +118,7 @@ enum ProviderBehavior {
     Delayed { reply: String, delay: Duration },
     PartialThenDelayed { delta: String, delay: Duration },
     AgentWeatherThenFinal,
+    AgentWebSearchInvalidArguments,
 }
 
 struct WeatherAgentSession {
@@ -201,6 +203,10 @@ impl TestProvider {
         Self::new(ProviderBehavior::AgentWeatherThenFinal)
     }
 
+    pub(super) fn agent_web_search_invalid_arguments() -> Self {
+        Self::new(ProviderBehavior::AgentWebSearchInvalidArguments)
+    }
+
     fn new(behavior: ProviderBehavior) -> Self {
         Self {
             behavior,
@@ -266,6 +272,9 @@ impl LlmProvider for TestProvider {
                 Ok(chat_outcome(delta))
             }
             ProviderBehavior::AgentWeatherThenFinal => {
+                unreachable!("agent behavior uses chat_with_tools")
+            }
+            ProviderBehavior::AgentWebSearchInvalidArguments => {
                 unreachable!("agent behavior uses chat_with_tools")
             }
         }
@@ -336,6 +345,9 @@ impl LlmProvider for TestProvider {
             ProviderBehavior::AgentWeatherThenFinal => {
                 unreachable!("agent behavior uses chat_with_tools")
             }
+            ProviderBehavior::AgentWebSearchInvalidArguments => {
+                unreachable!("agent behavior uses chat_with_tools")
+            }
         }
     }
 
@@ -404,6 +416,56 @@ impl LlmProvider for TestProvider {
             }
             ProviderBehavior::AgentWeatherThenFinal => {
                 unreachable!("agent behavior returned before mock progress")
+            }
+            ProviderBehavior::AgentWebSearchInvalidArguments => {
+                let serialized = match req
+                    .tools
+                    .execute_json(
+                        &req.tool_context,
+                        "web_search",
+                        r#"{"query":"公开项目","time_range":"not-a-valid-range"}"#,
+                    )
+                    .await
+                {
+                    Ok(output) => output,
+                    // Agent Loop 会把参数校验 Err 转换为结构化 tool_result；夹具在
+                    // Provider 内模拟同一条边界，继续让 Core 运行领域投影。
+                    Err(error) => json!({
+                        "ok": false,
+                        "execution_succeeded": false,
+                        "error": {
+                            "code": error.code,
+                            "stage": error.stage,
+                        },
+                    })
+                    .to_string(),
+                };
+                let output = serde_json::from_str::<Value>(&serialized)
+                    .unwrap_or_else(|_| json!({"raw": serialized}));
+                let succeeded = output.get("ok").and_then(Value::as_bool) != Some(false);
+                let tool_result = ToolExecutionResult {
+                    name: "web_search".to_owned(),
+                    output,
+                    succeeded,
+                };
+                let draft = "模型草稿：联网查询已经成功完成，不应直接发送。";
+                if let Some(sink) = req.final_delta_sink.as_ref() {
+                    sink(draft.to_owned()).await?;
+                }
+                let mut outcome = chat_outcome(draft);
+                outcome.agent = AgentRunDiagnostics {
+                    model_rounds: 2,
+                    emitted_tools: vec!["web_search".to_owned()],
+                    tool_execution_attempted: true,
+                    executed_tools: vec!["web_search".to_owned()],
+                    side_effecting_tools_started: Vec::new(),
+                    tool_results: vec![tool_result],
+                    tool_attempts: Vec::new(),
+                    tools_with_unknown_result: Vec::new(),
+                    streaming_fallback_used: false,
+                    stop_reason: Some(AgentStopReason::ToolUsed),
+                };
+                Ok(outcome)
             }
         }
     }
