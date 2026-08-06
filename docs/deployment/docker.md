@@ -1,5 +1,9 @@
 # Docker 与 Compose 部署
 
+> 只想把机器人跑起来、大部分配置在网页里完成？直接看
+> [Docker 部署 · 小白版](./docker-simple.md)。本文保留完整细节（安全加固、多实例、
+> 自动部署与回滚）供维护者参考。
+
 Docker 是服务器推荐部署方式。GitHub Actions 在固定的 Debian 13/Rust 构建链路中生成镜像，
 服务器只拉取并运行镜像，不安装 Rust、Cargo、Node.js，也不现场编译。现有 Release 包、
 `qbot` / `botctl` 和源码部署继续保留。
