@@ -1,100 +1,155 @@
-# Docker 部署 · 小白版
+# Docker 部署 · 人话版
 
-> 想 5 分钟把机器人跑起来，看这篇就够了。
-> 想看完整细节（安全加固、多实例、自动发布、回滚）再看[完整版](./docker.md)。
+> 这份教程是给「不想折腾、只想把机器人跑起来」的人看的。每句都说大白话，
+> 每条命令复制粘贴就能用。想看细节（安全加固、多实例、自动发布、回滚）再看
+> [完整版](./docker.md)。
 
-## 一句话说明
+## 装之前，先知道三件事
 
-你的服务器**只需要装 Docker**，不用装 Rust、不用装 Node.js、不用现场编译。
-我们把程序打包成了现成镜像，你拉下来、跑起来，然后在**网页里把配置填完**就完事了。
+1. 你需要一台**能联网的 Linux 电脑或服务器**（Debian / Ubuntu 这类最常见，别的系统
+   也能装，步骤大同小异）。没有的话，租一台便宜的云服务器就行。
+2. Docker 你不用深究，先把它当成「帮你运行程序的小盒子」。我们要做的是：把做好的
+   程序（叫"镜像"）下载下来、丢进小盒子跑起来，然后打开网页填设置。
+3. 整个过程**不用写代码、不用编译**，照下面一步步来就行。
 
-## 开始前：装好 Docker
+## 第 0 步：装 Docker（一条命令搞定）
 
-**Debian / Ubuntu 等 Linux 系统**用官方一键脚本（会一并装好 Compose 插件）：
+在终端里（租的服务器就先 SSH 登上去）粘贴下面这条，回车，它会自动把 Docker 装好：
 
 ```bash
 curl -fsSL https://get.docker.com | sudo sh
 ```
 
-装好后把当前用户加进 `docker` 组，之后不用每次敲 `sudo`（重新登录生效）：
+> 中途可能要你输密码（你登录服务器的密码），正常，输进去回车就行。
+
+装完再执行下面这条，让当前用户以后用 docker 不用每次加 `sudo`：
 
 ```bash
 sudo usermod -aG docker $USER
 ```
 
-> 其他系统（Windows / macOS / 其他 Linux 发行版）按
-> [Docker 官方安装文档](https://docs.docker.com/engine/install/) 安装即可。
+**然后退出 SSH、重新登录一次**（或者把终端关掉重开），这步才生效。
 
-确认装好了：
+确认装好没有——下面两条命令都执行一下，能刷出一大段版本信息（不用看懂）就行：
 
 ```bash
 docker version
 docker compose version
 ```
 
-两条命令都不报错、能显示版本号，就可以继续。
+> Windows / macOS 不用敲命令：去 [Docker 官网](https://docs.docker.com/engine/install/)
+> 下载 Docker Desktop，双击安装、打开，然后继续看下面（命令都在终端里执行）。
 
-## 第 1 步：下载仓库
+## 第 1 步：把程序文件下载到服务器
 
 ```bash
 git clone https://github.com/kuliantnt/qq-maid-bot.git
 cd qq-maid-bot
 ```
 
-## 第 2 步：准备目录和两个小文件
+第一条是把程序文件下载到当前文件夹，第二条是进入这个文件夹。
+（如果提示找不到 `git`，先执行 `sudo apt install -y git`，再重新来。）
 
-先照着复制粘贴（都是一次性准备动作）：
+## 第 2 步：准备两个配置文件
+
+先复制下面这一整段，粘贴进终端回车。它负责建好文件夹、写好 `.env` 文件、设好权限，
+都是一次性动作，以后不用再跑：
 
 ```bash
 cp docker/compose.env.example compose.env
 mkdir -p runtime/config/secrets runtime/data/storage runtime/media/inbound
-touch runtime/config/.env
+printf '%s\n' 'LLM_SERVER_HOST=0.0.0.0' > runtime/config/.env
 chmod 700 runtime/config/secrets
 chmod 600 runtime/config/.env
 sudo chown -R 10001:10001 runtime/config runtime/data runtime/media
 ```
 
-然后做两件小事：
+然后改一个小地方：打开 `compose.env` 文件（终端里执行 `nano compose.env` 就能编辑，
+改完按 `Ctrl+O` 保存、`Ctrl+X` 退出；没有 nano 就先 `sudo apt install -y nano`），
+找到 `QQ_MAID_IMAGE=` 那一行，把后面的内容换成：
 
-1. 编辑 `compose.env`，把 `QQ_MAID_IMAGE=` 后面的内容换成镜像地址。
-   小白直接用 `latest` 最省事（会跟着新版本走），默认用 Docker Hub 源（国内好拉）：
+```text
+QQ_MAID_IMAGE=docker.io/kuliantnt/qq-maid-bot:latest
+```
 
-   ```text
-   QQ_MAID_IMAGE=docker.io/kuliantnt/qq-maid-bot:latest
-   ```
+> `latest` 就是「用最新版」的意思，最省事。想固定某个版本，就去
+> [Releases 页面](https://github.com/kuliantnt/qq-maid-bot/releases) 抄一个版本号，
+> 把 `latest` 换成它，例如 `:v0.23.8`。
 
-   想固定版本就换成 [Releases 页面](https://github.com/kuliantnt/qq-maid-bot/releases)
-   上的版本号，例如 `docker.io/kuliantnt/qq-maid-bot:v0.23.8`；想用 GHCR 源就把
-   `docker.io` 换成 `ghcr.io`。
+`runtime/config/.env` 不用动，里面已经写好了一行网页要用到的设置。
 
-2. 编辑 `runtime/config/.env`，加这一行（不加的话网页控制台打不开）：
-
-   ```text
-   LLM_SERVER_HOST=0.0.0.0
-   ```
-
-## 第 3 步：启动
+## 第 3 步：启动！
 
 ```bash
 docker compose --project-directory . --env-file compose.env \
   -f docker/compose.yaml -f docker/compose.console.yaml up -d
 ```
 
-第一次会自动下载镜像，等一会儿。想看进度就看日志（看完按 `Ctrl+C` 退出）：
+第一次会自动下载镜像（程序包），可能要等几分钟，网速决定。想看看进度：
 
 ```bash
 docker compose --project-directory . --env-file compose.env \
   -f docker/compose.yaml -f docker/compose.console.yaml logs -f bot
 ```
 
-没有报错退出、日志正常滚动，就说明跑起来了。
+看到日志一直往下刷、没有反复报错，就是跑起来了。按 `Ctrl+C` 退出日志（程序不会停）。
 
-## 拉不动镜像？配个镜像加速（国内常用）
+> 如果一直卡在下载、报 `timeout` / `429`，说明网络连 Docker 仓库不顺畅，去下面
+> 「下载不动怎么办」配个加速。
 
-第 3 步如果卡在下载镜像（或报 `timeout`、`429`），说明网络访问 Docker 仓库不顺畅。
-给 Docker 配一个镜像加速即可：
+## 第 4 步：打开网页，把设置填完
 
-编辑 `/etc/docker/daemon.json`（没有就新建），写入：
+在你电脑的浏览器打开：
+
+```text
+http://127.0.0.1:8787
+```
+
+> 服务器在远处的话：先在你电脑的终端执行
+> `ssh -L 8787:127.0.0.1:8787 用户名@服务器IP`，再打开上面的地址。
+
+第一次打开会让你输入一个「临时密码」（网页上写的是 Bootstrap Token）。去服务器上
+执行：
+
+```bash
+sudo cat runtime/config/secrets/bootstrap.token
+```
+
+把显示出来的那串字符复制到网页里，然后设置你自己的管理员密码。
+
+登录进去之后，**QQ 机器人、AI 模型、联网搜索……全部在网页里填**，不用再碰命令行。
+
+网页里保存完设置，回服务器执行一次重启让设置生效：
+
+```bash
+docker compose --project-directory . --env-file compose.env \
+  -f docker/compose.yaml -f docker/compose.console.yaml restart bot
+```
+
+## 以后常用的命令
+
+下面四条都是完整命令，直接复制执行：
+
+```bash
+docker compose --project-directory . --env-file compose.env -f docker/compose.yaml -f docker/compose.console.yaml ps
+docker compose --project-directory . --env-file compose.env -f docker/compose.yaml -f docker/compose.console.yaml logs -f bot
+docker compose --project-directory . --env-file compose.env -f docker/compose.yaml -f docker/compose.console.yaml restart bot
+docker compose --project-directory . --env-file compose.env -f docker/compose.yaml -f docker/compose.console.yaml down
+```
+
+- `ps`：看现在跑没跑
+- `logs -f bot`：看日志（`Ctrl+C` 退出）
+- `restart bot`：重启
+- `down`：停止并删除容器（数据都在，不会丢）
+
+**升级**：改 `compose.env` 里的 `QQ_MAID_IMAGE` 版本号，再执行一次第 3 步的启动命令。
+
+## 下载不动怎么办（给 Docker 配个加速）
+
+如果你在国内，下载镜像经常超时失败。给 Docker 配一个「加速通道」：
+
+在服务器上执行 `sudo nano /etc/docker/daemon.json`，把下面的内容粘进去
+（文件原本有内容就保留原来的，只把 `registry-mirrors` 这段加进去或替换掉）：
 
 ```json
 {
@@ -105,69 +160,43 @@ docker compose --project-directory . --env-file compose.env \
 }
 ```
 
-保存后重启 Docker，再重新执行一次第 3 步的 `up -d`：
+保存后重启 Docker，再重新执行一次第 3 步的启动命令：
 
 ```bash
 sudo systemctl restart docker
 ```
 
-> 注意：
-> - 镜像加速只对 Docker Hub（`docker.io`）有效；公共加速源随时可能失效，失效就换一个。
-> - 云厂商（阿里云 / 腾讯云）控制台里通常有专属加速地址，最稳定。
-> - 拉不到 `ghcr.io` 的镜像时，把 `QQ_MAID_IMAGE` 换成上面的
->   `docker.io/kuliantnt/qq-maid-bot:latest` 即可，两个仓库都有官方镜像。
+> - 加速只对 Docker Hub（`docker.io`）有效，对 `ghcr.io` 没用；拉不到 `ghcr.io` 时，
+>   把 `QQ_MAID_IMAGE` 换成 `docker.io/kuliantnt/qq-maid-bot:latest` 就行，两边都有官方镜像。
+> - 公共加速地址随时可能失效，失效就换一个；云服务器厂商（阿里云 / 腾讯云）控制台里
+>   一般有专属加速地址，最稳。
 
-## 第 4 步：打开网页，把所有配置填完
+## 机器人没起来（容器显示 unhealthy）怎么查
 
-浏览器打开：
+网页打不开或者容器状态一直显示 `unhealthy`，别慌，这只是在说「健康检查没通过」，
+不一定是你配错了。按顺序看：
 
-```text
-http://127.0.0.1:8787
-```
+1. **看日志**：执行
+   `docker compose --project-directory . --env-file compose.env -f docker/compose.yaml -f docker/compose.console.yaml logs bot`，
+   有没有报错、有没有说哪个文件解析失败？
+2. **看权限**：第 2 步那句
+   `sudo chown -R 10001:10001 runtime/config runtime/data runtime/media` 执行过没有？
+3. **看配置文件**：日志里有没有提示哪个文件写错了？
+4. **看端口**：健康检查访问的是 `LLM_SERVER_PORT`（默认 8787），`.env` 里别把它改乱了。
 
-> 服务器在远处的话，先在自己电脑上开 SSH 隧道，再打开上面的地址：
-> `ssh -L 8787:127.0.0.1:8787 用户名@服务器IP`
-
-第一次打开会让你输入 **Bootstrap Token**（一次性初始化凭据），到服务器上查看：
-
-```bash
-cat runtime/config/secrets/bootstrap.token
-```
-
-填进去、设置管理员密码。之后 **QQ 机器人、AI 模型、联网搜索……全都在网页里填**，
-不用再碰配置文件。
-
-网页里保存配置后，回到服务器重启一下让配置生效：
-
-```bash
-docker compose --project-directory . --env-file compose.env \
-  -f docker/compose.yaml -f docker/compose.console.yaml restart bot
-```
-
-## 常用命令
-
-下面的 `...` 就是第 3 步里那一长串（`--project-directory . --env-file compose.env
--f docker/compose.yaml -f docker/compose.console.yaml`），照抄即可：
-
-```bash
-docker compose ... ps          # 看状态
-docker compose ... logs -f bot # 看日志
-docker compose ... restart bot # 重启
-docker compose ... down        # 停止并删除容器（数据保留在 runtime/ 目录）
-```
-
-**升级**：改 `compose.env` 里的 `QQ_MAID_IMAGE` 版本号，再执行一次第 3 步的
-`up -d` 即可。
+> 一个小知识：没填模型 API Key 时，程序只是「没设置好」（网页里会显示 setup_required），
+> 但健康检查照样通过，容器是 healthy 的。所以「没配模型」不会导致 unhealthy，
+> 去网页里补上设置就行。
 
 ## 常见问题
 
-| 现象 | 怎么办 |
+| 遇到 | 怎么办 |
 | --- | --- |
-| 启动报 `permission denied` | 第 2 步的 `sudo chown -R 10001:10001 ...` 有没有执行？ |
-| 拉镜像超时 / `429` | 见上文「拉不动镜像？配个镜像加速」，或把 `QQ_MAID_IMAGE` 换成 Docker Hub 地址 |
+| 启动报 `permission denied`（没有权限） | 第 2 步的 `sudo chown -R 10001:10001 runtime/config runtime/data runtime/media` 执行过没有？ |
+| 下载镜像超时 / `429` | 看上面「下载不动怎么办」；或把 `QQ_MAID_IMAGE` 换成 Docker Hub 地址 |
 | 网页打不开 | `runtime/config/.env` 里有没有 `LLM_SERVER_HOST=0.0.0.0`？启动命令有没有带 `-f docker/compose.console.yaml`？ |
-| 容器一直 `unhealthy` | `docker compose ... logs bot` 看日志，按提示补配置（多半是模型 API Key 没填） |
-| 只想接微信 / OneBot 11 | 要额外加载对应 override 并改容器内监听地址，详见[完整版](./docker.md) |
-| 想要更稳的镜像 | 固定版本号（如 `:v0.23.8`），或去 GHCR 包页面复制 `@sha256:...` 完整 digest 替换 `QQ_MAID_IMAGE` |
+| 容器一直 `unhealthy` | 看上面「机器人没起来怎么查」 |
+| 想接微信 / OneBot 11 | 要额外加载对应配置文件，详见[完整版](./docker.md) |
+| 想要更稳的版本 | 固定版本号（如 `:v0.23.8`），或去 GHCR 页面复制 `@sha256:...` 完整 digest 替换 `QQ_MAID_IMAGE` |
 
 其他问题、备份、安全加固请看[完整版 Docker 部署](./docker.md)。
