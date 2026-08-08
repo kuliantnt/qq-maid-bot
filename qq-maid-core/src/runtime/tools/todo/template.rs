@@ -276,7 +276,7 @@ mod tests {
         assert!(body.markdown.contains("确认 \\[推送\\] 没失败"));
         assert!(body.text.contains("状态：进行中"));
         assert!(body.text.contains("重复：隔天"));
-        assert!(body.text.contains("下一次提醒：99-01-03 9:30（星期六）"));
+        assert!(body.text.contains("下一次提醒：99-01-03 9:30 星期六"));
     }
 
     #[test]
@@ -294,7 +294,7 @@ mod tests {
             },
         );
 
-        assert!(body.text.contains("提醒：99-01-03 9:30（星期六）"));
-        assert!(body.text.contains("下一次提醒：99-01-05 9:30（星期一）"));
+        assert!(body.text.contains("提醒：99-01-03 9:30 星期六"));
+        assert!(body.text.contains("下一次提醒：99-01-05 9:30 星期一"));
     }
 }

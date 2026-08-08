@@ -30,7 +30,7 @@ pub fn format_local_date_for_display(value: &str) -> String {
         .unwrap_or_else(|| value.trim().to_owned())
 }
 
-/// 格式化日期为 "MM-DD（星期几）" 的用户展示格式。
+/// 格式化日期为 "MM-DD 星期几" 的用户展示格式。
 pub fn format_local_date_with_weekday_for_display(value: &str) -> String {
     local_date_from_timestamp(value)
         .map(format_short_date_with_weekday)
@@ -355,12 +355,12 @@ fn format_datetime_with_offset(datetime: DateTime<FixedOffset>) -> String {
 }
 
 fn format_short_date_with_weekday(date: NaiveDate) -> String {
-    format!("{}（{}）", date.format("%m-%d"), chinese_weekday(date))
+    format!("{} {}", date.format("%m-%d"), chinese_weekday(date))
 }
 
 fn format_todo_datetime(datetime: NaiveDateTime) -> String {
     format!(
-        "{}{:02}:{:02}",
+        "{} {:02}:{:02}",
         format_short_date_with_weekday(datetime.date()),
         datetime.hour(),
         datetime.minute()
@@ -370,7 +370,7 @@ fn format_todo_datetime(datetime: NaiveDateTime) -> String {
 fn format_todo_datetime_chip(datetime: NaiveDateTime, current_year: i32) -> String {
     let date = datetime.date();
     format!(
-        "{} {}:{:02}（{}）",
+        "{} {}:{:02} {}",
         todo_chip_date_label(date, current_year),
         datetime.hour(),
         datetime.minute(),
@@ -380,7 +380,7 @@ fn format_todo_datetime_chip(datetime: NaiveDateTime, current_year: i32) -> Stri
 
 fn format_todo_date_chip(date: NaiveDate, current_year: i32) -> String {
     format!(
-        "{}（{}）",
+        "{} {}",
         todo_chip_date_label(date, current_year),
         chinese_weekday(date)
     )

@@ -192,35 +192,32 @@ fn formats_and_parses_local_timestamp_dates() {
     );
     assert_eq!(
         format_local_date_with_weekday_for_display("2026-06-12"),
-        "06-12（星期五）"
+        "06-12 星期五"
     );
     assert_eq!(
         format_local_date_with_weekday_for_display("2026-06-13"),
-        "06-13（星期六）"
+        "06-13 星期六"
     );
-    assert_eq!(
-        format_todo_time_for_display("2026-06-15"),
-        "06-15（星期一）"
-    );
+    assert_eq!(format_todo_time_for_display("2026-06-15"), "06-15 星期一");
     assert_eq!(
         format_todo_time_for_display("2026-06-15 12:30:00"),
-        "06-15（星期一）12:30"
+        "06-15 星期一 12:30"
     );
     assert_eq!(
         format_todo_time_for_display("2026-06-15 12:30"),
-        "06-15（星期一）12:30"
+        "06-15 星期一 12:30"
     );
     assert_eq!(
         format_todo_time_for_display("2026-06-15T12:30:00+08:00"),
-        "06-15（星期一）12:30"
+        "06-15 星期一 12:30"
     );
     assert_eq!(
         format_todo_time_for_display("2026-06-15（推测）"),
-        "06-15（星期一）"
+        "06-15 星期一"
     );
     assert_eq!(
         format_todo_time_for_display("2026-06-15 12:30:00【推测】"),
-        "06-15（星期一）12:30"
+        "06-15 星期一 12:30"
     );
     assert_eq!(
         format_todo_time_for_display("坏数据（推测）"),
@@ -228,19 +225,19 @@ fn formats_and_parses_local_timestamp_dates() {
     );
     assert_eq!(
         format_todo_time_chip_for_display_with_year("2025-07-10 07:00:00", 2025),
-        "07-10 7:00（星期四）"
+        "07-10 7:00 星期四"
     );
     assert_eq!(
         format_todo_time_chip_for_display_with_year("2025-07-10", 2025),
-        "07-10（星期四）"
+        "07-10 星期四"
     );
     assert_eq!(
         format_todo_time_chip_for_display_with_year("2026-01-02 05:00", 2025),
-        "26-01-02 5:00（星期五）"
+        "26-01-02 5:00 星期五"
     );
     assert_eq!(
         format_todo_time_chip_for_display_with_year("2025-08-02T05:00:00+08:00", 2025),
-        "08-02 5:00（星期六）"
+        "08-02 5:00 星期六"
     );
     assert_eq!(
         format_todo_time_chip_for_display_with_year("坏数据（推测）", 2025),
