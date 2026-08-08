@@ -116,6 +116,11 @@ pub struct AgentRunHandle {
 struct AgentRunState {
     diagnostics: AgentRunDiagnostics,
     pending_attempt: Option<AgentAttemptBaseline>,
+    /// 整次请求不可逆的终止态，与候选级 `diagnostics.stop_reason` 分离。
+    ///
+    /// 单个模型请求超时仍会把当前候选诊断记为 Timeout，但不能据此阻止后续候选；
+    /// 只有统一 deadline 到期或 Core 显式取消才写入这里。
+    request_termination: Option<AgentStopReason>,
     deadline: Option<Instant>,
     finalization_reserve: Duration,
 }
@@ -182,7 +187,7 @@ impl AgentRunHandle {
         }
         if matches!(
             state.diagnostics.stop_reason,
-            Some(AgentStopReason::Failed | AgentStopReason::MaxRounds)
+            Some(AgentStopReason::Failed | AgentStopReason::MaxRounds | AgentStopReason::Timeout)
         ) {
             state.diagnostics.stop_reason = None;
         }
@@ -207,7 +212,7 @@ impl AgentRunHandle {
         }
         if matches!(
             state.diagnostics.stop_reason,
-            Some(AgentStopReason::Failed | AgentStopReason::MaxRounds)
+            Some(AgentStopReason::Failed | AgentStopReason::MaxRounds | AgentStopReason::Timeout)
         ) {
             state.diagnostics.stop_reason = None;
         }
@@ -355,15 +360,16 @@ impl AgentRunHandle {
     }
 
     pub(crate) fn set_stop_reason(&self, reason: AgentStopReason) {
-        self.update(|diagnostics| {
-            // Core 的整次请求终止信号优先于候选内部失败，避免清理过程中被改回 failed。
-            if !matches!(
-                diagnostics.stop_reason,
-                Some(AgentStopReason::Timeout | AgentStopReason::Cancelled)
-            ) {
-                diagnostics.stop_reason = Some(reason);
-            }
-        });
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // 请求级终止信号优先于候选内部失败，避免清理过程中被改回 failed。
+        if let Some(request_reason) = state.request_termination {
+            state.diagnostics.stop_reason = Some(request_reason);
+        } else {
+            state.diagnostics.stop_reason = Some(reason);
+        }
     }
 
     pub(crate) fn set_stop_reason_if_unset(&self, reason: AgentStopReason) {
@@ -385,6 +391,7 @@ impl AgentRunHandle {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if refresh_termination_reason(&mut state).is_none() {
+            state.request_termination = Some(reason);
             state.diagnostics.stop_reason = Some(reason);
         }
         drop(state);
@@ -428,25 +435,17 @@ impl AgentAttemptBaseline {
     }
 }
 
-fn request_termination_reason(diagnostics: &AgentRunDiagnostics) -> Option<AgentStopReason> {
-    diagnostics.stop_reason.filter(|reason| {
-        matches!(
-            reason,
-            AgentStopReason::Timeout | AgentStopReason::Cancelled
-        )
-    })
-}
-
 /// 用 Tokio 单调时钟把 deadline 到期同步为请求级 Timeout，避免候选或内部
 /// fallback 在外层预算耗尽后再启动一次新的上游请求。
 fn refresh_termination_reason(state: &mut AgentRunState) -> Option<AgentStopReason> {
-    if let Some(reason) = request_termination_reason(&state.diagnostics) {
+    if let Some(reason) = state.request_termination {
         return Some(reason);
     }
     if state
         .deadline
         .is_some_and(|deadline| deadline <= Instant::now())
     {
+        state.request_termination = Some(AgentStopReason::Timeout);
         state.diagnostics.stop_reason = Some(AgentStopReason::Timeout);
         return Some(AgentStopReason::Timeout);
     }
