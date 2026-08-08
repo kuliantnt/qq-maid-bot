@@ -1,19 +1,13 @@
 use std::{
     collections::{HashMap, VecDeque},
-    fs::{self, OpenOptions},
-    io::{Read, Write},
-    path::{Path, PathBuf},
-    sync::{Arc, Condvar, Mutex, OnceLock},
+    fs,
+    path::PathBuf,
+    sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chacha20poly1305::XChaCha20Poly1305;
-use chacha20poly1305::aead::{Generate, Key};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::storage::database::{SqliteDatabase, SqliteMigration};
@@ -873,9 +867,32 @@ impl AdminAuth {
     }
 }
 
-mod helpers;
+fn database_error(error: impl std::fmt::Display) -> AdminAuthError {
+    AdminAuthError::storage(format!("administrator database operation failed: {error}"))
+}
 
-use helpers::*;
+fn unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn safe_audit_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'.' || byte == b'_')
+}
+
+mod bootstrap;
+mod credentials;
+mod session;
+
+use bootstrap::*;
+use credentials::*;
+use session::*;
 
 #[cfg(test)]
 mod tests;

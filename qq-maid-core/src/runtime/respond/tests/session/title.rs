@@ -1,326 +1,75 @@
-use super::*;
+use serde_json::Value;
+use tokio::time::{Duration, sleep};
+
+use super::super::support::*;
+use crate::{
+    error::LlmError,
+    runtime::session::{DEFAULT_SESSION_TITLE, SessionMeta},
+};
 
 #[tokio::test]
-async fn group_members_with_same_display_name_still_use_distinct_actor_refs() {
-    let inspector = MockProvider::new();
-    let service = test_service_with_provider(inspector.clone());
+async fn session_deterministic_messages_use_configured_bot_display_name() {
+    let service = test_service_with_bot_display_name("小助手");
 
-    for (user_id, text) in [("u1", "A 的消息"), ("u2", "B 的消息")] {
-        service
-            .respond(message_with_actor_context(
-                text,
-                "group:g1",
-                "g1",
-                user_id,
-                "同名成员",
-            ))
-            .await
-            .unwrap();
-    }
-
-    let request = inspector
-        .requests()
-        .into_iter()
-        .rev()
-        .find(|request| request.metadata.get("purpose").map(String::as_str) == Some("chat"))
-        .expect("missing B chat request");
-    let actor_a = request
-        .messages
-        .iter()
-        .find(|message| message.content.contains("A 的消息"))
-        .and_then(|message| history_actor_ref(&message.content))
-        .expect("A actor_ref should be present");
-    let session = service
-        .session_store
-        .get_or_create_active(&test_meta())
-        .unwrap();
-    let actor_b = session.history[2]
-        .turn_actor
-        .as_ref()
-        .and_then(|actor| actor.actor_ref.as_deref())
-        .expect("B actor_ref should be present");
-
-    assert_ne!(actor_a, actor_b);
-    let current_context = request
-        .messages
-        .last()
-        .and_then(|message| message.content_parts.first())
-        .expect("current MessageContext should be present")
-        .fallback_text();
-    assert!(current_context.contains("昵称=同名成员"));
-    assert!(current_context.contains(&format!("current_actor_ref={actor_b}")));
-}
-
-#[tokio::test]
-async fn compacted_group_summary_keeps_actor_ownership_for_next_member() {
-    let provider = MockProvider::new();
-    let inspector = provider.clone();
-    let service = test_service_with_provider(provider.clone());
-
-    service
-        .respond(message_with_actor_context(
-            "/set 昵称 初墨",
-            "group:g1",
-            "g1",
-            "u1",
-            "平台A",
-        ))
-        .await
-        .unwrap();
-    let actor_a = service
-        .session_store
-        .get_or_create_active(&test_meta())
-        .unwrap()
-        .history[0]
-        .turn_actor
-        .as_ref()
-        .and_then(|actor| actor.actor_ref.clone())
-        .expect("A actor_ref should be persisted");
-    let summary = format!(
-        "当前话题：身份确认\n公共内容：无\n成员事实：\n- actor_ref={actor_a}：展示名为初墨\n待处理事项：无\n回复偏好：无"
-    );
-    provider.push_compact_reply(summary.clone());
-
-    service
-        .respond(message_with_actor_context(
-            "/compact", "group:g1", "g1", "u1", "平台A",
-        ))
-        .await
-        .unwrap();
-    let compacted = service
-        .session_store
-        .get_or_create_active(&test_meta())
-        .unwrap();
-    assert_eq!(compacted.summary, summary);
+    let state_response = service.respond(message("/state")).await.unwrap();
     assert!(
-        compacted
-            .summary
-            .contains(&format!("actor_ref={actor_a}：展示名为初墨"))
+        state_response
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("小助手桌面是空的"))
     );
 
-    service
-        .respond(message_with_actor_context(
-            "我是谁？",
-            "group:g1",
-            "g1",
-            "u2",
-            "平台B",
-        ))
-        .await
-        .unwrap();
+    let new_response = service.respond(message("/new 测试话题")).await.unwrap();
+    assert_eq!(
+        new_response.text.as_deref(),
+        Some("新会话已开。小助手已经准备好新的上下文，之前的会话仍可通过恢复入口找回。")
+    );
+}
+
+async fn wait_for_session_title(
+    service: &crate::runtime::respond::RustRespondService,
+    title: &str,
+) {
+    wait_for_session_title_for_meta(service, &test_meta(), title).await;
+}
+
+async fn wait_for_session_title_for_meta(
+    service: &crate::runtime::respond::RustRespondService,
+    meta: &SessionMeta,
+    title: &str,
+) {
+    for _ in 0..50 {
+        let session = service.session_store.get_or_create_active(meta).unwrap();
+        if session.title == title {
+            return;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
     let session = service
         .session_store
         .get_or_create_active(&test_meta())
         .unwrap();
-    let actor_b = session
-        .history
-        .iter()
-        .rev()
-        .find(|message| message.role == "user" && message.content == "我是谁？")
-        .and_then(|message| message.turn_actor.as_ref())
-        .and_then(|actor| actor.actor_ref.as_deref())
-        .expect("B actor_ref should be persisted");
-    assert_ne!(actor_a, actor_b);
-
-    let request = inspector
-        .requests()
-        .into_iter()
-        .rev()
-        .find(|request| request.metadata.get("purpose").map(String::as_str) == Some("chat"))
-        .expect("missing B chat request");
-    let request_text = request_text(&request);
-    assert!(request_text.contains(&format!("actor_ref={actor_a}：展示名为初墨")));
-    assert!(request_text.contains(&format!("current_actor_ref={actor_b}")));
-    assert!(request_text.contains("actor_ref 不同或 unknown 时，不得把对应事实归给当前发言人"));
+    assert_eq!(session.title, title);
 }
 
-#[tokio::test]
-async fn guild_channel_members_use_distinct_actor_refs_and_current_mapping() {
-    let inspector = MockProvider::new();
-    let service = test_service_with_provider(inspector.clone());
-
-    service
-        .respond(guild_message_with_actor_context(
-            "A 的频道消息",
-            "u1",
-            "同名成员",
-        ))
-        .await
-        .unwrap();
-    service
-        .respond(guild_message_with_actor_context(
-            "B 的频道消息",
-            "u2",
-            "同名成员",
-        ))
-        .await
-        .unwrap();
-
-    let request = inspector
-        .requests()
-        .into_iter()
-        .rev()
-        .find(|request| request.metadata.get("purpose").map(String::as_str) == Some("chat"))
-        .expect("missing guild B chat request");
-    let actor_a = request
-        .messages
-        .iter()
-        .find(|message| message.content.contains("A 的频道消息"))
-        .and_then(|message| history_actor_ref(&message.content))
-        .expect("guild A actor_ref should be present");
-    let meta = SessionMeta::new(
-        "guild:guild-1:channel-1",
-        Some("u2".to_owned()),
-        None,
-        Some("guild-1".to_owned()),
-        Some("channel-1".to_owned()),
-        "qq_official",
-    );
-    let session = service.session_store.get_or_create_active(&meta).unwrap();
-    let actor_b = session.history[2]
-        .turn_actor
-        .as_ref()
-        .and_then(|actor| actor.actor_ref.as_deref())
-        .expect("guild B actor_ref should be present");
-
-    assert_ne!(actor_a, actor_b);
-    let request_text = request_text(&request);
-    assert!(request_text.contains("[历史发言人：actor_ref="));
-    assert!(request_text.contains(&format!("current_actor_ref={actor_b}")));
-}
-
-#[tokio::test]
-async fn private_chat_does_not_inject_actor_refs_or_history_labels() {
-    let inspector = MockProvider::new();
-    let service = test_service_with_provider(inspector.clone());
-
-    service
-        .respond(private_message("第一条私聊"))
-        .await
-        .unwrap();
-    service
-        .respond(private_message("第二条私聊"))
-        .await
-        .unwrap();
-
-    let request = inspector
-        .requests()
-        .into_iter()
-        .rev()
-        .find(|request| request.metadata.get("purpose").map(String::as_str) == Some("chat"))
-        .expect("missing private chat request");
-    let request_text = request_text(&request);
-    assert!(request_text.contains("第一条私聊"));
-    assert!(!request_text.contains("current_actor_ref="));
-    assert!(!request_text.contains("[历史发言人："));
-    assert!(!request_text.contains("[机器人当时回复给："));
-}
-
-pub(super) fn message_with_actor_context(
-    text: &str,
-    scope_key: &str,
-    group_id: &str,
-    user_id: &str,
-    platform_name: &str,
-) -> crate::runtime::respond::RespondRequest {
-    let mut req = message_in_scope(text, scope_key, user_id, group_id);
-    req.message_context = Some(qq_maid_common::identity_context::MessageContext {
-        current_actor_ref: None,
-        actor: Some(qq_maid_common::identity_context::MessageActorContext {
-            user_id: Some(user_id.to_owned()),
-            display_name: Some(platform_name.to_owned()),
-            display_name_source: Some("event".to_owned()),
-            source: qq_maid_common::identity_context::IdentitySource::Event,
-            ..Default::default()
-        }),
-        mentions: Vec::new(),
-        conversation: qq_maid_common::identity_context::ConversationContext {
-            kind: "group".to_owned(),
-            id: Some(group_id.to_owned()),
-            platform: Some("qq_official".to_owned()),
-            account_id: None,
-        },
-    });
-    req
-}
-
-fn guild_message_with_actor_context(
-    text: &str,
-    user_id: &str,
-    platform_name: &str,
-) -> crate::runtime::respond::RespondRequest {
-    let mut req = crate::runtime::respond::RespondRequest {
-        content: text.to_owned(),
-        scope_key: "guild:guild-1:channel-1".to_owned(),
-        conversation_kind: qq_maid_common::identity_context::ConversationKind::Channel,
-        conversation_id: Some("channel-1".to_owned()),
-        user_id: Some(user_id.to_owned()),
-        guild_id: Some("guild-1".to_owned()),
-        channel_id: Some("channel-1".to_owned()),
-        platform: "qq_official".to_owned(),
-        event_type: "FakeEvent".to_owned(),
-        ..crate::runtime::respond::common::empty_respond_request()
-    };
-    req.message_context = Some(qq_maid_common::identity_context::MessageContext {
-        current_actor_ref: None,
-        actor: Some(qq_maid_common::identity_context::MessageActorContext {
-            user_id: Some(user_id.to_owned()),
-            display_name: Some(platform_name.to_owned()),
-            display_name_source: Some("event".to_owned()),
-            source: qq_maid_common::identity_context::IdentitySource::Event,
-            ..Default::default()
-        }),
-        mentions: Vec::new(),
-        conversation: qq_maid_common::identity_context::ConversationContext {
-            kind: "channel".to_owned(),
-            id: Some("channel-1".to_owned()),
-            platform: Some("qq_official".to_owned()),
-            account_id: None,
-        },
-    });
-    req
-}
-
-pub(super) fn last_chat_request_text(inspector: &MockProvider) -> String {
-    request_text(
-        inspector
+async fn wait_for_title_request_count(inspector: &MockProvider, expected: usize) {
+    for _ in 0..50 {
+        let count = inspector
             .requests()
             .iter()
-            .rev()
-            .find(|req| req.metadata.get("purpose").map(String::as_str) != Some("session_title"))
-            .expect("missing chat request"),
-    )
-}
-
-pub(super) fn history_actor_ref(content: &str) -> Option<&str> {
-    let (_, tail) = content.lines().next()?.split_once("actor_ref=")?;
-    tail.split(['，', ']']).next()
-}
-
-fn request_text(request: &ChatRequest) -> String {
-    request
-        .messages
-        .iter()
-        .flat_map(|message| {
-            let mut texts = vec![message.content.as_str()];
-            for part in &message.content_parts {
-                if let qq_maid_common::input_part::MessageInputPart::Text { text, .. } = part {
-                    texts.push(text.as_str());
-                }
-            }
-            texts
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-pub(super) fn assert_unimplemented_rss_commands_absent(text: &str) {
-    for command in ["/rss refresh", "/rss enable", "/rss disable", "/rss edit"] {
-        assert!(
-            !text.contains(command),
-            "unimplemented RSS command leaked into help: {command}"
-        );
+            .filter(|req| req.metadata.get("purpose").map(String::as_str) == Some("session_title"))
+            .count();
+        if count == expected {
+            return;
+        }
+        sleep(Duration::from_millis(10)).await;
     }
+    let count = inspector
+        .requests()
+        .iter()
+        .filter(|req| req.metadata.get("purpose").map(String::as_str) == Some("session_title"))
+        .count();
+    assert_eq!(count, expected);
 }
 
 #[tokio::test]

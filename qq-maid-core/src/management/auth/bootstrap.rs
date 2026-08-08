@@ -1,71 +1,23 @@
-use super::*;
+//! Bootstrap 与密码重置令牌的文件生命周期。
+//!
+//! 令牌只在本地受保护文件中保存，认证流程本身仍由父模块编排；这里集中处理
+//! 令牌格式、过期时间、文件权限和安全摘要，避免这些文件操作混入会话逻辑。
 
-pub(super) fn new_admin_session(
-    id: i64,
-    username: &str,
-) -> ([u8; 32], SessionRecord, IssuedSession) {
-    let now = unix_seconds();
-    let (cookie_value, cookie_hash) = random_token();
-    let (csrf_token, csrf_hash) = random_token();
-    let absolute_expires_at = now + SESSION_ABSOLUTE_TTL.as_secs() as i64;
-    let record = SessionRecord {
-        kind: SessionKind::Admin {
-            id,
-            username: username.to_owned(),
-        },
-        csrf_token: csrf_token.clone(),
-        csrf_hash,
-        created_at: now,
-        last_seen_at: now,
-        absolute_expires_at,
-    };
-    let issued = IssuedSession {
-        cookie_value,
-        session: AdminSession {
-            username: username.to_owned(),
-            capabilities: admin_capabilities(),
-            csrf_token,
-            expires_at: absolute_expires_at,
-        },
-    };
-    (cookie_hash, record, issued)
-}
+use std::{
+    fs::{self, OpenOptions},
+    io::{Read, Write},
+    path::Path,
+    time::Duration,
+};
 
-pub(super) fn insert_session_locked(
-    sessions: &mut HashMap<[u8; 32], SessionRecord>,
-    token_hash: [u8; 32],
-    record: SessionRecord,
-) -> Result<(), AdminAuthError> {
-    match &record.kind {
-        SessionKind::PreAuth => {
-            if session_count(sessions, SessionKindFilter::PreAuth) >= MAX_PREAUTH_SESSIONS {
-                // 匿名容量满时只回收最旧 PreAuth，绝不让匿名洪泛淘汰 Admin。
-                let oldest = oldest_session(sessions, SessionKindFilter::PreAuth)
-                    .ok_or_else(session_capacity_reached)?;
-                sessions.remove(&oldest);
-            }
-        }
-        SessionKind::Admin { .. } => {
-            if session_count(sessions, SessionKindFilter::Admin) >= MAX_ADMIN_SESSIONS {
-                // 有效 Admin 达到独立上限时拒绝新会话，不隐式登出其他管理员浏览器。
-                return Err(session_capacity_reached());
-            }
-        }
-    }
-    sessions.insert(token_hash, record);
-    debug_assert!(sessions.len() <= MAX_SESSIONS);
-    Ok(())
-}
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+use super::{
+    AdminAuth, AdminAuthError, BOOTSTRAP_PREFIX, BOOTSTRAP_TTL, PASSWORD_RESET_PREFIX,
+    database_error, unix_seconds,
+};
 
 impl AdminAuth {
-    pub(super) fn remove_session(&self, cookie_value: &str) -> Result<(), AdminAuthError> {
-        self.sessions
-            .lock()
-            .map_err(session_lock_error)?
-            .remove(&token_hash(cookie_value));
-        Ok(())
-    }
-
     pub(super) fn admin_count(&self) -> Result<i64, AdminAuthError> {
         self.database
             .connection()
@@ -216,19 +168,6 @@ pub(super) fn print_bootstrap_token(token: &str, ttl: Duration) {
     );
 }
 
-pub(super) fn dummy_password_hash() -> Result<&'static str, AdminAuthError> {
-    static DUMMY_PASSWORD_HASH: OnceLock<String> = OnceLock::new();
-    if let Some(value) = DUMMY_PASSWORD_HASH.get() {
-        return Ok(value);
-    }
-    let value = hash_password("qq-maid-dummy-password-verification")?;
-    let _ = DUMMY_PASSWORD_HASH.set(value);
-    DUMMY_PASSWORD_HASH
-        .get()
-        .map(String::as_str)
-        .ok_or_else(|| AdminAuthError::storage("failed to initialize dummy password hash"))
-}
-
 pub(super) struct BootstrapToken {
     pub(super) purpose: BootstrapTokenPurpose,
     pub(super) issued_at: i64,
@@ -302,57 +241,14 @@ pub(super) fn invalid_bootstrap_token_format() -> AdminAuthError {
     )
 }
 
-pub(super) fn hash_password(password: &str) -> Result<String, AdminAuthError> {
-    let random = Key::<XChaCha20Poly1305>::generate();
-    let salt = SaltString::encode_b64(&random[..16])
-        .map_err(|_| AdminAuthError::storage("failed to encode password salt"))?;
-    Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
-        .map(|hash| hash.to_string())
-        .map_err(|_| AdminAuthError::storage("failed to hash administrator password"))
-}
-
-pub(super) fn verify_password(password: &str, encoded: &str) -> Result<bool, AdminAuthError> {
-    let parsed = PasswordHash::new(encoded)
-        .map_err(|_| AdminAuthError::storage("stored administrator password hash is invalid"))?;
-    Ok(Argon2::default()
-        .verify_password(password.as_bytes(), &parsed)
-        .is_ok())
-}
-
-pub(super) fn random_token() -> (String, [u8; 32]) {
-    let random = Key::<XChaCha20Poly1305>::generate();
-    let value = URL_SAFE_NO_PAD.encode(random);
-    let hash = token_hash(&value);
-    (value, hash)
-}
-
 pub(super) fn random_bootstrap_token() -> String {
+    use chacha20poly1305::XChaCha20Poly1305;
+    use chacha20poly1305::aead::{Generate, Key};
+
     let random = Key::<XChaCha20Poly1305>::generate();
     // Bootstrap/重置令牌是短时单次且还要求读取本地文件；128-bit 随机强度足够，
     // 同时比 Cookie/CSRF 使用的 256-bit token 更便于人工输入。
     URL_SAFE_NO_PAD.encode(&random[..16])
-}
-
-pub(super) fn token_hash(value: &str) -> [u8; 32] {
-    Sha256::digest(value.as_bytes()).into()
-}
-
-pub(super) fn rate_limit_key(parts: &[&str]) -> [u8; 32] {
-    let mut digest = Sha256::new();
-    for part in parts {
-        digest.update(part.len().to_le_bytes());
-        digest.update(part.as_bytes());
-    }
-    digest.finalize().into()
-}
-
-pub(super) fn normalize_username(username: &str) -> String {
-    username.trim().to_ascii_lowercase()
-}
-
-pub(super) fn constant_time_token_eq(left: &str, right: &str) -> bool {
-    token_hash(left).ct_eq(&token_hash(right)).unwrap_u8() == 1
 }
 
 pub(super) fn token_expiry(token: &BootstrapToken) -> i64 {
@@ -361,128 +257,6 @@ pub(super) fn token_expiry(token: &BootstrapToken) -> i64 {
 
 pub(super) fn token_is_valid(token: &BootstrapToken) -> bool {
     unix_seconds() <= token_expiry(token)
-}
-
-pub(super) fn prune_sessions(sessions: &mut HashMap<[u8; 32], SessionRecord>, now: i64) {
-    sessions.retain(|_, value| {
-        now <= value.absolute_expires_at
-            && now - value.last_seen_at
-                <= match value.kind {
-                    SessionKind::PreAuth => PREAUTH_TTL.as_secs() as i64,
-                    SessionKind::Admin { .. } => SESSION_IDLE_TTL.as_secs() as i64,
-                }
-    });
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum SessionKindFilter {
-    PreAuth,
-    Admin,
-}
-
-pub(super) fn session_matches(kind: &SessionKind, filter: SessionKindFilter) -> bool {
-    matches!(
-        (kind, filter),
-        (SessionKind::PreAuth, SessionKindFilter::PreAuth)
-            | (SessionKind::Admin { .. }, SessionKindFilter::Admin)
-    )
-}
-
-pub(super) fn session_count(
-    sessions: &HashMap<[u8; 32], SessionRecord>,
-    filter: SessionKindFilter,
-) -> usize {
-    sessions
-        .values()
-        .filter(|record| session_matches(&record.kind, filter))
-        .count()
-}
-
-pub(super) fn oldest_session(
-    sessions: &HashMap<[u8; 32], SessionRecord>,
-    filter: SessionKindFilter,
-) -> Option<[u8; 32]> {
-    sessions
-        .iter()
-        .filter(|(_, record)| session_matches(&record.kind, filter))
-        .min_by_key(|(_, record)| record.created_at)
-        .map(|(key, _)| *key)
-}
-
-pub(super) fn validate_username(username: &str) -> Result<(), AdminAuthError> {
-    let username = username.trim();
-    let count = username.chars().count();
-    if !(3..=64).contains(&count) || username.chars().any(char::is_control) {
-        return Err(AdminAuthError::new(
-            "validation_error",
-            "administrator username must contain 3 to 64 visible characters",
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn validate_password(password: &str) -> Result<(), AdminAuthError> {
-    if !(6..=256).contains(&password.chars().count()) {
-        return Err(AdminAuthError::new(
-            "validation_error",
-            "administrator password must contain 6 to 256 characters",
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn invalid_credentials() -> AdminAuthError {
-    AdminAuthError::new("invalid_credentials", "invalid username or password")
-}
-
-pub(super) fn unauthenticated() -> AdminAuthError {
-    AdminAuthError::new(
-        "unauthenticated",
-        "administrator session is missing or expired",
-    )
-}
-
-pub(super) fn session_capacity_reached() -> AdminAuthError {
-    AdminAuthError::new(
-        "session_capacity_reached",
-        "administrator session capacity has been reached; retry later",
-    )
-}
-
-pub(super) fn session_lock_error<T>(_: std::sync::PoisonError<T>) -> AdminAuthError {
-    AdminAuthError::storage("administrator session lock is poisoned")
-}
-
-pub(super) fn database_error(error: impl std::fmt::Display) -> AdminAuthError {
-    AdminAuthError::storage(format!("administrator database operation failed: {error}"))
-}
-
-pub(super) fn unix_seconds() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
-
-pub(super) fn admin_capabilities() -> Vec<String> {
-    [
-        "console.config.read",
-        "console.config.write",
-        "console.audit.write",
-        "console.process.restart",
-        "memory.admin",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
-}
-
-pub(super) fn safe_audit_value(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte == b'.' || byte == b'_')
 }
 
 pub(super) fn safe_path_summary(path: &Path) -> String {
