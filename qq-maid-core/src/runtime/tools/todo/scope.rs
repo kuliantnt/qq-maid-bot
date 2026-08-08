@@ -29,9 +29,10 @@ use super::common::MANAGE_RECURRING_REMINDER_TOOL_NAME;
 use super::common::{
     PREBOUND_EDIT_DRAFT_KEY, PREBOUND_ERROR_OUTPUT_KEY, PREBOUND_SELECTION_KEY,
     PREBOUND_SINGLE_ID_KEY, PREBOUND_SINGLE_LABEL_KEY, TODO_DEDUP_HISTORY_KEY,
-    TODO_DEDUP_HISTORY_LIMIT, TODO_REFERENCE_UNAVAILABLE_CODE, TODO_SELECTION_NOT_FOUND_CODE,
-    TODO_VISIBLE_NUMBERS_UNAVAILABLE_CODE, TodoReference, TodoSelectionLabel, TodoSelectionRequest,
-    TodoToolDedupEntry, session_tool_error, todo_tool_error, todo_tool_error_output,
+    TODO_DEDUP_HISTORY_LIMIT, TODO_REFERENCE_UNAVAILABLE_CODE, TODO_REMINDER_TIME_REQUIRED_CODE,
+    TODO_SELECTION_NOT_FOUND_CODE, TODO_VISIBLE_NUMBERS_UNAVAILABLE_CODE, TodoReference,
+    TodoSelectionLabel, TodoSelectionRequest, TodoToolDedupEntry, session_tool_error,
+    todo_tool_error, todo_tool_error_output,
 };
 
 pub(crate) use crate::runtime::visible_entity::VisibleEntitySelectionScope as SelectionScope;
@@ -820,6 +821,7 @@ fn clarification_question(
     };
     let list = candidate_lines(candidates);
     match error_code {
+        TODO_REMINDER_TIME_REQUIRED_CODE => message.to_owned(),
         TODO_VISIBLE_NUMBERS_UNAVAILABLE_CODE => format!(
             "我现在没有可用的待办列表编号。请告诉我要操作哪条待办的标题关键词，或回复编号选择这次列出的候选。{list}"
         ),

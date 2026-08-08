@@ -106,6 +106,51 @@ async fn natural_language_tool_query_combines_tomorrow_status_and_keyword() {
 }
 
 #[tokio::test]
+async fn natural_language_tomorrow_todo_query_still_uses_list_date_range() {
+    let tomorrow = (qq_maid_common::time_context::request_time_context().local_date()
+        + chrono::Duration::days(1))
+    .format("%Y-%m-%d")
+    .to_string();
+    let arguments = serde_json::json!({
+        "status": "pending",
+        "due_date": null,
+        "date_range_text": "明天",
+        "time_filter": null,
+        "keyword": null,
+        "recurring": null
+    })
+    .to_string();
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json("list_todos", arguments, "查询完成");
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    service
+        .task_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                due_date: Some(tomorrow),
+                time_precision: TodoTimePrecision::Date,
+                ..todo_draft("明天的待办")
+            },
+        )
+        .unwrap();
+
+    let response = service
+        .respond(private_message("看看明天的待办"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_list"));
+    assert!(response.text.as_deref().unwrap().contains("明天的待办"));
+    assert_eq!(
+        response.diagnostics.unwrap()["agent_executed_tools"],
+        serde_json::json!(["list_todos"])
+    );
+}
+
+#[tokio::test]
 async fn natural_language_tool_query_supports_fuzzy_keyword_search() {
     let arguments = serde_json::json!({
         "status": "pending",

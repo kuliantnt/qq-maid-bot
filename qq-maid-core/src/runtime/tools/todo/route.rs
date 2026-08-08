@@ -164,6 +164,28 @@ fn has_reminder_action(text: &str) -> bool {
     contains_any(text, REMINDER_ACTION_MARKERS)
 }
 
+/// 判断文本是否明确要求设置提醒，而不是取消或清除现有提醒。
+///
+/// `edit_todo` 用它识别“明天提醒我”这类已确定操作但缺具体时刻的输入；这里只
+/// 判断动作方向，具体日期、时刻和最终合法性仍由时间解析与 Todo Tool 校验负责。
+pub(super) fn is_reminder_setting_intent(text: &str) -> bool {
+    has_reminder_action(text)
+        && !contains_any(
+            text,
+            &[
+                "不提醒",
+                "别提醒",
+                "不用提醒",
+                "取消提醒",
+                "清除提醒",
+                "清空提醒",
+                "删除提醒",
+                "关掉提醒",
+                "关闭提醒",
+            ],
+        )
+}
+
 pub(super) fn looks_like_temporal_expression(text: &str) -> bool {
     // 路由层只判断“是否存在时间线索”，不消费推断出的日期，也不改变 Todo Tool
     // 内部基于模型/时间上下文生成的最终 due_date/due_at。
@@ -386,6 +408,15 @@ mod tests {
             "下午整理一下",
         ] {
             assert!(!classify(input, false).is_confident(), "{input}");
+        }
+    }
+
+    #[test]
+    fn reminder_setting_intent_excludes_clear_requests() {
+        assert!(is_reminder_setting_intent("明天提醒我"));
+        assert!(is_reminder_setting_intent("到时候帮我提醒一下"));
+        for text in ["明天别提醒我", "取消提醒", "清空提醒"] {
+            assert!(!is_reminder_setting_intent(text), "{text}");
         }
     }
 

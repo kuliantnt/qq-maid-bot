@@ -153,6 +153,11 @@ pub(crate) fn aggregate_todo_tool_results(
     let mut outcomes = Vec::new();
     for index in todo_indexes.iter().copied() {
         let result = &results[index];
+        if todo_validation_failure_was_corrected(index, results, attempts) {
+            // 原始失败继续保留在 Agent diagnostics 中；这里只避免把模型已经自纠的
+            // 参数错误投影给用户，成功回执仍必须来自后续真实 Todo Tool 结果。
+            continue;
+        }
         let pending_query = if result.name == LIST_TODOS_TOOL_NAME {
             if is_retry_superseded_result(index, attempts) {
                 None
@@ -185,6 +190,48 @@ pub(crate) fn aggregate_todo_tool_results(
         consumed_result_indexes,
         outcomes,
     })
+}
+
+fn todo_validation_failure_was_corrected(
+    result_index: usize,
+    results: &[ToolExecutionResult],
+    attempts: &[ToolExecutionAttempt],
+) -> bool {
+    let result = &results[result_index];
+    if result.succeeded || !is_tool_argument_failure(&result.output) {
+        return false;
+    }
+    let Some(failed_round) = tool_result_round(result_index, attempts) else {
+        return false;
+    };
+    results
+        .iter()
+        .enumerate()
+        .skip(result_index + 1)
+        .any(|(later_index, later)| {
+            later.succeeded
+                && is_todo_tool_result(later)
+                && (later.name == result.name || todo_write_operation(&later.name).is_some())
+                && tool_result_round(later_index, attempts)
+                    .is_some_and(|later_round| later_round > failed_round)
+        })
+}
+
+fn tool_result_round(result_index: usize, attempts: &[ToolExecutionAttempt]) -> Option<usize> {
+    attempts
+        .iter()
+        .find(|attempt| attempt.result_index == result_index)
+        .map(|attempt| attempt.round)
+}
+
+fn is_tool_argument_failure(output: &Value) -> bool {
+    let code = output
+        .get("error_code")
+        .and_then(Value::as_str)
+        .or_else(|| output.pointer("/error/code").and_then(Value::as_str));
+    let kind = output.pointer("/error/kind").and_then(Value::as_str);
+    matches!(code, Some("bad_tool_arguments" | "invalid_arguments"))
+        || kind == Some("invalid_arguments")
 }
 
 fn is_todo_tool_result(result: &ToolExecutionResult) -> bool {

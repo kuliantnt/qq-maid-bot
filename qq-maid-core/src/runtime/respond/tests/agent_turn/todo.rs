@@ -248,3 +248,70 @@ async fn only_list_todos_success_does_not_claim_todo_write_success() {
     assert_eq!(diagnostics["tool_outcomes"][0]["effect"], "read_only");
     assert_eq!(diagnostics["tool_outcomes"][0]["status"], "succeeded");
 }
+
+#[tokio::test]
+async fn corrected_todo_argument_failure_is_not_exposed_after_write_success() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results_and_attempts(
+            vec![
+                raw_tool_result(
+                    "list_todos",
+                    serde_json::json!({
+                        "ok": false,
+                        "error": {
+                            "code": "bad_tool_arguments",
+                            "kind": "invalid_arguments",
+                            "message": "date_range_text must be one of 今天/明天/昨天/..."
+                        }
+                    }),
+                    false,
+                ),
+                raw_tool_result(
+                    "edit_todo",
+                    serde_json::json!({
+                        "ok": true,
+                        "updated": {
+                            "visible_number": 1,
+                            "title": "完成 qq-maid-bot issue #476",
+                            "reminder_at": "2099-01-02 14:00"
+                        }
+                    }),
+                    true,
+                ),
+            ],
+            vec![
+                ToolExecutionAttempt {
+                    result_index: 0,
+                    call_id: "bad-list".to_owned(),
+                    round: 0,
+                    retry_of: None,
+                },
+                ToolExecutionAttempt {
+                    result_index: 1,
+                    call_id: "correct-edit".to_owned(),
+                    round: 1,
+                    retry_of: None,
+                },
+            ],
+            "已设置提醒。",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service.respond(private_message("下午两点")).await.unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("todo_edit"));
+    let text = response.text.unwrap();
+    assert!(text.contains("已修改待办"));
+    assert!(!text.contains("date_range_text"));
+    assert!(!text.contains("invalid_arguments"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["agent_turn_status"], "succeeded");
+    assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 1);
+    // 原始失败仍留在诊断轨迹，不能把真实失败吞掉或改写成成功。
+    assert_eq!(
+        diagnostics["agent_tool_results"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(diagnostics["agent_tool_results"][0]["succeeded"], false);
+}
