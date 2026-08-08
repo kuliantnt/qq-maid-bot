@@ -24,9 +24,9 @@ async fn todo_create_receipt_shows_full_user_visible_card() {
 
     let text = response.text.unwrap();
     assert!(text.contains("✅ 已新增待办"));
-    assert!(text.contains("装宽带 · 时间：99-01-01 10:00（四）"));
+    assert!(text.contains("装宽带 · 时间：99-01-01 10:00（星期四）"));
     assert!(text.contains("提醒："));
-    assert!(text.contains("99-01-01 9:30（四）"));
+    assert!(text.contains("99-01-01 9:30（星期四）"));
     assert!(text.contains("详情：\n提前确认地址并携带身份证"));
     assert!(!text.contains("created_at"));
     assert!(!text.contains("scope"));
@@ -75,7 +75,7 @@ async fn todo_edit_receipt_shows_final_detail_card() {
 
     let text = response.text.unwrap();
     assert!(text.contains("✏️ 已修改待办"));
-    assert!(text.contains("装宽带 · 时间：99-01-01（四）"));
+    assert!(text.contains("装宽带 · 时间：99-01-01（星期四）"));
     assert!(text.contains("详情：\n提前确认地址"));
     // 写操作默认不再刷新完整列表；详情只需在修改回执本身展示。
     assert!(!text.contains("🚧 当前进行中"));
@@ -265,9 +265,9 @@ async fn todo_complete_receipt_reuses_full_user_visible_card() {
     let text = response.text.unwrap();
     assert!(text.contains("✅ 已完成待办"));
     assert!(text.contains("状态：已完成"));
-    assert!(text.contains("装宽带 · 时间：99-01-01 10:00（四）"));
+    assert!(text.contains("装宽带 · 时间：99-01-01 10:00（星期四）"));
     assert!(text.contains("提醒："));
-    assert!(text.contains("99-01-01 9:30（四）"));
+    assert!(text.contains("99-01-01 9:30（星期四）"));
     assert!(text.contains("详情：\n提前确认地址并携带身份证"));
     assert!(text.contains("完成时间："));
     assert!(!text.contains("created_at"));
