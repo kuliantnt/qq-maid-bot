@@ -10,8 +10,17 @@ export class ConsoleApiError extends Error {
     }
 }
 let csrfToken = "";
+let unauthorizedHandler = null;
 export function setCsrfToken(value) {
     csrfToken = value;
+}
+/** 统一通知页面会话失效，避免各个页面分别吞掉 401 后继续显示已认证状态。 */
+export function setUnauthorizedHandler(handler) {
+    unauthorizedHandler = handler;
+}
+function notifyUnauthorized(status) {
+    if (status === 401)
+        unauthorizedHandler?.();
 }
 export async function fetchSession() {
     const payload = record(await fetchJson(AUTH_ROUTES.session, {
@@ -118,8 +127,10 @@ export async function uploadUserFile(file) {
         headers: { Accept: "application/json", "X-CSRF-Token": csrfToken },
         body: (() => { const form = new FormData(); form.append("file", file); return form; })(),
     });
-    if (!response.ok)
+    if (!response.ok) {
+        notifyUnauthorized(response.status);
         throw new ConsoleApiError(`文件上传失败（HTTP ${response.status}）`, "request_failed", response.status);
+    }
     const payload = record(await response.json());
     return parseUserFile(payload.data);
 }
@@ -129,8 +140,10 @@ export async function readUserFile(file) {
         credentials: "same-origin",
         headers: { "X-CSRF-Token": csrfToken },
     });
-    if (!response.ok)
+    if (!response.ok) {
+        notifyUnauthorized(response.status);
         throw new ConsoleApiError(`文件读取失败（HTTP ${response.status}）`, "request_failed", response.status);
+    }
     return response.blob();
 }
 export async function deleteUserFile(fileId) {
@@ -433,6 +446,7 @@ async function fetchJson(input, init) {
             message = string(error.message, message);
         }
         catch { /* 保留稳定的 HTTP 错误摘要。 */ }
+        notifyUnauthorized(response.status);
         throw new ConsoleApiError(message, code, response.status);
     }
     try {
@@ -465,6 +479,7 @@ async function mutatingJson(input, method, body, allowEmpty = false) {
             message = string(error.message, message);
         }
         catch { /* 保留稳定错误。 */ }
+        notifyUnauthorized(response.status);
         throw new ConsoleApiError(message, code, response.status);
     }
     return await response.json();
@@ -479,6 +494,7 @@ async function responseError(response) {
         message = string(error.message, message);
     }
     catch { /* 保留稳定错误。 */ }
+    notifyUnauthorized(response.status);
     return new ConsoleApiError(message, code, response.status);
 }
 function parseRuntime(value) {

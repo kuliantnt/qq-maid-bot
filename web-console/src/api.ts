@@ -48,9 +48,19 @@ export class ConsoleApiError extends Error {
 }
 
 let csrfToken = "";
+let unauthorizedHandler: (() => void) | null = null;
 
 export function setCsrfToken(value: string): void {
   csrfToken = value;
+}
+
+/** 统一通知页面会话失效，避免各个页面分别吞掉 401 后继续显示已认证状态。 */
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  unauthorizedHandler = handler;
+}
+
+function notifyUnauthorized(status: number): void {
+  if (status === 401) unauthorizedHandler?.();
 }
 
 export async function fetchSession(): Promise<AdminSession> {
@@ -184,7 +194,10 @@ export async function uploadUserFile(file: File): Promise<UserFile> {
     headers: { Accept: "application/json", "X-CSRF-Token": csrfToken },
     body: (() => { const form = new FormData(); form.append("file", file); return form; })(),
   });
-  if (!response.ok) throw new ConsoleApiError(`文件上传失败（HTTP ${response.status}）`, "request_failed", response.status);
+  if (!response.ok) {
+    notifyUnauthorized(response.status);
+    throw new ConsoleApiError(`文件上传失败（HTTP ${response.status}）`, "request_failed", response.status);
+  }
   const payload = record(await response.json() as unknown);
   return parseUserFile(payload.data);
 }
@@ -195,7 +208,10 @@ export async function readUserFile(file: UserFile): Promise<Blob> {
     credentials: "same-origin",
     headers: { "X-CSRF-Token": csrfToken },
   });
-  if (!response.ok) throw new ConsoleApiError(`文件读取失败（HTTP ${response.status}）`, "request_failed", response.status);
+  if (!response.ok) {
+    notifyUnauthorized(response.status);
+    throw new ConsoleApiError(`文件读取失败（HTTP ${response.status}）`, "request_failed", response.status);
+  }
   return response.blob();
 }
 
@@ -521,6 +537,7 @@ async function fetchJson(input: RequestInfo | URL, init?: RequestInit): Promise<
       code = string(error.code, code);
       message = string(error.message, message);
     } catch { /* 保留稳定的 HTTP 错误摘要。 */ }
+    notifyUnauthorized(response.status);
     throw new ConsoleApiError(message, code, response.status);
   }
   try {
@@ -551,6 +568,7 @@ async function mutatingJson(input: string, method: string, body?: unknown, allow
       code = string(error.code, code);
       message = string(error.message, message);
     } catch { /* 保留稳定错误。 */ }
+    notifyUnauthorized(response.status);
     throw new ConsoleApiError(message, code, response.status);
   }
   return await response.json() as unknown;
@@ -565,6 +583,7 @@ async function responseError(response: Response): Promise<ConsoleApiError> {
     code = string(error.code, code);
     message = string(error.message, message);
   } catch { /* 保留稳定错误。 */ }
+  notifyUnauthorized(response.status);
   return new ConsoleApiError(message, code, response.status);
 }
 

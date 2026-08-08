@@ -95,27 +95,40 @@ export function renderThemeSelector(
     success: string,
     failure: string,
     apply: () => void,
+    rollback: () => void,
+    statusTarget: HTMLElement = status,
   ): Promise<void> => {
-    if (!userData || saveInFlight) return;
+    // 原生 radio 会先改变 checked，再触发 change；保存失败或并发点击时必须显式恢复控件。
+    if (!userData || saveInFlight) {
+      rollback();
+      return;
+    }
     saveInFlight = true;
-    status.textContent = "正在保存界面偏好……";
+    fieldset.disabled = true;
+    statusTarget.textContent = "正在保存界面偏好……";
     try {
       await userData.updatePreferences(patch);
       apply();
-      status.textContent = success;
+      statusTarget.textContent = success;
     } catch (cause) {
-      status.textContent = cause instanceof Error ? `${failure}：${cause.message}` : failure;
+      rollback();
+      statusTarget.textContent = cause instanceof Error ? `${failure}：${cause.message}` : failure;
     } finally {
       saveInFlight = false;
+      fieldset.disabled = false;
     }
   };
 
-  const sync = (preset: ConsoleThemePreset): void => {
+  const syncThemeControls = (preset: ConsoleThemePreset): void => {
     for (const input of choices.querySelectorAll<HTMLInputElement>("input[type=radio]")) {
       const selected = input.value === preset;
       input.checked = selected;
       input.closest("label")?.classList.toggle("console-theme-choice--selected", selected);
     }
+  };
+
+  const sync = (preset: ConsoleThemePreset): void => {
+    syncThemeControls(preset);
     status.textContent = `当前主题：${CONSOLE_THEMES[preset].name}`;
   };
 
@@ -131,11 +144,12 @@ export function renderThemeSelector(
     input.setAttribute("aria-describedby", "console-theme-selection");
     input.addEventListener("change", () => {
       if (!isConsoleThemePreset(input.value)) return;
-       const nextPreset = input.value;
-       void savePreference({ customColors: [] }, "主题已保存。", "主题保存失败", () => {
-         controller.select(nextPreset);
-         sync(nextPreset);
-       });
+      const nextPreset = input.value;
+      const previousPreset = controller.current().preset;
+      void savePreference({ customColors: [] }, "主题已保存。", "主题保存失败", () => {
+        controller.select(nextPreset);
+        sync(nextPreset);
+      }, () => syncThemeControls(previousPreset));
     });
 
     const name = document.createElement("span");
@@ -163,10 +177,11 @@ export function renderThemeSelector(
   reset.className = "secondary console-theme-reset";
   reset.textContent = "恢复默认";
   reset.addEventListener("click", () => {
+    const previousPreset = controller.current().preset;
     void savePreference({ customColors: [] }, "已恢复默认主题。", "恢复默认主题失败", () => {
       const preference = controller.reset();
       sync(preference.preset);
-    });
+    }, () => syncThemeControls(previousPreset));
   });
 
   const backgroundFieldset = document.createElement("fieldset");
@@ -209,13 +224,14 @@ export function renderThemeSelector(
     input.disabled = option.mode === "special" && !backgroundController.isUnlocked();
     input.addEventListener("change", () => {
       const mode = input.value as BackgroundMode;
-       void savePreference({
-         backgroundMode: mode,
-         activeBackgroundFileId: null,
-       }, "背景已保存。", "背景保存失败", () => {
-         backgroundController.select(mode);
-         syncBackground(backgroundController.current());
-       });
+      const previousMode = backgroundController.current();
+      void savePreference({
+        backgroundMode: mode,
+        activeBackgroundFileId: null,
+      }, "背景已保存。", "背景保存失败", () => {
+        backgroundController.select(mode);
+        syncBackground(backgroundController.current());
+      }, () => syncBackgroundMode(previousMode), backgroundStatus);
     });
     const name = document.createElement("span");
     name.className = "console-theme-choice-name";
@@ -258,12 +274,14 @@ export function renderThemeSelector(
       void savePreference({ customColors: colors }, "自定义颜色已保存。", "自定义颜色保存失败", () => {
         controller.applyCustomColors(colors);
         customStatus.textContent = "自定义颜色已保存。";
-      });
+      }, () => undefined, customStatus);
     });
     custom.append(label, input, save, customStatus);
     fieldset.append(custom);
 
-    if (userData.uploadFile && userData.deleteFile) {
+    const uploadFile = userData.uploadFile;
+    const deleteFile = userData.deleteFile;
+    if (uploadFile && deleteFile) {
       const filesSection = document.createElement("div");
       filesSection.className = "console-custom-background-controls";
       const fileLabel = document.createElement("label");
@@ -281,6 +299,7 @@ export function renderThemeSelector(
       const activateFile = async (file: BackgroundFile, forceRefresh: boolean): Promise<void> => {
         if (saveInFlight) return;
         saveInFlight = true;
+        fieldset.disabled = true;
         try {
           await activateBackgroundFile({
             userData,
@@ -291,6 +310,7 @@ export function renderThemeSelector(
           }, file, forceRefresh);
         } finally {
           saveInFlight = false;
+          fieldset.disabled = false;
         }
       };
       for (const file of userData.files) {
@@ -310,10 +330,21 @@ export function renderThemeSelector(
         remove.className = "danger";
         remove.textContent = "删除";
         remove.addEventListener("click", () => {
-          void userData.deleteFile?.(file).then(() => {
+          if (saveInFlight) return;
+          saveInFlight = true;
+          fieldset.disabled = true;
+          remove.disabled = true;
+          fileStatus.textContent = "正在删除背景文件……";
+          void deleteFile(file).then(() => {
             backgroundController.deleteFile(file.fileId);
             row.remove();
             fileStatus.textContent = "背景文件已删除。";
+          }).catch((cause: unknown) => {
+            fileStatus.textContent = `背景文件删除失败：${errorText(cause)}`;
+          }).finally(() => {
+            saveInFlight = false;
+            fieldset.disabled = false;
+            remove.disabled = false;
           });
         });
         row.append(name, activate, remove);
@@ -321,10 +352,12 @@ export function renderThemeSelector(
       }
       fileInput.addEventListener("change", () => {
         const file = fileInput.files?.[0];
-        if (!file) return;
-        void userData.uploadFile?.(file).then((uploaded) => {
+        if (!file || saveInFlight) return;
+        saveInFlight = true;
+        fieldset.disabled = true;
+        fileStatus.textContent = "正在上传背景文件……";
+        void uploadFile(file).then((uploaded) => {
           fileStatus.textContent = `${uploaded.filename} 已上传，请刷新配置后选择。`;
-          fileInput.value = "";
           const name = document.createElement("span");
           name.textContent = uploaded.filename;
           const activate = document.createElement("button");
@@ -338,6 +371,12 @@ export function renderThemeSelector(
           row.className = "console-background-file-row";
           row.append(name, activate);
           fileList.append(row);
+        }).catch((cause: unknown) => {
+          fileStatus.textContent = `背景文件上传失败：${errorText(cause)}`;
+        }).finally(() => {
+          saveInFlight = false;
+          fieldset.disabled = false;
+          fileInput.value = "";
         });
       });
       filesSection.append(fileLabel, fileInput, fileList, fileStatus);

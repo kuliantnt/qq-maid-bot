@@ -13,7 +13,8 @@ let allItems = [];
 let filterParams = defaultKnowledgeParams();
 let uploadFlowInstalled = false;
 let loadMoreInFlight = false;
-let requestGeneration = 0;
+// 用户主动请求与轮询拥有不同的生命周期，轮询不能让刷新/分页请求失效。
+let listRequestGeneration = 0;
 let knowledgeInitialized = false;
 let controlsBound = false;
 let documentListenersBound = false;
@@ -22,6 +23,10 @@ const onVisibilityChange = () => {
         polling.notifyChange();
 };
 const onPageHide = () => polling.stop();
+const onPageShow = () => {
+    if (knowledgeInitialized && document.visibilityState !== "hidden" && polling.hasActive())
+        polling.notifyChange();
+};
 const onSearchKeydown = (event) => {
     if (event.key === "Enter") {
         event.preventDefault();
@@ -36,22 +41,11 @@ const polling = new KnowledgePollingController({
     setTimeout: (fn, ms) => window.setTimeout(fn, ms),
     clearTimeout: (id) => window.clearTimeout(id),
     fetchPages: (params, pageCount) => {
-        const generation = ++requestGeneration;
-        return Promise.all(Array.from({ length: pageCount }, (_, index) => listKnowledgeFiles({ ...params, page: index + 1 }))).then((pages) => {
-            if (generation !== requestGeneration || !paramsMatch({ ...params, page: 1 }, { ...filterParams, page: 1 }))
-                return [];
-            return pages;
-        });
+        // 用户请求开始时会停止轮询；PollingController 自身还会丢弃停止前已经发出的响应。
+        return Promise.all(Array.from({ length: pageCount }, (_, index) => listKnowledgeFiles({ ...params, page: index + 1 })));
     },
     onUpdate: (pages) => {
-        if (pages.length === 0)
-            return;
-        for (const page of pages)
-            itemsByPage.set(page.page, [...page.items]);
-        const lastPage = pages[pages.length - 1];
-        if (lastPage === undefined)
-            return;
-        rebuildLoadedState(lastPage);
+        applyKnowledgePages(pages);
         renderKnowledgeContent();
     },
     onTransientError: (message) => setText("knowledge-result", message),
@@ -83,15 +77,16 @@ export async function initializeKnowledge() {
         uploadFlowInstalled = true;
     }
     await refreshKnowledgeList("refresh");
-    polling.start({ ...filterParams, page: loadedPages || 1 });
 }
 export function disposeKnowledge() {
     polling.stop();
-    requestGeneration += 1;
+    listRequestGeneration += 1;
     if (documentListenersBound && typeof document !== "undefined" && typeof document.removeEventListener === "function")
         document.removeEventListener("visibilitychange", onVisibilityChange);
-    if (documentListenersBound && typeof window !== "undefined" && typeof window.removeEventListener === "function")
+    if (documentListenersBound && typeof window !== "undefined" && typeof window.removeEventListener === "function") {
         window.removeEventListener("pagehide", onPageHide);
+        window.removeEventListener("pageshow", onPageShow);
+    }
     const search = typeof document === "undefined" ? null : document.getElementById("knowledge-search");
     if (typeof HTMLInputElement !== "undefined" && search instanceof HTMLInputElement)
         search.removeEventListener("keydown", onSearchKeydown);
@@ -120,32 +115,50 @@ export function getKnowledgeCapabilities() {
     return capabilities;
 }
 export async function refreshKnowledgeList(reason) {
-    const generation = ++requestGeneration;
-    const reset = reason === "refresh" || reason === "filter";
-    if (reset) {
-        itemsByPage.clear();
-        loadedPages = 0;
-        allItems = [];
-        pager = initialKnowledgePager();
-    }
-    if (allItems.length === 0)
+    const generation = ++listRequestGeneration;
+    // 上传、重试、删除都会改变总数或排序，继续复用旧的后续页会造成重复、遗漏或残留。
+    // 所有刷新原因统一从第一页重新建立已加载状态。
+    const preserveOnFailure = reason === "upload" || reason === "retry" || reason === "delete";
+    const previous = {
+        itemsByPage: new Map([...itemsByPage.entries()].map(([page, items]) => [page, [...items]])),
+        loadedPages,
+        pager: { ...pager },
+        allItems: [...allItems],
+    };
+    const hadItems = allItems.length > 0;
+    polling.stop();
+    itemsByPage.clear();
+    loadedPages = 0;
+    allItems = [];
+    pager = initialKnowledgePager();
+    if (!preserveOnFailure || !hadItems)
         renderKnowledgeLoading();
     const params = { ...filterParams, page: 1 };
     try {
         const page = await listKnowledgeFiles(params);
-        if (generation !== requestGeneration || !paramsMatch(params, { ...filterParams, page: 1 }))
+        if (generation !== listRequestGeneration || !paramsMatch(params, { ...filterParams, page: 1 }))
             return;
         itemsByPage.set(1, [...page.items]);
-        loadedPages = reset ? 1 : Math.max(loadedPages, 1);
+        loadedPages = 1;
         rebuildLoadedState(page);
-        polling.updateParams({ ...filterParams, page: loadedPages });
-        polling.setPages(allItems);
+        syncKnowledgePolling();
         renderKnowledgeContent();
-        polling.notifyChange();
     }
     catch (cause) {
-        if (generation !== requestGeneration)
+        if (generation !== listRequestGeneration)
             return;
+        if (preserveOnFailure) {
+            itemsByPage = previous.itemsByPage;
+            loadedPages = previous.loadedPages;
+            pager = previous.pager;
+            allItems = previous.allItems;
+            if (allItems.length > 0)
+                syncKnowledgePolling();
+            else
+                renderKnowledgeLoadError();
+            showKnowledgeError(cause, "知识库列表加载失败");
+            return;
+        }
         showKnowledgeError(cause, "知识库列表加载失败");
         if (allItems.length === 0)
             renderKnowledgeLoadError();
@@ -171,17 +184,43 @@ function bindDocumentListeners() {
         return;
     documentListenersBound = true;
     document.addEventListener("visibilitychange", onVisibilityChange);
-    if (typeof window.addEventListener === "function")
+    if (typeof window.addEventListener === "function") {
         window.addEventListener("pagehide", onPageHide);
+        window.addEventListener("pageshow", onPageShow);
+    }
 }
 function syncKnowledgeFilters(search, status) {
-    requestGeneration += 1;
     filterParams = { ...filterParams, search: search.value.trim(), status: knowledgeStatusValue(status.value) };
 }
 function rebuildLoadedState(lastPage) {
     pager = appendKnowledgePage({ ...pager, loadedCount: 0 }, lastPage);
     pager = { ...pager, page: loadedPages, loadedCount: allPageItems().length, hasMore: loadedPages < lastPage.total_pages };
     allItems = allPageItems();
+}
+function applyKnowledgePages(pages) {
+    if (pages.length === 0) {
+        itemsByPage.clear();
+        loadedPages = 0;
+        allItems = [];
+        pager = initialKnowledgePager();
+        return;
+    }
+    const lastPage = pages[pages.length - 1];
+    if (lastPage === undefined)
+        return;
+    for (const page of pages)
+        itemsByPage.set(page.page, [...page.items]);
+    // 删除后总页数可能减少；清掉已经不存在的旧页，避免轮询再次把旧文件渲染出来。
+    for (const pageNumber of itemsByPage.keys()) {
+        if (pageNumber > lastPage.total_pages)
+            itemsByPage.delete(pageNumber);
+    }
+    loadedPages = Math.min(Math.max(loadedPages, ...pages.map((page) => page.page)), Math.max(1, lastPage.total_pages));
+    rebuildLoadedState(lastPage);
+}
+function syncKnowledgePolling() {
+    polling.setPages(allItems);
+    polling.updateParams({ ...filterParams, page: loadedPages || 1 });
 }
 function allPageItems() {
     return Array.from({ length: loadedPages }, (_, index) => itemsByPage.get(index + 1) ?? []).flat();
@@ -231,35 +270,36 @@ async function loadMoreKnowledgeFiles() {
     if (loadMoreInFlight || !hasMoreKnowledgePages(pager))
         return;
     const previous = { loadedPages, pager: { ...pager }, allItems: [...allItems] };
-    const generation = ++requestGeneration;
+    const generation = ++listRequestGeneration;
     const pageNumber = loadedPages + 1;
     const params = { ...filterParams, page: pageNumber };
+    polling.stop();
     loadMoreInFlight = true;
     renderKnowledgePagination();
     try {
         const page = await listKnowledgeFiles(params);
-        if (generation !== requestGeneration || !paramsMatch(params, { ...filterParams, page: pageNumber }))
+        if (generation !== listRequestGeneration || !paramsMatch(params, { ...filterParams, page: pageNumber }))
             return;
         itemsByPage.set(pageNumber, [...page.items]);
         loadedPages = pageNumber;
         rebuildLoadedState(page);
-        polling.updateParams({ ...filterParams, page: loadedPages });
-        polling.setPages(allItems);
+        syncKnowledgePolling();
         renderKnowledgeContent();
-        polling.notifyChange();
     }
     catch (cause) {
-        if (generation === requestGeneration) {
+        if (generation === listRequestGeneration) {
             loadedPages = previous.loadedPages;
             pager = previous.pager;
             allItems = previous.allItems;
             showKnowledgeError(cause, "知识库列表加载失败");
             renderKnowledgeContent();
+            syncKnowledgePolling();
         }
     }
     finally {
         loadMoreInFlight = false;
-        if (generation === requestGeneration)
+        // 即使加载更多被刷新/筛选淘汰，也必须解锁当前分页控件；否则新列表会永久显示“加载中”。
+        if (knowledgeInitialized)
             renderKnowledgePagination();
     }
 }
