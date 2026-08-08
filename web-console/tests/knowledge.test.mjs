@@ -290,6 +290,104 @@ test("知识库刷新失败保留现有列表并显示安全错误", async () =>
   delete globalThis.fetch;
 });
 
+test("轮询响应不会淘汰同时进行的主动刷新", async () => {
+  setupKnowledgePage();
+  const timers = new Map();
+  let nextTimerId = 1;
+  window.setTimeout = (callback) => {
+    const timerId = nextTimerId++;
+    timers.set(timerId, callback);
+    return timerId;
+  };
+  window.clearTimeout = (timerId) => timers.delete(timerId);
+  let listCalls = 0;
+  let resolvePoll;
+  let resolveRefresh;
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init.body));
+    if (body.page === undefined) return new Response(JSON.stringify({ ok: true, data: knowledgeCapabilities() }));
+    listCalls += 1;
+    if (listCalls === 1) return new Response(JSON.stringify(knowledgeResponse([knowledgeItem({ status: "pending", filename: "initial.md" })])));
+    if (listCalls === 2) return new Promise((resolve) => { resolvePoll = () => resolve(new Response(JSON.stringify(knowledgeResponse([knowledgeItem({ status: "processing", filename: "stale-poll.md" })])))); });
+    return new Promise((resolve) => { resolveRefresh = () => resolve(new Response(JSON.stringify(knowledgeResponse([knowledgeItem({ status: "ready", filename: "fresh.md" })])))); });
+  };
+
+  await initializeKnowledge();
+  const scheduled = timers.entries().next().value;
+  assert.ok(scheduled, "初始待处理文件应安排轮询");
+  timers.delete(scheduled[0]);
+  scheduled[1]();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const refresh = refreshKnowledgeList("refresh");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  resolveRefresh();
+  await refresh;
+  resolvePoll();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const refreshedRows = document.getElementById("knowledge-list").children[0].children[1].children;
+  assert.equal(refreshedRows.some((row) => row.children[0].textContent === "fresh.md"), true);
+  assert.equal(refreshedRows.some((row) => row.children[0].textContent === "stale-poll.md"), false);
+  delete globalThis.fetch;
+});
+
+test("刷新淘汰加载更多后会恢复分页按钮且不追加旧页", async () => {
+  setupKnowledgePage();
+  let resolvePageTwo;
+  let resolveRefresh;
+  let listCalls = 0;
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init.body));
+    if (body.page === undefined) return new Response(JSON.stringify({ ok: true, data: knowledgeCapabilities() }));
+    listCalls += 1;
+    if (listCalls === 1) return new Response(JSON.stringify({ ok: true, data: { items: [knowledgeItem({ filename: "page-1.md" })], page: 1, page_size: 20, total: 2, total_pages: 2 } }));
+    if (listCalls === 2) return new Promise((resolve) => { resolvePageTwo = () => resolve(new Response(JSON.stringify({ ok: true, data: { items: [knowledgeItem({ filename: "stale-page-2.md" })], page: 2, page_size: 20, total: 2, total_pages: 2 } }))); });
+    return new Promise((resolve) => { resolveRefresh = () => resolve(new Response(JSON.stringify({ ok: true, data: { items: [knowledgeItem({ filename: "refreshed-page-1.md" })], page: 1, page_size: 20, total: 2, total_pages: 2 } }))); });
+  };
+
+  await initializeKnowledge();
+  document.getElementById("knowledge-pagination").children[0].onclick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const refresh = refreshKnowledgeList("refresh");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  resolveRefresh();
+  await refresh;
+  resolvePageTwo();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const pagination = document.getElementById("knowledge-pagination");
+  assert.equal(pagination.children.length, 1);
+  assert.equal(pagination.children[0].disabled, false, "被淘汰的加载更多请求不能永久锁住按钮");
+  const refreshedRows = document.getElementById("knowledge-list").children[0].children[1].children;
+  assert.equal(refreshedRows.some((row) => row.children[0].textContent === "stale-page-2.md"), false);
+  delete globalThis.fetch;
+});
+
+test("删除后的刷新重建第一页并清除已经不存在的后续页", async () => {
+  setupKnowledgePage();
+  let listCalls = 0;
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init.body));
+    if (body.page === undefined) return new Response(JSON.stringify({ ok: true, data: knowledgeCapabilities() }));
+    listCalls += 1;
+    if (listCalls === 1) return new Response(JSON.stringify({ ok: true, data: { items: [knowledgeItem({ filename: "page-1.md" })], page: 1, page_size: 20, total: 2, total_pages: 2 } }));
+    if (body.page === 2) return new Response(JSON.stringify({ ok: true, data: { items: [knowledgeItem({ filename: "page-2.md" })], page: 2, page_size: 20, total: 2, total_pages: 2 } }));
+    return new Response(JSON.stringify({ ok: true, data: { items: [knowledgeItem({ filename: "remaining.md" })], page: 1, page_size: 20, total: 1, total_pages: 1 } }));
+  };
+
+  await initializeKnowledge();
+  document.getElementById("knowledge-pagination").children[0].onclick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await refreshKnowledgeList("delete");
+
+  const rows = document.getElementById("knowledge-list").children[0].children[1].children;
+  assert.equal(rows.some((row) => row.children[0].textContent === "remaining.md"), true);
+  assert.equal(rows.some((row) => row.children[0].textContent === "page-2.md"), false);
+  assert.equal(document.getElementById("knowledge-pagination").children.length, 0);
+  delete globalThis.fetch;
+});
+
 test("加载两页后轮询不会丢失后续页", async () => {
   setupKnowledgePage();
   const timers = new Map();

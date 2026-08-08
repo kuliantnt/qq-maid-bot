@@ -15,6 +15,8 @@ import {
   logoutAdmin,
   requestPasswordReset,
   resetAdminPassword,
+  setCsrfToken,
+  setUnauthorizedHandler,
 } from "./api.js";
 import { requiredElement, setText, togglePasswordReveal } from "./dom.js";
 import { renderDashboard } from "./views/dashboard.js";
@@ -78,8 +80,15 @@ let appBound = false;
 let autoRefreshTimer: number | undefined;
 let refreshInFlight = false;
 let userDataController: import("./views/configuration/configuration.js").UserDataController | null = null;
+let consoleAuthenticated = false;
+let authGeneration = 0;
+let sessionResetPromise: Promise<void> | null = null;
 
 const AUTO_REFRESH_INTERVAL_MS = 30_000;
+
+setUnauthorizedHandler(() => {
+  if (consoleAuthenticated) void handleSessionExpired();
+});
 
 authForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -137,15 +146,19 @@ async function initialize(): Promise<void> {
       setText("auth-error", cause instanceof Error ? cause.message : "认证状态加载失败");
       return;
     }
-    try {
-      const status = await fetchBootstrap();
-      await issuePreAuth();
-      bootstrapStatus = status;
-      authMode = status.initialized ? "login" : "initialize";
-      renderAuth(status);
-    } catch (bootstrapCause) {
-      setText("auth-error", bootstrapCause instanceof Error ? bootstrapCause.message : "初始化认证流程失败");
-    }
+    await prepareAuthentication();
+  }
+}
+
+async function prepareAuthentication(): Promise<void> {
+  try {
+    const status = await fetchBootstrap();
+    await issuePreAuth();
+    bootstrapStatus = status;
+    authMode = status.initialized ? "login" : "initialize";
+    renderAuth(status);
+  } catch (cause) {
+    setText("auth-error", cause instanceof Error ? cause.message : "初始化认证流程失败");
   }
 }
 
@@ -224,6 +237,8 @@ async function togglePasswordReset(): Promise<void> {
 }
 
 async function showConsole(username: string): Promise<void> {
+  const generation = ++authGeneration;
+  consoleAuthenticated = true;
   // 认证完成后立即清掉隐藏表单中的密码和一次性 token，避免明文显示状态残留。
   clearCredentialInput("auth-password", "auth-password-reveal");
   clearCredentialInput("bootstrap-token", "bootstrap-token-reveal");
@@ -236,15 +251,19 @@ async function showConsole(username: string): Promise<void> {
     bindMarkdownPreview();
     appBound = true;
   }
-  await Promise.all([refreshStatus(), hydrateUserData()]);
+  await Promise.all([refreshStatus(generation), hydrateUserData(generation)]);
+  if (!isCurrentAuthentication(generation)) return;
   await refreshConfiguration();
+  if (!isCurrentAuthentication(generation)) return;
   await initializeTodo();
+  if (!isCurrentAuthentication(generation)) return;
   await initializeKnowledge();
 }
 
-async function hydrateUserData(): Promise<void> {
+async function hydrateUserData(generation: number): Promise<void> {
   try {
     const [preferences, files] = await Promise.all([fetchUserPreferences(), listUserFiles()]);
+    if (!isCurrentAuthentication(generation)) return;
     // 服务端仅保存自定义色；主题预设继续沿用认证前从 localStorage 恢复的选择。
     themeController.hydrate({
       preset: themeController.current().preset,
@@ -256,6 +275,7 @@ async function hydrateUserData(): Promise<void> {
       mode: preferences.backgroundMode,
       kuliantnt: preferences.kuliantnt,
     }, files);
+    if (!isCurrentAuthentication(generation)) return;
     let currentPreferences = preferences;
     let currentFiles = files;
     const dataController: import("./views/configuration/configuration.js").UserDataController = {
@@ -288,9 +308,17 @@ async function hydrateUserData(): Promise<void> {
         currentPreferences = await dataController.updatePreferences(patch);
       });
     } catch (cause) {
+      if (isUnauthorized(cause)) {
+        await handleSessionExpired();
+        return;
+      }
       setText("configuration-result", cause instanceof Error ? cause.message : "背景解锁状态迁移失败");
     }
   } catch (cause) {
+    if (isUnauthorized(cause)) {
+      await handleSessionExpired();
+      return;
+    }
     userDataController = null;
     backgroundController.dispose();
     setText("configuration-result", cause instanceof Error ? cause.message : "用户界面偏好加载失败");
@@ -301,11 +329,58 @@ async function refreshConfiguration(): Promise<void> {
   try {
     await initializeConfiguration(themeController, backgroundController, userDataController);
   } catch (cause) {
+    if (isUnauthorized(cause)) {
+      await handleSessionExpired();
+      return;
+    }
     setText("configuration-result", cause instanceof Error ? cause.message : "配置加载失败");
   }
 }
 
+function handleSessionExpired(): Promise<void> {
+  if (sessionResetPromise) return sessionResetPromise;
+  if (!consoleAuthenticated) return Promise.resolve();
+
+  consoleAuthenticated = false;
+  const resetGeneration = ++authGeneration;
+  refreshInFlight = false;
+  stopAutoRefresh();
+  disposeKnowledge();
+  backgroundController.dispose();
+  void clearFileBlobCache();
+  userDataController = null;
+  bootstrapStatus = null;
+  authMode = "login";
+  setCsrfToken("");
+  clearCredentialInput("auth-password", "auth-password-reveal");
+  clearCredentialInput("bootstrap-token", "bootstrap-token-reveal");
+  requiredElement("auth-shell", HTMLElement).hidden = false;
+  for (const item of document.querySelectorAll<HTMLElement>("[data-authenticated]")) item.hidden = true;
+  setText("auth-error", "登录会话已过期，请重新登录。");
+  statusError.textContent = "";
+
+  sessionResetPromise = (async () => {
+    try {
+      const status = await fetchBootstrap();
+      await issuePreAuth();
+      if (authGeneration !== resetGeneration || consoleAuthenticated) return;
+      bootstrapStatus = status;
+      authMode = status.initialized ? "login" : "initialize";
+      renderAuth(status);
+    } catch (cause) {
+      if (authGeneration === resetGeneration && !consoleAuthenticated) {
+        setText("auth-error", cause instanceof Error ? cause.message : "重新建立认证流程失败");
+      }
+    } finally {
+      sessionResetPromise = null;
+    }
+  })();
+  return sessionResetPromise;
+}
+
 async function logout(): Promise<void> {
+  consoleAuthenticated = false;
+  authGeneration += 1;
   try {
     await logoutAdmin();
   } finally {
@@ -321,19 +396,32 @@ async function logout(): Promise<void> {
   }
 }
 
-async function refreshStatus(): Promise<void> {
+async function refreshStatus(generation = authGeneration): Promise<void> {
   if (refreshInFlight) return;
   refreshInFlight = true;
   statusError.textContent = "";
   try {
     const status = await fetchConsoleStatus();
+    if (!isCurrentAuthentication(generation)) return;
     renderDashboard(status);
     renderPlatforms(status.platforms);
     renderStorage(status.storage);
     setText("last-refresh", new Date().toLocaleString());
   } catch (cause: unknown) {
+    if (isUnauthorized(cause)) {
+      await handleSessionExpired();
+      return;
+    }
     statusError.textContent = cause instanceof Error ? cause.message : "状态刷新失败";
   } finally {
     refreshInFlight = false;
   }
+}
+
+function isUnauthorized(cause: unknown): cause is ConsoleApiError {
+  return cause instanceof ConsoleApiError && cause.status === 401;
+}
+
+function isCurrentAuthentication(generation: number): boolean {
+  return consoleAuthenticated && authGeneration === generation;
 }
