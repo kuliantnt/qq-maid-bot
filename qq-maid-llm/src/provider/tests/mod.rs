@@ -32,6 +32,8 @@ struct MockProvider {
 #[derive(Clone, Copy)]
 enum HandleBehavior {
     Failed,
+    CandidateTimeout,
+    SlowFailed,
     Timeout,
     Cancelled,
     Success,
@@ -158,6 +160,17 @@ impl LlmProvider for HandleAwareProvider {
                 });
                 handle.set_stop_reason(AgentStopReason::Failed);
                 Err(LlmError::new("provider_error", "failed", "provider")
+                    .with_agent(handle.snapshot()))
+            }
+            HandleBehavior::CandidateTimeout => {
+                // 模拟 runner 的单请求 timeout：记录当前候选结果，但不取消整次 Agent。
+                handle.set_stop_reason(AgentStopReason::Timeout);
+                Err(LlmError::timeout("agent_step").with_agent(handle.snapshot()))
+            }
+            HandleBehavior::SlowFailed => {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                handle.set_stop_reason(AgentStopReason::Failed);
+                Err(LlmError::provider("slow candidate failed", "provider")
                     .with_agent(handle.snapshot()))
             }
             HandleBehavior::Timeout => {

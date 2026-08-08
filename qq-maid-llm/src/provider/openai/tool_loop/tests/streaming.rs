@@ -1,4 +1,52 @@
 use super::*;
+use crate::agent_loop::AgentToolResult;
+
+#[derive(Debug, Default)]
+struct TimeoutFallbackState {
+    requests: Vec<Value>,
+}
+
+async fn timeout_then_non_stream_handler(
+    State(state): State<Arc<Mutex<TimeoutFallbackState>>>,
+    Json(body): Json<Value>,
+) -> Response<Body> {
+    let streaming = body.get("stream").and_then(Value::as_bool) == Some(true);
+    state.lock().await.requests.push(body);
+    if streaming {
+        return Response::builder()
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .body(Body::from_stream(stream::pending::<
+                Result<Bytes, Infallible>,
+            >()))
+            .unwrap();
+    }
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "output_text": "fallback answer",
+                "output": [{
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "fallback answer"}]
+                }]
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
+async fn spawn_timeout_then_non_stream_mock() -> (String, Arc<Mutex<TimeoutFallbackState>>) {
+    let state = Arc::new(Mutex::new(TimeoutFallbackState::default()));
+    let app = Router::new()
+        .route("/v1/responses", post(timeout_then_non_stream_handler))
+        .with_state(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}/v1"), state)
+}
 
 fn test_streaming_session(base_url: String) -> ResponsesAgentSession {
     let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();
@@ -16,6 +64,49 @@ fn test_streaming_session(base_url: String) -> ResponsesAgentSession {
         None,
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn cancelled_streaming_attempt_does_not_duplicate_fallback_input() {
+    let (base_url, state) = spawn_timeout_then_non_stream_mock().await;
+    let mut session = test_streaming_session(base_url);
+    let results = vec![AgentToolResult {
+        call_id: "call_weather_1".to_owned(),
+        output: r#"{"weather":"rain"}"#.to_owned(),
+    }];
+
+    // 流式首活动超时会丢弃在 clone 上构造的 input；随后发起第二个完整的
+    // 非流式兼容请求，但同一批工具结果在协议 input 中只能出现一次。
+    let timed_out = tokio::time::timeout(
+        Duration::from_millis(20),
+        session.advance_streaming(
+            &results,
+            true,
+            recording_delta_sink(Arc::new(StdMutex::new(Vec::new()))),
+        ),
+    )
+    .await;
+    assert!(timed_out.is_err());
+
+    let step = session.advance(&results, true).await.unwrap();
+    assert!(matches!(step, AgentStep::FinalAnswer { .. }));
+
+    let requests = &state.lock().await.requests;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["stream"], true);
+    assert!(requests[1].get("stream").is_none());
+    assert_eq!(requests[0]["input"], requests[1]["input"]);
+    for request in requests {
+        let outputs = request["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| {
+                item["type"] == "function_call_output" && item["call_id"] == "call_weather_1"
+            })
+            .count();
+        assert_eq!(outputs, 1);
+    }
 }
 
 #[tokio::test]
