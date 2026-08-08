@@ -101,7 +101,8 @@ pub struct AgentRunDiagnostics {
     pub tools_with_unknown_result: Vec<String>,
     /// 本轮是否从 Agent 流式单步回退到非流式单步。
     pub streaming_fallback_used: bool,
-    /// Agent Runtime 的最终停止原因；运行中快照为 None。
+    /// 当前/最终 Agent 停止原因；候选链执行期间可暂存上一候选终止原因，下一候选开始时清理。
+    /// 请求级不可逆终止由 `AgentRunHandle` 内部独立维护；运行中快照为 None。
     pub stop_reason: Option<AgentStopReason>,
 }
 
