@@ -2,6 +2,94 @@ use super::support::*;
 use super::*;
 
 #[tokio::test]
+async fn edit_tool_rejects_standalone_time_without_explicit_patch() {
+    let (todo_store, session_store, notification_store, owner) = test_stores();
+    let item = todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "不能被孤立时间修改".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
+            },
+        )
+        .unwrap();
+    let mut session = session_store
+        .get_or_create_active(&SessionMeta::new(
+            "private:u1",
+            Some("u1".to_owned()),
+            None,
+            None,
+            None,
+            "qq_official",
+        ))
+        .unwrap();
+    session.remember_last_todo_action(&owner.key, &item, "created");
+    session_store.save(&mut session).unwrap();
+    let edit_tool = EditTodoTool::new(
+        todo_store.clone(),
+        session_store.clone(),
+        notification_store,
+    );
+
+    let output = edit_tool
+        .execute(
+            test_context(),
+            json!({
+                "number": null,
+                "reference": "last",
+                "raw_text": "下午两点",
+                "title": null,
+                "detail": null,
+                "due_date": null,
+                "due_at": null,
+                "reminder_at": null,
+                "time_precision": null,
+                "recurrence_kind": null,
+                "recurrence_interval": null,
+                "recurrence_unit": null,
+                "recurrence_interval_days": null
+            }),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(output["ok"], false);
+    assert_eq!(output["error_code"], "todo_edit_patch_empty");
+    assert_eq!(
+        todo_store
+            .get_by_id(&owner, &item.id)
+            .unwrap()
+            .unwrap()
+            .reminder_at,
+        None
+    );
+    assert!(
+        session_store
+            .get_or_create_active(&SessionMeta::new(
+                "private:u1",
+                Some("u1".to_owned()),
+                None,
+                None,
+                None,
+                "qq_official",
+            ))
+            .unwrap()
+            .pending_operation
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn edit_tool_reuses_user_visible_snapshot_across_same_task_rounds() {
     let (todo_store, session_store, notification_store, owner) = test_stores();
     let mut visible_ids = Vec::new();

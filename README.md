@@ -17,7 +17,7 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.23.8`，项目处于 `23.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.23.9`，项目处于 `23.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
@@ -133,11 +133,12 @@ runtime/botctl.sh status
 
 ## 23.x 版本线更新
 
-当前稳定版本为 `v0.23.8`。需要查看本版本线的详细变更和升级提示时，再展开下面的更新记录：
+当前稳定版本为 `v0.23.9`。需要查看本版本线的详细变更和升级提示时，再展开下面的更新记录：
 
 <details>
 <summary>展开查看 23.x / 22.x 版本更新</summary>
 
+- **Todo 提醒澄清与工具回执收口**（v0.23.9）：已定位待办但只给日期时可跨轮补充提醒时刻，孤立时间不再误改最近待办；Todo 工具的中间参数错误不会覆盖后续真实成功结果，Core、Gateway、LLM 大文件职责也完成拆分，并补充 Docker 人话版部署指南。
 - **群消息轻量入站与工具流降级收口**（v0.23.8）：QQ 官方群消息先完成轻量去重、触发判定与被忽略消息的引用观察，再进入按群串行的重型回复队列，并修复去重记录提前提交导致的丢消息；工具活动后的未验真文本严格缓冲，`response.incomplete` 等失败直接丢弃且不阻止候选降级，联网搜索结果数按配置硬上限收敛。
 - **启动诊断与联网查询稳定性**（v0.23.7，PR #650、#652）：启动配置预检补充安全的 Agent / Ops 文件诊断和完整错误链日志；联网查询正确处理模型传入的空 `time_range`，并收紧 Tool Loop 最终正文发送边界，避免错误回执与模型草稿重复出站。
 - **QQ 官方流式协议迁移与候选恢复**（v0.23.6，PR #649）：统一使用官方 `/stream_messages` 累计替换协议，修复候选正文改写时的 Rollover 丢正文与重复发送；补齐连续 `index`、固定 `msg_seq`、429/50002 限流重试和 `ext_info.ref_idx` 保留语义。

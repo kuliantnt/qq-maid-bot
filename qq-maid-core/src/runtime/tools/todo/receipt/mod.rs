@@ -153,6 +153,11 @@ pub(crate) fn aggregate_todo_tool_results(
     let mut outcomes = Vec::new();
     for index in todo_indexes.iter().copied() {
         let result = &results[index];
+        if todo_validation_failure_was_corrected(index, results, attempts) {
+            // 原始失败继续保留在 Agent diagnostics 中；这里只避免把模型已经自纠的
+            // 参数错误投影给用户，成功回执仍必须来自后续真实 Todo Tool 结果。
+            continue;
+        }
         let pending_query = if result.name == LIST_TODOS_TOOL_NAME {
             if is_retry_superseded_result(index, attempts) {
                 None
@@ -187,6 +192,50 @@ pub(crate) fn aggregate_todo_tool_results(
     })
 }
 
+fn todo_validation_failure_was_corrected(
+    result_index: usize,
+    results: &[ToolExecutionResult],
+    attempts: &[ToolExecutionAttempt],
+) -> bool {
+    let result = &results[result_index];
+    if result.succeeded || !is_tool_argument_failure(&result.output) {
+        return false;
+    }
+    if is_retry_superseded_result(result_index, attempts) {
+        return true;
+    }
+    let Some(failed_round) = tool_result_round(result_index, attempts) else {
+        return false;
+    };
+    results
+        .iter()
+        .enumerate()
+        .skip(result_index + 1)
+        .any(|(later_index, later)| {
+            later.succeeded
+                && later.name == result.name
+                && tool_result_round(later_index, attempts)
+                    .is_some_and(|later_round| later_round > failed_round)
+        })
+}
+
+fn tool_result_round(result_index: usize, attempts: &[ToolExecutionAttempt]) -> Option<usize> {
+    attempts
+        .iter()
+        .find(|attempt| attempt.result_index == result_index)
+        .map(|attempt| attempt.round)
+}
+
+fn is_tool_argument_failure(output: &Value) -> bool {
+    let code = output
+        .get("error_code")
+        .and_then(Value::as_str)
+        .or_else(|| output.pointer("/error/code").and_then(Value::as_str));
+    let kind = output.pointer("/error/kind").and_then(Value::as_str);
+    matches!(code, Some("bad_tool_arguments" | "invalid_arguments"))
+        || kind == Some("invalid_arguments")
+}
+
 fn is_todo_tool_result(result: &ToolExecutionResult) -> bool {
     result.name == LIST_TODOS_TOOL_NAME
         || result.name == GET_TODO_TOOL_NAME
@@ -194,6 +243,11 @@ fn is_todo_tool_result(result: &ToolExecutionResult) -> bool {
 }
 
 fn is_user_visible_list_query(results: &[ToolExecutionResult], index: usize) -> bool {
+    // 失败的列表调用本身就是用户可见的真实失败；后续独立写操作不能把它当作
+    // 内部查询吞掉。成功列表仍可作为写操作前的内部定位查询而不单独展示。
+    if !results[index].succeeded {
+        return true;
+    }
     !results.iter().skip(index + 1).any(|result| {
         result.name == GET_TODO_TOOL_NAME || todo_write_operation(&result.name).is_some()
     })
