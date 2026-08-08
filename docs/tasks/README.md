@@ -46,6 +46,7 @@
 - [`qq-maid-llm` / `qq-maid-core` 改名风险](./archive/rename-core-risk.md)
 - [大文件审计](./archive/large-file-audit-report.md)
 - [Rust 测试资产基线](./archive/rust-test-asset-baseline.md)
+- [Issue #190 Todo / Tool Loop 分层测试审计](./archive/issue-190-test-layer-audit.md)
 - [`/ping` 多异常摘要修复](./archive/ping-summary-missing-fallback-and-reconnect.md)
 
 ## 新任务文档约定
