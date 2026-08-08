@@ -1,5 +1,7 @@
 # Issue #190：Todo / Tool Loop 分层测试审计
 
+> 归档说明：本文对应 Issue #190，是完成 #190 时形成的历史审计记录。当前行为和测试职责最终以源码、测试、`AGENTS.md` 及维护文档为准。
+
 审计日期：2026-08-08
 
 本清单以当前源码和测试为准，审计范围是 `qq-maid-core` 中 Tool、Respond、Pending、Storage 之间重叠的 Todo / Tool Loop 链路。目标是说明每个测试保护的独立风险，不以测试数量或代码行数为优化目标。
