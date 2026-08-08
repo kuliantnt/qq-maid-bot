@@ -258,6 +258,45 @@ async fn tool_candidate_failure_then_success_keeps_request_counters() {
 }
 
 #[tokio::test]
+async fn tool_candidate_step_timeout_does_not_terminate_model_route() {
+    let (provider, first, second) =
+        handle_route_provider(HandleBehavior::CandidateTimeout, HandleBehavior::Success);
+    let mut req = tool_request();
+    req.run_handle = Some(AgentRunHandle::with_timeout(
+        std::time::Duration::from_secs(2),
+    ));
+
+    let outcome = provider.chat_with_tools(req).await.unwrap();
+
+    assert_eq!(outcome.reply, "fallback success");
+    assert!(outcome.fallback_used);
+    assert_eq!(outcome.agent.model_rounds, 2);
+    assert_eq!(first.calls(), 1);
+    assert_eq!(second.calls(), 1);
+}
+
+#[tokio::test]
+async fn expired_agent_deadline_stops_model_route_before_second_candidate() {
+    let (provider, first, second) =
+        handle_route_provider(HandleBehavior::SlowFailed, HandleBehavior::Success);
+    let mut req = tool_request();
+    req.run_handle = Some(AgentRunHandle::with_timeout(
+        std::time::Duration::from_millis(10),
+    ));
+
+    let err = provider.chat_with_tools(req).await.unwrap_err();
+
+    assert_eq!(err.code, "timeout");
+    assert_eq!(err.stage, "agent_loop");
+    assert_eq!(first.calls(), 1);
+    assert_eq!(second.calls(), 0);
+    assert_eq!(
+        err.agent.unwrap().stop_reason,
+        Some(AgentStopReason::Timeout)
+    );
+}
+
+#[tokio::test]
 async fn tool_candidate_fallback_is_skipped_when_remaining_budget_is_insufficient() {
     let (provider, first, second) =
         handle_route_provider(HandleBehavior::Failed, HandleBehavior::Success);

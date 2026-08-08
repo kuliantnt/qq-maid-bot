@@ -219,6 +219,25 @@ fn new_candidate_attempt_clears_failed_but_external_termination_wins() {
 }
 
 #[test]
+fn new_candidate_attempt_clears_candidate_timeout_without_clearing_request_timeout() {
+    let handle = AgentRunHandle::default();
+    // 单候选/单请求超时只描述刚失败的 attempt，候选链仍可继续。
+    handle.set_stop_reason(AgentStopReason::Timeout);
+    handle.begin_candidate_attempt().unwrap();
+    assert_eq!(handle.snapshot().stop_reason, None);
+
+    // 整体 deadline/显式取消写入独立请求终止态，不能被新候选清除。
+    handle.cancel(AgentStopReason::Timeout);
+    let err = handle.begin_candidate_attempt().unwrap_err();
+    assert_eq!(err.code, "timeout");
+    assert_eq!(err.stage, "agent_loop");
+    assert_eq!(
+        handle.snapshot().stop_reason,
+        Some(AgentStopReason::Timeout)
+    );
+}
+
+#[test]
 fn cancel_and_begin_candidate_are_linearized_by_one_lifecycle_lock() {
     for reason in [AgentStopReason::Timeout, AgentStopReason::Cancelled] {
         for _ in 0..128 {
