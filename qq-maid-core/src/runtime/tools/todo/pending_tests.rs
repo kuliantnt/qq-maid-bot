@@ -146,15 +146,17 @@ async fn prepared_bulk_delete_confirm_executes_once_and_clears_pending() {
         ),
     );
 
-    let stored = service
-        .session_store
-        .get_or_create_active(&test_meta())
-        .unwrap()
-        .pending_operation
-        .expect("missing prepared action");
-    assert_eq!(stored.scope_key(), "group:g1");
-    assert!(!stored.expires_at().is_empty());
-    assert_eq!(stored.revision(), 1);
+    // 通用 envelope 的 scope、expiry、revision 由 Pending 与 Todo payload 单测覆盖；
+    // 本层保留确认前确实存在 pending 的用户可见生命周期断言。
+    assert!(
+        service
+            .session_store
+            .get_or_create_active(&test_meta())
+            .unwrap()
+            .pending_operation
+            .is_some(),
+        "确认前必须存在 pending 操作"
+    );
 
     let first = service.respond(message("确认")).await.unwrap();
     assert!(first.text.unwrap().contains("已永久删除 1 条进行中待办"));
