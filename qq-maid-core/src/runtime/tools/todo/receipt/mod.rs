@@ -201,6 +201,9 @@ fn todo_validation_failure_was_corrected(
     if result.succeeded || !is_tool_argument_failure(&result.output) {
         return false;
     }
+    if is_retry_superseded_result(result_index, attempts) {
+        return true;
+    }
     let Some(failed_round) = tool_result_round(result_index, attempts) else {
         return false;
     };
@@ -210,8 +213,7 @@ fn todo_validation_failure_was_corrected(
         .skip(result_index + 1)
         .any(|(later_index, later)| {
             later.succeeded
-                && is_todo_tool_result(later)
-                && (later.name == result.name || todo_write_operation(&later.name).is_some())
+                && later.name == result.name
                 && tool_result_round(later_index, attempts)
                     .is_some_and(|later_round| later_round > failed_round)
         })
@@ -241,6 +243,11 @@ fn is_todo_tool_result(result: &ToolExecutionResult) -> bool {
 }
 
 fn is_user_visible_list_query(results: &[ToolExecutionResult], index: usize) -> bool {
+    // 失败的列表调用本身就是用户可见的真实失败；后续独立写操作不能把它当作
+    // 内部查询吞掉。成功列表仍可作为写操作前的内部定位查询而不单独展示。
+    if !results[index].succeeded {
+        return true;
+    }
     !results.iter().skip(index + 1).any(|result| {
         result.name == GET_TODO_TOOL_NAME || todo_write_operation(&result.name).is_some()
     })
