@@ -503,19 +503,21 @@ export async function commitMemoryOperation(input: {
   readonly operation: MemoryOperation;
   readonly targetRef: string;
   readonly confirmationToken: string;
-}): Promise<{ affectedCount: number; capabilities: MemoryOperationCapabilities }> {
+}): Promise<{ affectedCount: number; capabilities: MemoryOperationCapabilities; target: MemoryTargetView }> {
   const payload = record(await mutatingJson(MEMORY_ROUTES.commit, "POST", {
     operation: input.operation,
     target_ref: input.targetRef,
     confirmation_token: input.confirmationToken,
   }));
   const data = record(payload.data);
-  if (data.operation !== input.operation || parseMemoryTarget(data.target).targetRef !== input.targetRef) {
+  const target = parseMemoryTarget(data.target);
+  if (data.operation !== input.operation || target.targetRef !== input.targetRef) {
     throw new ConsoleApiError("Memory 提交接口返回了不匹配的操作范围", "invalid_response");
   }
   return {
     affectedCount: requiredNonNegativeInteger(data.affected_count, "affected_count"),
     capabilities: parseOperationCapabilities(data.capabilities),
+    target,
   };
 }
 

@@ -4,8 +4,14 @@ let viewGeneration = 0;
 let page = 1;
 let items = [];
 let targetOptions = [];
-// targets 接口返回服务端能力；提交响应到达前，保留本地覆盖避免旧 DOM 重复触发高影响操作。
-let targetOperationCapabilities = new Map();
+// target discovery 使用服务端分页；只把已加载页用于创建、筛选和范围操作。
+const MEMORY_TARGET_PAGE_SIZE = 100;
+let targetPage = 0;
+let targetTotal = 0;
+let targetTotalPages = 0;
+let targetLoading = false;
+let targetError = null;
+let targetRequestGeneration = 0;
 let currentPage = { total: 0, totalPages: 0 };
 const KIND_LABELS = {
     personal: "个人记忆",
@@ -54,6 +60,7 @@ export async function initializeMemory() {
         return;
     initialized = true;
     bindControls();
+    void refreshMemoryTargets(true);
     await refreshMemories();
 }
 export function disposeMemory() {
@@ -62,7 +69,12 @@ export function disposeMemory() {
     page = 1;
     items = [];
     targetOptions = [];
-    targetOperationCapabilities.clear();
+    targetPage = 0;
+    targetTotal = 0;
+    targetTotalPages = 0;
+    targetLoading = false;
+    targetError = null;
+    targetRequestGeneration += 1;
     currentPage = { total: 0, totalPages: 0 };
     resetMemoryCreateForm();
     document.getElementById("memory-list")?.replaceChildren();
@@ -130,10 +142,7 @@ async function refreshMemories() {
     const generation = ++viewGeneration;
     renderLoading();
     try {
-        const [result, targets] = await Promise.all([
-            listMemories(readParams()),
-            loadAllMemoryTargets(),
-        ]);
+        const result = await listMemories(readParams());
         if (!initialized || generation !== viewGeneration)
             return;
         // 归档/恢复可能让当前页失效；回到最后有效页，避免空列表把分页控件一起隐藏。
@@ -142,12 +151,6 @@ async function refreshMemories() {
             return refreshMemories();
         }
         items = result.items;
-        targetOptions = targets;
-        const discoveredTargets = new Set(targets.map((target) => target.targetRef));
-        for (const targetRef of targetOperationCapabilities.keys()) {
-            if (!discoveredTargets.has(targetRef))
-                targetOperationCapabilities.delete(targetRef);
-        }
         currentPage = { total: result.total, totalPages: result.totalPages };
         renderMemoryContent();
         setResult(`${result.total} 条记忆`, false);
@@ -200,6 +203,84 @@ function renderMemoryContent() {
     renderMemoryTargets();
     renderPagination();
 }
+/**
+ * 目标列表是独立的渐进式资源：Memory 列表先可用，后续 target 页失败只影响目标控件。
+ */
+async function refreshMemoryTargets(reset) {
+    const generation = ++targetRequestGeneration;
+    if (reset) {
+        targetOptions = [];
+        targetPage = 0;
+        targetTotal = 0;
+        targetTotalPages = 0;
+    }
+    targetLoading = true;
+    targetError = null;
+    renderTargetState();
+    try {
+        const result = await listMemoryTargets(1, MEMORY_TARGET_PAGE_SIZE);
+        if (!isCurrentTargetRequest(generation))
+            return;
+        targetOptions = result.items;
+        targetPage = result.page;
+        targetTotal = result.total;
+        targetTotalPages = result.totalPages;
+    }
+    catch (cause) {
+        if (!isCurrentTargetRequest(generation))
+            return;
+        targetError = cause;
+    }
+    finally {
+        if (isCurrentTargetRequest(generation)) {
+            targetLoading = false;
+            renderTargetState();
+        }
+    }
+}
+async function loadMoreMemoryTargets() {
+    if (targetLoading || targetPage >= targetTotalPages)
+        return;
+    const generation = targetRequestGeneration;
+    const requestedPage = targetPage + 1;
+    targetLoading = true;
+    targetError = null;
+    renderTargetState();
+    try {
+        const result = await listMemoryTargets(requestedPage, MEMORY_TARGET_PAGE_SIZE);
+        if (!isCurrentTargetRequest(generation))
+            return;
+        targetOptions = mergeMemoryTargets(targetOptions, result.items);
+        targetPage = result.page;
+        targetTotal = result.total;
+        targetTotalPages = result.totalPages;
+    }
+    catch (cause) {
+        if (!isCurrentTargetRequest(generation))
+            return;
+        targetError = cause;
+    }
+    finally {
+        if (isCurrentTargetRequest(generation)) {
+            targetLoading = false;
+            renderTargetState();
+        }
+    }
+}
+function isCurrentTargetRequest(generation) {
+    return initialized && generation === targetRequestGeneration;
+}
+function mergeMemoryTargets(current, next) {
+    const merged = new Map(current.map((target) => [target.targetRef, target]));
+    for (const target of next)
+        merged.set(target.targetRef, target);
+    return [...merged.values()];
+}
+function renderTargetState() {
+    renderMemoryAdvancedFilters();
+    renderTargetControls();
+    renderMemoryTargets();
+}
 function memoryCard(item) {
     const card = document.createElement("article");
     card.className = `memory-card memory-card--${item.kind}${item.status === "archived" ? " memory-card--archived" : ""}`;
@@ -242,6 +323,16 @@ function memoryCard(item) {
 function renderTargetControls() {
     const targetContainer = element("memory-targets", HTMLElement);
     targetContainer.replaceChildren();
+    if (targetOptions.length === 0) {
+        const message = document.createElement("p");
+        message.className = "hint";
+        message.textContent = targetLoading
+            ? "正在加载授权范围…"
+            : targetError
+                ? "授权范围加载失败，请重试。"
+                : "暂无可用授权范围。";
+        targetContainer.append(message);
+    }
     for (const target of targetOptions) {
         const row = document.createElement("div");
         row.className = "memory-target-row";
@@ -256,11 +347,42 @@ function renderTargetControls() {
         }
         targetContainer.append(row);
     }
+    if (targetError) {
+        if (targetOptions.length > 0) {
+            const message = document.createElement("p");
+            message.className = "hint";
+            message.textContent = "后续授权范围加载失败，请重试。";
+            targetContainer.append(message);
+        }
+        const retry = actionButton(targetPage === 0 ? "重试加载范围" : "重试后续范围", () => {
+            if (targetPage === 0)
+                void refreshMemoryTargets(true);
+            else
+                void loadMoreMemoryTargets();
+        });
+        retry.id = "memory-target-retry";
+        targetContainer.append(retry);
+    }
+    else if (targetPage < targetTotalPages) {
+        const loadMore = actionButton(targetLoading ? "正在加载更多范围…" : `加载更多范围（已加载 ${targetOptions.length}/${targetTotal}）`, () => void loadMoreMemoryTargets());
+        loadMore.id = "memory-target-load-more";
+        loadMore.disabled = targetLoading;
+        targetContainer.append(loadMore);
+    }
 }
 function renderMemoryTargets() {
     const select = element("memory-create-target", HTMLSelectElement);
     const creatableTargets = targetOptions.filter(canCreateMemory);
-    select.replaceChildren(new Option(creatableTargets.length > 0 ? "选择已授权范围…" : "暂无可用范围", ""));
+    const placeholder = targetLoading && targetOptions.length === 0
+        ? "加载范围中…"
+        : targetError && targetOptions.length === 0
+            ? "范围加载失败"
+            : creatableTargets.length > 0
+                ? "选择已授权范围…"
+                : targetPage < targetTotalPages
+                    ? "请加载更多范围…"
+                    : "暂无可用范围";
+    select.replaceChildren(new Option(placeholder, ""));
     for (const target of creatableTargets) {
         select.append(new Option(targetLabel(target), target.targetRef));
     }
@@ -281,13 +403,6 @@ function renderOpaqueRefFilter(id, emptyLabel, refs) {
 }
 function uniqueRefs(refs) {
     return [...new Set(refs)];
-}
-async function loadAllMemoryTargets() {
-    const first = await listMemoryTargets(1, 100);
-    if (first.totalPages <= 1)
-        return first.items;
-    const pages = await Promise.all(Array.from({ length: first.totalPages - 1 }, (_, index) => listMemoryTargets(index + 2, 100)));
-    return [first, ...pages].flatMap((current) => current.items);
 }
 function updateCreateVisibilityOptions() {
     const targetSelect = element("memory-create-target", HTMLSelectElement);
@@ -386,7 +501,8 @@ async function confirmTargetOperation(operation, target) {
             targetRef: target.targetRef,
             confirmationToken: confirmation.confirmationToken,
         });
-        targetOperationCapabilities.set(target.targetRef, result.capabilities);
+        targetOptions = targetOptions.map((current) => current.targetRef === result.target.targetRef ? result.target : current);
+        renderTargetState();
         setResult(`服务端已完成${noun}：${result.affectedCount} 条`, false);
         await refreshMemories();
     }
@@ -445,17 +561,14 @@ function targetLabel(target) {
         target.subjectRef ? `用户 ${compactRef(target.subjectRef)}` : null,
     ].filter((value) => value !== null).join(" · ");
 }
-function operationCapabilitiesFor(target) {
-    return targetOperationCapabilities.get(target.targetRef) ?? target.capabilities;
-}
 function canClearTarget(target) {
-    return operationCapabilitiesFor(target).canClearTarget;
+    return target.capabilities.canClearTarget;
 }
 function canDisableGroupProfile(target) {
-    return target.scope === "group_profile" && operationCapabilitiesFor(target).canDisableGroupProfile;
+    return target.scope === "group_profile" && target.capabilities.canDisableGroupProfile;
 }
 function canCreateMemory(target) {
-    return target.scope !== "group_profile" || operationCapabilitiesFor(target).canDisableGroupProfile;
+    return target.scope !== "group_profile" || target.capabilities.canDisableGroupProfile;
 }
 function compactRef(value) {
     return value.length <= 32 ? value : `${value.slice(0, 22)}…${value.slice(-8)}`;
