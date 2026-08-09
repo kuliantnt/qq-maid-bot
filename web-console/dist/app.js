@@ -9,6 +9,7 @@ import { createThemeController } from "./theme.js";
 import { bindConsoleNavigation } from "./console-shell.js";
 import { initializeTodo } from "./views/todo/todo.js";
 import { disposeKnowledge, initializeKnowledge } from "./views/knowledge/knowledge.js";
+import { disposeMemory, initializeMemory } from "./views/memory/memory.js";
 import { createBackgroundController, installBackgroundConsoleUnlock, unlockPreferencePatch } from "./background.js";
 import { cacheFileBlob, clearFileBlobCache, deleteCachedFileBlob, readCachedFileBlob } from "./file-cache.js";
 let localStorage = null;
@@ -237,6 +238,9 @@ async function showConsole(username) {
     await initializeTodo();
     if (!isCurrentAuthentication(generation))
         return;
+    await initializeMemory();
+    if (!isCurrentAuthentication(generation))
+        return;
     await initializeKnowledge();
 }
 async function hydrateUserData(generation) {
@@ -328,6 +332,7 @@ function handleSessionExpired() {
     const resetGeneration = ++authGeneration;
     refreshInFlight = false;
     stopAutoRefresh();
+    disposeMemory();
     disposeKnowledge();
     backgroundController.dispose();
     void clearFileBlobCache();
@@ -370,6 +375,7 @@ async function logout() {
         await logoutAdmin();
     }
     finally {
+        disposeMemory();
         disposeKnowledge();
         backgroundController.dispose();
         void clearFileBlobCache();

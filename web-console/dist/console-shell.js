@@ -1,9 +1,10 @@
-export const CONSOLE_PAGE_IDS = ["overview", "platforms", "configuration", "storage", "todo", "knowledge", "tools"];
+export const CONSOLE_PAGE_IDS = ["overview", "platforms", "configuration", "storage", "memory", "todo", "knowledge", "tools"];
 export const CONSOLE_PAGES = [
     { id: "overview", label: "总览", icon: "overview", targetId: "dashboard" },
     { id: "platforms", label: "平台", icon: "platforms", targetId: "platforms" },
     { id: "configuration", label: "配置", icon: "configuration", targetId: "configuration" },
     { id: "storage", label: "存储", icon: "storage", targetId: "storage" },
+    { id: "memory", label: "Memory", icon: "memory", targetId: "memory" },
     { id: "todo", label: "Todo", icon: "todo", targetId: "todo" },
     { id: "knowledge", label: "知识库", icon: "knowledge", targetId: "knowledge" },
     { id: "tools", label: "工具", icon: "tools", targetId: "markdown" },
@@ -14,6 +15,7 @@ const ICONS = {
     platforms: { label: "平台", paths: ["M5 5h14v14H5z", "M9 5v14", "M15 5v14", "M5 10h4", "M15 14h4"] },
     configuration: { label: "配置", paths: ["M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z", "M12 2v3", "M12 19v3", "M2 12h3", "M19 12h3", "m4.93 4.93 2.12-2.12", "m16.95 7.05 2.12-2.12", "m4.93 7.07 2.12 2.12", "m16.95 16.95 2.12 2.12"] },
     storage: { label: "存储", paths: ["M4 6.5C4 5.12 7.58 4 12 4s8 1.12 8 2.5S16.42 9 12 9 4 7.88 4 6.5Z", "M4 6.5v5C4 12.88 7.58 14 12 14s8-1.12 8-2.5v-5", "M4 11.5v6C4 18.88 7.58 20 12 20s8-1.12 8-2.5v-6"] },
+    memory: { label: "Memory", paths: ["M5 5h14v14H5z", "M8 9h8", "M8 12h8", "M8 15h5", "M3 9h2", "M19 9h2", "M3 15h2", "M19 15h2"] },
     todo: { label: "Todo", paths: ["M5 6h14", "M5 12h14", "M5 18h9", "M3 6h.01", "M3 12h.01", "M3 18h.01"] },
     knowledge: { label: "知识库", paths: ["M4 5a2 2 0 0 1 2-2h9l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5Z", "M14 3v5h5", "M8 12h8", "M8 16h5"] },
     tools: { label: "工具", paths: ["m14.7 6.3 3-3 3 3-3 3", "m17.7 3.3-7.1 7.1", "M5 20h4l8.7-8.7-4-4L5 16v4Z"] },
@@ -29,12 +31,14 @@ export function pageForTarget(targetId) {
             return CONSOLE_PAGES[2];
         case "storage":
             return CONSOLE_PAGES[3];
-        case "todo":
+        case "memory":
             return CONSOLE_PAGES[4];
-        case "knowledge":
+        case "todo":
             return CONSOLE_PAGES[5];
-        case "markdown":
+        case "knowledge":
             return CONSOLE_PAGES[6];
+        case "markdown":
+            return CONSOLE_PAGES[7];
         default:
             return undefined;
     }

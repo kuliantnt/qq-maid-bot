@@ -29,6 +29,7 @@ import { createThemeController } from "./theme.js";
 import { bindConsoleNavigation } from "./console-shell.js";
 import { initializeTodo } from "./views/todo/todo.js";
 import { disposeKnowledge, initializeKnowledge } from "./views/knowledge/knowledge.js";
+import { disposeMemory, initializeMemory } from "./views/memory/memory.js";
 import { createBackgroundController, installBackgroundConsoleUnlock, unlockPreferencePatch, type BackgroundFile } from "./background.js";
 import { cacheFileBlob, clearFileBlobCache, deleteCachedFileBlob, readCachedFileBlob } from "./file-cache.js";
 
@@ -257,6 +258,8 @@ async function showConsole(username: string): Promise<void> {
   if (!isCurrentAuthentication(generation)) return;
   await initializeTodo();
   if (!isCurrentAuthentication(generation)) return;
+  await initializeMemory();
+  if (!isCurrentAuthentication(generation)) return;
   await initializeKnowledge();
 }
 
@@ -345,6 +348,7 @@ function handleSessionExpired(): Promise<void> {
   const resetGeneration = ++authGeneration;
   refreshInFlight = false;
   stopAutoRefresh();
+  disposeMemory();
   disposeKnowledge();
   backgroundController.dispose();
   void clearFileBlobCache();
@@ -384,6 +388,7 @@ async function logout(): Promise<void> {
   try {
     await logoutAdmin();
   } finally {
+    disposeMemory();
     disposeKnowledge();
     backgroundController.dispose();
     void clearFileBlobCache();

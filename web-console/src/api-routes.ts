@@ -34,6 +34,18 @@ export const TODO_ROUTES = {
   delete: "/api/v1/console/todo/delete",
 } as const;
 
+export const MEMORY_ROUTES = {
+  list: "/api/v1/console/memories/list",
+  targets: "/api/v1/console/memories/targets",
+  get: "/api/v1/console/memories/get",
+  create: "/api/v1/console/memories/create",
+  update: "/api/v1/console/memories/update",
+  archive: "/api/v1/console/memories/archive",
+  restore: "/api/v1/console/memories/restore",
+  prepare: "/api/v1/console/memories/operations/prepare",
+  commit: "/api/v1/console/memories/operations/commit",
+} as const;
+
 export const USER_DATA_ROUTES = {
   preferencesGet: "/api/v1/console/user-preferences/get",
   preferencesUpdate: "/api/v1/console/user-preferences/update",

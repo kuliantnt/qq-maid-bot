@@ -237,6 +237,113 @@ export interface TodoTargetPage {
   totalPages: number;
 }
 
+export type MemoryKind = "personal" | "group_profile" | "group";
+export type MemoryStatus = "active" | "archived";
+export type MemoryCategory = "note" | "preference" | "identity" | "relation" | "instruction";
+export type MemoryVisibility = "private" | "context_only" | "group_members" | "public";
+export type MemorySourceType = "user_confirmed" | "manual_import" | "system_derived" | "legacy";
+
+export interface MemoryTargetView {
+  targetRef: string;
+  scope: MemoryKind;
+  platform: string;
+  accountRef: string;
+  groupRef: string | null;
+  subjectRef: string | null;
+}
+
+export interface MemoryCapabilities {
+  canUpdate: boolean;
+  canArchive: boolean;
+  canRestore: boolean;
+}
+
+export interface MemoryItem {
+  memoryRef: string;
+  target: MemoryTargetView;
+  version: number;
+  content: string;
+  kind: MemoryKind;
+  category: MemoryCategory;
+  visibility: MemoryVisibility;
+  status: MemoryStatus;
+  pinned: boolean;
+  createdAt: string;
+  updatedAt: string | null;
+  lastConfirmedAt: string | null;
+  sourceType: MemorySourceType;
+  capabilities: MemoryCapabilities;
+}
+
+export interface MemoryPage {
+  items: MemoryItem[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface MemoryTargetPage {
+  items: MemoryTargetView[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface MemoryListParams {
+  page: number;
+  pageSize: number;
+  scope: MemoryKind | "all";
+  status: MemoryStatus | "all";
+  category: MemoryCategory | "all";
+  visibility: MemoryVisibility | "all";
+  pinned: "all" | "true" | "false";
+  keyword: string;
+  platform: string;
+  accountRef: string;
+  groupRef: string;
+  subjectRef: string;
+}
+
+export type MemoryOperation = "clear_target" | "disable_group_profile";
+
+export interface MemoryConfirmation {
+  confirmationToken: string;
+  operation: MemoryOperation;
+  target: MemoryTargetView;
+  affectedCount: number;
+  expiresAt: number;
+}
+
+export interface MemoryCreateInput {
+  readonly targetRef: string;
+  readonly content: string;
+  readonly category: MemoryCategory;
+  readonly visibility: MemoryVisibility;
+  readonly pinned?: boolean;
+  readonly attributeKey?: string | null;
+}
+
+export interface MemoryUpdateInput {
+  readonly targetRef: string;
+  readonly memoryRef: string;
+  readonly expectedVersion: number;
+  readonly patch: {
+    readonly content?: string;
+    readonly category?: MemoryCategory;
+    readonly visibility?: MemoryVisibility;
+    readonly pinned?: boolean;
+    readonly attributeKey?: string | null;
+  };
+}
+
+export interface MemoryVersionedInput {
+  readonly targetRef: string;
+  readonly memoryRef: string;
+  readonly expectedVersion: number;
+}
+
 export type KnowledgeFileStatus = "pending" | "processing" | "ready" | "failed";
 
 export type KnowledgeFileSource = "managed" | "directory";
