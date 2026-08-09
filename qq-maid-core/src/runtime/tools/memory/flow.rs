@@ -292,6 +292,7 @@ impl RustRespondService {
             MemoryPendingPayload::Replace {
                 record_id,
                 expected_updated_at,
+                expected_revision,
                 expected_record,
                 draft,
                 ..
@@ -308,6 +309,7 @@ impl RustRespondService {
                     owner_key: actor.personal_scope_id,
                     record_id,
                     expected_updated_at,
+                    expected_revision,
                     expected_record,
                     draft,
                     created_at: now_iso_cn(),

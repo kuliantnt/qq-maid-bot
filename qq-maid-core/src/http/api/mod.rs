@@ -5,6 +5,7 @@
 
 pub(crate) mod common;
 pub(crate) mod knowledge;
+pub(crate) mod memory;
 pub(crate) mod todo;
 pub(crate) mod user_data;
 

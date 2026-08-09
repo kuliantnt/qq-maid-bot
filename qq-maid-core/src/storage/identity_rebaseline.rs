@@ -344,7 +344,8 @@ fn stable_prefix(account_id: &str, target_type: &str) -> String {
 mod tests {
     use super::*;
     use crate::{
-        runtime::tools::memory::MEMORY_DOMAIN_SCHEMA_V3, storage::database::SqliteDatabase,
+        runtime::tools::memory::{MEMORY_DOMAIN_SCHEMA_V3, MEMORY_MANAGEMENT_SCHEMA_V5},
+        storage::database::SqliteDatabase,
     };
 
     #[test]
@@ -356,7 +357,10 @@ mod tests {
         let v2_migrations = APP_MIGRATIONS
             .iter()
             .copied()
-            .filter(|migration| migration.name != MEMORY_DOMAIN_SCHEMA_V3.name)
+            .filter(|migration| {
+                migration.name != MEMORY_DOMAIN_SCHEMA_V3.name
+                    && migration.name != MEMORY_MANAGEMENT_SCHEMA_V5.name
+            })
             .collect::<Vec<_>>();
         let database = SqliteDatabase::open(&path, &v2_migrations).unwrap();
         {

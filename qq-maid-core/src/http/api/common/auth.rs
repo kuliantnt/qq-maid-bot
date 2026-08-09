@@ -1,6 +1,7 @@
 //! 已认证管理 API 调用者上下文。
 
 use axum::http::{HeaderMap, header};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
@@ -18,6 +19,7 @@ const REQUEST_ID_HEADER: &str = "x-request-id";
 pub(crate) struct AuthenticatedApiActor {
     admin_id: i64,
     subject: String,
+    session_digest: [u8; 32],
 }
 
 impl AuthenticatedApiActor {
@@ -28,6 +30,10 @@ impl AuthenticatedApiActor {
 
     pub(crate) fn admin_id(&self) -> i64 {
         self.admin_id
+    }
+
+    pub(crate) fn session_digest(&self) -> [u8; 32] {
+        self.session_digest
     }
 }
 
@@ -101,7 +107,7 @@ impl ApiRequestId {
         )
     }
 
-    pub(super) fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -148,6 +154,7 @@ fn authenticate_admin_request_inner(
         auth.check_management_rate_limit(admin_id)
             .map_err(ApiError::from_admin_auth)?;
     }
+    let session_digest = Sha256::digest(cookie.as_bytes()).into();
     Ok(AuthenticatedAdminRequest {
         auth,
         cookie,
@@ -156,6 +163,7 @@ fn authenticate_admin_request_inner(
         actor: AuthenticatedApiActor {
             admin_id,
             subject: format!("console_admin:{admin_id}"),
+            session_digest,
         },
     })
 }

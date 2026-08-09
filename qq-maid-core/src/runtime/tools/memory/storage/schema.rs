@@ -181,9 +181,22 @@ pub const MEMORY_CONSOLIDATION_SCHEMA_V4: SqliteMigration = SqliteMigration {
                                   last_processed_session_id);",
 };
 
+/// Memory schema v5：为每条记录补充服务端维护的乐观并发版本。
+///
+/// SQLite 的 `DEFAULT 1` 会把已有 active 与 archived 历史统一初始化为 1；
+/// 后续状态变化在领域事务内递增，客户端不能写入该字段。
+pub const MEMORY_MANAGEMENT_SCHEMA_V5: SqliteMigration = SqliteMigration {
+    name: "memory_management_schema_v5_revision",
+    sql:
+        "ALTER TABLE memories ADD COLUMN revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1);
+        CREATE INDEX IF NOT EXISTS idx_memories_management_revision
+            ON memories(scope_type, scope_id, memory_kind, status, revision);",
+};
+
 pub const MEMORY_MIGRATIONS: &[SqliteMigration] = &[
     MEMORY_SCHEMA_V1,
     MEMORY_SCOPE_SCHEMA_V2,
     MEMORY_DOMAIN_SCHEMA_V3,
     MEMORY_CONSOLIDATION_SCHEMA_V4,
+    MEMORY_MANAGEMENT_SCHEMA_V5,
 ];

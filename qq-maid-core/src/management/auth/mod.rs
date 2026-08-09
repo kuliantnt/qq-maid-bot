@@ -6,6 +6,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
 use subtle::ConstantTimeEq;
@@ -57,6 +60,20 @@ pub const CONSOLE_ADMIN_SCHEMA_V1: SqliteMigration = SqliteMigration {
             ON console_audit_events(created_at);",
 };
 
+/// 管理审计 v2：在既有 `console_audit_events` 上补充请求和版本摘要。
+///
+/// 这些字段只接受稳定安全元数据；Memory 正文、raw identity、token 和 CSRF 永远不进表。
+pub const CONSOLE_AUDIT_SCHEMA_V2: SqliteMigration = SqliteMigration {
+    name: "console_audit_schema_v2_management_metadata",
+    sql: "ALTER TABLE console_audit_events ADD COLUMN request_id TEXT;
+        ALTER TABLE console_audit_events ADD COLUMN target_digest TEXT;
+        ALTER TABLE console_audit_events ADD COLUMN before_version INTEGER;
+        ALTER TABLE console_audit_events ADD COLUMN after_version INTEGER;
+        ALTER TABLE console_audit_events ADD COLUMN safe_error_code TEXT;
+        CREATE INDEX IF NOT EXISTS idx_console_audit_request_id
+            ON console_audit_events(request_id);",
+};
+
 #[derive(Debug, thiserror::Error)]
 #[error("{code}: {message}")]
 pub struct AdminAuthError {
@@ -102,6 +119,19 @@ pub struct AdminSession {
     pub expires_at: i64,
 }
 
+/// 管理资源审计所需的最小安全元数据；不携带资源正文或平台 raw identity。
+#[derive(Debug, Clone, Copy)]
+pub struct ManagementAudit<'a> {
+    pub actor_admin_id: i64,
+    pub request_id: &'a str,
+    pub action: &'a str,
+    pub result: &'a str,
+    pub target_digest: Option<&'a str>,
+    pub before_version: Option<u64>,
+    pub after_version: Option<u64>,
+    pub safe_error_code: Option<&'a str>,
+}
+
 #[derive(Debug, Clone)]
 pub struct IssuedSession {
     pub cookie_value: String,
@@ -120,6 +150,8 @@ pub struct AdminAuth {
     argon2_limiter: Arc<Argon2ConcurrencyLimiter>,
     bootstrap_lock: Arc<Mutex<()>>,
     bootstrap_token_output: Option<BootstrapTokenOutput>,
+    #[cfg(test)]
+    management_audit_failure: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -284,6 +316,8 @@ impl AdminAuth {
             argon2_limiter: Arc::new(Argon2ConcurrencyLimiter::new(MAX_ARGON2_VERIFICATIONS)),
             bootstrap_lock: Arc::new(Mutex::new(())),
             bootstrap_token_output,
+            #[cfg(test)]
+            management_audit_failure: Arc::new(AtomicBool::new(false)),
         };
         auth.ensure_bootstrap_state()?;
         Ok(auth)
@@ -780,6 +814,45 @@ impl AdminAuth {
         Ok(())
     }
 
+    /// 复用现有管理审计表记录资源操作的安全摘要。
+    pub fn audit_management(&self, event: ManagementAudit<'_>) -> Result<(), AdminAuthError> {
+        let event = validate_management_audit(event)?;
+        #[cfg(test)]
+        self.ensure_management_audit_available()?;
+        let connection = self.database.connection().map_err(database_error)?;
+        insert_management_audit(&connection, &event)
+    }
+
+    /// 在 Memory 领域事务所在的同一个 SQLite transaction 中写管理审计。
+    ///
+    /// Memory 的成功写入必须和该审计记录一起提交；任何一个步骤失败都会由调用方回滚，
+    /// 避免客户端看到 500 时数据库里已经存在未审计的业务变更。
+    pub(crate) fn audit_management_in_transaction(
+        &self,
+        connection: &rusqlite::Transaction<'_>,
+        event: ManagementAudit<'_>,
+    ) -> Result<(), AdminAuthError> {
+        let event = validate_management_audit(event)?;
+        #[cfg(test)]
+        self.ensure_management_audit_available()?;
+        insert_management_audit(connection, &event)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_management_audit_failure_for_tests(&self, enabled: bool) {
+        self.management_audit_failure
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn ensure_management_audit_available(&self) -> Result<(), AdminAuthError> {
+        if self.management_audit_failure.load(Ordering::Relaxed) {
+            Err(AdminAuthError::storage("injected management audit failure"))
+        } else {
+            Ok(())
+        }
+    }
+
     fn issue_admin_session(
         &self,
         id: i64,
@@ -886,10 +959,12 @@ fn safe_audit_value(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte == b'.' || byte == b'_')
 }
 
+mod audit;
 mod bootstrap;
 mod credentials;
 mod session;
 
+use audit::{insert_management_audit, validate_management_audit};
 use bootstrap::*;
 use credentials::*;
 use session::*;
