@@ -1,5 +1,8 @@
 use super::*;
 
+mod actions;
+use actions::MockToolAction;
+
 fn agent_tool_trace(
     emitted_tools: Vec<String>,
     tool_results: Vec<ToolExecutionResult>,
@@ -46,47 +49,6 @@ pub(crate) struct MockProvider {
     dream_delay: Option<std::time::Duration>,
     search_query_rewrite_replies: Arc<Mutex<Vec<Result<String, LlmError>>>>,
     title_delay: Option<std::time::Duration>,
-}
-
-#[derive(Clone)]
-enum MockToolAction {
-    CreateTodo {
-        content: String,
-    },
-    ExecuteTool {
-        name: String,
-        arguments: String,
-        reply: String,
-    },
-    ExecuteTodoListRetry {
-        arguments: String,
-        reply: String,
-    },
-    ExecuteTools {
-        calls: Vec<(String, String)>,
-        reply: String,
-    },
-    ExecuteToolsThenFail {
-        calls: Vec<(String, String)>,
-        error: LlmError,
-    },
-    ExecuteToolsThenFailWithPendingCall {
-        calls: Vec<(String, String)>,
-        pending_tools: Vec<String>,
-        error: LlmError,
-    },
-    ReturnToolResults {
-        results: Vec<ToolExecutionResult>,
-        attempts: Vec<ToolExecutionAttempt>,
-        reply: String,
-    },
-    ReplyWithoutTool {
-        reply: String,
-    },
-    RejectedToolCall {
-        name: String,
-        reply: String,
-    },
 }
 
 impl MockProvider {
@@ -195,161 +157,6 @@ impl MockProvider {
 
     pub(crate) fn with_stream_enabled(mut self, enabled: bool) -> Self {
         self.stream_enabled = enabled;
-        self
-    }
-
-    pub(crate) fn with_create_todo_tool_call(self, content: impl Into<String>) -> Self {
-        self.tool_actions
-            .lock()
-            .unwrap()
-            .push(MockToolAction::CreateTodo {
-                content: content.into(),
-            });
-        self
-    }
-
-    pub(crate) fn with_tool_call_json(
-        self,
-        name: impl Into<String>,
-        arguments: impl Into<String>,
-        reply: impl Into<String>,
-    ) -> Self {
-        self.tool_actions
-            .lock()
-            .unwrap()
-            .push(MockToolAction::ExecuteTool {
-                name: name.into(),
-                arguments: arguments.into(),
-                reply: reply.into(),
-            });
-        self
-    }
-
-    pub(crate) fn with_todo_list_retry(
-        self,
-        arguments: impl Into<String>,
-        reply: impl Into<String>,
-    ) -> Self {
-        self.tool_actions
-            .lock()
-            .unwrap()
-            .push(MockToolAction::ExecuteTodoListRetry {
-                arguments: arguments.into(),
-                reply: reply.into(),
-            });
-        self
-    }
-
-    pub(crate) fn with_tool_calls_json(
-        self,
-        calls: Vec<(&str, &str)>,
-        reply: impl Into<String>,
-    ) -> Self {
-        self.tool_actions
-            .lock()
-            .unwrap()
-            .push(MockToolAction::ExecuteTools {
-                calls: calls
-                    .into_iter()
-                    .map(|(name, arguments)| (name.to_owned(), arguments.to_owned()))
-                    .collect(),
-                reply: reply.into(),
-            });
-        self
-    }
-
-    pub(crate) fn with_tool_calls_then_error(
-        self,
-        calls: Vec<(&str, &str)>,
-        error: LlmError,
-    ) -> Self {
-        self.tool_actions
-            .lock()
-            .unwrap()
-            .push(MockToolAction::ExecuteToolsThenFail {
-                calls: calls
-                    .into_iter()
-                    .map(|(name, arguments)| (name.to_owned(), arguments.to_owned()))
-                    .collect(),
-                error,
-            });
-        self
-    }
-
-    pub(crate) fn with_tool_calls_then_error_with_pending_call(
-        self,
-        calls: Vec<(&str, &str)>,
-        pending_tools: Vec<&str>,
-        error: LlmError,
-    ) -> Self {
-        self.tool_actions.lock().unwrap().push(
-            MockToolAction::ExecuteToolsThenFailWithPendingCall {
-                calls: calls
-                    .into_iter()
-                    .map(|(name, arguments)| (name.to_owned(), arguments.to_owned()))
-                    .collect(),
-                pending_tools: pending_tools.into_iter().map(str::to_owned).collect(),
-                error,
-            },
-        );
-        self
-    }
-
-    pub(crate) fn with_raw_tool_results(
-        self,
-        results: Vec<ToolExecutionResult>,
-        reply: impl Into<String>,
-    ) -> Self {
-        self.tool_actions
-            .lock()
-            .unwrap()
-            .push(MockToolAction::ReturnToolResults {
-                results,
-                attempts: Vec::new(),
-                reply: reply.into(),
-            });
-        self
-    }
-
-    pub(crate) fn with_raw_tool_results_and_attempts(
-        self,
-        results: Vec<ToolExecutionResult>,
-        attempts: Vec<ToolExecutionAttempt>,
-        reply: impl Into<String>,
-    ) -> Self {
-        self.tool_actions
-            .lock()
-            .unwrap()
-            .push(MockToolAction::ReturnToolResults {
-                results,
-                attempts,
-                reply: reply.into(),
-            });
-        self
-    }
-
-    pub(crate) fn with_tool_loop_reply_without_tool(self, reply: impl Into<String>) -> Self {
-        self.tool_actions
-            .lock()
-            .unwrap()
-            .push(MockToolAction::ReplyWithoutTool {
-                reply: reply.into(),
-            });
-        self
-    }
-
-    pub(crate) fn with_rejected_tool_call(
-        self,
-        name: impl Into<String>,
-        reply: impl Into<String>,
-    ) -> Self {
-        self.tool_actions
-            .lock()
-            .unwrap()
-            .push(MockToolAction::RejectedToolCall {
-                name: name.into(),
-                reply: reply.into(),
-            });
         self
     }
 
@@ -882,6 +689,16 @@ impl LlmProvider for MockProvider {
                             stop_reason: Some(AgentStopReason::ToolUsed),
                         },
                     });
+                }
+                MockToolAction::ReturnToolResultsThenFail { results, error } => {
+                    let emitted_tools = results
+                        .iter()
+                        .map(|result| result.name.clone())
+                        .collect::<Vec<_>>();
+                    let mut diagnostics = agent_tool_trace(emitted_tools, results);
+                    diagnostics.model_rounds = 4;
+                    diagnostics.stop_reason = Some(AgentStopReason::Failed);
+                    return Err(error.with_agent(diagnostics));
                 }
                 MockToolAction::ReplyWithoutTool { reply } => {
                     return Ok(ChatOutcome {

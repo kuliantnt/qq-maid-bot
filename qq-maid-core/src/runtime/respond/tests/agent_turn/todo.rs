@@ -231,13 +231,17 @@ async fn only_list_todos_success_does_not_claim_todo_write_success() {
         .await
         .unwrap();
 
-    let visible_snapshot = response
-        .visible_entity_snapshot
-        .as_ref()
-        .expect("visible list response should carry snapshot");
-    assert_eq!(visible_snapshot.items.len(), 1);
-    assert_eq!(visible_snapshot.items[0].visible_number, 1);
-    assert_eq!(visible_snapshot.items[0].domain, "todo");
+    assert_eq!(response.text.as_deref(), Some("当前待办列表"));
+    assert!(response.visible_entity_snapshot.is_none());
+    assert!(
+        service
+            .session_store
+            .get_or_create_active(&private_test_meta())
+            .unwrap()
+            .last_todo_query
+            .is_none(),
+        "模型正文未结构化展示编号时不能登记隐藏列表"
+    );
 
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], "succeeded");

@@ -391,7 +391,7 @@ async fn group_tool_loop_todo_visible_snapshot_uses_actor_interaction_session() 
                 output: json!({"ok": true, "status": "pending"}),
                 succeeded: true,
             }],
-            "已列出待办",
+            "  ",
         )
         .with_tool_call_json(
             "complete_todos",

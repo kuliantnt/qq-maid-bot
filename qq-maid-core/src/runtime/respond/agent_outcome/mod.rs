@@ -88,6 +88,10 @@ pub(crate) struct ProvenanceSource {
     pub title: String,
     pub url: String,
     pub snippet: String,
+    /// 确定性搜索正文是否已经结构化展示来源身份（title / URL）。
+    pub identity_in_deterministic_body: bool,
+    /// 确定性搜索正文是否已经结构化展示来源摘要。
+    pub snippet_in_deterministic_body: bool,
 }
 
 impl OutcomePresentation {
@@ -281,24 +285,35 @@ impl AgentTurnOutcome {
     /// 当前整轮是否拥有可安全展示的完整确定性结果。
     pub(crate) fn can_render_deterministic_reply(&self) -> bool {
         !self.has_incomplete_result()
-            && !self.blocks.is_empty()
+            && !self.outcomes.is_empty()
             && self
                 .outcomes
                 .iter()
-                .all(|outcome| outcome.presentation != OutcomePresentation::Unhandled)
+                .all(outcome_has_complete_deterministic_body)
+    }
+
+    /// 当前整轮是否至少有一段可安全展示的确定性正文。
+    ///
+    /// 最终模型失败时，完整结果可以直接降级；混合了 Internal 结果时只能展示
+    /// 已知部分并明确警告；一段正文都没有时必须传播原始生成错误。
+    pub(crate) fn has_renderable_deterministic_body(&self) -> bool {
+        self.outcomes.iter().any(outcome_has_deterministic_body)
     }
 
     /// 自然语言 Agent 是否可以把模型正文作为本轮唯一主体。
     ///
-    /// 成功的写操作也走这里；Todo 成功验真仍由 Todo postprocessor 在合成后执行。
+    /// 成功的写操作也走这里；Todo 成功验真由 Todo postprocessor 在合成前执行。
     /// 只有真实失败（`empty_result` 是“查询完成但无证据”的兼容状态）才回到确定性
-    /// 错误/回执，避免模型把失败工具说成成功。
+    /// 错误/回执，避免模型把失败工具说成成功。Internal/Skipped 表示去重或调用上限
+    /// 等无需单独展示的内部跳过状态，不应覆盖同轮已经生成的有效模型正文。
     pub(crate) fn can_use_model_reply_as_primary(&self) -> bool {
-        if self.has_incomplete_result() || !self.can_render_deterministic_reply() {
+        if self.has_incomplete_result() || self.has_unhandled_outcome() {
             return false;
         }
         self.outcomes.iter().all(|outcome| {
             outcome.status == ToolOutcomeStatus::Succeeded
+                || (outcome.status == ToolOutcomeStatus::Skipped
+                    && outcome.presentation == OutcomePresentation::Internal)
                 || (outcome.status == ToolOutcomeStatus::Failed
                     && outcome.effect == ToolEffect::ReadOnly
                     && outcome.error_code.as_deref() == Some("empty_result"))
@@ -315,18 +330,16 @@ impl AgentTurnOutcome {
 
     /// 自然语言 Agent 成功时允许追加到模型正文后的用户可见补充内容。
     ///
-    /// 只追加 Todo 的真实可见列表和搜索来源；写操作回执、天气事实卡等仍由模型
-    /// 总结，避免同一轮把所有 Tool 结果重复发送给用户。
+    /// 只追加搜索来源；Todo 列表、写操作回执、天气事实卡等仍由模型总结，避免
+    /// 模型已经列出结果时再次附加确定性正文。
     pub(crate) fn render_natural_language_supplement(&self) -> CommandBody {
-        let related_lists = self.render_related_list_body();
-        let provenance = self.render_provenance();
-        join_command_bodies(&related_lists, &provenance)
+        self.render_provenance()
     }
 
     /// 确定性结果正文并附加尚未嵌入正文的可信来源。
     pub(crate) fn render_body_with_provenance(&self) -> CommandBody {
         let body = self.render_body();
-        let provenance = self.render_provenance_excluding(&body);
+        let provenance = self.render_deterministic_provenance();
         join_command_bodies(&body, &provenance)
     }
 
@@ -337,7 +350,14 @@ impl AgentTurnOutcome {
     pub(crate) fn render_fallback_body(&self) -> CommandBody {
         let body = self.render_body_with_provenance();
         if !body.text.trim().is_empty() {
-            return body;
+            if self.can_render_deterministic_reply() {
+                return body;
+            }
+            let warning = CommandBody::dual(
+                "⚠️ 以上只包含可确定展示的部分结果；另有工具结果需要模型整理，但最终回复生成失败，请稍后重试。",
+                "## ⚠️ 结果不完整\n\n以上只包含可确定展示的部分结果；另有工具结果需要模型整理，但最终回复生成失败，请稍后重试。",
+            );
+            return join_command_bodies(&body, &warning);
         }
         if self
             .outcomes
@@ -359,12 +379,10 @@ impl AgentTurnOutcome {
         Self::render_block_bodies(self.blocks.iter())
     }
 
-    fn render_related_list_body(&self) -> CommandBody {
-        Self::render_block_bodies(
-            self.blocks
-                .iter()
-                .filter(|block| matches!(block, ResponseBlock::RelatedList(_))),
-        )
+    pub(crate) fn has_related_list(&self) -> bool {
+        self.blocks
+            .iter()
+            .any(|block| matches!(block, ResponseBlock::RelatedList(_)))
     }
 
     fn render_block_bodies<'a, I>(blocks: I) -> CommandBody
@@ -395,14 +413,22 @@ impl AgentTurnOutcome {
         CommandBody { text, markdown }
     }
 
-    fn render_provenance_excluding(&self, body: &CommandBody) -> CommandBody {
+    fn render_deterministic_provenance(&self) -> CommandBody {
         let sources = self
             .provenance
             .iter()
-            .filter(|source| !source_is_embedded(source, body))
             .cloned()
+            .filter_map(|mut source| {
+                if source.identity_in_deterministic_body {
+                    return None;
+                }
+                if source.snippet_in_deterministic_body {
+                    source.snippet.clear();
+                }
+                Some(source)
+            })
             .collect::<Vec<_>>();
-        render_provenance_sources_avoiding_embedded_snippets(&sources, body)
+        render_provenance_sources(&sources)
     }
 
     pub(crate) fn render_compat_body(&self) -> CommandBody {
@@ -551,6 +577,21 @@ impl AgentTurnOutcome {
     }
 }
 
+fn outcome_has_complete_deterministic_body(outcome: &ToolExecutionOutcome) -> bool {
+    outcome.presentation == OutcomePresentation::Trusted && outcome_has_deterministic_body(outcome)
+}
+
+fn outcome_has_deterministic_body(outcome: &ToolExecutionOutcome) -> bool {
+    outcome.blocks.iter().any(|block| {
+        let body = block.body();
+        !body.text.trim().is_empty()
+            || body
+                .markdown
+                .as_deref()
+                .is_some_and(|markdown| !markdown.trim().is_empty())
+    })
+}
+
 fn calculate_turn_status(outcomes: &[ToolExecutionOutcome], incomplete: bool) -> AgentTurnStatus {
     if outcomes.is_empty() {
         return if incomplete {
@@ -618,9 +659,9 @@ fn structured_error_code(output: &Value) -> Option<String> {
 }
 
 fn deduplicate_provenance(sources: Vec<ProvenanceSource>) -> Vec<ProvenanceSource> {
-    let mut unique = Vec::new();
+    let mut unique: Vec<ProvenanceSource> = Vec::new();
     for source in sources {
-        let duplicate = unique.iter().any(|existing: &ProvenanceSource| {
+        let duplicate = unique.iter_mut().find(|existing| {
             if !source.url.is_empty() && !existing.url.is_empty() {
                 source.url == existing.url
             } else {
@@ -629,7 +670,10 @@ fn deduplicate_provenance(sources: Vec<ProvenanceSource>) -> Vec<ProvenanceSourc
                     && source.snippet == existing.snippet
             }
         });
-        if !duplicate {
+        if let Some(existing) = duplicate {
+            existing.identity_in_deterministic_body |= source.identity_in_deterministic_body;
+            existing.snippet_in_deterministic_body |= source.snippet_in_deterministic_body;
+        } else {
             unique.push(source);
         }
     }
@@ -666,57 +710,6 @@ fn render_provenance_sources(sources: &[ProvenanceSource]) -> CommandBody {
     let mut body = structured_command_body(markdown_lines.join("\n"));
     body.text = text_lines.join("\n");
     body
-}
-
-/// 来源的 title/URL 尚未展示时，不能因为 snippet 已经出现在正文中而丢弃整个来源。
-/// 这里只省略重复的摘要文本，避免 answer 与 snippet 相同导致正文重复，来源身份仍保留。
-fn render_provenance_sources_avoiding_embedded_snippets(
-    sources: &[ProvenanceSource],
-    body: &CommandBody,
-) -> CommandBody {
-    let sources = sources
-        .iter()
-        .cloned()
-        .map(|mut source| {
-            if source_snippet_is_embedded(&source, body) {
-                source.snippet.clear();
-            }
-            source
-        })
-        .collect::<Vec<_>>();
-    render_provenance_sources(&sources)
-}
-
-fn source_is_embedded(source: &ProvenanceSource, body: &CommandBody) -> bool {
-    let url = source.url.trim();
-    if !url.is_empty() {
-        // 带 URL 的来源以 URL 为稳定身份；正文只有 answer/snippet 时不能算已展示。
-        return body_contains(body, url);
-    }
-
-    let title = source.title.trim();
-    if !title.is_empty() {
-        // 没有 URL 时至少要出现 title；若有 snippet，也要求摘要同时出现，避免
-        // 仅凭相同的短文本把来源身份误判为已展示。
-        return body_contains(body, title)
-            && (source.snippet.trim().is_empty() || body_contains(body, source.snippet.trim()));
-    }
-
-    // 只有 title 和 URL 都为空的来源才允许使用 snippet-only 去重。
-    !source.snippet.trim().is_empty() && body_contains(body, source.snippet.trim())
-}
-
-fn source_snippet_is_embedded(source: &ProvenanceSource, body: &CommandBody) -> bool {
-    let snippet = source.snippet.trim();
-    !snippet.is_empty() && body_contains(body, snippet)
-}
-
-fn body_contains(body: &CommandBody, needle: &str) -> bool {
-    body.text.contains(needle)
-        || body
-            .markdown
-            .as_deref()
-            .is_some_and(|markdown| markdown.contains(needle))
 }
 
 fn join_command_bodies(first: &CommandBody, second: &CommandBody) -> CommandBody {

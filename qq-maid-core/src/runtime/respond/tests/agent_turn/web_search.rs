@@ -132,6 +132,51 @@ async fn empty_model_reply_keeps_search_answer_and_sources_once() {
 }
 
 #[tokio::test]
+async fn empty_model_reply_appends_research_source_truncated_from_card() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results(
+            vec![raw_tool_result(
+                "web_search",
+                serde_json::json!({
+                    "ok": true,
+                    "mode": "multi_entity_research",
+                    "successful": 2,
+                    "failed": 0,
+                    "results": [{
+                        "entity": "项目甲",
+                        "status": "success",
+                        "facts": "前序事实".repeat(350),
+                        "sources": []
+                    }, {
+                        "entity": "项目乙",
+                        "status": "success",
+                        "facts": "尾部事实仍然可见".repeat(4),
+                        "sources": [{
+                            "title": "项目乙官方来源",
+                            "url": "https://example.test/project-b",
+                            "snippet": "项目乙来源摘要"
+                        }]
+                    }]
+                }),
+                true,
+            )],
+            "  ",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("联网调研项目甲和项目乙"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("尾部事实仍然可见"));
+    assert!(text.contains("参考来源："));
+    assert_eq!(text.matches("https://example.test/project-b").count(), 1);
+}
+
+#[tokio::test]
 async fn duplicate_web_search_keeps_first_card_and_model_reply_without_counting_cache_hit() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)

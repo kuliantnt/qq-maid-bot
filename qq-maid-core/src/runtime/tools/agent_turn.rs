@@ -51,6 +51,10 @@ pub(crate) trait DomainTurnDiagnostics {
     ) -> Option<&'static str> {
         None
     }
+
+    fn blocks_reply_composition(&self) -> bool {
+        false
+    }
 }
 
 /// 领域后处理器只接收通用 Tool Turn 结果，并自行完成领域验真与诊断构造。
@@ -59,8 +63,10 @@ pub(crate) trait DomainTurnDiagnostics {
 pub(crate) trait DomainTurnPostprocessor {
     fn postprocess_output(
         self: Box<Self>,
-        projected_outcome: Option<&AgentTurnOutcome>,
+        projected_outcome: Option<&mut AgentTurnOutcome>,
         output: &mut RespondOutput,
+        state_session: &mut SessionRecord,
+        reply_source: AgentReplySource,
     ) -> Box<dyn DomainTurnDiagnostics>;
 }
 
@@ -118,6 +124,12 @@ impl ToolTurnDiagnostics {
             .iter()
             .find_map(|domain| domain.guard_error_code(outcome, use_agent_runtime))
     }
+
+    fn blocks_reply_composition(&self) -> bool {
+        self.domains
+            .iter()
+            .any(|domain| domain.blocks_reply_composition())
+    }
 }
 
 pub(crate) fn postprocess_tool_turn(
@@ -150,27 +162,45 @@ pub(crate) fn postprocess_tool_turn(
         todo::agent_turn::TodoTurnPostprocessor::for_request(req, state_session, &output.reply),
     )];
 
-    let outcome = project_tool_turn(task_store, state_session, meta, &output)?;
-    if let Some(interaction) = standalone_interaction.as_mut() {
-        session_store
-            .save(interaction)
-            .map_err(crate::runtime::respond::common::session_error)?;
+    let mut outcome = project_tool_turn(task_store, state_session, meta, &output)?;
+    if output.model_reply_empty
+        && !outcome.has_incomplete_result()
+        && !outcome.has_unhandled_outcome()
+        && !outcome.can_render_deterministic_reply()
+    {
+        // 最终模型正文为空时，Internal outcome 无法被完整降级。至少有可信正文
+        // 的混合结果属于部分成功；完全没有可展示正文则不能继续标记整轮成功。
+        outcome.status = if outcome.has_renderable_deterministic_body() {
+            AgentTurnStatus::PartialSuccess
+        } else {
+            AgentTurnStatus::Failed
+        };
     }
 
     // 即使最终模型正文为空或失败，也必须把完整 Tool Turn 投影成 outcome，供
     // session 快照、Todo 验真、来源和确定性 fallback 使用；只有完全没有结果时
     // 才视为普通模型回复，不进入 domain presentation。
-    let projected_outcome = if outcome.outcomes.is_empty() && !outcome.has_incomplete_result() {
-        None
-    } else {
-        compose_tool_turn_output(&mut output, &outcome, reply_source);
-        Some(&outcome)
-    };
+    let has_projected_outcome = !outcome.outcomes.is_empty() || outcome.has_incomplete_result();
     let mut domains = Vec::with_capacity(domain_postprocessors.len());
     for postprocessor in domain_postprocessors {
-        domains.push(postprocessor.postprocess_output(projected_outcome, &mut output));
+        domains.push(postprocessor.postprocess_output(
+            has_projected_outcome.then_some(&mut outcome),
+            &mut output,
+            state_session,
+            reply_source,
+        ));
     }
     let diagnostics = ToolTurnDiagnostics { domains };
+    // 领域 guard 必须先于正文合成执行；如果 guard 已生成安全回复，composer 不能
+    // 再用模型正文或确定性列表覆盖它。
+    if has_projected_outcome && !diagnostics.blocks_reply_composition() {
+        compose_tool_turn_output(&mut output, &outcome, reply_source);
+    }
+    if let Some(interaction) = standalone_interaction.as_mut() {
+        session_store
+            .save(interaction)
+            .map_err(crate::runtime::respond::common::session_error)?;
+    }
     Ok(ToolTurnPostprocess {
         output,
         outcome,

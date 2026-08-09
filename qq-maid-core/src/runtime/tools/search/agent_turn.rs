@@ -220,6 +220,9 @@ fn string_field(output: &Value, key: &str) -> Option<String> {
 }
 
 fn provenance_from_output(output: &Value) -> Vec<ProvenanceSource> {
+    // 来源去重标记必须以 formatter 截断后的实际正文为准；否则后部条目的来源行
+    // 已被 1500 字符上限裁掉时，fallback 仍会误以为来源已经展示。
+    let deterministic_body = format_web_search_tool_reply(output);
     if string_field(output, "mode").as_deref() == Some("multi_entity_research") {
         return output
             .get("results")
@@ -227,10 +230,50 @@ fn provenance_from_output(output: &Value) -> Vec<ProvenanceSource> {
             .into_iter()
             .flatten()
             .filter(|item| string_field(item, "status").as_deref() == Some("success"))
-            .flat_map(|item| sources_from_value(item.get("sources")))
+            .flat_map(|item| {
+                let mut sources = sources_from_value(item.get("sources"));
+                mark_first_source_rendered_fields(&mut sources, &deterministic_body);
+                mark_rendered_snippets(&mut sources, &deterministic_body);
+                sources
+            })
             .collect();
     }
-    sources_from_value(output.get("sources"))
+    let answer = string_field(output, "answer");
+    let mut sources = sources_from_value(output.get("sources"));
+    if answer.is_some() {
+        mark_rendered_snippets(&mut sources, &deterministic_body);
+    } else {
+        mark_first_source_rendered_fields(&mut sources, &deterministic_body);
+    }
+    sources
+}
+
+/// formatter 对无顶层 answer 的单次搜索、以及每个多目标条目，只尝试嵌入第一个
+/// 可展示来源。只有完整身份和摘要确实保留在截断后正文里，才标记为已展示。
+fn mark_first_source_rendered_fields(sources: &mut [ProvenanceSource], body: &str) {
+    if let Some(source) = sources.first_mut() {
+        source.identity_in_deterministic_body = source_identity(source)
+            .as_deref()
+            .is_some_and(|identity| body.contains(identity));
+        source.snippet_in_deterministic_body =
+            !source.snippet.is_empty() && body.contains(source.snippet.as_str());
+    }
+}
+
+fn mark_rendered_snippets(sources: &mut [ProvenanceSource], body: &str) {
+    for source in sources {
+        source.snippet_in_deterministic_body =
+            !source.snippet.is_empty() && body.contains(source.snippet.as_str());
+    }
+}
+
+fn source_identity(source: &ProvenanceSource) -> Option<String> {
+    match (source.title.trim(), source.url.trim()) {
+        (title, url) if !title.is_empty() && !url.is_empty() => Some(format!("[{title}]({url})")),
+        (title, _) if !title.is_empty() => Some(title.to_owned()),
+        (_, url) if !url.is_empty() => Some(url.to_owned()),
+        _ => None,
+    }
 }
 
 fn sources_from_value(value: Option<&Value>) -> Vec<ProvenanceSource> {
@@ -248,6 +291,8 @@ fn sources_from_value(value: Option<&Value>) -> Vec<ProvenanceSource> {
                     title: text.to_owned(),
                     url: String::new(),
                     snippet: String::new(),
+                    identity_in_deterministic_body: false,
+                    snippet_in_deterministic_body: false,
                 });
             }
             let title = string_field(source, "title").unwrap_or_default();
@@ -258,6 +303,8 @@ fn sources_from_value(value: Option<&Value>) -> Vec<ProvenanceSource> {
                     title,
                     url,
                     snippet,
+                    identity_in_deterministic_body: false,
+                    snippet_in_deterministic_body: false,
                 },
             )
         })
@@ -340,6 +387,74 @@ mod tests {
         assert!(text.contains("来源标题"));
         assert!(text.contains("来源摘要"));
         assert!(!text.contains("没查到明确结果"));
+    }
+
+    #[test]
+    fn provenance_marks_source_fields_embedded_by_single_search_formatter() {
+        let sources = provenance_from_output(&json!({
+            "answer": "",
+            "sources": [{
+                "title": "来源标题",
+                "url": "https://example.test/source",
+                "snippet": "来源摘要"
+            }, {
+                "title": "第二来源",
+                "url": "https://example.test/second",
+                "snippet": "第二摘要"
+            }]
+        }));
+
+        assert!(sources[0].identity_in_deterministic_body);
+        assert!(sources[0].snippet_in_deterministic_body);
+        assert!(!sources[1].identity_in_deterministic_body);
+        assert!(!sources[1].snippet_in_deterministic_body);
+    }
+
+    #[test]
+    fn provenance_marks_matching_answer_snippet_without_hiding_source_identity() {
+        let sources = provenance_from_output(&json!({
+            "answer": "与摘要相同的答案",
+            "sources": [{
+                "title": "来源标题",
+                "url": "https://example.test/source",
+                "snippet": "与摘要相同的答案"
+            }]
+        }));
+
+        assert!(!sources[0].identity_in_deterministic_body);
+        assert!(sources[0].snippet_in_deterministic_body);
+    }
+
+    #[test]
+    fn truncated_research_source_is_not_marked_as_rendered() {
+        let output = json!({
+            "mode": "multi_entity_research",
+            "successful": 2,
+            "failed": 0,
+            "results": [{
+                "entity": "项目甲",
+                "status": "success",
+                "facts": "前序事实".repeat(350),
+                "sources": []
+            }, {
+                "entity": "项目乙",
+                "status": "success",
+                "facts": "尾部事实仍然可见".repeat(4),
+                "sources": [{
+                    "title": "项目乙官方来源",
+                    "url": "https://example.test/project-b",
+                    "snippet": "项目乙来源摘要"
+                }]
+            }]
+        });
+
+        let text = web_search_fact_text(output.clone());
+        let sources = provenance_from_output(&output);
+
+        assert!(text.contains("尾部事实仍然可见"));
+        assert!(!text.contains("https://example.test/project-b"));
+        assert!(!sources[0].identity_in_deterministic_body);
+        assert!(!sources[0].snippet_in_deterministic_body);
     }
 
     #[test]

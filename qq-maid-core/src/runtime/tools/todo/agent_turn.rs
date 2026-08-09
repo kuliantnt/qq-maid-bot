@@ -8,6 +8,7 @@ use crate::{
     runtime::{
         respond::{
             RespondRequest,
+            agent_composition::AgentReplySource,
             agent_outcome::{AgentTurnOutcome, ToolEffect, ToolOutcomeStatus},
             llm_service::RespondOutput,
         },
@@ -49,35 +50,65 @@ impl TodoTurnPostprocessor {
 impl DomainTurnPostprocessor for TodoTurnPostprocessor {
     fn postprocess_output(
         self: Box<Self>,
-        projected_outcome: Option<&AgentTurnOutcome>,
+        projected_outcome: Option<&mut AgentTurnOutcome>,
         output: &mut RespondOutput,
+        state_session: &mut SessionRecord,
+        reply_source: AgentReplySource,
     ) -> Box<dyn DomainTurnDiagnostics> {
-        let validation = if let Some(validation) =
-            projected_outcome.and_then(success_validation_from_agent_outcome)
+        // 自然语言 Agent 正常成功时模型正文是唯一主体，确定性 RelatedList 不再
+        // 附加。既然列表正文没有结构化发布，就同步撤销本轮 list_todos 写入的快照，
+        // 避免下一轮“第一条”命中用户未见过的编号。
+        let model_primary_hides_related_list =
+            matches!(reply_source, AgentReplySource::NaturalLanguageAgent)
+                && !output.model_reply_empty
+                && projected_outcome.as_deref().is_some_and(|outcome| {
+                    outcome.has_related_list() && outcome.can_use_model_reply_as_primary()
+                });
+
+        let (validation, guard_applied) = if let Some(validation) = projected_outcome
+            .as_deref()
+            .and_then(success_validation_from_agent_outcome)
         {
-            validation
+            // 已有 Todo 写结果时让通用 composer 渲染真实成功/失败回执；这里仅记录
+            // 验真状态，不能用通用 guard 文案覆盖更具体的领域错误。
+            (validation, false)
         } else {
             let scope = success_verification_scope(self.candidate_scope, output);
             if matches!(
                 scope,
                 todo::success_guard::TodoSuccessVerificationScope::None
             ) {
-                todo::success_guard::TodoSuccessValidation::Passed {
-                    claimed_success: false,
-                }
+                (
+                    todo::success_guard::TodoSuccessValidation::Passed {
+                        claimed_success: false,
+                    },
+                    false,
+                )
             } else {
                 let validation =
                     validate_model_reply_success(&self.original_model_reply, output, scope);
+                let guard_applied = !validation.passed();
                 if !validation.passed() {
                     apply_success_not_verified_output(output);
                 }
-                validation
+                (validation, guard_applied)
             }
         };
+
+        if (guard_applied || model_primary_hides_related_list)
+            && let Some(outcome) = projected_outcome
+        {
+            let clears_list_snapshot = outcome.has_related_list();
+            outcome.visible_entity_snapshot = None;
+            if clears_list_snapshot {
+                state_session.last_todo_query = None;
+            }
+        }
 
         Box::new(diagnostics_from_tool_results(
             &output.agent.tool_results,
             validation,
+            guard_applied,
         ))
     }
 }
@@ -106,16 +137,19 @@ pub(crate) fn diagnostics_from_plain_output(output: &RespondOutput) -> TodoAgent
         todo::success_guard::TodoSuccessValidation::Passed {
             claimed_success: false,
         },
+        false,
     )
 }
 
 pub(crate) fn diagnostics_from_tool_results(
     tool_results: &[ToolExecutionResult],
     validation: todo::success_guard::TodoSuccessValidation,
+    blocks_reply_composition: bool,
 ) -> TodoAgentDiagnostics {
     TodoAgentDiagnostics {
         validation,
         summaries: todo::success_guard::todo_tool_result_summaries(tool_results),
+        blocks_reply_composition,
     }
 }
 
@@ -203,9 +237,14 @@ fn apply_success_not_verified_output(output: &mut RespondOutput) {
 pub(crate) struct TodoAgentDiagnostics {
     validation: todo::success_guard::TodoSuccessValidation,
     summaries: Vec<todo::success_guard::TodoToolResultSummary>,
+    blocks_reply_composition: bool,
 }
 
 impl DomainTurnDiagnostics for TodoAgentDiagnostics {
+    fn blocks_reply_composition(&self) -> bool {
+        self.blocks_reply_composition
+    }
+
     fn log_tool_loop_results(&self, executed_tools: &[String]) {
         if self.summaries.is_empty() {
             if self.validation.claimed_success() {

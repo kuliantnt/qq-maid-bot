@@ -159,6 +159,69 @@ fn readonly_success_preserves_model_reply() {
 }
 
 #[test]
+fn internal_success_requires_model_but_can_keep_valid_model_reply() {
+    let turn = AgentTurnOutcome::from_outcomes(vec![outcome(
+        "knowledge_search",
+        "knowledge",
+        ToolOutcomeStatus::Succeeded,
+        ToolEffect::ReadOnly,
+        Vec::new(),
+    )]);
+
+    assert!(!turn.can_render_deterministic_reply());
+    assert!(!turn.has_renderable_deterministic_body());
+    assert!(turn.can_use_model_reply_as_primary());
+}
+
+#[test]
+fn internal_skip_does_not_discard_valid_model_reply() {
+    let turn = AgentTurnOutcome::from_outcomes(vec![
+        outcome(
+            "get_weather",
+            "weather",
+            ToolOutcomeStatus::Succeeded,
+            ToolEffect::ReadOnly,
+            vec![ResponseBlock::FactCard(CommandBody::plain("可信天气结果"))],
+        ),
+        outcome(
+            "knowledge_search",
+            "knowledge",
+            ToolOutcomeStatus::Skipped,
+            ToolEffect::ReadOnly,
+            Vec::new(),
+        ),
+    ]);
+
+    assert!(turn.can_use_model_reply_as_primary());
+}
+
+#[test]
+fn mixed_trusted_and_internal_fallback_is_explicitly_partial() {
+    let turn = AgentTurnOutcome::from_outcomes(vec![
+        outcome(
+            "get_weather",
+            "weather",
+            ToolOutcomeStatus::Succeeded,
+            ToolEffect::ReadOnly,
+            vec![ResponseBlock::FactCard(CommandBody::plain("可信天气结果"))],
+        ),
+        outcome(
+            "knowledge_search",
+            "knowledge",
+            ToolOutcomeStatus::Succeeded,
+            ToolEffect::ReadOnly,
+            Vec::new(),
+        ),
+    ]);
+
+    assert!(!turn.can_render_deterministic_reply());
+    assert!(turn.has_renderable_deterministic_body());
+    let body = turn.render_fallback_body();
+    assert!(body.text.contains("可信天气结果"));
+    assert!(body.text.contains("只包含可确定展示的部分结果"));
+}
+
+#[test]
 fn readonly_empty_results_preserve_model_reply() {
     let mut empty = outcome(
         "web_search",
@@ -210,6 +273,8 @@ fn deterministic_fallback_keeps_search_source_once() {
             title: "官方来源".to_owned(),
             url: "https://example.test/source".to_owned(),
             snippet: "官方摘要".to_owned(),
+            identity_in_deterministic_body: false,
+            snippet_in_deterministic_body: false,
         }],
         Vec::new(),
     );
@@ -238,6 +303,8 @@ fn embedded_search_source_is_not_appended_again() {
             title: "官方来源".to_owned(),
             url: "https://example.test/source".to_owned(),
             snippet: "官方摘要".to_owned(),
+            identity_in_deterministic_body: true,
+            snippet_in_deterministic_body: true,
         }],
         Vec::new(),
     );

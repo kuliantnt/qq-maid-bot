@@ -45,7 +45,7 @@ async fn private_agent_executes_knowledge_search_and_answers_from_evidence() {
 }
 
 #[tokio::test]
-async fn knowledge_search_final_failure_returns_non_empty_fallback() {
+async fn knowledge_search_final_failure_propagates_original_error() {
     let provider = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_calls_then_error(
@@ -67,18 +67,13 @@ async fn knowledge_search_final_failure_returns_non_empty_fallback() {
         "# 错误码\n\n## RAG-504\n\nRAG-504 表示上游请求超时。",
     );
 
-    let response = service
+    let error = service
         .respond(private_message("项目里的 RAG-504 是什么错误？"))
         .await
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(
-        response.text.as_deref(),
-        Some("工具已完成，但模型未能整理出可用回复，请稍后重试。")
-    );
-    let diagnostics = response.diagnostics.unwrap();
-    assert_eq!(diagnostics["agent_finalization_fallback_used"], true);
-    assert_eq!(diagnostics["agent_turn_status"], "succeeded");
+    assert_eq!(error.code, "context_budget_exceeded");
+    assert_eq!(error.stage, "tool_loop");
 }
 
 #[tokio::test]

@@ -283,7 +283,7 @@ impl RustRespondService {
                             .map(|agent| &agent.executed_tools),
                         "Tool 执行已验真，但 Agent 最终回复失败，改用领域回退"
                     );
-                    agent_finalization_error = Some(err.as_info());
+                    agent_finalization_error = Some(err);
                     output
                 }
             };
@@ -316,6 +316,15 @@ impl RustRespondService {
                 &req,
                 AgentReplySource::NaturalLanguageAgent,
             )?;
+            if agent_finalization_error.is_some()
+                && !postprocess.outcome.has_renderable_deterministic_body()
+            {
+                // Knowledge 等 Internal 结果需要模型整理，不能仅凭“存在 Tool Result”
+                // 把最终生成错误包装成 ok=true 的空回复或伪成功提示。
+                return Err(agent_finalization_error
+                    .take()
+                    .expect("checked finalization error must exist"));
+            }
             (
                 postprocess.output,
                 Some(postprocess.outcome),

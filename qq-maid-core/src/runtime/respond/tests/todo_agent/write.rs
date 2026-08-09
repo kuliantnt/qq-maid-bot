@@ -423,7 +423,7 @@ async fn todo_write_with_explicit_list_keeps_the_explicit_list_visible() {
                 ),
                 ("list_todos", r#"{"status":"completed"}"#),
             ],
-            "已完成第一条",
+            "  ",
         );
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
@@ -473,7 +473,7 @@ async fn todo_write_with_explicit_list_keeps_the_explicit_list_visible() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.starts_with("已完成第一条"));
+    assert!(text.contains("✅ 已完成待办"), "{text}");
     assert!(text.contains("当前已完成 · 共 1 项"));
     assert!(text.contains("先完成"));
     let diagnostics = response.diagnostics.unwrap();

@@ -32,18 +32,13 @@ pub(crate) fn compose_tool_turn_output(
         return;
     }
 
-    if !outcome.can_render_deterministic_reply() {
-        // 只有内部状态、没有可信用户正文时，保留有效模型输出；如果最终模型
-        // 失败，则给出明确重试提示，不能把空字符串包装成成功。
-        if output.model_reply_empty {
-            apply_body(output, outcome.render_fallback_body());
-        }
-        return;
-    }
-
     match source {
         AgentReplySource::DeterministicCommand => {
-            apply_body(output, outcome.render_body_with_provenance());
+            if outcome.can_render_deterministic_reply() {
+                apply_body(output, outcome.render_body_with_provenance());
+            } else {
+                apply_body(output, outcome.render_fallback_body());
+            }
         }
         AgentReplySource::NaturalLanguageAgent => {
             if outcome.can_use_model_reply_as_primary() && !output.model_reply_empty {
@@ -51,7 +46,7 @@ pub(crate) fn compose_tool_turn_output(
             } else {
                 // 正常成功时模型正文是唯一主体；模型为空、失败或工具状态需要
                 // 确定性解释时，才使用已经完成且可信的领域 renderer 降级。
-                apply_body(output, outcome.render_body_with_provenance());
+                apply_body(output, outcome.render_fallback_body());
             }
         }
     }
@@ -184,6 +179,8 @@ mod tests {
                 title: "OpenAI 官方公告".to_owned(),
                 url: "https://example.test".to_owned(),
                 snippet: answer.to_owned(),
+                identity_in_deterministic_body: false,
+                snippet_in_deterministic_body: true,
             }],
             Vec::new(),
         );
@@ -197,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn natural_language_list_keeps_the_visible_numbered_list() {
+    fn natural_language_list_keeps_model_body_without_duplicate_list() {
         let mut list = outcome(
             ToolOutcomeStatus::Succeeded,
             ToolEffect::ReadOnly,
@@ -212,9 +209,9 @@ mod tests {
 
         compose_tool_turn_output(&mut output, &turn, AgentReplySource::NaturalLanguageAgent);
 
-        assert!(output.text.starts_with("查询完成"));
-        assert!(output.text.contains("待办 · 共 1 项"));
-        assert!(output.text.contains("1. 待办 A"));
+        assert_eq!(output.text, "查询完成");
+        assert!(!output.text.contains("待办 · 共 1 项"));
+        assert!(!output.text.contains("1. 待办 A"));
     }
 
     #[test]
@@ -237,6 +234,52 @@ mod tests {
             output.text,
             "工具已完成，但模型未能整理出可用回复，请稍后重试。"
         );
+    }
+
+    #[test]
+    fn internal_success_keeps_non_empty_model_reply() {
+        let turn = AgentTurnOutcome::from_outcomes(vec![ToolExecutionOutcome {
+            tool_name: "knowledge_search".to_owned(),
+            domain: "knowledge".to_owned(),
+            status: ToolOutcomeStatus::Succeeded,
+            effect: ToolEffect::ReadOnly,
+            presentation: OutcomePresentation::Internal,
+            blocks: Vec::new(),
+            error_code: None,
+            command: Some("knowledge".to_owned()),
+        }]);
+        let mut output = output("模型整理出的知识库答案", false);
+
+        compose_tool_turn_output(&mut output, &turn, AgentReplySource::NaturalLanguageAgent);
+
+        assert_eq!(output.text, "模型整理出的知识库答案");
+    }
+
+    #[test]
+    fn internal_skip_keeps_mixed_turn_model_reply() {
+        let turn = AgentTurnOutcome::from_outcomes(vec![
+            outcome(
+                ToolOutcomeStatus::Succeeded,
+                ToolEffect::ReadOnly,
+                "可信天气结果",
+            ),
+            ToolExecutionOutcome {
+                tool_name: "knowledge_search".to_owned(),
+                domain: "knowledge".to_owned(),
+                status: ToolOutcomeStatus::Skipped,
+                effect: ToolEffect::ReadOnly,
+                presentation: OutcomePresentation::Internal,
+                blocks: Vec::new(),
+                error_code: None,
+                command: Some("knowledge".to_owned()),
+            },
+        ]);
+        let mut output = output("模型综合天气与知识库结果", false);
+
+        compose_tool_turn_output(&mut output, &turn, AgentReplySource::NaturalLanguageAgent);
+
+        assert_eq!(output.text, "模型综合天气与知识库结果");
+        assert!(!output.text.contains("最终回复生成失败"));
     }
 
     #[test]
