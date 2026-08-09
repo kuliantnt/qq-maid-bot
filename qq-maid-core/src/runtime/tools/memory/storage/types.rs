@@ -361,6 +361,8 @@ pub(crate) struct PersistMemoryRequest {
 pub(crate) struct PersistMemoryResult {
     pub record: MemoryRecord,
     pub archived_ids: Vec<String>,
+    /// 写事务内验证过的画像开关；管理 DTO 不需要在提交后重新读取偏好。
+    pub profile_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

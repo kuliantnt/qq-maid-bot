@@ -106,7 +106,7 @@ pub(super) fn commit(
             "memory target changed after confirmation was prepared".to_owned(),
         ));
     }
-    let affected_count = match operation {
+    let mutation = match operation {
         ManagementOperation::ClearTarget => service
             .store
             .management_clear_if_unchanged_with_audit(
@@ -117,8 +117,7 @@ pub(super) fn commit(
                         .map_err(|error| super::super::MemoryError::audit_failed(error.message()))
                 },
             )
-            .map_err(MemoryManagementError::from)?
-            .len(),
+            .map_err(MemoryManagementError::from)?,
         ManagementOperation::DisableGroupProfile => service
             .store
             .management_disable_group_profile_if_unchanged_with_audit(
@@ -130,17 +129,12 @@ pub(super) fn commit(
                         .map_err(|error| super::super::MemoryError::audit_failed(error.message()))
                 },
             )
-            .map_err(MemoryManagementError::from)?
-            .len(),
+            .map_err(MemoryManagementError::from)?,
     };
-    let current_snapshot = service
-        .store
-        .management_snapshot(&target.target)
-        .map_err(MemoryManagementError::from)?;
     Ok(MemoryOperationResult {
         operation: operation.as_str().to_owned(),
         target: target.summary,
-        affected_count,
-        capabilities: operation_capabilities(&target.target, &current_snapshot),
+        affected_count: mutation.affected_count,
+        capabilities: operation_capabilities(&target.target, mutation.profile_enabled),
     })
 }

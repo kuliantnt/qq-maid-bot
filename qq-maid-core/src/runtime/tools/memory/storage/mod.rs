@@ -117,11 +117,19 @@ pub struct MemoryError {
 #[derive(Debug, Clone)]
 pub struct MemoryStore {
     database: SqliteDatabase,
+    #[cfg(test)]
+    management_snapshot_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MemoryStore {
     pub(crate) fn new(database: SqliteDatabase) -> Self {
-        Self { database }
+        Self {
+            database,
+            #[cfg(test)]
+            management_snapshot_failure: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
+        }
     }
 
     /// 兼容旧入口：仅根据已有 user/group 字段保守推导访问边界。
@@ -463,6 +471,13 @@ impl MemoryStore {
         let value = operation(&transaction)?;
         transaction.commit().map_err(MemoryError::from_sql)?;
         Ok(value)
+    }
+
+    /// 仅用于证明管理 mutation 的成功响应不依赖提交后的 snapshot 读取。
+    #[cfg(test)]
+    pub(crate) fn fail_management_snapshot_for_test(&self, enabled: bool) {
+        self.management_snapshot_failure
+            .store(enabled, std::sync::atomic::Ordering::SeqCst);
     }
 
     #[cfg(test)]

@@ -44,6 +44,18 @@ pub(crate) struct ManagementTargetSnapshot {
     pub(crate) profile_enabled: Option<bool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManagementMutationResult {
+    pub(crate) record: MemoryRecord,
+    pub(crate) profile_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManagementBulkMutationResult {
+    pub(crate) affected_count: usize,
+    pub(crate) profile_enabled: bool,
+}
+
 impl MemoryStore {
     /// 从已经存在的 v3 Memory 记录发现完整 target。
     ///
@@ -165,38 +177,20 @@ impl MemoryStore {
             .map_err(MemoryError::from_sql)
     }
 
-    pub(crate) fn management_get(
-        &self,
-        target: &MemoryTarget,
-        id: &str,
-    ) -> Result<Option<MemoryRecord>, MemoryError> {
-        let target = target.clean()?;
-        let conn = self.connection()?;
-        let sql = format!(
-            "SELECT {MANAGEMENT_COLUMNS} FROM memories
-             WHERE id = ?1 AND scope_type = ?2 AND scope_id = ?3
-               AND memory_kind = ?4 AND subject_id IS ?5"
-        );
-        conn.query_row(
-            &sql,
-            params![
-                id,
-                target.scope_type.as_str(),
-                target.scope_id,
-                target.memory_kind.as_str(),
-                target.subject_id,
-            ],
-            memory_from_row,
-        )
-        .optional()
-        .map_err(MemoryError::from_sql)
-    }
-
     /// 以同一连接读取 active revision 和群画像偏好，供 prepare 固定快照。
     pub(crate) fn management_snapshot(
         &self,
         target: &MemoryTarget,
     ) -> Result<ManagementTargetSnapshot, MemoryError> {
+        #[cfg(test)]
+        if self
+            .management_snapshot_failure
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(MemoryError::io(
+                "management snapshot failure injected for test",
+            ));
+        }
         let target = target.clean()?;
         let conn = self.connection()?;
         let mut stmt = conn
@@ -265,7 +259,7 @@ impl MemoryStore {
         target: &MemoryTarget,
         expected: &[(String, u64)],
         audit: F,
-    ) -> Result<Vec<String>, MemoryError>
+    ) -> Result<ManagementBulkMutationResult, MemoryError>
     where
         F: FnOnce(&Transaction<'_>, Option<u64>) -> Result<(), MemoryError>,
     {
@@ -277,9 +271,13 @@ impl MemoryStore {
                     "memory target changed after confirmation was prepared",
                 ));
             }
-            super::v3::archive_target_unlocked_for_management(tx, &target)?;
+            let affected_count = super::v3::archive_target_unlocked_for_management(tx, &target)?;
+            let profile_enabled = profile_enabled_for_management_in_transaction(tx, &target)?;
             audit(tx, None)?;
-            Ok(expected.iter().map(|(id, _)| id.clone()).collect())
+            Ok(ManagementBulkMutationResult {
+                affected_count,
+                profile_enabled,
+            })
         })
     }
 
@@ -290,7 +288,7 @@ impl MemoryStore {
         expected_enabled: bool,
         expected: &[(String, u64)],
         audit: F,
-    ) -> Result<Vec<String>, MemoryError>
+    ) -> Result<ManagementBulkMutationResult, MemoryError>
     where
         F: FnOnce(&Transaction<'_>, Option<u64>) -> Result<(), MemoryError>,
     {
@@ -322,9 +320,12 @@ impl MemoryStore {
                 params![target.scope_id, subject_id, now],
             )
             .map_err(MemoryError::from_sql)?;
-            super::v3::archive_target_unlocked_for_management(tx, &target)?;
+            let affected_count = super::v3::archive_target_unlocked_for_management(tx, &target)?;
             audit(tx, None)?;
-            Ok(expected.iter().map(|(id, _)| id.clone()).collect())
+            Ok(ManagementBulkMutationResult {
+                affected_count,
+                profile_enabled: false,
+            })
         })
     }
 
@@ -334,7 +335,7 @@ impl MemoryStore {
         target: &MemoryTarget,
         expected: &MemoryRecord,
         audit: F,
-    ) -> Result<MemoryRecord, MemoryError>
+    ) -> Result<ManagementMutationResult, MemoryError>
     where
         F: FnOnce(&Transaction<'_>, Option<u64>) -> Result<(), MemoryError>,
     {
@@ -350,9 +351,8 @@ impl MemoryStore {
             .ok_or_else(|| MemoryError::io("memory revision overflow"))?;
         self.with_immediate_transaction(|tx| {
             super::v3::ensure_record_unchanged_for_management(tx, &target, &expected.id, expected)?;
-            if expected.memory_kind == MemoryKind::GroupProfile
-                && !profile_enabled_in_transaction(tx, &target)?
-            {
+            let profile_enabled = profile_enabled_for_management_in_transaction(tx, &target)?;
+            if expected.memory_kind == MemoryKind::GroupProfile && !profile_enabled {
                 return Err(MemoryError::profile_opted_out());
             }
             if let Some(attribute_key) = expected.attribute_key.as_deref()
@@ -383,10 +383,17 @@ impl MemoryStore {
                     "memory changed after confirmation was prepared",
                 ));
             }
-            audit(tx, Some(after_version))
-        })?;
-        self.management_get(&target, &expected.id)?
-            .ok_or_else(|| MemoryError::io("memory disappeared after restore"))
+            let record = super::get_by_id_unlocked(tx, &expected.id)?
+                .ok_or_else(|| MemoryError::io("memory disappeared inside restore transaction"))?;
+            if record.status != MemoryStatus::Active || record.revision != after_version {
+                return Err(MemoryError::io("restored memory result is inconsistent"));
+            }
+            audit(tx, Some(after_version))?;
+            Ok(ManagementMutationResult {
+                record,
+                profile_enabled,
+            })
+        })
     }
 
     pub(crate) fn management_archive_if_unchanged_with_audit<F>(
@@ -394,7 +401,7 @@ impl MemoryStore {
         target: &MemoryTarget,
         expected: &MemoryRecord,
         audit: F,
-    ) -> Result<MemoryRecord, MemoryError>
+    ) -> Result<ManagementMutationResult, MemoryError>
     where
         F: FnOnce(&Transaction<'_>, Option<u64>) -> Result<(), MemoryError>,
     {
@@ -420,10 +427,18 @@ impl MemoryStore {
                     "memory changed after confirmation was prepared",
                 ));
             }
-            audit(tx, Some(after_version))
-        })?;
-        self.management_get(&target, &expected.id)?
-            .ok_or_else(|| MemoryError::io("memory disappeared after archive"))
+            let profile_enabled = profile_enabled_for_management_in_transaction(tx, &target)?;
+            let record = super::get_by_id_unlocked(tx, &expected.id)?
+                .ok_or_else(|| MemoryError::io("memory disappeared inside archive transaction"))?;
+            if record.status != MemoryStatus::Archived || record.revision != after_version {
+                return Err(MemoryError::io("archived memory result is inconsistent"));
+            }
+            audit(tx, Some(after_version))?;
+            Ok(ManagementMutationResult {
+                record,
+                profile_enabled,
+            })
+        })
     }
 }
 
@@ -552,6 +567,17 @@ fn profile_enabled_in_transaction(
     .optional()
     .map(|value| value.unwrap_or(true))
     .map_err(MemoryError::from_sql)
+}
+
+fn profile_enabled_for_management_in_transaction(
+    tx: &Transaction<'_>,
+    target: &MemoryTarget,
+) -> Result<bool, MemoryError> {
+    if target.memory_kind == MemoryKind::GroupProfile {
+        profile_enabled_in_transaction(tx, target)
+    } else {
+        Ok(true)
+    }
 }
 
 fn active_attribute_conflict_exists(

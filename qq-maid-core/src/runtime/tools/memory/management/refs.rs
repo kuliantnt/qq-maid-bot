@@ -6,7 +6,6 @@ use sha2::{Digest, Sha256};
 
 use crate::identity::parse_stable_scope_key;
 
-use super::super::storage::ManagementTargetSnapshot;
 use super::super::{MemoryCategory, MemoryKind, MemoryRecord, MemoryStatus, MemoryTarget};
 use super::types::*;
 
@@ -255,12 +254,12 @@ pub(super) fn memory_item(
 
 pub(super) fn operation_capabilities(
     target: &MemoryTarget,
-    snapshot: &ManagementTargetSnapshot,
+    profile_enabled: bool,
 ) -> MemoryOperationCapabilities {
     MemoryOperationCapabilities {
         can_clear_target: true,
         can_disable_group_profile: target.memory_kind() == MemoryKind::GroupProfile
-            && snapshot.profile_enabled.unwrap_or(true),
+            && profile_enabled,
     }
 }
 

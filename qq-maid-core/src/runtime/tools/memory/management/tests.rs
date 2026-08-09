@@ -125,6 +125,125 @@ fn create_update_archive_restore_use_monotonic_revision_and_cas() {
 }
 
 #[test]
+fn mutation_results_are_ready_without_post_commit_snapshot_reads() {
+    let (service, store) = test_service();
+    let target = MemoryTarget::personal(personal_scope("user-a"));
+    seed(&store, target, "事务结果基线");
+    let target_ref = service
+        .targets(MemoryTargetFilter::default(), 20, 0)
+        .unwrap()
+        .items[0]
+        .target_ref
+        .clone();
+
+    // 若 mutation 在 commit 后再次读取 snapshot，这里会把该读取变成明确失败。
+    store.fail_management_snapshot_for_test(true);
+    let created = service
+        .create(MemoryCreateInput {
+            target_ref: target_ref.clone(),
+            content: "事务内创建".to_owned(),
+            category: MemoryCategory::Note,
+            visibility: MemoryVisibility::Private,
+            pinned: false,
+            attribute_key: None,
+        })
+        .unwrap();
+    assert_eq!(created.memory.status, "active");
+    assert_eq!(created.memory.version, 1);
+
+    let updated = service
+        .update(
+            &target_ref,
+            &created.memory.memory_ref,
+            created.memory.version,
+            MemoryUpdatePatch {
+                content: Some("事务内更新".to_owned()),
+                ..MemoryUpdatePatch::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(updated.memory.status, "active");
+    assert_eq!(updated.memory.version, 2);
+
+    let archived = service
+        .archive(
+            &target_ref,
+            &updated.memory.memory_ref,
+            updated.memory.version,
+        )
+        .unwrap();
+    assert_eq!(archived.memory.status, "archived");
+    assert_eq!(archived.memory.version, 3);
+    assert!(archived.memory.updated_at.is_some());
+
+    let restored = service
+        .restore(
+            &target_ref,
+            &archived.memory.memory_ref,
+            archived.memory.version,
+        )
+        .unwrap();
+    assert_eq!(restored.memory.status, "active");
+    assert_eq!(restored.memory.version, 4);
+    assert!(restored.memory.updated_at.is_some());
+}
+
+#[test]
+fn bulk_mutation_results_include_commit_state_without_snapshot_reads() {
+    let (service, store) = test_service();
+    let target = MemoryTarget::personal(personal_scope("user-a"));
+    seed(&store, target, "清空事务结果");
+    let target_ref = service
+        .targets(MemoryTargetFilter::default(), 20, 0)
+        .unwrap()
+        .items[0]
+        .target_ref
+        .clone();
+    let actor = ManagementActor {
+        admin_id: 1,
+        session_digest: [3; 32],
+    };
+    let prepared = service.prepare(actor, "clear_target", &target_ref).unwrap();
+    store.fail_management_snapshot_for_test(true);
+    let cleared = service
+        .commit(
+            actor,
+            "clear_target",
+            &target_ref,
+            &prepared.confirmation_token,
+        )
+        .unwrap();
+    assert_eq!(cleared.affected_count, 1);
+    assert!(cleared.capabilities.can_clear_target);
+
+    store.fail_management_snapshot_for_test(false);
+    let profile = MemoryTarget::group_profile(group_scope("group-a"), personal_scope("user-a"));
+    seed(&store, profile, "停用事务结果");
+    let profile_ref = service
+        .targets(MemoryTargetFilter::default(), 20, 0)
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|item| item.scope == "group_profile")
+        .unwrap()
+        .target_ref;
+    let prepared = service
+        .prepare(actor, "disable_group_profile", &profile_ref)
+        .unwrap();
+    store.fail_management_snapshot_for_test(true);
+    let disabled = service
+        .commit(
+            actor,
+            "disable_group_profile",
+            &profile_ref,
+            &prepared.confirmation_token,
+        )
+        .unwrap();
+    assert_eq!(disabled.affected_count, 1);
+    assert!(!disabled.capabilities.can_disable_group_profile);
+}
+
+#[test]
 fn clear_and_profile_disable_are_snapshot_bound_and_one_shot() {
     let (service, store) = test_service();
     let target = MemoryTarget::personal(personal_scope("user-a"));

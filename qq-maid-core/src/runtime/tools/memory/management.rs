@@ -269,7 +269,7 @@ impl MemoryManagementService {
             })
             .map_err(MemoryManagementError::from)?;
         Ok(MemoryManagementMutationResult {
-            memory: self.present(&target, archived)?,
+            memory: memory_item(&target, archived.record, archived.profile_enabled)?,
             archived_count: 1,
         })
     }
@@ -304,7 +304,7 @@ impl MemoryManagementService {
             })
             .map_err(MemoryManagementError::from)?;
         Ok(MemoryManagementMutationResult {
-            memory: self.present(&target, restored)?,
+            memory: memory_item(&target, restored.record, restored.profile_enabled)?,
             archived_count: 0,
         })
     }
@@ -428,7 +428,7 @@ impl MemoryManagementService {
     ) -> Result<MemoryManagementMutationResult, MemoryManagementError> {
         let archived_count = result.archived_ids.len();
         Ok(MemoryManagementMutationResult {
-            memory: self.present(target, result.record)?,
+            memory: memory_item(target, result.record, result.profile_enabled)?,
             archived_count,
         })
     }

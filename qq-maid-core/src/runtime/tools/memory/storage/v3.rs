@@ -66,12 +66,13 @@ impl MemoryStore {
     {
         let record = build_v3_record(req)?;
         self.with_immediate_transaction(|tx| {
-            ensure_profile_enabled_unlocked(tx, &record)?;
+            let profile_enabled = ensure_profile_enabled_unlocked(tx, &record)?;
             let archived_ids = archive_conflicts_unlocked(tx, &record, None)?;
             insert_record_unlocked(tx, &record)?;
             let result = PersistMemoryResult {
                 record,
                 archived_ids,
+                profile_enabled,
             };
             audit(tx, &result)?;
             Ok(result)
@@ -94,7 +95,7 @@ impl MemoryStore {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(MemoryError::from_sql)?;
-        ensure_profile_enabled_unlocked(&tx, &record)?;
+        let profile_enabled = ensure_profile_enabled_unlocked(&tx, &record)?;
         if !memory_exists_for_target_unlocked(&tx, &target, id, MemoryStatus::Active)? {
             return Err(MemoryError::not_found("memory not found"));
         }
@@ -110,6 +111,7 @@ impl MemoryStore {
         Ok(PersistMemoryResult {
             record,
             archived_ids,
+            profile_enabled,
         })
     }
 
@@ -142,7 +144,7 @@ impl MemoryStore {
         }
         self.with_immediate_transaction(|tx| {
             ensure_record_unchanged_unlocked(tx, &target, id, expected)?;
-            ensure_profile_enabled_unlocked(tx, &record)?;
+            let profile_enabled = ensure_profile_enabled_unlocked(tx, &record)?;
             record.revision = expected
                 .revision
                 .checked_add(1)
@@ -160,6 +162,7 @@ impl MemoryStore {
             let result = PersistMemoryResult {
                 record,
                 archived_ids,
+                profile_enabled,
             };
             audit(tx, &result)?;
             Ok(result)
@@ -469,13 +472,13 @@ pub(super) fn build_v3_record(req: PersistMemoryRequest) -> Result<MemoryRecord,
 pub(super) fn ensure_profile_enabled_unlocked(
     tx: &Transaction<'_>,
     record: &MemoryRecord,
-) -> Result<(), MemoryError> {
+) -> Result<bool, MemoryError> {
     if record.memory_kind != MemoryKind::GroupProfile {
-        return Ok(());
+        return Ok(true);
     }
     let enabled = profile_enabled_for_target_unlocked(tx, &record_target(record))?;
     if enabled {
-        Ok(())
+        Ok(true)
     } else {
         Err(MemoryError::profile_opted_out())
     }
