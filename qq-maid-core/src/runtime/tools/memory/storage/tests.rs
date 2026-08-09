@@ -20,6 +20,24 @@ fn v4_migration_contains_consolidation_and_dream_state_tables() {
     }
 }
 
+#[test]
+fn v5_migration_initializes_revision_for_new_and_legacy_records() {
+    let store = test_store();
+    let conn = store.connection().unwrap();
+    let revision_default = conn
+        .query_row(
+            "SELECT dflt_value FROM pragma_table_info('memories') WHERE name = 'revision'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    assert_eq!(revision_default, "1");
+    drop(conn);
+
+    let record = create_context_personal_memory(&store, "migration revision");
+    assert_eq!(record.revision, 1);
+}
+
 fn create_memory(store: &MemoryStore, content: &str) -> MemoryRecord {
     store
         .create(CreateMemoryRequest {
@@ -68,7 +86,7 @@ fn create_context_personal_memory_with_meta(
     store
         .persist_v3(PersistMemoryRequest {
             target: MemoryTarget::personal("u1"),
-            created_by_user_id: "u1".to_owned(),
+            created_by_user_id: Some("u1".to_owned()),
             content: content.to_owned(),
             source_text: "seed".to_owned(),
             category: MemoryCategory::Note,
@@ -439,6 +457,7 @@ fn legacy_v2_database_upgrades_to_v3_and_reopens_conservatively() {
     assert_eq!(personal.scope_type, "personal");
     assert_eq!(personal.memory_kind, MemoryKind::Personal);
     assert_eq!(personal.status, MemoryStatus::Active);
+    assert_eq!(personal.revision, 1);
     assert_eq!(personal.scope_id.as_deref(), Some("u1"));
     assert_eq!(personal.created_by_user_id.as_deref(), Some("u1"));
 
@@ -447,10 +466,12 @@ fn legacy_v2_database_upgrades_to_v3_and_reopens_conservatively() {
     assert_eq!(group.memory_kind, MemoryKind::Group);
     assert_eq!(group.scope_id.as_deref(), Some("g1"));
     assert_eq!(group.created_by_user_id, None);
+    assert_eq!(group.revision, 1);
     let conn = store.connection().unwrap();
     let unknown = get_by_id_unlocked(&conn, "unknown-id").unwrap().unwrap();
     assert_eq!(unknown.memory_kind, MemoryKind::LegacyUnassigned);
     assert_eq!(unknown.status, MemoryStatus::Archived);
+    assert_eq!(unknown.revision, 1);
     assert!(
         store
             .list_scoped(ScopedMemoryQuery {

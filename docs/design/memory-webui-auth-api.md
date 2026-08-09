@@ -1,66 +1,86 @@
 # Memory WebUI 身份授权与 API 边界
 
-> 状态：当前边界，更新于 2026-07-30。Memory WebUI 和 Memory 管理 API 尚未实现；部署管理员认证、配置管理和 Todo 管理 API 已落地。
+> 状态：第一阶段（部署管理员 Memory 管理 API）已实现，更新于 2026-08-09；第二阶段原生 TypeScript WebUI 尚未实现。
 
-本文定义后续 Memory WebUI 的接入边界，不表示仓库已开放 Memory HTTP 路由。历史 v1 设计及当时的威胁分析保留在 [设计归档](./archive/memory-webui-auth-api-v1.md)。
+本文记录 Issue #476 第一阶段的真实后端边界。历史 v1 设计及当时的威胁分析保留在[设计归档](./archive/memory-webui-auth-api-v1.md)。路由、DTO 和错误细节以 `qq-maid-core/src/http/api/memory/` 及[管理 API 约定](../development/management-api.md)为准。
 
-## 当前已落地基线
+## 已落地基线
 
 | 能力 | 当前状态 | 实现边界 |
 | --- | --- | --- |
-| 部署管理员认证 | 已实现 | Bootstrap / PreAuth、初始化、登录、登出和密码重置由 `qq-maid-core/src/http/management/` 提供 |
-| Web 会话与 CSRF | 已实现 | 服务端 Session、HttpOnly Cookie、同源校验、CSRF 和管理请求限流由通用认证层负责 |
-| 配置与重启 | 已实现 | 控制台可读写 runtime / agent / secret 配置，并执行本地校验和受控重启 |
-| Todo 管理 API | 已实现 | 复用管理员 Session、同源和 CSRF；业务归属仍保留真实平台 owner / scope / delivery target |
-| Memory 领域门面 | 已实现 | `qq-maid-core/src/runtime/tools/memory/` 维护 personal、group profile 和 group memory 的权限与持久化不变量 |
-| Memory 管理 API / 页面 | 未实现 | 当前路由树不注册 Memory HTTP 路由，前端也没有 Memory 资源页 |
-| 平台用户自助管理 | 未实现 | 尚无“浏览器会话 → 已验证平台主体”的账号绑定与群角色复验链路 |
+| 部署管理员认证 | 已实现 | Bootstrap / PreAuth、初始化、登录、登出和密码重置由现有管理认证提供 |
+| Web Session、Origin、CSRF、限流 | 已实现 | Memory API 复用现有服务端 Session、同源校验、CSRF 和管理请求限流 |
+| 统一响应与请求 ID | 已实现 | 复用 `/api/v1/console/` 的成功/错误 envelope、分页和 `x-request-id` |
+| 管理审计 | 已实现 | Memory 操作写入既有 `console_audit_events`，只增加安全元数据列 |
+| Memory 领域门面 | 已实现 | `runtime/tools/memory/management/` 编排目标发现、DTO 所需结果、revision 和确认协议 |
+| Memory 管理 API | 已实现 | 只在 `WEB_CONSOLE_ENABLED=true` 时注册，路径统一为 `/api/v1/console/memories/*` |
+| 原生 TypeScript WebUI | 未实现 | 本阶段不修改 `web-console/`，也不生成前端 `dist/` |
+| 平台用户/群管理员自助 | 未实现 | 没有把部署管理员身份转换为平台用户或群角色的绑定链路 |
 
-`WEB_CONSOLE_ENABLED=false` 时，除 `/healthz` 外的控制台页面和管理路由均不注册。控制台已不是“只读页面”，但仍只应部署在 loopback 或受控内网；经反向代理时必须按配置中心文档保留原始 Host / 协议并限定可信代理 IP。
+## 部署管理员边界
 
-## 不可绕过的业务边界
+第一阶段的管理能力是实例级部署管理员 capability。管理员是 HTTP 调用者和审计 actor，不是 Memory owner；所有管理员看到同一份实例级可管理范围，但不会因此成为任何平台用户、群组、机器人账号或 scope。
 
-- HTTP Handler 只负责请求解析、管理员认证、同源 / CSRF 校验、调用领域门面和安全 DTO 转换。
-- Memory 的作用域、可见性、生命周期、确认来源、群画像 opt-out 和权限校验必须留在 `runtime/tools/memory/`。
-- 不得从 HTTP Handler 直接暴露 `MemoryStore` CRUD，也不得用浏览器提交的 `scope_key`、`user_id`、`group_id`、昵称或角色构造授权事实。
-- 部署管理员是 HTTP 调用者，不是 Memory 业务 actor。如需跨主体管理，必须增加显式 capability、安全目标引用和审计，不能把管理员 ID 写成 memory owner。
-- 个人记忆、群内个人画像和群公共记忆必须分别授权；群管理员身份不能扩张为读取成员个人记忆或群内画像的权限。
-- `legacy_unassigned` 不允许被普通管理流程自动认领或批量暴露。
+Memory 创建使用 `ManualImport` 来源，`created_by_user_id` 保持为空；编辑只保留原记录的 owner/source 元数据，不允许管理员通过请求伪造这些字段。管理审计单独记录管理员 actor，不把管理员 ID 写入 Memory owner。
 
-## 后续交付顺序
+支持的范围只有：
 
-### 1. 部署管理员 Memory API
+- `personal`；
+- `group_profile`；
+- `group`。
 
-第一阶段只允许现有部署管理员使用，并复用现有通用认证与资源 API 契约：
+`legacy_unassigned` 不进入 target discovery、list、detail 或任何写操作。未知、缺失或不能可信解析的旧 scope 统一 fail closed，不通过错误差异、ID 探测或搜索泄露其存在。
 
-1. 管理员 Session、同源、CSRF、限流和 `x-request-id` 不另起一套实现。
-2. 列表、详情、创建、编辑、归档、恢复和清空通过 Memory 领域门面实现，保留真实范围与生命周期。
-3. 目标使用服务端签发的不透明引用，不向前端暴露 raw 平台 ID、稳定 scope key 或数据库内部细节。
-4. 破坏性或批量操作采用服务端 prepare / commit 确认，确认令牌绑定主体、会话、目标、操作和过期时间。
-5. 读取他人记忆、来源详情、批量导出和物理删除默认不进入首版。
+## Opaque target/reference
 
-### 2. 平台用户与群管理员自助
+target discovery 从已存在且可可信解析的 v3 Memory 记录中恢复稳定的 platform/account/group/subject 关系，然后生成带版本前缀的 opaque reference：
 
-该阶段不能复用部署管理员账号充当最终用户身份。开放前至少需要：
+- `memory_target:v1:<digest>`；
+- `memory_account:v1:<digest>`；
+- `memory_group:v1:<digest>`；
+- `memory_subject:v1:<digest>`；
+- `memory:v1:<digest>`。
 
-- 通过可验证的平台消息完成一次性账号绑定，不接受浏览器自报 ID。
-- 按 `platform + account_id + subject` 隔离身份，不因文本 ID 相同自动合并跨平台身份。
-- 群公共记忆写操作使用实时或短 TTL 的 `owner/admin` 结构化事实复验；`member/unknown` 失败关闭。
-- 账号解绑、群角色变化或 grant 过期后，相关会话与 capability 及时失效。
+摘要只返回 scope 名称、平台名和 opaque ref，不返回 scope key、account/group/user ID、owner ID、关系 subject raw ID 或内部 row key。服务器每次使用 target ref 都重新回查当前候选目标；客户端持有旧 ref 不会跳过当前合法性检查。memory ref 同时绑定 target ref 和记录 ID，因此 target mismatch、未知 ID、目标外 ID 和 legacy probing 都统一安全失败。
 
-## API 与安全约定
+## API 与生命周期
 
-后续 Memory API 优先复用 [管理 API 约定](../development/management-api.md) 的统一响应、错误、分页、`x-request-id` 和认证上下文。如 Memory 因作用域、审计或并发更新需要更强语义，应在通用契约上显式扩展，不得降低现有 Todo API 的安全基线。
+第一阶段真实路由为：
 
-- 错误响应不返回 SQLite 文本、绝对路径、内部 scope、raw 平台 ID 或认证细节。
-- 日志和审计不记录 Memory 正文、来源原文、cookie、CSRF token、Bootstrap token 或确认令牌。
-- 前端不把管理员会话、CSRF、平台 ID 或完整记忆写入 `localStorage`。
-- 不得以隐藏按钮、CORS allowlist、来源 IP 或“仅内网”替代服务端认证和资源授权。
+| 路径 | 领域动作 |
+| --- | --- |
+| `POST /api/v1/console/memories/targets` | 分页发现可管理 target，并支持 scope/platform/account_ref/group_ref/subject_ref 筛选 |
+| `POST /api/v1/console/memories/list` | 按 target、结构化字段和正文 keyword 分页查询 |
+| `POST /api/v1/console/memories/get` | 按 target_ref + memory_ref 读取安全详情 |
+| `POST /api/v1/console/memories/create` | 对重新回查成功的 target 创建人工导入 |
+| `POST /api/v1/console/memories/update` | 携带 expected_version 编辑，保留旧记录并写入新记录 |
+| `POST /api/v1/console/memories/archive` | 携带 expected_version 原子归档 |
+| `POST /api/v1/console/memories/restore` | 携带 expected_version 原子恢复 |
+| `POST /api/v1/console/memories/operations/prepare` | 准备高影响操作 |
+| `POST /api/v1/console/memories/operations/commit` | 提交一次性确认 |
 
-## 实现前验收清单
+编辑沿用当前领域的历史语义：旧记录变为 archived，新记录获得新 ID；不会原地覆盖正文，也不能修改 target、owner、source 或创建者。管理 API 不提供永久物理删除。
 
-- 确认路由树只在显式启用的控制台内注册 Memory API，禁用时返回 404。
-- 验证未登录、缺少 CSRF、跨源、越权作用域、失效目标引用和并发修改均失败关闭。
-- 对 personal、group profile、group 和 `legacy_unassigned` 分别覆盖列表、详情、写入和破坏性操作的权限矩阵。
-- 确认所有成功结果来自真实领域与持久化返回，不用前端文案或模型文案伪造成功。
-- 对响应、日志、审计和前端状态执行敏感信息检查。
+`clear_target` 的语义是事务内把目标范围当前 active Memory 全部归档，历史保留且可恢复；它不是 DELETE。`disable_group_profile` 复用群画像 opt-out 生命周期：在同一事务写入 profile preference=false，并归档当前 active 画像。第一阶段没有重新启用画像的管理路由；历史 archived 记录不会被自动恢复。
+
+## revision 与并发
+
+`memory_management_schema_v5_revision` 为旧记录和新记录增加 `revision INTEGER NOT NULL DEFAULT 1`。revision 由服务端维护，不接受客户端指定。更新、归档、恢复和批量操作都在 SQLite `IMMEDIATE` transaction 中比较完整记录或 `(id, revision)` 快照；相同 expected version 的并发请求最多一个提交，另一个返回 `conflict`，事务失败不会留下部分结果。
+
+## prepare / commit
+
+`clear_target` 和 `disable_group_profile` 必须先 prepare。确认条目绑定部署管理员 ID、当前管理 Session 摘要、operation、target、active `(id, revision)` 快照、画像开关快照和 5 分钟 TTL。响应只返回随机 confirmation token 原文一次；服务端只保存 token 的 SHA-256 摘要及上述绑定信息，不保存 token 原文。
+
+commit 会重新校验当前 Session、管理员、Origin、CSRF、TTL、token、operation、target 和当前 target 合法性，再由领域 storage 事务比较快照。成功前 token 在互斥锁内消费，因此不能 replay；跨 actor、跨 Session、错误 operation、目标变化、revision 变化或过期都会 fail closed。CSRF 只由每次 HTTP 请求的现有认证流程校验，不写入 confirmation 状态，因此合法的 CSRF 轮换不会无故使确认失效。确认状态是进程内最小状态；进程重启会丢弃未提交确认并安全失败，不新增第二套数据库确认表。
+
+## 搜索、分页与 DTO
+
+Memory keyword 首版使用 SQLite 参数化 `LIKE`，只匹配 `content`。keyword trim 后为空视为未设置，长度上限为 256 个字符；反斜杠、`%`、`_` 会按字面子串转义，并使用明确的 `ESCAPE` 规则。COUNT 和 page query 共用完全相同的 WHERE 条件，不读取后在内存分页，也不搜索 source_text、source_ref、scope 或 raw identity。
+
+成功的 list/get/mutation DTO 可以返回管理界面需要的正文、kind/category、visibility、status、pinned、时间、safe source type、version 和 capabilities。任何错误、not_found、conflict、permission、日志、审计和 confirmation 状态都不包含正文、source detail、raw identity、scope key 或 token。
+
+## 后续平台用户自助管理
+
+第二阶段或后续平台用户能力不能复用部署管理员账号充当最终用户身份。开放前至少需要可验证的平台消息绑定、`platform + account + subject` 隔离、实时群角色复验和 grant 失效处理；这些能力不属于本阶段。
+
+`WEB_CONSOLE_ENABLED=false` 时 Memory 路由不注册并返回 404；setup-required 或 Memory domain 未装配时不匿名降级，已认证但服务缺失返回 `memory_unavailable`。旧 `/memory`、`/query`、`/v1/chat` 路由仍不存在。

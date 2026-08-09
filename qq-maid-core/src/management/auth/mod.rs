@@ -57,6 +57,20 @@ pub const CONSOLE_ADMIN_SCHEMA_V1: SqliteMigration = SqliteMigration {
             ON console_audit_events(created_at);",
 };
 
+/// 管理审计 v2：在既有 `console_audit_events` 上补充请求和版本摘要。
+///
+/// 这些字段只接受稳定安全元数据；Memory 正文、raw identity、token 和 CSRF 永远不进表。
+pub const CONSOLE_AUDIT_SCHEMA_V2: SqliteMigration = SqliteMigration {
+    name: "console_audit_schema_v2_management_metadata",
+    sql: "ALTER TABLE console_audit_events ADD COLUMN request_id TEXT;
+        ALTER TABLE console_audit_events ADD COLUMN target_digest TEXT;
+        ALTER TABLE console_audit_events ADD COLUMN before_version INTEGER;
+        ALTER TABLE console_audit_events ADD COLUMN after_version INTEGER;
+        ALTER TABLE console_audit_events ADD COLUMN safe_error_code TEXT;
+        CREATE INDEX IF NOT EXISTS idx_console_audit_request_id
+            ON console_audit_events(request_id);",
+};
+
 #[derive(Debug, thiserror::Error)]
 #[error("{code}: {message}")]
 pub struct AdminAuthError {
@@ -100,6 +114,19 @@ pub struct AdminSession {
     pub capabilities: Vec<String>,
     pub csrf_token: String,
     pub expires_at: i64,
+}
+
+/// 管理资源审计所需的最小安全元数据；不携带资源正文或平台 raw identity。
+#[derive(Debug, Clone, Copy)]
+pub struct ManagementAudit<'a> {
+    pub actor_admin_id: i64,
+    pub request_id: &'a str,
+    pub action: &'a str,
+    pub result: &'a str,
+    pub target_digest: Option<&'a str>,
+    pub before_version: Option<u64>,
+    pub after_version: Option<u64>,
+    pub safe_error_code: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -775,6 +802,66 @@ impl AdminAuth {
                  (created_at, actor_admin_id, event_type, outcome)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![unix_seconds(), actor_admin_id, event_type, outcome],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    /// 复用现有管理审计表记录资源操作的安全摘要。
+    pub fn audit_management(&self, event: ManagementAudit<'_>) -> Result<(), AdminAuthError> {
+        let ManagementAudit {
+            actor_admin_id,
+            request_id,
+            action,
+            result,
+            target_digest,
+            before_version,
+            after_version,
+            safe_error_code,
+        } = event;
+        if request_id.is_empty()
+            || request_id.len() > 128
+            || !request_id.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+            })
+            || !safe_audit_value(action)
+            || !safe_audit_value(result)
+            || target_digest.is_some_and(|value| {
+                value.len() != 64
+                    || !value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            || safe_error_code.is_some_and(|value| !safe_audit_value(value))
+        {
+            return Err(AdminAuthError::storage("invalid management audit metadata"));
+        }
+        let before_version = before_version
+            .map(|value| i64::try_from(value).map_err(|_| ()))
+            .transpose()
+            .map_err(|_| AdminAuthError::storage("management audit version is too large"))?;
+        let after_version = after_version
+            .map(|value| i64::try_from(value).map_err(|_| ()))
+            .transpose()
+            .map_err(|_| AdminAuthError::storage("management audit version is too large"))?;
+        let connection = self.database.connection().map_err(database_error)?;
+        connection
+            .execute(
+                "INSERT INTO console_audit_events
+                 (created_at, actor_admin_id, event_type, outcome, request_id,
+                  target_digest, before_version, after_version, safe_error_code)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    unix_seconds(),
+                    actor_admin_id,
+                    action,
+                    result,
+                    request_id,
+                    target_digest,
+                    before_version,
+                    after_version,
+                    safe_error_code,
+                ],
             )
             .map_err(database_error)?;
         Ok(())

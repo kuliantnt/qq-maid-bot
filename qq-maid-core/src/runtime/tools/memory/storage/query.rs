@@ -40,7 +40,7 @@ pub(super) fn list_recall_layer_unlocked(
                 user_id, group_id, content, source_text,
                 memory_kind, subject_id, relation_subject_id, relation_object_id,
                 visibility, source_type, source_ref, last_confirmed_at,
-                status, pinned, attribute_key
+                status, pinned, attribute_key, revision
          FROM memories
          WHERE status = 'active'
            AND scope_type = ? AND scope_id = ? AND memory_kind = ? AND subject_id IS ?
@@ -84,7 +84,7 @@ pub(super) fn list_unlocked(
                 user_id, group_id, content, source_text,
                 memory_kind, subject_id, relation_subject_id, relation_object_id,
                 visibility, source_type, source_ref, last_confirmed_at,
-                status, pinned, attribute_key
+                status, pinned, attribute_key, revision
          FROM memories
          WHERE status = 'active'",
     );
@@ -140,7 +140,7 @@ pub(super) fn list_scoped_unlocked(
                 user_id, group_id, content, source_text,
                 memory_kind, subject_id, relation_subject_id, relation_object_id,
                 visibility, source_type, source_ref, last_confirmed_at,
-                status, pinned, attribute_key
+                status, pinned, attribute_key, revision
          FROM memories
          WHERE scope_type = ? AND scope_id = ? AND memory_kind = ? AND status = 'active'",
     );
@@ -188,7 +188,7 @@ pub(super) fn list_v3_unlocked(
                 user_id, group_id, content, source_text,
                 memory_kind, subject_id, relation_subject_id, relation_object_id,
                 visibility, source_type, source_ref, last_confirmed_at,
-                status, pinned, attribute_key
+                status, pinned, attribute_key, revision
          FROM memories
          WHERE scope_type = ? AND scope_id = ? AND memory_kind = ? AND subject_id IS ?",
     );
@@ -417,7 +417,8 @@ pub(super) fn update_record_unlocked(
 ) -> Result<(), MemoryError> {
     conn.execute(
         "UPDATE memories
-         SET content = ?1, source_text = ?2, memory_type = ?3, scope = ?4, updated_at = ?5
+         SET content = ?1, source_text = ?2, memory_type = ?3, scope = ?4,
+             updated_at = ?5, revision = revision + 1
          WHERE id = ?6",
         params![
             record.content.as_str(),

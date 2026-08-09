@@ -16,6 +16,7 @@ use crate::{
     },
     management::AdminAuth,
     management::ConsoleUserDataService,
+    runtime::tools::memory::MemoryManagementService,
     runtime::tools::todo::TodoManagementService,
 };
 
@@ -60,6 +61,8 @@ pub struct OpsHttpState {
     pub admin_auth: Option<AdminAuth>,
     /// Todo 管理领域门面；Handler 不直接持有数据库或通知 Store。
     pub(crate) todo_management: Option<TodoManagementService>,
+    /// Memory 管理领域门面；只有控制台启用且 Core 业务存储已装配时存在。
+    pub(crate) memory_management: Option<MemoryManagementService>,
     /// 控制台用户私有偏好与通用文件领域门面。
     pub(crate) console_user_data: Option<ConsoleUserDataService>,
     /// 知识库托管文件领域门面；与通用文件服务共享原始文件存储。
@@ -80,6 +83,11 @@ impl OpsHttpState {
 
     pub(crate) fn with_todo_management(mut self, service: TodoManagementService) -> Self {
         self.todo_management = Some(service);
+        self
+    }
+
+    pub(crate) fn with_memory_management(mut self, service: MemoryManagementService) -> Self {
+        self.memory_management = Some(service);
         self
     }
 
@@ -119,6 +127,7 @@ impl OpsHttpState {
             config_center: None,
             admin_auth: None,
             todo_management: None,
+            memory_management: None,
             console_user_data: None,
             knowledge_files: None,
             registered_tools: Arc::new(Vec::new()),
@@ -163,6 +172,7 @@ impl OpsHttpState {
             config_center,
             admin_auth,
             todo_management: None,
+            memory_management: None,
             console_user_data: None,
             knowledge_files: None,
             registered_tools: Arc::new(Vec::new()),
@@ -186,6 +196,7 @@ impl OpsHttpState {
             config_center: Some(config_center),
             admin_auth,
             todo_management: None,
+            memory_management: None,
             console_user_data: None,
             knowledge_files: None,
             registered_tools: Arc::new(Vec::new()),

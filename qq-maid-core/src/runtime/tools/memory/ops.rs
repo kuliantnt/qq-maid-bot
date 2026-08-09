@@ -413,7 +413,7 @@ fn authorize_target(
     }
 }
 
-fn validate_visibility(
+pub(crate) fn validate_visibility(
     target: &MemoryTarget,
     visibility: MemoryVisibility,
 ) -> Result<(), MemoryError> {
@@ -446,7 +446,7 @@ fn validate_visibility(
 fn persist_request(req: &SaveMemoryRequest) -> PersistMemoryRequest {
     PersistMemoryRequest {
         target: req.target.clone(),
-        created_by_user_id: req.actor.personal_scope_id.clone(),
+        created_by_user_id: Some(req.actor.personal_scope_id.clone()),
         content: req.content.clone(),
         source_text: req.source_text.clone(),
         category: req.category,

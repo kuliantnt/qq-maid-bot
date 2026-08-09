@@ -36,6 +36,7 @@ const GROUP_LAYER_VISIBILITIES: &[MemoryVisibility] = &[
 mod clean;
 mod consolidation;
 mod dream;
+mod management;
 mod query;
 mod row;
 mod schema;
@@ -47,9 +48,10 @@ pub(crate) use dream::{
     DreamCandidate, DreamCompletion, DreamContext, DreamFinalizeStats, DreamLimits, DreamMessage,
     DreamTriggerPolicy,
 };
+pub(crate) use management::{ManagementListQuery, ManagementPage, ManagementTargetSnapshot};
 pub use schema::{
-    MEMORY_CONSOLIDATION_SCHEMA_V4, MEMORY_DOMAIN_SCHEMA_V3, MEMORY_MIGRATIONS, MEMORY_SCHEMA_V1,
-    MEMORY_SCOPE_SCHEMA_V2,
+    MEMORY_CONSOLIDATION_SCHEMA_V4, MEMORY_DOMAIN_SCHEMA_V3, MEMORY_MANAGEMENT_SCHEMA_V5,
+    MEMORY_MIGRATIONS, MEMORY_SCHEMA_V1, MEMORY_SCOPE_SCHEMA_V2,
 };
 pub use types::{
     CreateMemoryRequest, CreateScopedMemoryRequest, ListMemoryQuery, MemoryCategory, MemoryKind,
@@ -656,6 +658,7 @@ fn build_scoped_record(req: CreateScopedMemoryRequest) -> Result<MemoryRecord, M
         status,
         pinned: false,
         attribute_key: None,
+        revision: 1,
         user_id: clean_optional_option(req.user_id),
         group_id: clean_optional_option(req.group_id),
         content: redact_sensitive_text(&content),
@@ -671,9 +674,9 @@ fn insert_record_unlocked(conn: &Connection, record: &MemoryRecord) -> Result<()
             user_id, group_id, content, source_text,
             memory_kind, subject_id, relation_subject_id, relation_object_id,
             visibility, source_type, source_ref, last_confirmed_at,
-            status, pinned, attribute_key
+            status, pinned, attribute_key, revision
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                   ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                   ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         params![
             record.id,
             record.created_at,
@@ -698,6 +701,8 @@ fn insert_record_unlocked(conn: &Connection, record: &MemoryRecord) -> Result<()
             record.status.as_str(),
             record.pinned,
             record.attribute_key,
+            i64::try_from(record.revision)
+                .map_err(|_| MemoryError::io("memory revision exceeds SQLite integer range"))?,
         ],
     )
     .map_err(MemoryError::from_sql)?;
