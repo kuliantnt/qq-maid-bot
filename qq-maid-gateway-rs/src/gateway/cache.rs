@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tracing::debug;
+use tracing::trace;
 
 use super::logging::mask_identifier;
 
@@ -149,7 +149,7 @@ impl BoundedIdSet {
     }
 
     fn log_eviction(&self, reason: &'static str, value: &str) {
-        debug!(
+        trace!(
             cache = self.log_label,
             id_kind = self.kind,
             id = %mask_identifier(value),
@@ -158,12 +158,12 @@ impl BoundedIdSet {
             max_entries = self.max_entries,
             expired_evictions = self.expired_evictions,
             capacity_evictions = self.capacity_evictions,
-            "gateway short-lived cache evicted id"
+            "Gateway 短期缓存已淘汰 ID"
         );
     }
 
     fn log_metrics(&self) {
-        debug!(
+        trace!(
             cache = self.log_label,
             id_kind = self.kind,
             entries = self.entries.len(),
@@ -171,7 +171,7 @@ impl BoundedIdSet {
             ttl_seconds = self.ttl.as_secs(),
             expired_evictions = self.expired_evictions,
             capacity_evictions = self.capacity_evictions,
-            "gateway short-lived cache metrics"
+            "Gateway 短期缓存统计"
         );
     }
 }

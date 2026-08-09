@@ -15,21 +15,25 @@ use crate::{
         session::{SessionMeta, SessionRecord, SessionStore},
         tools::{TaskStore, memory, todo},
     },
+    service::VisibleEntitySnapshot,
 };
 
 use super::agent_presenters::{
     tool_outcome_from_knowledge_result, tool_outcome_from_rss_result,
     tool_outcome_from_train_result, tool_outcome_from_weather_result,
-    tool_outcome_from_web_search_result,
 };
+use super::search::agent_turn::project_results as project_search_results;
 
 pub(crate) type IndexedToolOutcomes = Vec<(usize, ToolExecutionOutcome)>;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct ToolTurnContext {
-    pub(crate) semantic_domain: Option<&'static str>,
-    pub(crate) status_subject: Option<&'static str>,
-    pub(crate) status_action: Option<&'static str>,
+/// 单个业务域对整轮 Tool 结果的结构化投影。
+///
+/// 领域只报告它消费的结果和对应回执；跨领域的原始调用顺序、重试覆盖和未知 Tool
+/// 回退统一由本模块处理，避免把整轮编排错误地下沉到任一业务域。
+pub(crate) struct DomainResultProjection {
+    pub(crate) consumed_result_indexes: std::collections::HashSet<usize>,
+    pub(crate) outcomes: IndexedToolOutcomes,
+    pub(crate) visible_entity_snapshot: Option<VisibleEntitySnapshot>,
 }
 
 pub(crate) trait DomainTurnDiagnostics {
@@ -42,6 +46,17 @@ pub(crate) trait DomainTurnDiagnostics {
     ) -> Option<&'static str> {
         None
     }
+}
+
+/// 领域后处理器只接收通用 Tool Turn 结果，并自行完成领域验真与诊断构造。
+///
+/// 通用调度层不读取领域候选、成功声明或工具名称等具体规则。
+pub(crate) trait DomainTurnPostprocessor {
+    fn postprocess_output(
+        self: Box<Self>,
+        projected_outcome: Option<&AgentTurnOutcome>,
+        output: &mut RespondOutput,
+    ) -> Box<dyn DomainTurnDiagnostics>;
 }
 
 pub(crate) struct ToolTurnPostprocess {
@@ -93,7 +108,7 @@ pub(crate) fn postprocess_tool_turn(
     meta: &SessionMeta,
     interaction_meta: &SessionMeta,
     mut output: RespondOutput,
-    context: ToolTurnContext,
+    req: &crate::runtime::respond::RespondRequest,
 ) -> Result<ToolTurnPostprocess, LlmError> {
     let mut standalone_interaction = if interaction_meta.scope_key != meta.scope_key {
         Some(
@@ -108,6 +123,10 @@ pub(crate) fn postprocess_tool_turn(
         .as_mut()
         .unwrap_or(conversation_session);
 
+    let domain_postprocessors: Vec<Box<dyn DomainTurnPostprocessor>> = vec![Box::new(
+        todo::agent_turn::TodoTurnPostprocessor::for_request(req, state_session, &output.reply),
+    )];
+
     let outcome = project_tool_turn(task_store, state_session, meta, &output)?;
     if let Some(interaction) = standalone_interaction.as_mut() {
         session_store
@@ -115,34 +134,24 @@ pub(crate) fn postprocess_tool_turn(
             .map_err(crate::runtime::respond::common::session_error)?;
     }
 
-    let todo_guard_enabled = todo::agent_turn::should_validate_success(&context, &output);
-    let validation = if outcome.can_replace_model_reply() {
+    let projected_outcome = if outcome.can_replace_model_reply() {
         if outcome.should_preserve_model_reply() {
             apply_agent_turn_outcome_with_model_reply(&mut output, &outcome);
         } else {
             apply_agent_turn_outcome(&mut output, &outcome);
         }
-        todo::agent_turn::success_validation_from_agent_outcome(&outcome)
+        Some(&outcome)
     } else if outcome.has_unhandled_outcome() && !outcome.outcomes.is_empty() {
         apply_agent_turn_compat_output(&mut output, &outcome);
-        todo::agent_turn::success_validation_from_agent_outcome(&outcome)
-    } else if todo_guard_enabled {
-        let validation = todo::agent_turn::validate_model_reply_success(&output);
-        if !validation.passed() {
-            output = todo::agent_turn::success_not_verified_output(output);
-        }
-        validation
+        Some(&outcome)
     } else {
-        todo::success_guard::TodoSuccessValidation::Passed {
-            claimed_success: false,
-        }
+        None
     };
-    let diagnostics = ToolTurnDiagnostics {
-        domains: vec![Box::new(todo::agent_turn::diagnostics_from_tool_results(
-            &output.agent.tool_results,
-            validation,
-        ))],
-    };
+    let mut domains = Vec::with_capacity(domain_postprocessors.len());
+    for postprocessor in domain_postprocessors {
+        domains.push(postprocessor.postprocess_output(projected_outcome, &mut output));
+    }
+    let diagnostics = ToolTurnDiagnostics { domains };
     Ok(ToolTurnPostprocess {
         output,
         outcome,
@@ -190,22 +199,37 @@ fn project_tool_turn(
     meta: &SessionMeta,
     output: &RespondOutput,
 ) -> Result<AgentTurnOutcome, LlmError> {
-    let todo_projection =
-        todo::agent_turn::project_results(task_store, session, meta, &output.agent.tool_results)?;
+    let todo_projection = todo::agent_turn::project_results(
+        task_store,
+        session,
+        meta,
+        &output.agent.tool_results,
+        &output.agent.tool_attempts,
+    )?;
     let visible_entity_snapshot = todo_projection.visible_entity_snapshot;
+    let search_projection =
+        project_search_results(&output.agent.tool_results, &output.agent.tool_attempts);
     let mut outcomes = Vec::new();
     let mut todo_outcomes = todo_projection.outcomes.into_iter().peekable();
+    let mut search_outcomes = search_projection.outcomes.into_iter().peekable();
 
     for (index, result) in output.agent.tool_results.iter().enumerate() {
+        if is_retry_superseded_result(index, &output.agent.tool_attempts) {
+            // 旧尝试仍保留在 Agent diagnostics；这里只丢弃它对应的用户展示块。
+            let mut discarded = Vec::new();
+            drain_domain_outcomes_for_result(index, &mut todo_outcomes, &mut discarded);
+            drain_domain_outcomes_for_result(index, &mut search_outcomes, &mut discarded);
+            continue;
+        }
         if todo_projection.consumed_result_indexes.contains(&index) {
-            drain_todo_outcomes_for_result(index, &mut todo_outcomes, &mut outcomes);
+            drain_domain_outcomes_for_result(index, &mut todo_outcomes, &mut outcomes);
+        } else if search_projection.consumed_result_indexes.contains(&index) {
+            drain_domain_outcomes_for_result(index, &mut search_outcomes, &mut outcomes);
         } else if let Some(outcome) = tool_outcome_from_weather_result(result) {
             outcomes.push(outcome);
         } else if let Some(outcome) = tool_outcome_from_train_result(result) {
             outcomes.push(outcome);
         } else if let Some(outcome) = tool_outcome_from_rss_result(result) {
-            outcomes.push(outcome);
-        } else if let Some(outcome) = tool_outcome_from_web_search_result(result) {
             outcomes.push(outcome);
         } else if let Some(outcome) = tool_outcome_from_knowledge_result(result) {
             outcomes.push(outcome);
@@ -216,6 +240,7 @@ fn project_tool_turn(
         }
     }
     outcomes.extend(todo_outcomes.map(|(_, outcome)| outcome));
+    outcomes.extend(search_outcomes.map(|(_, outcome)| outcome));
 
     Ok(AgentTurnOutcome::from_outcomes_with_visible_snapshot(
         outcomes,
@@ -223,19 +248,30 @@ fn project_tool_turn(
     ))
 }
 
-fn drain_todo_outcomes_for_result(
+fn drain_domain_outcomes_for_result(
     result_index: usize,
-    todo_outcomes: &mut std::iter::Peekable<impl Iterator<Item = (usize, ToolExecutionOutcome)>>,
+    domain_outcomes: &mut std::iter::Peekable<impl Iterator<Item = (usize, ToolExecutionOutcome)>>,
     outcomes: &mut Vec<ToolExecutionOutcome>,
 ) {
-    while todo_outcomes
+    while domain_outcomes
         .peek()
         .is_some_and(|(outcome_index, _)| *outcome_index == result_index)
     {
-        if let Some((_, outcome)) = todo_outcomes.next() {
+        if let Some((_, outcome)) = domain_outcomes.next() {
             outcomes.push(outcome);
         }
     }
+}
+
+/// 重试后的旧结果仍保留在原始 Agent 轨迹中，但不能再参与用户展示或领域回执。
+/// 这是所有领域共用的 Tool Loop 语义，不属于 Todo 专用逻辑。
+pub(crate) fn is_retry_superseded_result(
+    result_index: usize,
+    attempts: &[qq_maid_llm::provider::ToolExecutionAttempt],
+) -> bool {
+    attempts
+        .iter()
+        .any(|attempt| attempt.retry_of == Some(result_index))
 }
 
 fn apply_agent_turn_outcome(output: &mut RespondOutput, outcome: &AgentTurnOutcome) {
@@ -243,7 +279,6 @@ fn apply_agent_turn_outcome(output: &mut RespondOutput, outcome: &AgentTurnOutco
     output.reply = body.markdown.clone().unwrap_or_else(|| body.text.clone());
     output.text = body.text;
     output.markdown = body.markdown;
-    output.chat.reply = Some(output.reply.clone());
 }
 
 fn apply_agent_turn_outcome_with_model_reply(
@@ -270,7 +305,6 @@ fn apply_agent_turn_outcome_with_model_reply(
     output.reply = markdown.clone().unwrap_or_else(|| text.clone());
     output.text = text;
     output.markdown = markdown;
-    output.chat.reply = Some(output.reply.clone());
 }
 
 fn apply_agent_turn_compat_output(output: &mut RespondOutput, outcome: &AgentTurnOutcome) {
@@ -278,5 +312,4 @@ fn apply_agent_turn_compat_output(output: &mut RespondOutput, outcome: &AgentTur
     output.reply = body.markdown.clone().unwrap_or_else(|| body.text.clone());
     output.text = body.text;
     output.markdown = body.markdown;
-    output.chat.reply = Some(output.reply.clone());
 }

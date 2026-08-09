@@ -93,7 +93,7 @@ impl SecretStore {
         database: SqliteDatabase,
         master_key_path: &Path,
     ) -> Result<Self, ConfigCenterError> {
-        let cipher = load_or_create_master_key(master_key_path)?;
+        let cipher = load_or_create_master_key(&database, master_key_path)?;
         Ok(Self { database, cipher })
     }
 
@@ -350,10 +350,32 @@ fn envelope_revision(envelope: &SecretEnvelope) -> String {
     format!("sha256:{}", STANDARD_NO_PAD.encode(&digest[..]))
 }
 
-fn load_or_create_master_key(path: &Path) -> Result<XChaCha20Poly1305, ConfigCenterError> {
+fn load_or_create_master_key(
+    database: &SqliteDatabase,
+    path: &Path,
+) -> Result<XChaCha20Poly1305, ConfigCenterError> {
     match read_master_key(path)? {
         Some(cipher) => Ok(cipher),
-        None => create_master_key(path),
+        None => {
+            let connection = database.connection().map_err(|err| {
+                ConfigCenterError::secret(format!("failed to open secret database: {err}"))
+            })?;
+            let has_encrypted_secrets = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM config_secrets LIMIT 1)",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(secret_database_error)?;
+            if has_encrypted_secrets {
+                // 恢复数据库后若没有同期主密钥，生成新密钥只会把“缺失”伪装成认证失败，
+                // 还会污染待修复目录；此时必须保持目录不变并明确要求恢复原密钥。
+                return Err(ConfigCenterError::secret(
+                    "master key file is missing while encrypted managed configuration exists; restore the matching master key before startup",
+                ));
+            }
+            create_master_key(path)
+        }
     }
 }
 

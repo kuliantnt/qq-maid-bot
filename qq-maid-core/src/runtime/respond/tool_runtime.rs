@@ -12,16 +12,15 @@ use crate::{
     runtime::tools::rss::RssFetcher,
     runtime::tools::weather::WEATHER_TOOL_NAME,
     runtime::tools::{
-        CompleteTodoTool, CreateTodoTool, DeleteTodoTool, EditTodoTool, GetTodoTool,
-        KnowledgeSearchTool, ListTodoTool, ManageRecurringReminderTool, MergeTodoTool,
-        RestoreTodoTool, RssManageSubscriptionsTool, RssRecentItemsTool, SaveMemoryTool, TaskStore,
-        TodoScopedToolInputs, ToolTurnPostprocess, TrainScheduleTool, WEB_SEARCH_TOOL_NAME,
-        WeatherTool, WebSearchTimeouts, WebSearchTool, postprocess_tool_turn,
+        KnowledgeSearchTool, RssManageSubscriptionsTool, RssRecentItemsTool, SaveMemoryTool,
+        TaskStore, TodoScopedToolInputs, ToolTurnPostprocess, TrainScheduleTool,
+        WEB_SEARCH_TOOL_NAME, WeatherTool, WebSearchTimeouts, WebSearchTool, postprocess_tool_turn,
         replace_scoped_todo_tools_from_visible_snapshot, todo,
     },
     storage::notification::NotificationOutboxStore,
 };
 use qq_maid_llm::tool::{DEFAULT_TOOL_TIMEOUT, ToolMetadata, ToolRegistry};
+use qq_maid_llm::web_search::WebSearchBackend;
 
 use super::{
     RespondExecutors, RespondRequest, RespondStores, agent_route::AgentToolMode,
@@ -55,8 +54,9 @@ impl ToolRuntime {
             ToolRegistry::new().with_limits(DEFAULT_TOOL_TIMEOUT, tool_result_max_chars);
         let save_memory_tool =
             SaveMemoryTool::new(stores.memory_store.clone(), stores.session_store.clone());
-        let web_search_tool =
-            WebSearchTool::new(executors.query_executor.clone()).with_timeouts(web_search_timeouts);
+        let web_search_tool = WebSearchTool::new(executors.query_executor.clone())
+            .with_timeouts(web_search_timeouts)
+            .with_output_max_chars(tool_result_max_chars);
         let weather_available = executors.weather_executor.is_available();
         // Tool 只通过服务端白名单注册；Todo Tool 复用现有 store、session 快照和 pending。
         let mut tools: Vec<qq_maid_llm::tool::DynTool> = vec![
@@ -73,51 +73,13 @@ impl ToolRuntime {
                 knowledge_index,
                 tool_result_max_chars,
             )),
-            Arc::new(ListTodoTool::new(
-                stores.task_store.clone(),
-                stores.session_store.clone(),
-            )),
-            Arc::new(GetTodoTool::new(
-                stores.task_store.clone(),
-                stores.session_store.clone(),
-            )),
-            Arc::new(CreateTodoTool::new(
-                stores.task_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-            Arc::new(CompleteTodoTool::new(
-                stores.task_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-            Arc::new(EditTodoTool::new(
-                stores.task_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-            Arc::new(RestoreTodoTool::new(
-                stores.task_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-            Arc::new(DeleteTodoTool::new(
-                stores.task_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-            Arc::new(MergeTodoTool::new(
-                stores.task_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
-            Arc::new(ManageRecurringReminderTool::new(
-                stores.task_store.clone(),
-                stores.session_store.clone(),
-                stores.notification_store.clone(),
-            )),
             Arc::new(save_memory_tool.clone()),
         ];
+        tools.extend(todo::registered_tools(
+            stores.task_store.clone(),
+            stores.session_store.clone(),
+            stores.notification_store.clone(),
+        ));
         if weather_available {
             tools.push(Arc::new(WeatherTool::new(
                 executors.weather_executor.clone(),
@@ -128,7 +90,7 @@ impl ToolRuntime {
                 tracing::warn!(
                     error_code = %err.code,
                     error_stage = %err.stage,
-                    "failed to register core tool"
+                    "注册 Core Tool 失败"
                 );
             }
         }
@@ -168,6 +130,11 @@ impl ToolRuntime {
         if !self.weather_available {
             tool_names.retain(|name| *name != WEATHER_TOOL_NAME);
         }
+        if policy.search_backend == WebSearchBackend::Disabled {
+            tool_names.retain(|name| *name != WEB_SEARCH_TOOL_NAME);
+        }
+        // image_generation 是 Provider 原生工具开关，不属于业务 Function Tool Registry。
+        tool_names.retain(|name| *name != "image_generation");
         if policy.knowledge_mode == KnowledgeRetrievalMode::Auto {
             // auto 是紧急回退：自动注入时不再向模型暴露同一个检索工具。
             tool_names.retain(|name| {
@@ -181,6 +148,7 @@ impl ToolRuntime {
             registry.replace(Arc::new(
                 self.web_search_tool
                     .clone()
+                    .with_backend_override(policy.search_backend)
                     .with_model_override(policy.search_model.clone()),
             ))?;
         }
@@ -205,7 +173,7 @@ impl ToolRuntime {
         meta: &SessionMeta,
         interaction_meta: &SessionMeta,
         output: RespondOutput,
-        context: crate::runtime::tools::agent_turn::ToolTurnContext,
+        req: &RespondRequest,
     ) -> Result<ToolTurnPostprocess, LlmError> {
         postprocess_tool_turn(
             &self.session_store,
@@ -214,7 +182,7 @@ impl ToolRuntime {
             meta,
             interaction_meta,
             output,
-            context,
+            req,
         )
     }
 

@@ -11,8 +11,8 @@ use crate::{
 };
 
 use super::{
-    PlannedRespond, RespondPlan, RespondRequest, RustRespondService,
-    agent_route::{self, AgentRouteContext, RespondRoute},
+    PlannedRespond, RespondRequest, RustRespondService,
+    agent_route::{self, AgentRouteContext},
     common::session_error,
     interaction_state::{
         classify_inbound_with_active, interaction_snapshot, pending_blocks_immediate,
@@ -92,8 +92,8 @@ impl<'a> RespondRouter<'a> {
             return self.plan_plain_chat(req);
         }
 
-        // 先保护已有确定性命令和自然语言 Todo 查询，避免简单列表查询绕过
-        // `handle_todo_flow()` 进入模型 Tool Loop，回归同义词和默认过滤语义。
+        // 只保护显式命令和“查看完整结果”等确定性入口；普通自然语言待办查询
+        // 统一进入后续 AgentRuntime / Tool Loop，由 `list_todos` 处理筛选。
         let classification = classify_inbound_with_active(
             &user_text,
             active_interaction_session.as_ref(),
@@ -108,13 +108,6 @@ impl<'a> RespondRouter<'a> {
 
         let policy = self.resolve_agent_policy(req)?;
         let agent_decision = self.route_agent_runtime(req, &policy);
-        let plan = if !req.has_non_text_input_parts()
-            && matches!(agent_decision.route, RespondRoute::AgentRuntime)
-        {
-            RespondPlan::AgentRuntime
-        } else {
-            RespondPlan::StreamingChat
-        };
         // 状态语义在能力路由完成后独立计算，只供展示和 diagnostics 使用。
         // Todo domain 的上下文选择封装在业务状态分类器中，respond 不解释具体 domain。
         let interaction_state = interaction_snapshot(req, route_session);
@@ -126,8 +119,9 @@ impl<'a> RespondRouter<'a> {
                 classify_status_hint(trimmed, &interaction_state)
             }
         };
+        let planned = PlannedRespond::chat(agent_decision, status_hint);
         tracing::debug!(
-            respond_plan = ?plan,
+            respond_plan = ?planned.plan(),
             tool_loop_route = ?agent_decision.route,
             status_subject = ?status_hint.map(|hint| hint.subject.as_str()),
             route_reason = agent_decision.reason,
@@ -137,9 +131,9 @@ impl<'a> RespondRouter<'a> {
                 .is_some_and(|value| !value.trim().is_empty()),
             input_chars = trimmed.chars().count(),
             enabled_tools_count = policy.enabled_tools.len(),
-            "selected core respond route"
+            "已选择 Core 响应路由"
         );
-        Ok(PlannedRespond::chat(agent_decision, status_hint))
+        Ok(planned)
     }
 
     pub(super) fn classify_inbound(
@@ -161,7 +155,7 @@ impl<'a> RespondRouter<'a> {
             .map_err(session_error)?;
 
         // Gateway 只提交候选，Core 负责后续注册表与权限判断；所有斜杠候选都应绕过
-        // Gateway 普通聊天冷却，确保未知命令也能在 Core 静默收口。
+        // Gateway 普通聊天冷却，确保未知命令也能在 Core 确定性收口。
         if self.service.command_prefix().is_candidate(&user_text) {
             return Ok(CoreInboundClassification {
                 kind: CoreInboundKind::Immediate,
@@ -271,6 +265,7 @@ impl RustRespondService {
 }
 
 fn is_event_wrapped_command(text: &str) -> bool {
-    session_flow::parse_session_command(text)
-        .is_some_and(|command| command.action.as_str() == "help")
+    crate::runtime::tools::voice::parse_voice_command(text).is_some()
+        || session_flow::parse_session_command(text)
+            .is_some_and(|command| command.action.as_str() == "help")
 }

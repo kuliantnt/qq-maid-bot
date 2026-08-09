@@ -14,6 +14,7 @@ mod recall;
 mod receipt;
 pub(crate) mod route;
 mod save;
+pub(crate) mod status;
 pub mod storage;
 mod types;
 
@@ -37,7 +38,16 @@ pub(crate) use receipt::{
 };
 pub(crate) use route::infer_group_memory_kind;
 pub use save::SaveMemoryTool;
-pub use storage::*;
+// 只暴露 Memory 领域的稳定持久化门面；storage 内部查询/行映射不应通过通配导出
+// 扩散到 respond 或其他业务域。
+pub use storage::{
+    CreateMemoryRequest, CreateScopedMemoryRequest, ListMemoryQuery,
+    MEMORY_CONSOLIDATION_SCHEMA_V4, MEMORY_DOMAIN_SCHEMA_V3, MEMORY_MIGRATIONS, MEMORY_SCHEMA_V1,
+    MEMORY_SCOPE_SCHEMA_V2, MemoryCategory, MemoryDeleteResponse, MemoryError, MemoryErrorInfo,
+    MemoryItemResponse, MemoryKind, MemoryListResponse, MemoryQuery, MemoryRecord, MemoryScopeType,
+    MemorySourceType, MemoryStatus, MemoryStore, MemoryTarget, MemoryVisibility, ScopedMemoryQuery,
+    UpdateMemoryRequest,
+};
 pub(crate) use types::MemoryRecall;
 pub use types::{
     MemoryActor, MemoryMutationResult, MemoryWriteResult, ProfilePreferenceResult,

@@ -155,6 +155,36 @@ fn stale_worker_cannot_advance_or_override_new_worker_retry() {
 }
 
 #[test]
+fn delivery_state_requires_current_lease_and_exact_part_progress() {
+    let store = test_store();
+    let task = store
+        .upsert(multipart_request("ops:delivery-state:result"))
+        .unwrap();
+    store
+        .claim_due("worker-a", 10, "2020-01-01T00:00:00+08:00")
+        .unwrap();
+
+    assert_eq!(
+        store.delivery_state(task.id, "worker-a", 0).unwrap(),
+        NotificationDeliveryState::Ready
+    );
+    assert_eq!(
+        store.delivery_state(task.id, "worker-b", 0).unwrap(),
+        NotificationDeliveryState::LeaseLost
+    );
+    assert_eq!(
+        store.delivery_state(task.id, "worker-a", 1).unwrap(),
+        NotificationDeliveryState::LeaseLost
+    );
+
+    store.cancel_by_source("ops", "ops-1").unwrap();
+    assert_eq!(
+        store.delivery_state(task.id, "worker-a", 0).unwrap(),
+        NotificationDeliveryState::Cancelled
+    );
+}
+
+#[test]
 fn stale_worker_cannot_override_new_worker_sent_state() {
     let store = test_store();
     let task = store

@@ -6,12 +6,11 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+use qq_maid_common::redaction::redact_sensitive_text;
+
 use super::SendMessageIds;
 
-/// C2C 流式首帧响应 DTO。
-///
-/// 目前只接受顶层 `id` 作为 stream id；真实 QQ 联调确认字段前，不能把原始
-/// `msg_id` 或其它普通消息 id 路径猜作流式续接 id。
+/// QQ C2C 流式响应和错误响应的兼容 DTO。
 #[derive(Debug, Deserialize)]
 struct C2cStreamSendResponse {
     #[serde(default)]
@@ -19,29 +18,85 @@ struct C2cStreamSendResponse {
     #[serde(default)]
     code: Option<Value>,
     #[serde(default)]
+    err_code: Option<Value>,
+    #[serde(default)]
     message: Option<String>,
     #[serde(default)]
     msg: Option<String>,
+    #[serde(default)]
+    ext_info: Option<StreamExtInfo>,
 }
 
-pub(super) fn extract_c2c_text_stream_id(body: &str) -> Option<String> {
+#[derive(Debug, Deserialize)]
+struct StreamExtInfo {
+    #[serde(default)]
+    ref_idx: Option<String>,
+}
+
+/// 官方 `/stream_messages` 成功响应：顶层 `id` 是本次响应消息 ID，
+/// `ext_info.ref_idx` 才是可写入引用索引的正文键，二者不能互换。
+pub(super) fn extract_c2c_stream_response(body: &str) -> Option<(String, Option<String>)> {
     let response = serde_json::from_str::<C2cStreamSendResponse>(body).ok()?;
-    response
+    let message_id = response
         .id
         .map(|id| id.trim().to_owned())
-        .filter(|id| !id.is_empty())
+        .filter(|id| !id.is_empty())?;
+    let ref_index_id = response
+        .ext_info
+        .and_then(|ext_info| ext_info.ref_idx)
+        .map(|ref_idx| ref_idx.trim().to_owned())
+        .filter(|ref_idx| !ref_idx.is_empty());
+    Some((message_id, ref_index_id))
 }
 
 pub(super) fn qq_api_error_fields(body: &str) -> (Option<String>, Option<String>) {
     let Ok(response) = serde_json::from_str::<C2cStreamSendResponse>(body) else {
         return (None, None);
     };
-    let code = response.code.map(|value| match value {
-        Value::String(value) => value,
-        other => other.to_string(),
-    });
-    let message = response.message.or(response.msg);
+    let code = response
+        .code
+        .or(response.err_code)
+        .map(|value| match value {
+            Value::String(value) => value,
+            other => other.to_string(),
+        })
+        .map(|value| redact_qq_error_text(&value));
+    let message = response
+        .message
+        .or(response.msg)
+        .map(|value| redact_qq_error_text(&value));
     (code, message)
+}
+
+/// QQ 错误消息可能回显媒体 URL 或凭证片段；日志仅保留脱敏后的诊断文本。
+fn redact_qq_error_text(text: &str) -> String {
+    let redacted = redact_sensitive_text(text);
+    let mut safe = String::with_capacity(redacted.len());
+    let mut rest = redacted.as_str();
+    loop {
+        let position = [rest.find("https://"), rest.find("http://")]
+            .into_iter()
+            .flatten()
+            .min();
+        let Some(start) = position else {
+            safe.push_str(rest);
+            break;
+        };
+        safe.push_str(&rest[..start]);
+        safe.push_str("<redacted:url>");
+        let url = &rest[start..];
+        let end = url
+            .char_indices()
+            .skip(1)
+            .find(|(_, character)| {
+                character.is_whitespace()
+                    || matches!(character, '"' | '\'' | '<' | '>' | ')' | ']' | '}')
+            })
+            .map(|(index, _)| index)
+            .unwrap_or(url.len());
+        rest = &url[end..];
+    }
+    safe
 }
 
 pub(crate) fn extract_sent_message_id(body: &str) -> Option<String> {
@@ -72,12 +127,25 @@ pub(crate) fn extract_sent_message_id(body: &str) -> Option<String> {
 pub(crate) fn extract_sent_ref_index_id(body: &str) -> Option<String> {
     let value = serde_json::from_str::<Value>(body).ok()?;
     let candidates = [
+        value.get("ext_info").and_then(|item| item.get("ref_idx")),
         value.get("msg_idx"),
         value.get("ref_msg_idx"),
+        value
+            .get("d")
+            .and_then(|item| item.get("ext_info"))
+            .and_then(|item| item.get("ref_idx")),
         value.get("d").and_then(|item| item.get("msg_idx")),
         value.get("d").and_then(|item| item.get("ref_msg_idx")),
+        value
+            .get("data")
+            .and_then(|item| item.get("ext_info"))
+            .and_then(|item| item.get("ref_idx")),
         value.get("data").and_then(|item| item.get("msg_idx")),
         value.get("data").and_then(|item| item.get("ref_msg_idx")),
+        value
+            .get("message")
+            .and_then(|item| item.get("ext_info"))
+            .and_then(|item| item.get("ref_idx")),
         value.get("message").and_then(|item| item.get("msg_idx")),
         value
             .get("message")
@@ -96,5 +164,28 @@ pub(crate) fn extract_sent_message_ids(body: &str) -> SendMessageIds {
     SendMessageIds {
         message_id: extract_sent_message_id(body),
         ref_index_id: extract_sent_ref_index_id(body),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qq_error_fields_redact_credentials_and_complete_urls() {
+        let body = serde_json::json!({
+            "code": 400,
+            "message": "upload https://cdn.example/image.png?sign=private failed; OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz123456"
+        })
+        .to_string();
+
+        let (code, message) = qq_api_error_fields(&body);
+        assert_eq!(code.as_deref(), Some("400"));
+        let message = message.unwrap();
+        assert!(message.contains("<redacted:url>"));
+        assert!(message.contains("OPENAI_API_KEY=<redacted>"));
+        assert!(!message.contains("cdn.example"));
+        assert!(!message.contains("private"));
+        assert!(!message.contains("sk-"));
     }
 }

@@ -51,8 +51,35 @@ pub async fn run_with_config_with_shutdown_and_status(
     runtime: GatewayRuntimeStatus,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<()> {
+    run_with_config_with_shutdown_and_status_and_application_version(
+        config,
+        respond,
+        push_sink,
+        runtime,
+        shutdown_token,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await
+}
+
+pub async fn run_with_config_with_shutdown_and_status_and_application_version(
+    config: AppConfig,
+    respond: RespondClient,
+    push_sink: GatewayPushSink,
+    runtime: GatewayRuntimeStatus,
+    shutdown_token: CancellationToken,
+    application_version: &'static str,
+) -> anyhow::Result<()> {
     log_startup(&config);
-    gateway::run(config, respond, push_sink, runtime, shutdown_token).await
+    gateway::run_with_application_version(
+        config,
+        respond,
+        push_sink,
+        runtime,
+        shutdown_token,
+        application_version,
+    )
+    .await
 }
 
 /// 依次尝试加载当前工作目录下的 `config/.env` 和 `.env` 文件。
@@ -82,8 +109,9 @@ fn log_startup(config: &AppConfig) {
         api_base = %config.api_base,
         sandbox = config.sandbox,
         enable_markdown = config.enable_markdown,
-        enable_image = config.enable_image,
         enable_group_messages = config.enable_group_messages,
+        group_message_mode = ?config.group_message_mode,
+        group_active_keyword_count = config.group_active_keywords.len(),
         verbose_log = config.verbose_log,
         conversation_queue_capacity = config.conversation_queue_capacity,
         max_active_conversation_workers = config.max_active_conversation_workers,
@@ -94,7 +122,7 @@ fn log_startup(config: &AppConfig) {
             config.wechat_service.bind_host, config.wechat_service.bind_port
         ),
         wechat_service_callback_path = %config.wechat_service.callback_path,
-        "starting qq-maid Rust gateway"
+        "正在启动 qq-maid Rust Gateway"
     );
 }
 

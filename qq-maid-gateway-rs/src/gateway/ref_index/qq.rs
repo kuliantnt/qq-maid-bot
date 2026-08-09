@@ -1,9 +1,9 @@
 //! QQ 官方引用索引字段解析。
 //!
-//! QQ 引用消息常见只下发 `REFIDX_*`，字段位于 `message_scene.ext`；
-//! 引用消息类型下 `msg_elements[0].msg_idx` 更接近被引用消息索引。
+//! QQ 官方在 `message_scene.ext` 中分别下发当前消息与被引用消息的索引。
 
 use serde::Deserialize;
+use serde_json::{Map, Value};
 
 pub(crate) const MSG_TYPE_QUOTE: u64 = 103;
 
@@ -15,12 +15,41 @@ pub(crate) struct RawMessageScene {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub(crate) struct RawMsgElement {
+    /// 元素的 `msg_idx` 仅用于反序列化；按 QQ 最新文档，引用内容解析不再以
+    /// `msg_idx == ref_msg_idx` 筛选元素，因此本字段不再被业务代码读取。
     #[serde(default)]
+    #[allow(dead_code)]
     pub(crate) msg_idx: Option<String>,
     #[serde(default)]
     pub(crate) content: Option<String>,
     #[serde(default)]
+    pub(crate) message_type: Option<u64>,
+    #[serde(default)]
     pub(crate) attachments: Vec<crate::gateway::event::Attachment>,
+    #[serde(default)]
+    pub(crate) ark_data: Option<RawArkData>,
+    /// 引用根元素可能继续包含有序子元素；只有根元素及其后代属于被引用消息。
+    #[serde(default)]
+    pub(crate) msg_elements: Vec<RawMsgElement>,
+}
+
+/// QQ ARK 卡片的最小安全 DTO。`fields` 保持为动态对象，只读取明确白名单字段，
+/// 避免平台新增的任意嵌套结构直接进入 Gateway 或模型上下文。
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct RawArkData {
+    #[serde(default)]
+    pub(crate) prompt: Option<String>,
+    #[serde(default, rename = "type")]
+    pub(crate) ark_type: Option<Value>,
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) ark_name: Option<String>,
+    #[serde(default)]
+    pub(crate) fields: Map<String, Value>,
+    /// 官方卡片的展示字段可能直接位于 `ark_data` 顶层；仍只由 normalizer 读取白名单键。
+    #[serde(default, flatten)]
+    pub(crate) extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -29,11 +58,7 @@ pub(crate) struct QqRefIndices {
     pub(crate) ref_msg_idx: Option<String>,
 }
 
-pub(crate) fn parse_ref_indices(
-    scene: Option<&RawMessageScene>,
-    message_type: Option<u64>,
-    msg_elements: &[RawMsgElement],
-) -> QqRefIndices {
+pub(crate) fn parse_ref_indices(scene: Option<&RawMessageScene>) -> QqRefIndices {
     let mut indices = QqRefIndices::default();
     if let Some(scene) = scene {
         for item in &scene.ext {
@@ -44,13 +69,6 @@ pub(crate) fn parse_ref_indices(
                 indices.ref_msg_idx = clean_idx(value);
             }
         }
-    }
-    if message_type == Some(MSG_TYPE_QUOTE)
-        && let Some(value) = msg_elements
-            .first()
-            .and_then(|item| item.msg_idx.as_deref())
-    {
-        indices.ref_msg_idx = clean_idx(value);
     }
     indices
 }
@@ -73,25 +91,21 @@ mod tests {
             ],
         };
 
-        let indices = parse_ref_indices(Some(&scene), None, &[]);
+        let indices = parse_ref_indices(Some(&scene));
 
         assert_eq!(indices.msg_idx.as_deref(), Some("REFIDX_current"));
         assert_eq!(indices.ref_msg_idx.as_deref(), Some("REFIDX_old"));
     }
 
     #[test]
-    fn quote_message_type_uses_first_msg_element_as_reference() {
+    fn missing_scene_reference_is_not_inferred_from_elements() {
         let scene = RawMessageScene {
-            ext: vec!["ref_msg_idx=REFIDX_ext".to_owned()],
+            ext: vec!["msg_idx=REFIDX_current".to_owned()],
         };
-        let elements = vec![RawMsgElement {
-            msg_idx: Some("REFIDX_element".to_owned()),
-            content: None,
-            attachments: Vec::new(),
-        }];
 
-        let indices = parse_ref_indices(Some(&scene), Some(MSG_TYPE_QUOTE), &elements);
+        let indices = parse_ref_indices(Some(&scene));
 
-        assert_eq!(indices.ref_msg_idx.as_deref(), Some("REFIDX_element"));
+        assert_eq!(indices.msg_idx.as_deref(), Some("REFIDX_current"));
+        assert_eq!(indices.ref_msg_idx, None);
     }
 }

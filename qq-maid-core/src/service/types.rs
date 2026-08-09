@@ -7,12 +7,9 @@ use async_trait::async_trait;
 use qq_maid_common::{
     identity_context::{ConversationContext, MentionIdentity, MessageActorContext, MessageContext},
     input_part::{MessageInputPart, QuotedMessageContext},
+    output_part::AssistantOutput,
 };
 use serde::{Deserialize, Serialize};
-
-// 平台无关出站内容模型已下沉到 common，这里重新导出以维持
-// `crate::service::{AssistantOutput, OutputPart, OutputMedia}` 的对外路径稳定。
-pub use qq_maid_common::output_part::{AssistantOutput, OutputMedia, OutputPart};
 use tokio::sync::mpsc;
 
 use crate::identity::conversation_scope_key;
@@ -45,6 +42,9 @@ pub struct CoreRequest {
     pub account_id: Option<String>,
     pub actor: CoreActor,
     pub mentions: Vec<MentionIdentity>,
+    /// Gateway 根据平台结构化 @ 或已支持的唤醒词判定本轮是否明确指向机器人。
+    /// 该字段只表达寻址语义，不参与平台协议解析或权限判断。
+    pub addressed_to_bot: bool,
     pub conversation: CoreConversation,
 }
 
@@ -135,19 +135,26 @@ pub enum CoreConversation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreResponse {
-    /// 结构化出站内容，Core → Gateway 完整回复的唯一正文契约。
+    /// Core → Gateway 完整回复 envelope 中的结构化正文。
     ///
     /// Gateway 出站渲染、ref_index 文本回填、流式收尾、日志等读取用户可见正文
     /// 时，应统一通过 [`CoreResponse::text_content`] / [`CoreResponse::markdown_content`]
     /// 访问，不再存在平行的旧 `text` / `markdown` 字段。Core 内部 `RespondResponse`
     /// 仍可按 text/markdown 双通道组装正文，但只在转换为 `CoreResponse` 时合成为
-    /// 该结构化 output，不外泄到 Core→Gateway 边界。
+    /// common 的 `AssistantOutput`，不再创建平行正文类型。
     pub output: Option<AssistantOutput>,
     pub handled: Option<bool>,
     pub session_id: Option<String>,
     pub command: Option<String>,
     pub diagnostics: Option<serde_json::Value>,
     pub visible_entity_snapshot: Option<VisibleEntitySnapshot>,
+    /// 最终回复的结构化投递提示；Gateway 必须自行校验平台能力并保留文字回退。
+    pub delivery_hint: Option<CoreDeliveryHint>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreDeliveryHint {
+    Voice,
 }
 
 #[derive(Debug)]
@@ -247,6 +254,7 @@ pub enum CoreFailureKind {
     SearchFailed,
     LlmTimeout,
     LlmFailed,
+    ContextBudgetExceeded,
     Cancelled,
     Internal,
 }
@@ -281,6 +289,26 @@ impl CoreResponse {
     pub fn with_output(mut self, output: AssistantOutput) -> Self {
         self.output = Some(output);
         self
+    }
+
+    pub fn with_delivery_hint_if_eligible(mut self, hint: Option<CoreDeliveryHint>) -> Self {
+        if self.voice_delivery_eligible() {
+            self.delivery_hint = hint;
+        }
+        self
+    }
+
+    /// 第一版只把纯文字/Markdown 最终回答交给 TTS；含图片或文件的回复保持现有发送方式。
+    pub fn voice_delivery_eligible(&self) -> bool {
+        use qq_maid_common::output_part::OutputPart;
+
+        self.text_content()
+            .is_some_and(|text| !text.trim().is_empty())
+            && self.output.as_ref().is_some_and(|output| {
+                output.parts.iter().all(|part| {
+                    matches!(part, OutputPart::Text { .. } | OutputPart::Markdown { .. })
+                })
+            })
     }
 
     /// 用户可见文本 fallback，读取结构化 `AssistantOutput::text_fallback`。

@@ -19,6 +19,7 @@ fn private_conversation_derives_private_scope() {
             is_bot: false,
             identity_source: IdentitySource::Event,
         },
+        addressed_to_bot: false,
         conversation: CoreConversation::Private {
             peer_id: "u1".to_owned(),
         },
@@ -54,6 +55,7 @@ fn group_conversation_derives_group_scope_without_member_split() {
             is_bot: false,
             identity_source: IdentitySource::Event,
         },
+        addressed_to_bot: false,
         conversation: CoreConversation::Group {
             group_id: "g1".to_owned(),
         },
@@ -103,6 +105,7 @@ fn message_context_is_derived_from_core_request_authoritative_fields() {
             is_bot: false,
             identity_source: IdentitySource::MemberApi,
         },
+        addressed_to_bot: false,
         conversation: CoreConversation::Group {
             group_id: "g1".to_owned(),
         },

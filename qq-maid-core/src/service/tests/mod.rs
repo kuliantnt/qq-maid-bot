@@ -7,6 +7,7 @@ use std::{
 use qq_maid_common::{
     identity_context::{ConversationKind, IdentitySource},
     input_part::QuotedMessageContext,
+    output_part::{AssistantOutput, OutputMedia, OutputPart},
 };
 use qq_maid_llm::provider::{LlmStreamEvent, ToolCallingProtocol};
 use tokio::sync::Notify;

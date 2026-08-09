@@ -25,7 +25,7 @@ pub(super) fn cleanup_media_cache_best_effort(root: &Path) {
     ) {
         warn!(
             error = %error,
-            "QQ official media cache cleanup failed"
+            "QQ 官方媒体缓存清理失败"
         );
     }
 }

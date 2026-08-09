@@ -13,11 +13,11 @@
 3. 在 `qq-maid-core/src/runtime/tools/mod.rs` 中导出 Tool 类型。
 4. 在 `qq-maid-core/src/runtime/respond/tool_runtime.rs` 中注册到服务端 `ToolRegistry`。
 5. 在 `qq-maid-core/src/config/agent/mod.rs` 的工具名校验集合中登记工具。
-6. 在 `runtime/config/agent.toml` 的对应场景 `enabled_tools` 中开放。
+6. 在 `runtime/config/agent.example.toml` 的对应场景 `enabled_tools` 中开放。
 
 如果工具需要自然语言路由、确定性展示、可见实体、确认/澄清或写入后诊断，还需要补充后文的 Tool Loop 接入文件；不要只注册 Tool 就把业务判断写进 `runtime/respond/`。
 
-第 5 步容易漏：当前 `agent.toml` 会校验工具名，未加入 `ALL_ENABLED_TOOL_NAMES` 的工具即使写进配置也会启动失败。工具是否对私聊或群聊开放不由代码默认值决定，必须在 `runtime/config/agent.toml` 对应 Scene 的 `enabled_tools` 中显式配置。
+第 5 步容易漏：当前 `agent.toml` 会校验工具名，未加入 `ALL_ENABLED_TOOL_NAMES` 的工具即使写进配置也会启动失败。工具是否对私聊或群聊开放不由代码默认值决定，必须在 `runtime/config/agent.example.toml` 对应 Scene 的 `enabled_tools` 中显式配置。
 
 这 6 步只是最小注册链路。工具若包含持久化、确认、用户可见编号、主动通知或跨存储副作用，还必须补充领域操作、pending、回执和可见实体等接入，不能把真实业务完成状态交给模型自由描述。
 
@@ -182,7 +182,7 @@ const ALL_ENABLED_TOOL_NAMES: &[&str] = &[
 
 ## 在配置中开放 Tool
 
-在 `runtime/config/agent.toml` 中，把工具名加入对应场景的 `enabled_tools`。
+在 `runtime/config/agent.example.toml` 中，把工具名加入对应场景的 `enabled_tools`。
 
 私聊示例：
 

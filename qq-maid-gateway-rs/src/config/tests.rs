@@ -38,12 +38,11 @@ fn loads_defaults_with_bound_credentials() {
         Duration::from_secs(DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS)
     );
     assert!(config.enable_markdown);
-    assert!(!config.enable_image);
     assert!(config.bot_mention_ids.is_empty());
     assert!(!config.enable_group_messages);
     assert!(!config.verbose_log);
-    // 成员详情补全默认开启（生产生效），失败降级不阻断主回复。
-    assert!(config.member_detail_enrich_enabled);
+    // QQ 当前不再提供成员详情接口，默认关闭以避免持续发送无权限请求。
+    assert!(!config.member_detail_enrich_enabled);
     assert_eq!(config.group_message_mode, GroupMessageMode::Mention);
     assert_eq!(config.group_active_keywords, vec!["小女仆"]);
     assert_eq!(config.media_dir, PathBuf::from(DEFAULT_MEDIA_DIR));
@@ -364,7 +363,6 @@ fn loads_optional_values() {
         ("QQ_BOT_TOKEN_REFRESH_MARGIN_SECONDS", "120"),
         ("QQ_MAID_BOT_MENTION_IDS", "bot-openid,member-openid"),
         ("QQ_MAID_ENABLE_MARKDOWN", "true"),
-        ("QQ_MAID_ENABLE_IMAGE", "1"),
         ("QQ_MAID_ENABLE_GROUP_MESSAGES", "yes"),
         ("QQ_MAID_GATEWAY_VERBOSE_LOG", "on"),
         ("CONVERSATION_QUEUE_CAPACITY", "24"),
@@ -408,7 +406,6 @@ fn loads_optional_values() {
     assert_eq!(config.token_refresh_margin, Duration::from_secs(120));
     assert_eq!(config.bot_mention_ids, vec!["bot-openid", "member-openid"]);
     assert!(config.enable_markdown);
-    assert!(config.enable_image);
     assert!(config.enable_group_messages);
     assert!(config.verbose_log);
     assert_eq!(config.conversation_queue_capacity, 24);
@@ -688,16 +685,16 @@ fn parses_verbose_log_boolean_values() {
 }
 
 #[test]
-fn member_detail_enrich_enabled_defaults_true_and_can_be_disabled() {
-    // 默认开启（生产生效）。
+fn member_detail_enrich_enabled_defaults_false_and_can_be_enabled() {
+    // QQ 当前不再向应用提供成员详情接口，默认不发起无权限请求。
     let config = AppConfig::from_map(&env_with_creds(&[])).unwrap();
-    assert!(config.member_detail_enrich_enabled);
+    assert!(!config.member_detail_enrich_enabled);
 
-    // 环境变量可关闭。
+    // 若后续账号重新获得接口权限，仍可通过环境变量显式开启。
     let config = AppConfig::from_map(&env_with_creds(&[(
         "QQ_MAID_MEMBER_DETAIL_ENRICH_ENABLED",
-        "false",
+        "true",
     )]))
     .unwrap();
-    assert!(!config.member_detail_enrich_enabled);
+    assert!(config.member_detail_enrich_enabled);
 }

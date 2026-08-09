@@ -11,7 +11,7 @@ use crate::{
     http::console::ConsoleCoreSummary,
     http::console::{ConsoleToolMetadata, DynConsoleStatusSource, EmptyConsoleStatusSource},
     http::routes::{OpsHttpState, build_router},
-    management::AdminAuth,
+    management::{AdminAuth, ConsoleUserDataService},
     runtime::push::PushSink,
     storage::database::SqliteDatabase,
 };
@@ -41,6 +41,7 @@ pub struct ManagementRuntime {
 impl ManagementRuntime {
     pub fn new(
         config: ManagementBootstrapConfig,
+        database: SqliteDatabase,
         config_center: ConfigCenter,
         admin_auth: Option<AdminAuth>,
         application_version: &str,
@@ -52,17 +53,21 @@ impl ManagementRuntime {
             config.server_port,
             &config.app_db_file,
         );
-        let http_state = OpsHttpState::setup_required(
+        let mut http_state = OpsHttpState::setup_required(
             crate::http::routes::OpsHttpConfig {
                 web_console_enabled: config.web_console_enabled,
                 web_console_allowed_origins: config.web_console_allowed_origins,
                 web_console_trusted_proxy_ips: config.web_console_trusted_proxy_ips,
                 web_console_secure_cookies: config.web_console_secure_cookies,
+                knowledge_max_file_bytes: config.knowledge_max_file_bytes,
             },
             summary,
             config_center,
             admin_auth,
         );
+        if config.web_console_enabled {
+            http_state = http_state.with_console_user_data(ConsoleUserDataService::new(database));
+        }
         Ok(Self { addr, http_state })
     }
 
@@ -71,7 +76,7 @@ impl ManagementRuntime {
         F: Future<Output = ()> + Send + 'static,
     {
         let listener = tokio::net::TcpListener::bind(self.addr).await?;
-        tracing::info!(addr = %self.addr, state = "setup_required", "qq-maid management runtime listening");
+        tracing::info!(addr = %self.addr, state = "setup_required", "qq-maid 管理服务正在监听");
         axum::serve(
             listener,
             build_router(self.http_state).into_make_service_with_connect_info::<SocketAddr>(),
@@ -145,16 +150,11 @@ impl LlmRuntime {
         application_version: &'static str,
     ) -> anyhow::Result<Self> {
         let addr: SocketAddr = format!("{}:{}", config.server_host, config.server_port).parse()?;
+        // 控制台开关（WEB_CONSOLE_ENABLED）关闭时不初始化控制台专属服务与工具元数据，
+        // 减少进程常驻内存；路由层同样不会注册 /console 与相关 API。
+        let console_enabled = config.web_console_enabled;
         let core_state = CoreRuntimeState::from_config_with_database(config, database)?;
-        let registered_tools = crate::service::CoreHandle::new(core_state.clone())
-            .registered_tool_metadata()
-            .into_iter()
-            .map(|tool| ConsoleToolMetadata {
-                name: tool.name,
-                description: tool.description,
-            })
-            .collect();
-        let http_state = OpsHttpState::from_config_with_center(
+        let mut http_state = OpsHttpState::from_config_with_center(
             &core_state.config,
             core_state.provider.clone(),
             core_state.upstream_status.clone(),
@@ -162,9 +162,43 @@ impl LlmRuntime {
             application_version,
             config_center,
             admin_auth,
-        )
-        .with_registered_tools(registered_tools);
-        let workers = CoreWorkers::from_runtime_state(&core_state, push_sink)?;
+        );
+        let console_user_data = console_enabled
+            .then(|| ConsoleUserDataService::new(core_state.knowledge_index.database().clone()));
+        let knowledge_file_service = console_user_data
+            .as_ref()
+            .map(|service| {
+                crate::runtime::tools::knowledge::KnowledgeFileService::new(
+                    service.clone(),
+                    core_state.knowledge_index.clone(),
+                    core_state.config.knowledge_max_file_bytes,
+                )
+            })
+            .transpose()?;
+        if let Some(user_data) = console_user_data {
+            let registered_tools = crate::service::CoreHandle::new(core_state.clone())
+                .registered_tool_metadata()
+                .into_iter()
+                .map(|tool| ConsoleToolMetadata {
+                    name: tool.name,
+                    description: tool.description,
+                })
+                .collect();
+            http_state = http_state
+                .with_todo_management(crate::runtime::tools::todo::TodoManagementService::new(
+                    core_state.stores.todo_store.clone(),
+                    core_state.stores.notification_store.clone(),
+                ))
+                .with_console_user_data(user_data)
+                .with_knowledge_files(
+                    knowledge_file_service
+                        .clone()
+                        .expect("knowledge file service must exist with console user data"),
+                )
+                .with_registered_tools(registered_tools);
+        }
+        let workers =
+            CoreWorkers::from_runtime_state(&core_state, push_sink, knowledge_file_service)?;
 
         Ok(Self {
             addr,
@@ -213,7 +247,7 @@ impl LlmRuntime {
 
         workers.spawn();
 
-        tracing::info!(%addr, "qq-maid-core listening");
+        tracing::info!(%addr, "qq-maid-core 正在监听");
         axum::serve(
             listener,
             build_router(http_state).into_make_service_with_connect_info::<SocketAddr>(),
@@ -239,6 +273,9 @@ pub fn init_tracing() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(
             fmt::layer()
+                // 独立 Core/评测入口也不能把日志混入 CLI 的机器可读 stdout。
+                .with_writer(std::io::stderr)
+                .with_ansi(false)
                 .with_target(false)
                 .with_timer(shanghai_log_timer()),
         )

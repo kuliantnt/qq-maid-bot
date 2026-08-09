@@ -78,6 +78,89 @@ async fn list_tool_combines_tomorrow_status_and_keyword_filters() {
 }
 
 #[tokio::test]
+async fn list_tool_filters_recurring_true_false_and_null() {
+    let (todo_store, session_store, _notification_store, owner) = test_stores();
+    let tomorrow = (qq_maid_common::time_context::request_time_context().local_date()
+        + chrono::Duration::days(1))
+    .format("%Y-%m-%d")
+    .to_string();
+    todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "项目周期复盘".to_owned(),
+                due_date: Some(tomorrow.clone()),
+                time_precision: TodoTimePrecision::Date,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::Daily,
+                recurrence_interval_days: 1,
+                recurrence_interval: 1,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
+                ..tool_test_draft("项目周期复盘")
+            },
+        )
+        .unwrap();
+    todo_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "项目一次复盘".to_owned(),
+                due_date: Some(tomorrow),
+                time_precision: TodoTimePrecision::Date,
+                ..tool_test_draft("项目一次复盘")
+            },
+        )
+        .unwrap();
+    let tool = ListTodoTool::new(todo_store, session_store);
+    let arguments = |recurring: Value| {
+        json!({
+            "status": "pending",
+            "due_date": null,
+            "date_range_text": "明天",
+            "time_filter": null,
+            "keyword": "项目",
+            "recurring": recurring,
+        })
+    };
+
+    let recurring = tool
+        .execute(test_context(), arguments(json!(true)))
+        .await
+        .unwrap()
+        .value;
+    let one_off = tool
+        .execute(test_context(), arguments(json!(false)))
+        .await
+        .unwrap()
+        .value;
+    let unrestricted = tool
+        .execute(test_context(), arguments(Value::Null))
+        .await
+        .unwrap()
+        .value;
+    let legacy_unrestricted = tool
+        .execute(
+            test_context(),
+            json!({
+                "status": "pending",
+                "due_date": null,
+                "date_range_text": "明天",
+                "time_filter": null,
+                "keyword": "项目",
+            }),
+        )
+        .await
+        .unwrap()
+        .value;
+
+    assert_eq!(recurring["total_count"], 1);
+    assert_eq!(recurring["items"][0]["title"], "项目周期复盘");
+    assert_eq!(one_off["total_count"], 1);
+    assert_eq!(one_off["items"][0]["title"], "项目一次复盘");
+    assert_eq!(unrestricted["total_count"], 2);
+    assert_eq!(unrestricted["items"], legacy_unrestricted["items"]);
+}
+
+#[tokio::test]
 async fn list_tool_rejects_completed_or_all_with_overdue_before_querying() {
     for status in ["completed", "all"] {
         let (todo_store, session_store, _notification_store, _owner) = test_stores();

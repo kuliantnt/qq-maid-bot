@@ -16,10 +16,16 @@ use serde::Deserialize;
 use tracing::{debug, info, warn};
 
 use crate::{
-    runtime::push::{PushError, PushIntent, PushSink},
+    runtime::push::{PushError, PushIntent, PushMention, PushSink, normalize_push_mentions},
     service::VisibleEntitySnapshot,
-    storage::notification::{NotificationOutboxStore, NotificationTask, NotificationWriteOutcome},
+    storage::notification::{
+        NotificationDeliveryState, NotificationOutboxStore, NotificationTask,
+        NotificationWriteOutcome,
+    },
 };
+
+#[cfg(test)]
+use tokio::sync::Notify;
 
 const DEFAULT_WORKER_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -41,6 +47,7 @@ pub struct NotificationWorkerStats {
     pub sent_count: usize,
     pub failed_count: usize,
     pub invalid_payload_count: usize,
+    pub cancelled_count: usize,
     pub lease_lost_count: usize,
 }
 
@@ -52,6 +59,26 @@ pub struct NotificationWorker {
     config: NotificationWorkerConfig,
     command_prefix: CommandPrefix,
     worker_id: String,
+    #[cfg(test)]
+    before_push_pause: Option<NotificationBeforePushPause>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct NotificationBeforePushPause {
+    reached: Arc<Notify>,
+    resume: Arc<Notify>,
+}
+
+#[cfg(test)]
+impl NotificationBeforePushPause {
+    pub(crate) async fn wait_until_reached(&self) {
+        self.reached.notified().await;
+    }
+
+    pub(crate) fn resume(&self) {
+        self.resume.notify_one();
+    }
 }
 
 #[async_trait]
@@ -61,6 +88,9 @@ pub trait NotificationSentHook: Send + Sync {
 
 #[derive(Debug, Deserialize)]
 struct NotificationPushPayload {
+    /// 历史 Outbox payload 没有此字段时按空列表处理。
+    #[serde(default)]
+    mentions: Vec<PushMention>,
     #[serde(default)]
     message_type: Option<String>,
     #[serde(default)]
@@ -94,6 +124,8 @@ impl NotificationWorker {
             config,
             command_prefix: CommandPrefix::default(),
             worker_id: new_worker_id(),
+            #[cfg(test)]
+            before_push_pause: None,
         }
     }
 
@@ -107,16 +139,25 @@ impl NotificationWorker {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_before_push_pause_for_test(
+        mut self,
+        pause: NotificationBeforePushPause,
+    ) -> Self {
+        self.before_push_pause = Some(pause);
+        self
+    }
+
     pub fn spawn(self) {
         if !self.config.enabled {
-            info!("notification worker disabled");
+            info!("通知 worker 已停用");
             return;
         }
         tokio::spawn(async move {
             info!(
                 batch_limit = self.config.batch_limit,
                 poll_interval_seconds = self.config.poll_interval.as_secs(),
-                "notification worker enabled"
+                "通知 worker 已启用"
             );
             self.run_loop().await;
         });
@@ -125,7 +166,7 @@ impl NotificationWorker {
     async fn run_loop(self) {
         loop {
             if let Err(err) = self.run_once().await {
-                warn!(error = %err, "notification worker cycle failed");
+                warn!(error = %err, "通知 worker 单轮处理失败");
             }
             tokio::time::sleep(self.config.poll_interval).await;
         }
@@ -155,10 +196,7 @@ impl NotificationWorker {
                         }
                         NotificationWriteOutcome::LeaseLost => {
                             stats.lease_lost_count += 1;
-                            warn!(
-                                task_id = task.id,
-                                "notification worker lease lost before mark_sent"
-                            );
+                            warn!(task_id = task.id, "通知任务在标记 mark_sent 前丢失租约");
                         }
                     }
                 }
@@ -171,7 +209,7 @@ impl NotificationWorker {
                         task_id = task.id,
                         source_type = %task.source_type,
                         kind = %task.kind,
-                        "notification task payload invalid"
+                        "通知任务 payload 无效"
                     );
                 }
                 Err(DeliveryError::Push(err)) => {
@@ -185,7 +223,7 @@ impl NotificationWorker {
                         source_type = %task.source_type,
                         kind = %task.kind,
                         error = %summary,
-                        "notification push failed"
+                        "通知推送失败"
                     );
                 }
                 Err(DeliveryError::Progress(message)) => {
@@ -197,7 +235,7 @@ impl NotificationWorker {
                         task_id = task.id,
                         source_type = %task.source_type,
                         kind = %task.kind,
-                        "notification part progress update failed"
+                        "更新通知分段投递进度失败"
                     );
                 }
                 Err(DeliveryError::LeaseLost) => {
@@ -206,7 +244,16 @@ impl NotificationWorker {
                         task_id = task.id,
                         source_type = %task.source_type,
                         kind = %task.kind,
-                        "notification worker lease lost during multipart delivery"
+                        "通知 worker 在多段投递期间丢失租约"
+                    );
+                }
+                Err(DeliveryError::Cancelled) => {
+                    stats.cancelled_count += 1;
+                    debug!(
+                        task_id = task.id,
+                        source_type = %task.source_type,
+                        kind = %task.kind,
+                        "通知任务在推送前已取消"
                     );
                 }
             }
@@ -217,8 +264,9 @@ impl NotificationWorker {
                 sent = stats.sent_count,
                 failed = stats.failed_count,
                 invalid_payload = stats.invalid_payload_count,
+                cancelled = stats.cancelled_count,
                 lease_lost = stats.lease_lost_count,
-                "notification worker cycle finished"
+                "通知 worker 单轮处理完成"
             );
         }
         Ok(stats)
@@ -238,6 +286,7 @@ impl NotificationWorker {
                 part
             })
             .collect::<Vec<_>>();
+        let mentions = normalize_push_mentions(payload.mentions);
         let part_count = u32::try_from(parts.len()).map_err(|_| {
             DeliveryError::InvalidPayload(
                 "push payload part count exceeds supported range".to_owned(),
@@ -250,9 +299,26 @@ impl NotificationWorker {
             ));
         }
         for (index, part) in parts.into_iter().enumerate().skip(delivered_parts) {
+            #[cfg(test)]
+            if let Some(pause) = &self.before_push_pause {
+                pause.reached.notify_one();
+                pause.resume.notified().await;
+            }
+            match self
+                .store
+                .delivery_state(task.id, &self.worker_id, index as u32)
+                .map_err(|err| DeliveryError::Progress(err.message().to_owned()))?
+            {
+                NotificationDeliveryState::Ready => {}
+                NotificationDeliveryState::Cancelled => return Err(DeliveryError::Cancelled),
+                NotificationDeliveryState::LeaseLost => return Err(DeliveryError::LeaseLost),
+            }
+            // 复核成功即视为本分段开始投递；进入平台网络请求后无法撤回。后续分段仍会
+            // 各自重新复核，因此业务删除后不会再开始新的分段推送。
             self.push_sink
                 .push(PushIntent {
                     target: task.target.clone(),
+                    mentions: mentions.clone(),
                     message_type: part.message_type,
                     text: part.text,
                     fallback_text: part.fallback_text,
@@ -288,10 +354,7 @@ impl NotificationWorker {
         {
             NotificationWriteOutcome::Applied => Ok(MarkFailedOutcome::Applied),
             NotificationWriteOutcome::LeaseLost => {
-                warn!(
-                    task_id = task.id,
-                    "notification worker lease lost before mark_failed"
-                );
+                warn!(task_id = task.id, "通知任务在标记 mark_failed 前丢失租约");
                 Ok(MarkFailedOutcome::LeaseLost)
             }
         }
@@ -321,6 +384,7 @@ enum DeliveryError {
     Push(PushError),
     Progress(String),
     LeaseLost,
+    Cancelled,
 }
 
 enum MarkFailedOutcome {
@@ -566,7 +630,50 @@ mod tests {
 
         assert_eq!(stats.sent_count, 1);
         assert_eq!(task.status, NotificationStatus::Sent);
-        assert_eq!(sink.requests.lock().unwrap().len(), 1);
+        let requests = sink.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].mentions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn worker_normalizes_mentions_and_keeps_first_member_order() {
+        let store = test_store();
+        store
+            .upsert(NotificationUpsert {
+                source_type: "todo".to_owned(),
+                source_id: "mention-1".to_owned(),
+                dedupe_key: "todo:mention-1".to_owned(),
+                target: PushTarget::qq_official(PushTargetType::Group, "g1"),
+                channel: "push".to_owned(),
+                kind: "todo_reminder".to_owned(),
+                payload: json!({
+                    "message_type": "text",
+                    "text": "提醒",
+                    "mentions": [
+                        {"user_id": " member-1 ", "display_name": " 张三 "},
+                        {"user_id": ""},
+                        {"user_id": "member-2"},
+                        {"user_id": "member-1", "display_name": "重复昵称"}
+                    ]
+                }),
+                scheduled_at: "2020-01-01T09:00:00+08:00".to_owned(),
+                max_attempts: 3,
+                reactivate_cancelled: false,
+            })
+            .unwrap();
+        let sink = Arc::new(TestPushSink::default());
+        let worker =
+            NotificationWorker::new(store, sink.clone(), NotificationWorkerConfig::default());
+
+        worker.run_once().await.unwrap();
+
+        assert_eq!(
+            sink.requests.lock().unwrap()[0].mentions,
+            vec![
+                PushMention::new("member-1", Some("张三".to_owned())),
+                PushMention::new("member-2", None),
+            ]
+        );
     }
 
     #[tokio::test]

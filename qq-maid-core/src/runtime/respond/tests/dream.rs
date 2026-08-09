@@ -1,6 +1,7 @@
 use crate::runtime::tools::memory::{
     MemoryDreamConfig, MemoryOperations, MemoryQuery, MemorySourceType, MemoryTarget,
 };
+use crate::storage::session::SessionMeta;
 
 use super::support::*;
 
@@ -14,12 +15,31 @@ async fn ordinary_private_chat_schedules_dream_after_session_write() {
         MemoryDreamConfig {
             enabled: true,
             min_interval_seconds: 0,
-            min_new_sessions: 1,
+            min_new_sessions: 5,
             max_sessions: 20,
             max_input_chars: 32_000,
             max_output_memories: 8,
         },
     );
+
+    let meta = SessionMeta::new(
+        "private:u1".to_owned(),
+        Some("u1".to_owned()),
+        None,
+        None,
+        None,
+        "test",
+    );
+    for (session_index, message_count) in [8, 7, 7, 7].into_iter().enumerate() {
+        let mut session = service.session_store.create(&meta, "", false).unwrap();
+        for message_index in 0..message_count {
+            session.append_message(
+                "user",
+                &format!("Dream 调度前置消息 {session_index}-{message_index}"),
+            );
+        }
+        service.session_store.save(&mut session).unwrap();
+    }
 
     service
         .respond(private_message("我长期偏好简洁回答"))

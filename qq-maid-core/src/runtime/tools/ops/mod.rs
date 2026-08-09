@@ -168,7 +168,7 @@ impl OpsService {
         if let Err(error) = notification_store.cancel_by_source_type(OPS_PROGRESS_SOURCE_TYPE) {
             warn!(
                 error_code = error.code(),
-                "stale ops codex progress notification startup cleanup failed"
+                "启动时清理过期的 ops codex 进度通知失败"
             );
         }
         Self {
@@ -304,7 +304,7 @@ impl OpsService {
         let registry = self.task_registry.clone();
         let progress_schedule = self.codex_progress_schedule;
         let background_task_id = task_id.clone();
-        info!(ops_command = "codex", conversation_type = %authorization.target_type.as_str(), "ops command accepted");
+        info!(ops_command = "codex", conversation_type = %authorization.target_type.as_str(), "ops 命令已受理");
         tokio::spawn(async move {
             let started_at = Instant::now();
             let execution = execute_codex(&config, &prompt, cancellation, process_id);
@@ -325,7 +325,7 @@ impl OpsService {
                 warn!(
                     ops_command = "codex",
                     error_code = error.code(),
-                    "ops codex error log write failed"
+                    "写入 ops codex 错误日志失败"
                 );
             }
             let managed_status = managed_status(result.status);
@@ -336,7 +336,7 @@ impl OpsService {
                 warn!(
                     ops_command = "codex",
                     error_code = error.code(),
-                    "ops execution status update failed"
+                    "更新 ops 执行状态失败"
                 );
             }
             enqueue_result(
@@ -384,14 +384,14 @@ impl OpsService {
         let background_execution_id = execution_id.clone();
         let task_name = name.clone();
         let args = command.args;
-        info!(ops_command = %task_name, conversation_type = authorization.target_type.as_str(), "ops command accepted");
+        info!(ops_command = %task_name, conversation_type = authorization.target_type.as_str(), "ops 命令已受理");
         tokio::spawn(async move {
             let started_at = Instant::now();
             let result = execute(&task_name, &config, &args).await;
             if let Err(error) =
                 execution_store.mark_status(&background_execution_id, result.status.as_str())
             {
-                warn!(ops_command = %task_name, error_code = error.code(), "ops execution status update failed");
+                warn!(ops_command = %task_name, error_code = error.code(), "更新 ops 执行状态失败");
             }
             enqueue_result(
                 &notification_store,
@@ -703,7 +703,7 @@ fn duplicate_reply(task_id: &str, command_name: &str) -> String {
 }
 
 fn storage_failure_reply(error: &storage::OpsStorageError) -> String {
-    warn!(error_code = error.code(), "ops execution claim failed");
+    warn!(error_code = error.code(), "领取 ops 执行任务失败");
     "当前无法可靠领取运维执行，为避免重复运行已拒绝受理。".to_owned()
 }
 
@@ -737,13 +737,13 @@ fn enqueue_result(
             stdout_truncated = result.stdout_truncated,
             stderr_truncated = result.stderr_truncated,
             notification_parts = parts.len(),
-            "ops result notification queued"
+            "ops 结果通知已入队"
         ),
         Err(error) => warn!(
             ops_command = %result.command,
             execution_status = result.status.as_str(),
             error_code = error.code(),
-            "ops result notification enqueue failed"
+            "ops 结果通知入队失败"
         ),
     }
 }
@@ -773,13 +773,13 @@ fn enqueue_progress(
             ops_command = "codex",
             progress_sequence = sequence,
             elapsed_seconds = elapsed.as_secs(),
-            "ops codex progress notification queued"
+            "ops codex 进度通知已入队"
         ),
         Err(error) => warn!(
             ops_command = "codex",
             progress_sequence = sequence,
             error_code = error.code(),
-            "ops codex progress notification enqueue failed"
+            "ops codex 进度通知入队失败"
         ),
     }
 }
@@ -789,13 +789,13 @@ fn cancel_pending_progress(store: &NotificationOutboxStore, task_id: &str) {
         Ok(cancelled) if cancelled > 0 => info!(
             ops_command = "codex",
             cancelled_progress_notifications = cancelled,
-            "stale ops codex progress notifications cancelled"
+            "已取消过期的 ops codex 进度通知"
         ),
         Ok(_) => {}
         Err(error) => warn!(
             ops_command = "codex",
             error_code = error.code(),
-            "stale ops codex progress notification cancellation failed"
+            "取消过期的 ops codex 进度通知失败"
         ),
     }
 }

@@ -54,6 +54,10 @@ pub struct ChunkLimits {
 // 默认软限制常量统一定义在 `crate::config`，避免双源漂移。
 /// 软限制允许的下限；低于此值没有实际分段意义，且无法容纳 synthetic fence。
 const MIN_CHUNK_SOFT_LIMIT: usize = 64;
+/// QQ 官方文档规定的同一被动消息最大可见回复数。
+pub(crate) const QQ_C2C_PASSIVE_REPLY_BUDGET: usize = 4;
+pub(crate) const QQ_GROUP_PASSIVE_REPLY_BUDGET: usize = 5;
+const PASSIVE_REPLY_TRUNCATION_NOTICE: &str = "\n\n[回复过长，已按平台被动回复上限截断]";
 
 impl ChunkLimits {
     pub fn new(markdown_soft_limit: usize, text_soft_limit: usize) -> Self {
@@ -556,6 +560,96 @@ pub fn chunk_outbound(message: &OutboundMessage, limits: &ChunkLimits) -> Vec<Ou
     }
 }
 
+/// 在发送前统一规划同一 QQ 被动消息的全部输出部分，保证不会先发若干段再撞到次数上限。
+///
+/// 先按现有软限制统计；超限时以两个现有限制中较大的一个重新分段，并合并相邻同类正文。
+/// 仍超限才将所有可见 fallback 按原顺序收敛为文本，并在最后保留明确截断提示。没有
+/// `msg_id` 的主动推送不调用本函数，仍可按原有分段策略发送。
+pub(crate) fn plan_qq_passive_reply_outbounds(
+    outbounds: &[OutboundMessage],
+    limits: &ChunkLimits,
+    max_visible_replies: usize,
+) -> (Vec<OutboundMessage>, ChunkLimits, bool) {
+    if count_outbound_chunks(outbounds, limits) <= max_visible_replies {
+        return (outbounds.to_vec(), *limits, false);
+    }
+
+    // 两个通道同段发送时以较大的既有单条限制重新切分，减少配置不一致造成的碎片。
+    let expanded_limit = limits.markdown_soft_limit.max(limits.text_soft_limit);
+    let expanded = ChunkLimits::new(expanded_limit, expanded_limit);
+    let merged = merge_adjacent_text_outbounds(outbounds);
+    if count_outbound_chunks(&merged, &expanded) <= max_visible_replies {
+        return (merged, expanded, false);
+    }
+
+    // 到这里继续保留多媒体或 Markdown 都会产生超预算回复。收敛为可见 fallback 文本可保证
+    // 原有顺序不乱、没有半截发送；图片仅在这个异常长回复场景降级为既有 fallback 文案。
+    let combined = merged
+        .iter()
+        .map(OutboundMessage::fallback_text)
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let max_chars = max_visible_replies.saturating_mul(expanded.text_soft_limit);
+    let text = truncate_for_passive_budget(&combined, max_chars, true);
+    (vec![OutboundMessage::Text { text }], expanded, true)
+}
+
+fn count_outbound_chunks(outbounds: &[OutboundMessage], limits: &ChunkLimits) -> usize {
+    outbounds
+        .iter()
+        .map(|outbound| chunk_outbound(outbound, limits).len())
+        .sum()
+}
+
+fn merge_adjacent_text_outbounds(outbounds: &[OutboundMessage]) -> Vec<OutboundMessage> {
+    let mut merged = Vec::with_capacity(outbounds.len());
+    for outbound in outbounds {
+        match (merged.last_mut(), outbound) {
+            (Some(OutboundMessage::Text { text }), OutboundMessage::Text { text: next }) => {
+                append_outbound_text(text, next);
+            }
+            (
+                Some(OutboundMessage::Markdown {
+                    markdown,
+                    fallback_text,
+                }),
+                OutboundMessage::Markdown {
+                    markdown: next_markdown,
+                    fallback_text: next_fallback,
+                },
+            ) => {
+                append_outbound_text(&mut markdown.content, &next_markdown.content);
+                append_outbound_text(fallback_text, next_fallback);
+            }
+            _ => merged.push(outbound.clone()),
+        }
+    }
+    merged
+}
+
+fn append_outbound_text(target: &mut String, next: &str) {
+    if target.is_empty() {
+        target.push_str(next);
+    } else if !next.is_empty() {
+        target.push_str("\n\n");
+        target.push_str(next);
+    }
+}
+
+fn truncate_for_passive_budget(text: &str, max_chars: usize, force_notice: bool) -> String {
+    if !force_notice && text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    let suffix_chars = PASSIVE_REPLY_TRUNCATION_NOTICE.chars().count();
+    let prefix_len = max_chars
+        .saturating_sub(suffix_chars)
+        .min(text.chars().count());
+    let mut result = text.chars().take(prefix_len).collect::<String>();
+    result.push_str(PASSIVE_REPLY_TRUNCATION_NOTICE);
+    result
+}
+
 fn chunk_plain_text(text: &str, limit: usize) -> Vec<OutboundChunk> {
     let chars: Vec<char> = text.chars().collect();
     if chars.len() <= limit {
@@ -693,252 +787,9 @@ fn render_markdown_segment(seg: &RawSegment) -> String {
 ///
 /// 语义与单段 `send_outbound_with_fallback` 一致，但作用在单个分段上：失败只回退
 /// 当前段，已成功发送的前段不重发。
-async fn send_chunk_c2c<S: OutboundSender + ?Sized>(
-    sender: &S,
-    target: &C2cReplyTarget,
-    chunk: &OutboundChunk,
-) -> (SendResult, bool) {
-    if let Some(markdown) = &chunk.markdown {
-        match sender.send_markdown(target, markdown).await {
-            Ok(id) => return (Ok(id), false),
-            Err(err) if !chunk.fallback_text.trim().is_empty() => {
-                warn!(
-                    user = %mask_openid(&target.user_openid),
-                    source_message_id = target.msg_id.as_deref().unwrap_or(""),
-                    chunk_index = chunk.chunk_index,
-                    chunk_count = chunk.chunk_count,
-                    error = %err.log_summary(),
-                    "chunk markdown send failed; falling back to text per chunk"
-                );
-                let fallback = sender.send_text(target, &chunk.fallback_text).await;
-                let used_fallback = fallback.is_ok();
-                return (fallback, used_fallback);
-            }
-            Err(err) => return (Err(err), false),
-        }
-    }
-    let result = sender.send_text(target, &chunk.fallback_text).await;
-    (result, false)
-}
+mod send;
 
-async fn send_chunk_group<S: GroupOutboundSender + ?Sized>(
-    sender: &S,
-    target: &GroupReplyTarget,
-    chunk: &OutboundChunk,
-) -> (SendResult, bool) {
-    if let Some(markdown) = &chunk.markdown {
-        match sender.send_markdown(target, markdown).await {
-            Ok(id) => return (Ok(id), false),
-            Err(err) if !chunk.fallback_text.trim().is_empty() => {
-                warn!(
-                    group = %mask_openid(&target.group_openid),
-                    source_message_id = target.msg_id.as_deref().unwrap_or(""),
-                    chunk_index = chunk.chunk_index,
-                    chunk_count = chunk.chunk_count,
-                    error = %err.log_summary(),
-                    "group chunk markdown send failed; falling back to text per chunk"
-                );
-                let fallback = sender.send_text(target, &chunk.fallback_text).await;
-                let used_fallback = fallback.is_ok();
-                return (fallback, used_fallback);
-            }
-            Err(err) => return (Err(err), false),
-        }
-    }
-    let result = sender.send_text(target, &chunk.fallback_text).await;
-    (result, false)
-}
-
-fn remaining_chars(chunks: &[OutboundChunk], from_index: usize) -> usize {
-    chunks[from_index..]
-        .iter()
-        .map(|c| c.consumed_original_chars)
-        .sum()
-}
-
-/// C2C 普通回复分段发送。
-///
-/// 逐段发送，每段成功后才发送下一段；任一段失败立即停止并返回 `OutboundSendError`。
-/// 这里对齐官方非流式长消息发送方式：只 `await` 当前段返回，不额外 `sleep`，
-/// 当前段成功后立即发送下一段。
-/// `on_sent` 仅在分段成功时回调一次（带该段序号与 QQ 返回的 ID 集），调用方按用途选择
-/// `message_id` 或 `ref_index_id`；失败段不回调。返回值为各段成功后收集到的 ID 集列表。
-pub async fn send_c2c_outbound_chunked<S, F>(
-    sender: &S,
-    target: &C2cReplyTarget,
-    message: &OutboundMessage,
-    limits: &ChunkLimits,
-    mut on_sent: F,
-) -> Result<Vec<SendMessageIds>, OutboundSendError>
-where
-    S: OutboundSender + ?Sized,
-    F: FnMut(usize, &SendMessageIds),
-{
-    let chunks = chunk_outbound(message, limits);
-    let total = chunks.len();
-    let masked_user = mask_openid(&target.user_openid);
-    debug!(
-        user = %masked_user,
-        source_message_id = target.msg_id.as_deref().unwrap_or(""),
-        chunk_count = total,
-        kind = outbound_kind(message),
-        "preparing chunked C2C outbound"
-    );
-
-    let mut sent_ids = Vec::with_capacity(total);
-    let mut fallback_chunks = 0_usize;
-    for (index, chunk) in chunks.iter().enumerate() {
-        trace!(
-            user = %masked_user,
-            source_message_id = target.msg_id.as_deref().unwrap_or(""),
-            chunk_index = chunk.chunk_index,
-            chunk_count = chunk.chunk_count,
-            sent_chars = chunk.rendered_chars,
-            remaining_chars = remaining_chars(&chunks, index),
-            message_type = message_type_name(chunk),
-            "sending C2C chunk"
-        );
-        match send_chunk_c2c(sender, target, chunk).await {
-            (Ok(id), fallback_used) => {
-                if fallback_used {
-                    fallback_chunks += 1;
-                }
-                trace!(
-                    user = %masked_user,
-                    source_message_id = target.msg_id.as_deref().unwrap_or(""),
-                    chunk_index = chunk.chunk_index,
-                    chunk_count = chunk.chunk_count,
-                    sent_chars = chunk.rendered_chars,
-                    remaining_chars = remaining_chars(&chunks, index + 1),
-                    message_type = message_type_name(chunk),
-                    fallback_used,
-                    "C2C chunk sent"
-                );
-                on_sent(chunk.chunk_index, &id);
-                sent_ids.push(id);
-            }
-            (Err(err), _) => {
-                warn!(
-                    user = %masked_user,
-                    source_message_id = target.msg_id.as_deref().unwrap_or(""),
-                    chunk_index = chunk.chunk_index,
-                    chunk_count = chunk.chunk_count,
-                    sent_chunks = index,
-                    fallback_chunks,
-                    remaining_chars = remaining_chars(&chunks, index),
-                    error = %err.log_summary(),
-                    "C2C chunk send failed; aborting remaining chunks"
-                );
-                return Err(make_send_error(
-                    err,
-                    index,
-                    total,
-                    remaining_chars(&chunks, index),
-                ));
-            }
-        }
-    }
-    info!(
-        user = %masked_user,
-        source_message_id = target.msg_id.as_deref().unwrap_or(""),
-        chunk_count = total,
-        sent_chunks = sent_ids.len(),
-        fallback_chunks,
-        kind = outbound_kind(message),
-        "chunked C2C outbound completed"
-    );
-    Ok(sent_ids)
-}
-
-/// 群普通回复分段发送。语义同 C2C 版本，区别仅在 `GroupOutboundSender` 与群 target。
-/// 同样对齐官方非流式长消息发送方式：当前段 `await` 成功后立即发送下一段，
-/// 不额外 `sleep`。
-pub async fn send_group_outbound_chunked<S, F>(
-    sender: &S,
-    target: &GroupReplyTarget,
-    message: &OutboundMessage,
-    limits: &ChunkLimits,
-    mut on_sent: F,
-) -> Result<Vec<SendMessageIds>, OutboundSendError>
-where
-    S: GroupOutboundSender + ?Sized,
-    F: FnMut(usize, &SendMessageIds),
-{
-    let chunks = chunk_outbound(message, limits);
-    let total = chunks.len();
-    let masked_group = mask_openid(&target.group_openid);
-    debug!(
-        group = %masked_group,
-        source_message_id = target.msg_id.as_deref().unwrap_or(""),
-        chunk_count = total,
-        kind = outbound_kind(message),
-        "preparing chunked group outbound"
-    );
-
-    let mut sent_ids = Vec::with_capacity(total);
-    let mut fallback_chunks = 0_usize;
-    for (index, chunk) in chunks.iter().enumerate() {
-        trace!(
-            group = %masked_group,
-            source_message_id = target.msg_id.as_deref().unwrap_or(""),
-            chunk_index = chunk.chunk_index,
-            chunk_count = chunk.chunk_count,
-            sent_chars = chunk.rendered_chars,
-            remaining_chars = remaining_chars(&chunks, index),
-            message_type = message_type_name(chunk),
-            "sending group chunk"
-        );
-        match send_chunk_group(sender, target, chunk).await {
-            (Ok(id), fallback_used) => {
-                if fallback_used {
-                    fallback_chunks += 1;
-                }
-                trace!(
-                    group = %masked_group,
-                    source_message_id = target.msg_id.as_deref().unwrap_or(""),
-                    chunk_index = chunk.chunk_index,
-                    chunk_count = chunk.chunk_count,
-                    sent_chars = chunk.rendered_chars,
-                    remaining_chars = remaining_chars(&chunks, index + 1),
-                    message_type = message_type_name(chunk),
-                    fallback_used,
-                    "group chunk sent"
-                );
-                on_sent(chunk.chunk_index, &id);
-                sent_ids.push(id);
-            }
-            (Err(err), _) => {
-                warn!(
-                    group = %masked_group,
-                    source_message_id = target.msg_id.as_deref().unwrap_or(""),
-                    chunk_index = chunk.chunk_index,
-                    chunk_count = chunk.chunk_count,
-                    sent_chunks = index,
-                    fallback_chunks,
-                    remaining_chars = remaining_chars(&chunks, index),
-                    error = %err.log_summary(),
-                    "group chunk send failed; aborting remaining chunks"
-                );
-                return Err(make_send_error(
-                    err,
-                    index,
-                    total,
-                    remaining_chars(&chunks, index),
-                ));
-            }
-        }
-    }
-    info!(
-        group = %masked_group,
-        source_message_id = target.msg_id.as_deref().unwrap_or(""),
-        chunk_count = total,
-        sent_chunks = sent_ids.len(),
-        fallback_chunks,
-        kind = outbound_kind(message),
-        "chunked group outbound completed"
-    );
-    Ok(sent_ids)
-}
+pub use send::{send_c2c_outbound_chunked, send_group_outbound_chunked};
 
 #[cfg(test)]
 mod tests;

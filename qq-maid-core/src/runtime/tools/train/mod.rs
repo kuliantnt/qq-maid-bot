@@ -5,6 +5,7 @@
 //! - 将 HTTP 请求、JSON 解析和错误分类收敛在这里；
 //! - 上层 `/火车` flow 只依赖 trait，不直接感知 12306 接口细节。
 
+pub(crate) mod status;
 mod tool;
 
 pub use tool::TrainScheduleTool;

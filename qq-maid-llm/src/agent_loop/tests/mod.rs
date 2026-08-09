@@ -39,6 +39,8 @@ fn test_context() -> ToolContext {
             interaction_scope_id: "private:u1".to_owned(),
         },
         tool_call_id: None,
+        tool_round: None,
+        retry_of: None,
         execution_deadline: None,
     }
 }
@@ -277,6 +279,7 @@ fn tool_call(name: &str, call_id: &str, args: &str) -> AgentToolCall {
 fn final_reply(text: &str) -> AgentStep {
     AgentStep::FinalAnswer {
         reply: text.to_owned(),
+        output_parts: Vec::new(),
         usage: None,
     }
 }
@@ -294,6 +297,19 @@ struct CountingTool {
     dependency: ToolCallDependency,
 }
 
+/// 显式声明确定性失败可缓存的只读工具，仅用于验证终结失败去重协议。
+struct TerminalFailureCachingTool;
+
+/// 读取可由同一 Agent 请求内写工具改变的状态，用于防止通用只读失败被误缓存。
+struct MutableStateReadTool {
+    state: Arc<StdMutex<bool>>,
+    calls: Arc<StdMutex<usize>>,
+}
+
+struct MutableStateWriteTool {
+    state: Arc<StdMutex<bool>>,
+}
+
 struct SlowReadOnlyTool {
     calls: Arc<StdMutex<usize>>,
     delay: std::time::Duration,
@@ -303,6 +319,132 @@ struct NamedSlowReadOnlyTool {
     name: &'static str,
     calls: Arc<StdMutex<usize>>,
     delay: std::time::Duration,
+}
+
+type ToolAttemptContext = (Option<usize>, Option<usize>);
+
+struct FailOnceReadOnlyTool {
+    calls: Arc<StdMutex<usize>>,
+    contexts: Arc<StdMutex<Vec<ToolAttemptContext>>>,
+}
+
+struct LimitedReadOnlyTool {
+    calls: Arc<StdMutex<usize>>,
+}
+
+/// 模拟网络请求已完成但没有返回可用证据的只读搜索结果。
+struct EmptyResultReadOnlyTool {
+    calls: Arc<StdMutex<usize>>,
+}
+
+#[async_trait]
+impl crate::tool::Tool for LimitedReadOnlyTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "knowledge_search".to_owned(),
+            description: "limited read-only knowledge search".to_owned(),
+            parameters: json!({"type": "object", "properties": {"query": {"type": "string"}}}),
+        }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    fn max_calls_per_request(&self) -> Option<usize> {
+        Some(2)
+    }
+
+    async fn execute(&self, _ctx: ToolContext, arguments: Value) -> Result<ToolOutput, LlmError> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolOutput::json(
+            json!({"ok": true, "evidence": arguments["query"]}),
+        ))
+    }
+}
+
+#[async_trait]
+impl crate::tool::Tool for EmptyResultReadOnlyTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "web_search".to_owned(),
+            description: "empty result search".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    fn max_calls_per_request(&self) -> Option<usize> {
+        Some(1)
+    }
+
+    async fn execute(&self, _ctx: ToolContext, _arguments: Value) -> Result<ToolOutput, LlmError> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ToolOutput::json(json!({
+            "ok": false,
+            "execution_succeeded": true,
+            "mode": "multi_entity_research",
+            "result_count": 0,
+            "error": {"code": "empty_result", "stage": "web_search"},
+            "results": [{
+                "entity": "项目甲",
+                "status": "failed",
+                "error": {"code": "empty_result", "stage": "web_search"}
+            }, {
+                "entity": "项目乙",
+                "status": "failed",
+                "error": {"code": "empty_result", "stage": "web_search"}
+            }],
+        })))
+    }
+}
+
+#[async_trait]
+impl crate::tool::Tool for FailOnceReadOnlyTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "search".to_owned(),
+            description: "fails once then returns a read-only result".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    async fn execute(&self, ctx: ToolContext, arguments: Value) -> Result<ToolOutput, LlmError> {
+        self.contexts
+            .lock()
+            .unwrap()
+            .push((ctx.tool_round, ctx.retry_of));
+        let mut calls = self.calls.lock().unwrap();
+        *calls += 1;
+        if *calls == 1 {
+            return Err(LlmError::new(
+                "network_error",
+                "simulated transient failure",
+                "tool",
+            ));
+        }
+        Ok(ToolOutput::json(json!({
+            "ok": true,
+            "value": arguments["value"],
+        })))
+    }
 }
 
 #[async_trait]
@@ -327,6 +469,14 @@ impl crate::tool::Tool for NamedSlowReadOnlyTool {
     async fn execute(&self, _ctx: ToolContext, arguments: Value) -> Result<ToolOutput, LlmError> {
         *self.calls.lock().unwrap() += 1;
         tokio::time::sleep(self.delay).await;
+        if self.name == "web_search" {
+            let value = arguments["value"].as_str().unwrap_or_default();
+            return Ok(ToolOutput::json(json!({
+                "ok": true,
+                "answer": format!("{value} 的完整搜索答案"),
+                "sources": [{"title": "搜索来源", "url": "https://example.test/source"}],
+            })));
+        }
         Ok(ToolOutput::json(json!({
             "ok": true,
             "value": arguments["value"],
@@ -453,6 +603,80 @@ impl crate::tool::Tool for CountingTool {
     }
 }
 
+#[async_trait]
+impl crate::tool::Tool for TerminalFailureCachingTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "cacheable_read".to_owned(),
+            description: "terminal failure caching test tool".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    fn cache_terminal_failures(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, _ctx: ToolContext, _arguments: Value) -> Result<ToolOutput, LlmError> {
+        unreachable!("invalid JSON must fail before executing the test tool")
+    }
+}
+
+#[async_trait]
+impl crate::tool::Tool for MutableStateReadTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "state_read".to_owned(),
+            description: "mutable state read test tool".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    async fn execute(&self, _ctx: ToolContext, _arguments: Value) -> Result<ToolOutput, LlmError> {
+        *self.calls.lock().unwrap() += 1;
+        if !*self.state.lock().unwrap() {
+            return Err(LlmError::new("tool_failed", "state is not ready", "tool"));
+        }
+        Ok(ToolOutput::json(json!({"ok": true, "ready": true})))
+    }
+}
+
+#[async_trait]
+impl crate::tool::Tool for MutableStateWriteTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "state_write".to_owned(),
+            description: "mutable state write test tool".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, _ctx: ToolContext, _arguments: Value) -> Result<ToolOutput, LlmError> {
+        *self.state.lock().unwrap() = true;
+        Ok(ToolOutput::json(json!({"ok": true})))
+    }
+}
+
 /// 记录 prepare/execute 顺序的工具，验证同轮 prepare-before-execute。
 struct OrderTool {
     name: &'static str,
@@ -511,7 +735,7 @@ fn delta_sink(deltas: Arc<StdMutex<Vec<String>>>) -> AgentTextDeltaSink {
         let deltas = deltas.clone();
         Box::pin(async move {
             deltas.lock().unwrap().push(delta);
-            Ok(())
+            Ok(AgentTextDeltaDelivery::Visible)
         }) as AgentTextDeltaFuture
     })
 }
@@ -521,6 +745,7 @@ mod cancel;
 mod fallback;
 mod streaming;
 mod tool_execution;
+mod tool_validation;
 
 #[allow(dead_code)]
 fn _ensure_value_imported(_: Value) {}

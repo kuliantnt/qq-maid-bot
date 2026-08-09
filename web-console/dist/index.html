@@ -5,8 +5,28 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>小女仆 · 部署管理控制台</title>
     <link rel="stylesheet" href="/console/styles.css">
+    <link rel="icon" type="image/png" href="/console/background/default.png">
   </head>
   <body>
+    <div class="console-background console-background--special" aria-hidden="true">
+      <div class="console-background-grid">
+        <!-- 9 宫格使用同一张正方形拼图；网格保持正方形，background-size 300% 等比切格不变形 -->
+        <div class="console-background-grid-cell"></div>
+        <div class="console-background-grid-cell"></div>
+        <div class="console-background-grid-cell"></div>
+        <div class="console-background-grid-cell"></div>
+        <div class="console-background-grid-cell"></div>
+        <div class="console-background-grid-cell"></div>
+        <div class="console-background-grid-cell"></div>
+        <div class="console-background-grid-cell"></div>
+        <div class="console-background-grid-cell"></div>
+      </div>
+    </div>
+    <div class="console-background console-background--custom" aria-hidden="true"></div>
+    <div id="console-transition" class="console-transition" aria-hidden="true" hidden>
+      <div class="console-transition-wash"></div>
+      <div id="console-transition-image" class="console-transition-image"></div>
+    </div>
     <div id="console-toast" class="console-toast" role="status" aria-live="polite" hidden></div>
     <section id="auth-shell" class="auth-shell">
       <form id="auth-form" class="auth-card">
@@ -39,129 +59,325 @@
     <header class="topbar" data-authenticated hidden>
       <div>
         <p class="eyebrow">QQ MAID BOT · LOCAL OPS</p>
-        <h1>部署管理控制台</h1>
         <p class="security-note">默认同源并受部署管理员会话与 CSRF 保护；公网访问仍必须使用受信 TLS 反向代理。</p>
       </div>
       <div class="refresh-box">
         <button id="restart-service" class="danger" type="button" disabled>重启服务</button>
-        <button id="refresh-status" type="button">手动刷新</button>
-        <label class="auto-refresh" for="auto-refresh"><input id="auto-refresh" type="checkbox"> 自动刷新</label>
+        <label class="auto-refresh" for="auto-refresh"><input id="auto-refresh" type="checkbox" checked> 自动刷新</label>
         <span>管理员：<strong id="admin-username">—</strong></span>
         <button id="logout" class="secondary" type="button">退出登录</button>
         <span>最后刷新：<time id="last-refresh">尚未刷新</time></span>
       </div>
     </header>
 
-    <nav class="nav" aria-label="控制台区块" data-authenticated hidden>
-      <a href="#dashboard">Dashboard</a>
-      <a href="#platforms">平台状态</a>
-      <a href="#capabilities">能力矩阵</a>
-      <a href="#storage">存储状态</a>
-      <a href="#configuration">核心配置</a>
-      <a href="#markdown">Markdown 预览</a>
-      <span>RSS <small>后续版本</small></span>
-      <span>Todo <small>后续版本</small></span>
-      <span>Memory <small>后续版本</small></span>
-      <span>消息调试 <small>尚未实现</small></span>
-      <span>附件管理 <small>尚未实现</small></span>
+    <nav id="console-nav" class="bottom-nav" aria-label="控制台页面" data-authenticated hidden>
+      <div id="console-nav-list" class="bottom-nav-list"></div>
     </nav>
 
-    <main data-authenticated hidden>
+    <main id="console-content" class="console-content" data-authenticated hidden>
       <p id="status-error" class="error" role="alert"></p>
 
-      <section id="dashboard" class="panel">
-        <div class="section-heading">
-          <div><p class="eyebrow">OVERVIEW</p><h2>Dashboard</h2></div>
-          <span class="readonly-tag">只读</span>
-        </div>
-        <div class="metric-grid">
-          <article><span>服务健康</span><strong id="health-value">加载中</strong></article>
-          <article><span>版本</span><strong id="version-value">—</strong></article>
-          <article><span>启动时间</span><strong id="started-value">—</strong></article>
-          <article><span>运行时长</span><strong id="uptime-value">—</strong></article>
-          <article><span>Provider</span><strong id="provider-value">—</strong></article>
-          <article><span>Model</span><strong id="model-value">—</strong></article>
-          <article><span>Streaming</span><strong id="stream-value">—</strong></article>
-          <article><span>监听摘要</span><strong id="listen-value">—</strong></article>
-        </div>
-        <div class="upstream-line">
-          <div><span>最近上游状态</span><strong id="upstream-value">—</strong></div>
-          <div><span>检查时间</span><strong id="upstream-time">—</strong></div>
-          <div><span>错误摘要</span><strong id="upstream-error">—</strong></div>
-        </div>
-      </section>
+      <div class="console-page" data-console-page="overview">
+      <section id="dashboard" class="panel overview-panel">
+        <header class="overview-heading">
+          <div>
+            <p class="eyebrow">OVERVIEW / RUNTIME</p>
+            <h2>运行总览</h2>
+            <p class="overview-lede">服务、模型与上游连接的只读运行快照。</p>
+          </div>
+          <div class="overview-heading-meta">
+            <span class="readonly-tag">只读</span>
+            <span class="overview-refresh-note">数据来自最近一次状态刷新</span>
+          </div>
+        </header>
 
-      <section id="platforms" class="panel">
-        <div class="section-heading"><div><p class="eyebrow">GATEWAYS</p><h2>平台状态</h2></div></div>
-        <div class="table-wrap"><table><thead><tr><th>平台</th><th>已配置</th><th>已启用</th><th>状态</th><th>最近事件</th><th>最近错误摘要</th></tr></thead><tbody id="platform-body"></tbody></table></div>
+        <article class="console-frame overview-health-card">
+          <div>
+            <p class="overview-kicker">PRIMARY HEALTH STATE</p>
+            <h3>服务健康</h3>
+            <p class="overview-health-copy">运行时状态与基础配置检查结果</p>
+          </div>
+          <strong id="health-value" class="console-status console-status--neutral overview-health-value">加载中</strong>
+        </article>
+
+        <section aria-labelledby="runtime-metrics-heading">
+          <div class="overview-subheading">
+            <h3 id="runtime-metrics-heading">运行指标</h3>
+            <span>Runtime metrics</span>
+          </div>
+          <div class="metric-grid">
+            <article class="console-frame"><span>版本</span><strong id="version-value">—</strong></article>
+            <article class="console-frame"><span>启动时间</span><strong id="started-value">—</strong></article>
+            <article class="console-frame"><span>运行时长</span><strong id="uptime-value">—</strong></article>
+            <article class="console-frame"><span>监听摘要</span><strong id="listen-value">—</strong></article>
+          </div>
+        </section>
+
+        <section aria-labelledby="provider-summary-heading" class="overview-provider-section">
+          <div class="overview-subheading">
+            <h3 id="provider-summary-heading">上游摘要</h3>
+            <span>Provider summary</span>
+          </div>
+          <div class="metric-grid overview-provider-grid">
+            <article class="console-frame"><span>Provider</span><strong id="provider-value">—</strong></article>
+            <article class="console-frame"><span>Model</span><strong id="model-value">—</strong></article>
+            <article class="console-frame"><span>Streaming</span><strong id="stream-value">—</strong></article>
+          </div>
+          <div class="upstream-line console-frame">
+            <div><span>最近上游状态</span><strong id="upstream-value" class="console-status console-status--neutral">—</strong></div>
+            <div><span>检查时间</span><strong id="upstream-time">—</strong></div>
+            <div><span>错误摘要</span><strong id="upstream-error">—</strong></div>
+          </div>
+        </section>
+      </section>
+      </div>
+
+      <div class="console-page" data-console-page="platforms" hidden>
+      <header class="product-page-heading">
+        <div>
+          <p class="eyebrow">PLATFORMS / GATEWAYS</p>
+          <h2>平台与能力</h2>
+          <p class="product-page-lede">查看真实运行入口的配置、启用状态和最近活动，并按作用域确认当前 adapter 支持的消息能力。</p>
+        </div>
+        <span class="readonly-tag">运行快照</span>
+      </header>
+
+      <section id="platforms" class="panel product-panel" aria-labelledby="platforms-heading">
+        <header class="section-heading">
+          <div>
+            <p class="eyebrow">GATEWAY STATUS</p>
+            <h2 id="platforms-heading">平台状态</h2>
+          </div>
+          <span class="section-meta">配置 · 入口 · 最近事件</span>
+        </header>
+        <p class="section-intro">状态来自当前 adapter 生命周期。配置和启用是独立信号，最近事件与错误摘要只展示后端已确认的信息。</p>
+        <div class="table-wrap platform-table-wrap"><table><thead><tr><th>平台</th><th>已配置</th><th>已启用</th><th>状态</th><th>最近事件</th><th>最近错误摘要</th></tr></thead><tbody id="platform-body"></tbody></table></div>
         <p class="hint">QQ 状态来自当前 WebSocket 生命周期；微信状态来自回调监听器是否成功绑定并仍在运行。</p>
       </section>
 
-      <section id="capabilities" class="panel">
-        <div class="section-heading"><div><p class="eyebrow">CAPABILITIES</p><h2>能力矩阵</h2></div></div>
-        <div class="table-wrap"><table><thead><tr><th>平台</th><th>作用域</th><th>方向</th><th>Text</th><th>Markdown</th><th>Image</th><th>File</th><th>Mixed message</th><th>Streaming</th></tr></thead><tbody id="capability-body"></tbody></table></div>
+      <section id="capabilities" class="panel product-panel" aria-labelledby="capabilities-heading">
+        <header class="section-heading">
+          <div>
+            <p class="eyebrow">CAPABILITY MATRIX</p>
+            <h2 id="capabilities-heading">能力矩阵</h2>
+          </div>
+          <span class="section-meta">接收 / 发送</span>
+        </header>
+        <p class="section-intro">每一行对应一个真实平台作用域和方向。能力状态由 adapter 与 sender 返回；“未启用”不等同于“不支持”。</p>
+        <div class="table-wrap capability-table-wrap"><table><thead><tr><th>平台</th><th>作用域</th><th>方向</th><th>Text</th><th>Markdown</th><th>Image</th><th>File</th><th>Mixed message</th><th>Streaming</th></tr></thead><tbody id="capability-body"></tbody></table></div>
         <p class="hint">“未启用”表示该作用域依赖的运行入口或功能配置已关闭；接收和发送能力分别来自真实 adapter 与 sender。</p>
       </section>
+      </div>
 
-      <section id="storage" class="panel">
-        <div class="section-heading"><div><p class="eyebrow">LOCAL DATA</p><h2>存储状态</h2></div></div>
-        <div class="table-wrap"><table><thead><tr><th>资源</th><th>安全路径摘要</th><th>状态</th><th>存在</th><th>可读</th><th>可写</th><th>错误分类</th><th>Schema / migration</th></tr></thead><tbody id="storage-body"></tbody></table></div>
-        <p class="hint">检查只执行元数据、只读打开或目录遍历入口验证；不会写入探测，因此可写性保持未知，也不会执行 migration。</p>
+      <div class="console-page" data-console-page="storage" hidden>
+      <header class="product-page-heading">
+        <div>
+          <p class="eyebrow">STORAGE / LOCAL DATA</p>
+          <h2>存储状态</h2>
+          <p class="product-page-lede">查看数据库、缓存与附件入口的真实运行状态。检查保持只读，不会写入探测或执行迁移。</p>
+        </div>
+        <span class="readonly-tag">只读检查</span>
+      </header>
+
+      <section id="storage" class="panel product-panel storage-panel" aria-labelledby="storage-heading">
+        <header class="section-heading">
+          <div>
+            <p class="section-kicker">PERSISTENCE / HEALTH</p>
+            <h2 id="storage-heading">本地资源</h2>
+          </div>
+          <span class="section-meta">元数据 · 访问 · schema</span>
+        </header>
+        <p class="section-intro">状态由后端入口验证结果组成。可写性没有执行探测，因此“未知”会如实保留，不代表资源可写。</p>
+        <div class="table-wrap storage-table-wrap"><table><thead><tr><th>资源</th><th>安全路径摘要</th><th>状态</th><th>存在</th><th>可读</th><th>可写</th><th>错误分类</th><th>Schema / migration</th></tr></thead><tbody id="storage-body"></tbody></table></div>
+        <p class="hint">检查只执行元数据、只读打开或目录遍历入口验证；不会写入探测，也不会执行 migration。</p>
       </section>
+      </div>
 
-      <section id="configuration" class="panel configuration-panel">
-        <div class="section-heading">
-          <div><p class="eyebrow">MANAGED CONFIGURATION</p><h2>核心配置</h2></div>
+      <div class="console-page" data-console-page="todo" hidden>
+        <header class="product-page-heading">
+          <div>
+            <p class="eyebrow">TODO / TASK CONTROL</p>
+            <h2>Todo 管理</h2>
+            <p class="product-page-lede">查看、创建和更新当前运行目录中的 Todo，目标与提醒状态来自管理 API。</p>
+          </div>
+          <span class="readonly-tag">受控写入</span>
+        </header>
+        <section id="todo-page" class="panel todo-panel" aria-labelledby="todo-heading">
+          <header class="section-heading">
+            <div>
+              <p class="section-kicker">TASK BOARD / LOCAL API</p>
+              <h2 id="todo-heading">任务清单</h2>
+            </div>
+            <div class="todo-page-actions">
+              <button id="todo-refresh" class="secondary" type="button">刷新</button>
+              <button id="todo-create-open" type="button">创建 Todo</button>
+            </div>
+          </header>
+          <div class="todo-toolbar">
+            <label>状态<select id="todo-status-filter"><option value="all">全部</option><option value="pending">待处理</option><option value="completed">已完成</option></select></label>
+            <label class="todo-search">关键词<input id="todo-keyword-filter" type="search" placeholder="搜索标题或内容"></label>
+            <button id="todo-advanced-toggle" type="button" class="secondary" aria-expanded="false">高级筛选</button>
+            <button id="todo-filter-submit" type="button">应用筛选</button>
+            <button id="todo-filter-reset" type="button" class="secondary">重置</button>
+          </div>
+          <div id="todo-advanced-filter" class="todo-advanced-filter" hidden>
+            <label>时间<select id="todo-time-filter"><option value="all">全部</option><option value="overdue">已逾期</option><option value="no_due_date">无截止日期</option></select></label>
+            <label>重复<select id="todo-recurring-filter"><option value="all">全部</option><option value="true">仅重复</option><option value="false">非重复</option></select></label>
+            <label>目标<select id="todo-target-filter"><option value="">全部目标</option></select></label>
+            <label>平台<input id="todo-platform-filter" placeholder="qq_official"></label>
+            <label>账号<input id="todo-account-filter" placeholder="可选"></label>
+            <label>用户/群组<input id="todo-user-filter" placeholder="可选"></label>
+            <label>范围<select id="todo-scope-filter"><option value="">全部</option><option value="private">私聊</option><option value="group">群聊</option></select></label>
+            <label>日期起<input id="todo-date-start" type="date"></label>
+            <label>日期止<input id="todo-date-end" type="date"></label>
+          </div>
+          <p id="todo-result" class="status-message" role="status" aria-live="polite"></p>
+          <div id="todo-list" class="todo-list" aria-live="polite"><p class="hint">正在加载 Todo…</p></div>
+          <div id="todo-pagination" class="todo-pagination"></div>
+        </section>
+      </div>
+
+      <!-- 知识库页面用于查看、筛选和上传由后端处理的知识库文件。 -->
+      <div class="console-page" data-console-page="knowledge" hidden>
+        <header class="product-page-heading">
+          <div>
+            <p class="eyebrow">KNOWLEDGE / FILES</p>
+            <h2>知识库管理</h2>
+            <p class="product-page-lede">查看、筛选和上传知识库文件，处理状态与文件信息均来自管理 API。</p>
+          </div>
+          <div class="knowledge-page-actions">
+            <button id="knowledge-upload-open" type="button">上传文件</button>
+          </div>
+        </header>
+        <section class="panel knowledge-panel" aria-labelledby="knowledge-heading">
+          <header class="section-heading">
+            <div>
+              <h2 id="knowledge-heading">知识库文件</h2>
+            </div>
+            <span class="section-meta">文件 · 处理状态</span>
+          </header>
+          <div class="knowledge-toolbar">
+            <label class="knowledge-search">搜索文件名<input id="knowledge-search" type="search" placeholder="搜索文件名"></label>
+            <label>状态<select id="knowledge-status-filter"><option value="all">全部</option><option value="pending">等待处理</option><option value="processing">处理中</option><option value="ready">已完成</option><option value="failed">处理失败</option></select></label>
+            <button id="knowledge-filter-submit" type="button">应用筛选</button>
+            <button id="knowledge-filter-reset" type="button" class="secondary">重置</button>
+            <button id="knowledge-refresh" type="button" class="secondary">刷新</button>
+          </div>
+          <p id="knowledge-result" class="status-message" role="status" aria-live="polite"></p>
+          <div id="knowledge-list" class="knowledge-list" aria-live="polite"><p class="hint">正在加载知识库…</p></div>
+          <div id="knowledge-pagination" class="knowledge-pagination"></div>
+        </section>
+      </div>
+
+      <dialog id="todo-create-dialog" class="todo-create-dialog">
+        <form id="todo-create-form" class="todo-create-form" method="dialog">
+          <div class="todo-create-heading">
+            <h3>创建 Todo</h3>
+            <button id="todo-create-close" type="button" class="secondary" aria-label="关闭">×</button>
+          </div>
+          <label>标题<input id="todo-create-title" name="title" required maxlength="500" placeholder="例如：整理部署日志"></label>
+          <label>目标<select id="todo-create-target" name="target_ref" required><option value="">加载目标中…</option></select></label>
+          <label>截止日期与时间
+            <span class="todo-create-deadline-fields">
+              <input id="todo-create-due-date" name="due_date" type="date" aria-label="截止日期">
+              <input id="todo-create-due-time" name="due_time" type="time" aria-label="截止时间（可选）">
+            </span>
+          </label>
+          <label>提醒时间<input id="todo-create-reminder-at" name="reminder_at" type="datetime-local"></label>
+          <label>重复类型<select id="todo-create-recurrence-kind"><option value="none">不重复</option><option value="every_n_days">间隔重复</option></select></label>
+          <label>重复间隔<input id="todo-create-recurrence-interval" type="number" min="1" placeholder="可选"></label>
+          <label>重复单位<select id="todo-create-recurrence-unit"><option value="day">天</option><option value="week">周</option><option value="month">月</option></select></label>
+          <label class="todo-create-detail">详情<textarea id="todo-create-detail" name="detail" rows="2" placeholder="可选"></textarea></label>
+          <p id="todo-create-error" class="error" role="alert"></p>
+          <button type="submit">创建</button>
+        </form>
+      </dialog>
+
+      <div class="console-page" data-console-page="configuration" hidden>
+      <header class="product-page-heading configuration-page-heading">
+        <div>
+          <p class="eyebrow">CONFIGURATION / CONTROL PLANE</p>
+          <h2>配置中心</h2>
+          <p class="product-page-lede">管理运行时入口、敏感凭据、Agent 策略与本地界面偏好。每个配置域独立保存，并以服务端 revision 与生效状态为准。</p>
+        </div>
+        <div class="configuration-page-actions">
+          <span class="readonly-tag">受控写入</span>
+          <div id="configuration-summary" class="configuration-summary" aria-label="配置状态摘要"></div>
           <button id="validate-config" class="secondary" type="button">执行安全校验</button>
         </div>
-        <div id="configuration-summary" class="configuration-summary"></div>
-        <p class="hint">普通值写入受管 runtime.toml；secret 认证加密后写入 SQLite。已登记的 .env 值可作为首次启动配置，WebUI 保存后由受管值优先；所有保存均以 API 返回的 revision 和持久化结果为准。</p>
-        <div class="connection-test-row">
-          <label for="connection-provider">Provider 连接测试</label>
-          <select id="connection-provider">
-            <option value="openai">OpenAI</option>
-            <option value="deepseek">DeepSeek</option>
-            <option value="bigmodel">BigModel</option>
-            <option value="gemini">Gemini</option>
-            <option value="mimo">MiMo</option>
-          </select>
-          <button id="test-provider-connection" class="secondary" type="button">受控测试</button>
+        <p id="configuration-page-note" class="configuration-page-note">先确认当前配置是否可用，再按风险边界编辑。校验不会保存配置，也不会执行外部网络请求。</p>
+      </header>
+
+      <section id="configuration" class="panel configuration-panel">
+        <nav id="configuration-business-tabs" class="configuration-business-tabs" role="tablist" aria-label="配置业务分组"></nav>
+        <p id="configuration-business-description" class="configuration-business-description"></p>
+        <div id="configuration-business-content" class="configuration-business-content" role="tabpanel">
+          <div id="public-config-fields" class="configuration-source-fragment grouped-config-grid"></div>
+          <div id="secret-config-fields" class="configuration-source-fragment grouped-config-grid"></div>
+          <div id="agent-config-fields" class="configuration-source-fragment config-grid"></div>
+          <section class="configuration-content-group" data-configuration-group="system-security" data-configuration-source="interface">
+            <section class="config-field-group">
+              <h3>控制台界面</h3>
+              <p class="config-field-group-hint">主题预设保留在当前浏览器；登录后自定义颜色与背景会保存到当前管理员的用户偏好。</p>
+              <div id="console-theme-selector" class="grouped-config-grid"></div>
+            </section>
+          </section>
         </div>
-        <p class="hint">连接测试只向所选 Provider 已配置的公网 HTTPS 主机请求模型列表，不发送聊天内容、不修改配置；自定义兼容地址会拒绝内网目标并固定到本次已校验的 DNS 地址。</p>
-        <p id="connection-test-result" class="status-message" role="status"></p>
-
-        <details open>
-          <summary>Provider、平台入口与主要功能</summary>
-          <div id="public-config-fields" class="grouped-config-grid"></div>
+        <div class="configuration-save-actions" aria-label="配置保存操作">
           <button id="save-public-config" type="button">保存普通配置</button>
-        </details>
-
-        <details>
-          <summary>敏感凭据</summary>
-          <p class="hint">加载时不回传原文；留空表示不修改。QQ 等关联凭据应在同一次保存中完整填写。</p>
-          <div id="secret-config-fields" class="grouped-config-grid"></div>
-          <button id="save-secret-config" type="button">保存敏感配置</button>
-        </details>
-
-        <details>
-          <summary>模型路线与 Tool Calling</summary>
-          <p class="hint">结构化修改现有 agent.toml；候选模型用英文逗号分隔，保存前执行与正式启动一致的引用和 Provider 预检。</p>
-          <div id="agent-config-fields" class="config-grid"></div>
+          <button id="save-secret-config" class="configuration-danger-action" type="button">保存敏感配置</button>
           <button id="save-agent-config" type="button">保存 Agent 策略</button>
-        </details>
+        </div>
+        <p class="hint configuration-save-hint">普通字段失焦后自动保存；Secret 留空不修改、清除必须显式选择。所有写入继续使用服务端 revision，冲突不会自动覆盖。</p>
         <p id="configuration-result" class="status-message" role="status"></p>
       </section>
+      </div>
 
-      <section id="markdown" class="panel markdown-panel">
-        <div class="section-heading"><div><p class="eyebrow">SAFE PREVIEW</p><h2>Markdown 预览</h2></div></div>
+      <div class="console-page" data-console-page="tools" hidden>
+      <header class="product-page-heading">
+        <div>
+          <p class="eyebrow">TOOLS / MARKDOWN</p>
+          <h2>Markdown 工具</h2>
+          <p class="product-page-lede">在本地编辑 Markdown，并查看经过 Rust 后端清理后的安全预览。</p>
+        </div>
+        <span class="readonly-tag">安全预览</span>
+      </header>
+
+      <section id="markdown" class="panel product-panel markdown-panel" aria-labelledby="markdown-heading">
+        <header class="section-heading">
+          <div>
+            <p class="section-kicker">EDITOR / SANITIZED OUTPUT</p>
+            <h2 id="markdown-heading">Markdown 预览</h2>
+          </div>
+          <span class="section-meta">Ctrl / ⌘ + Enter</span>
+        </header>
+        <p class="section-intro">编辑器只提交当前文本；预览内容由后端解析并清理后再显示，不在浏览器端复制 sanitization 逻辑。</p>
         <div class="markdown-grid">
-          <div><label for="markdown-input">Markdown</label><textarea id="markdown-input" rows="15" maxlength="65536" placeholder="# 标题&#10;&#10;由 Rust 后端解析并清理 HTML。"></textarea><button id="markdown-render" type="button">渲染预览</button><p class="hint">支持 Ctrl / ⌘ + Enter 快捷渲染。</p><p id="markdown-error" class="error" role="alert"></p></div>
-          <div><span class="preview-label">安全预览</span><article id="markdown-output" class="markdown-output"></article></div>
+          <div class="markdown-editor console-frame">
+            <div class="markdown-pane-heading">
+              <label for="markdown-input">Markdown 输入</label>
+              <span class="pane-meta">最多 65,536 字符</span>
+            </div>
+            <textarea id="markdown-input" rows="15" maxlength="65536" placeholder="# 标题&#10;&#10;由 Rust 后端解析并清理 HTML。"></textarea>
+            <div class="markdown-editor-actions">
+              <button id="markdown-render" type="button">渲染预览</button>
+              <span class="shortcut-note">支持 Ctrl / ⌘ + Enter 快捷渲染</span>
+            </div>
+            <p id="markdown-error" class="error" role="alert"></p>
+          </div>
+          <div class="markdown-preview console-frame">
+            <div class="markdown-pane-heading">
+              <span class="preview-label">安全预览</span>
+              <span class="pane-meta">后端清理结果</span>
+            </div>
+            <article id="markdown-output" class="markdown-output"></article>
+          </div>
         </div>
       </section>
+      </div>
+
     </main>
 
-    <footer data-authenticated hidden>重启操作复用当前运行目录的受控 botctl 脚本，不直接控制 Docker socket 或 systemd。</footer>
     <script type="module" src="/console/app.js"></script>
   </body>
 </html>

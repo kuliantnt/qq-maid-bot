@@ -48,9 +48,59 @@ async fn tool_loop_executes_function_call_and_returns_output_to_model() {
 }
 
 #[tokio::test]
-async fn tool_loop_budget_exceeded_before_first_provider_request() {
+async fn tool_loop_budget_before_first_request_disables_tools_for_answer() {
     let (base_url, state) = spawn_tool_loop_mock().await;
     let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();
+    let client = qq_maid_common::http_client::client();
+
+    let outcome = run_agent_loop(
+        Box::new(
+            ResponsesAgentSession::new(
+                client,
+                "test-key".to_owned(),
+                Some(base_url),
+                "openai",
+                "gpt-test".to_owned(),
+                10 * 1024 * 1024,
+                1200,
+                None,
+                &[ChatMessage::user("杭州今天需要带伞吗？")],
+                &registry,
+                Some(crate::context_budget::ContextBudgetConfig {
+                    context_window_chars: 150,
+                    output_reserve_chars: 20,
+                    protected_recent_turns: 0,
+                }),
+            )
+            .unwrap(),
+        ),
+        registry,
+        test_context(),
+        3,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.reply, "杭州今天有小雨，建议带伞。");
+    let requests = &state.lock().await.requests;
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].get("tools").is_none());
+    assert!(requests[0].get("tool_choice").is_none());
+    assert!(requests[0].get("parallel_tool_calls").is_none());
+}
+
+#[tokio::test]
+async fn non_stream_budget_finalization_rejects_provider_function_call_without_execution() {
+    let (base_url, state) = spawn_disabled_tools_function_call_mock().await;
+    let execute_calls = Arc::new(AtomicUsize::new(0));
+    let registry = ToolRegistry::new()
+        .register(SequenceToolStub {
+            fail: false,
+            calls: execute_calls.clone(),
+        })
+        .unwrap();
     let client = qq_maid_common::http_client::client();
 
     let err = run_agent_loop(
@@ -67,7 +117,7 @@ async fn tool_loop_budget_exceeded_before_first_provider_request() {
                 &[ChatMessage::user("杭州今天需要带伞吗？")],
                 &registry,
                 Some(crate::context_budget::ContextBudgetConfig {
-                    context_window_chars: 120,
+                    context_window_chars: 150,
                     output_reserve_chars: 20,
                     protected_recent_turns: 0,
                 }),
@@ -83,18 +133,28 @@ async fn tool_loop_budget_exceeded_before_first_provider_request() {
     .await
     .unwrap_err();
 
-    assert_eq!(err.code, "context_budget_exceeded");
+    assert_eq!(err.code, "tool_loop_limit");
     assert_eq!(err.stage, "tool_loop");
-    assert!(state.lock().await.requests.is_empty());
+    assert_eq!(execute_calls.load(Ordering::SeqCst), 0);
+    let requests = &state.lock().await.requests;
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].get("tools").is_none());
+    assert!(requests[0].get("tool_choice").is_none());
+    assert!(requests[0].get("parallel_tool_calls").is_none());
+    assert!(
+        requests[0]["input"]
+            .as_array()
+            .is_some_and(|input| input.iter().all(|item| item["type"] != "function_call"))
+    );
 }
 
 #[tokio::test]
-async fn tool_loop_budget_exceeded_after_tool_result_skips_next_provider_request() {
+async fn tool_loop_budget_after_tool_result_disables_tools_for_final_answer() {
     let (base_url, state) = spawn_tool_loop_mock().await;
     let registry = ToolRegistry::new().register(WeatherToolStub).unwrap();
     let client = qq_maid_common::http_client::client();
 
-    let err = run_agent_loop(
+    let outcome = run_agent_loop(
         Box::new(
             ResponsesAgentSession::new(
                 client,
@@ -122,13 +182,15 @@ async fn tool_loop_budget_exceeded_after_tool_result_skips_next_provider_request
         None,
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(err.code, "context_budget_exceeded");
-    assert_eq!(err.stage, "tool_loop");
+    assert_eq!(outcome.reply, "杭州今天有小雨，建议带伞。");
     let requests = &state.lock().await.requests;
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     assert_eq!(requests[0]["tools"][0]["name"], "get_weather");
+    assert!(requests[1].get("tools").is_none());
+    assert!(requests[1].get("tool_choice").is_none());
+    assert!(requests[1].get("parallel_tool_calls").is_none());
 }
 
 #[tokio::test]

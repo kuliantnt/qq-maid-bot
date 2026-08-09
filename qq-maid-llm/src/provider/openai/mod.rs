@@ -5,6 +5,7 @@
 
 mod chat;
 mod chat_tool_loop;
+mod configured;
 mod extract;
 mod fallback;
 mod payload;
@@ -20,7 +21,7 @@ use futures::{StreamExt, stream as futures_stream};
 
 use crate::{
     agent_loop::{AgentSessionRequest, AgentStepSession},
-    config::{LlmConfig, OpenAiApiMode},
+    config::{HttpAuthConfig, LlmConfig, OpenAiApiMode},
     error::LlmError,
     provider::{
         ChatOutcome, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol,
@@ -29,13 +30,34 @@ use crate::{
     },
 };
 
+const IMAGE_GENERATION_METADATA_KEY: &str = "image_generation";
+
+/// Provider 在强制最终回答阶段仍返回工具调用时的统一协议错误。
+pub(crate) fn tool_calls_disabled_error() -> LlmError {
+    LlmError::new(
+        "tool_loop_limit",
+        "tool loop returned tool calls when tool calls are disabled",
+        "tool_loop",
+    )
+}
+
+fn image_generation_enabled(req: &ChatRequest) -> bool {
+    req.metadata
+        .get(IMAGE_GENERATION_METADATA_KEY)
+        .is_some_and(|value| value == "true")
+}
+
 pub(crate) use chat::{
     ChatCompletionsClient, chat_completions_stream, chat_completions_with_stream_fallback,
 };
 pub(crate) use chat_tool_loop::{
     begin_chat_completions_session, provider_chat_completions_tool_calling_protocol,
 };
+pub(crate) use configured::ConfiguredResponsesProvider;
 pub(crate) use stream::is_openai_responses_done_sentinel;
+pub(crate) use transport::{
+    ResponsesTransportContext, openai_responses_url, send_openai_responses_request,
+};
 
 struct OpenAiChatFallbackRequest<'a> {
     api_mode: OpenAiApiMode,
@@ -44,12 +66,14 @@ struct OpenAiChatFallbackRequest<'a> {
     chat_client: &'a ChatCompletionsClient,
     api_key: &'a str,
     base_url: Option<&'a str>,
+    responses_auth: Option<&'a HttpAuthConfig>,
     provider: &'a str,
     model: &'a str,
     media_max_bytes: u64,
     max_output_tokens: u64,
     reasoning_effort: Option<crate::provider::types::ReasoningEffort>,
     messages: &'a [ChatMessage],
+    image_generation_enabled: bool,
 }
 
 /// OpenAI 提供商实现。
@@ -112,6 +136,7 @@ impl LlmProvider for OpenAiProvider {
     /// 执行聊天补全，根据配置选择 Responses 或 Chat Completions。`model` 支持 `"openai:"` 前缀。
     async fn chat(&self, req: ChatRequest) -> Result<ChatOutcome, LlmError> {
         let effective_model = effective_openai_model(req.model.as_deref(), &self.model)?;
+        let image_generation_enabled = image_generation_enabled(&req);
         openai_chat_with_chat_fallback(OpenAiChatFallbackRequest {
             api_mode: self.api_mode,
             stream: self.stream,
@@ -119,18 +144,21 @@ impl LlmProvider for OpenAiProvider {
             chat_client: &self.chat_client,
             api_key: &self.api_key,
             base_url: self.base_url.as_deref(),
+            responses_auth: None,
             provider: self.name(),
             model: &effective_model,
             media_max_bytes: self.media_max_bytes,
             max_output_tokens: req.max_output_tokens.unwrap_or(self.max_output_tokens),
             reasoning_effort: req.reasoning_effort,
             messages: &req.messages,
+            image_generation_enabled,
         })
         .await
     }
 
     async fn stream_chat(&self, req: ChatRequest) -> Result<LlmStream, LlmError> {
         let effective_model = effective_openai_model(req.model.as_deref(), &self.model)?;
+        let image_generation_enabled = image_generation_enabled(&req);
         if !self.stream {
             let outcome = openai_chat_with_chat_fallback(OpenAiChatFallbackRequest {
                 api_mode: self.api_mode,
@@ -139,12 +167,14 @@ impl LlmProvider for OpenAiProvider {
                 chat_client: &self.chat_client,
                 api_key: &self.api_key,
                 base_url: self.base_url.as_deref(),
+                responses_auth: None,
                 provider: self.name(),
                 model: &effective_model,
                 media_max_bytes: self.media_max_bytes,
                 max_output_tokens: req.max_output_tokens.unwrap_or(self.max_output_tokens),
                 reasoning_effort: req.reasoning_effort,
                 messages: &req.messages,
+                image_generation_enabled,
             })
             .await?;
             return Ok(outcome_to_stream(outcome));
@@ -156,12 +186,14 @@ impl LlmProvider for OpenAiProvider {
             chat_client: &self.chat_client,
             api_key: &self.api_key,
             base_url: self.base_url.as_deref(),
+            responses_auth: None,
             provider: self.name(),
             model: &effective_model,
             media_max_bytes: self.media_max_bytes,
             max_output_tokens: req.max_output_tokens.unwrap_or(self.max_output_tokens),
             reasoning_effort: req.reasoning_effort,
             messages: &req.messages,
+            image_generation_enabled,
         })
         .await
     }
@@ -178,19 +210,22 @@ impl LlmProvider for OpenAiProvider {
             return Ok(None);
         }
         let effective_model = effective_openai_model(req.chat.model.as_deref(), &self.model)?;
-        Ok(Some(Box::new(tool_loop::ResponsesAgentSession::new(
-            self.responses_client.clone(),
-            self.api_key.clone(),
-            self.base_url.clone(),
-            self.name(),
-            effective_model,
-            self.media_max_bytes,
-            req.chat.max_output_tokens.unwrap_or(self.max_output_tokens),
-            req.chat.reasoning_effort,
-            &req.chat.messages,
-            req.tools,
-            req.chat.context_budget,
-        )?)))
+        Ok(Some(Box::new(
+            tool_loop::ResponsesAgentSession::new_with_image_generation(
+                self.responses_client.clone(),
+                self.api_key.clone(),
+                self.base_url.clone(),
+                self.name(),
+                effective_model,
+                self.media_max_bytes,
+                req.chat.max_output_tokens.unwrap_or(self.max_output_tokens),
+                req.chat.reasoning_effort,
+                &req.chat.messages,
+                req.tools,
+                req.chat.context_budget,
+                image_generation_enabled(req.chat),
+            )?,
+        )))
     }
 
     fn tool_calling_protocol(&self, model: Option<&str>) -> Option<ToolCallingProtocol> {
@@ -272,6 +307,7 @@ async fn openai_auto_stream_with_chat_fallback(
         client: req.responses_client,
         api_key: req.api_key,
         base_url: req.base_url,
+        auth: req.responses_auth,
         provider: req.provider,
         model: req.model,
         media_max_bytes: req.media_max_bytes,
@@ -279,6 +315,7 @@ async fn openai_auto_stream_with_chat_fallback(
         reasoning_effort: req.reasoning_effort,
         messages: req.messages,
         allow_completed_response_fallback: true,
+        image_generation_enabled: req.image_generation_enabled,
     };
     match responses::openai_responses_chat_stream(&responses_req).await {
         Ok(stream) => Ok(openai_responses_runtime_fallback_stream(stream, req)),
@@ -288,7 +325,7 @@ async fn openai_auto_stream_with_chat_fallback(
                 model = %req.model,
                 error_code = err.code.as_str(),
                 error_stage = err.stage.as_str(),
-                "OpenAI Responses stream init failed; falling back to Chat Completions stream"
+                "OpenAI Responses 流初始化失败，将降级到 Chat Completions 流"
             );
             chat::chat_completions_stream(
                 req.chat_client,
@@ -359,6 +396,10 @@ async fn next_openai_runtime_fallback_event(
                     }
                     return Some(Ok(LlmStreamEvent::TextDelta(delta)));
                 }
+                Some(Ok(LlmStreamEvent::OutputPart(part))) => {
+                    state.emitted_non_empty_delta = true;
+                    return Some(Ok(LlmStreamEvent::OutputPart(part)));
+                }
                 Some(Ok(LlmStreamEvent::Completed {
                     usage,
                     finish_reason,
@@ -383,7 +424,7 @@ async fn next_openai_runtime_fallback_event(
                         model = %state.model,
                         error_code = err.code.as_str(),
                         error_stage = err.stage.as_str(),
-                        "OpenAI Responses stream failed before first delta; falling back to Chat Completions stream"
+                        "OpenAI Responses 流在首个增量前失败，将降级到 Chat Completions 流"
                     );
                     state.responses_stream = None;
                     match chat::chat_completions_stream(
@@ -429,6 +470,9 @@ async fn next_openai_runtime_fallback_event(
                 }
                 return Some(Ok(LlmStreamEvent::TextDelta(delta)));
             }
+            Some(Ok(LlmStreamEvent::OutputPart(part))) => {
+                return Some(Ok(LlmStreamEvent::OutputPart(part)));
+            }
             Some(Ok(LlmStreamEvent::Completed {
                 usage,
                 finish_reason,
@@ -465,6 +509,7 @@ async fn openai_auto_chat_with_chat_fallback(
             client: req.responses_client,
             api_key: req.api_key,
             base_url: req.base_url,
+            auth: req.responses_auth,
             provider: req.provider,
             model: req.model,
             media_max_bytes: req.media_max_bytes,
@@ -472,6 +517,7 @@ async fn openai_auto_chat_with_chat_fallback(
             reasoning_effort: req.reasoning_effort,
             messages: req.messages,
             allow_completed_response_fallback: true,
+            image_generation_enabled: req.image_generation_enabled,
         },
     )
     .await
@@ -483,7 +529,7 @@ async fn openai_auto_chat_with_chat_fallback(
                 model = %req.model,
                 error_code = err.code.as_str(),
                 error_stage = err.stage.as_str(),
-                "OpenAI Responses chat failed; falling back to Chat Completions"
+                "OpenAI Responses 对话失败，将降级到 Chat Completions"
             );
             chat_completions_with_stream_fallback(
                 req.stream,
@@ -542,395 +588,4 @@ fn effective_openai_model(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::{
-        Json, Router,
-        body::Body,
-        extract::State,
-        http::{StatusCode as AxumStatusCode, header},
-        response::IntoResponse,
-        routing::post,
-    };
-    use serde_json::Value;
-    use std::sync::Arc;
-    use tokio::{net::TcpListener, sync::Mutex};
-
-    #[derive(Debug)]
-    struct MockOpenAiState {
-        responses_status: AxumStatusCode,
-        responses_body: Value,
-        chat_body: Value,
-        responses_calls: usize,
-        chat_calls: usize,
-        chat_requests: Vec<Value>,
-    }
-
-    async fn mock_responses_handler(
-        State(state): State<Arc<Mutex<MockOpenAiState>>>,
-        Json(_body): Json<Value>,
-    ) -> impl IntoResponse {
-        let mut state = state.lock().await;
-        state.responses_calls += 1;
-        (state.responses_status, Json(state.responses_body.clone()))
-    }
-
-    async fn mock_chat_completions_handler(
-        State(state): State<Arc<Mutex<MockOpenAiState>>>,
-        Json(body): Json<Value>,
-    ) -> impl IntoResponse {
-        let mut state = state.lock().await;
-        state.chat_calls += 1;
-        state.chat_requests.push(body);
-        Json(state.chat_body.clone())
-    }
-
-    async fn spawn_mock_openai(state: MockOpenAiState) -> (String, Arc<Mutex<MockOpenAiState>>) {
-        let state = Arc::new(Mutex::new(state));
-        let app = Router::new()
-            .route("/v1/responses", post(mock_responses_handler))
-            .route("/v1/chat/completions", post(mock_chat_completions_handler))
-            .with_state(state.clone());
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        (format!("http://{addr}/v1"), state)
-    }
-
-    #[derive(Debug)]
-    struct MockOpenAiStreamState {
-        responses_body: String,
-        chat_body: String,
-        responses_calls: usize,
-        chat_calls: usize,
-    }
-
-    async fn mock_stream_responses_handler(
-        State(state): State<Arc<Mutex<MockOpenAiStreamState>>>,
-        _body: Body,
-    ) -> impl IntoResponse {
-        let mut state = state.lock().await;
-        state.responses_calls += 1;
-        (
-            AxumStatusCode::OK,
-            [(header::CONTENT_TYPE, "text/event-stream")],
-            state.responses_body.clone(),
-        )
-    }
-
-    async fn mock_stream_chat_handler(
-        State(state): State<Arc<Mutex<MockOpenAiStreamState>>>,
-        _body: Body,
-    ) -> impl IntoResponse {
-        let mut state = state.lock().await;
-        state.chat_calls += 1;
-        (
-            AxumStatusCode::OK,
-            [(header::CONTENT_TYPE, "text/event-stream")],
-            state.chat_body.clone(),
-        )
-    }
-
-    async fn spawn_mock_openai_stream(
-        responses_body: String,
-        chat_body: String,
-    ) -> (String, Arc<Mutex<MockOpenAiStreamState>>) {
-        let state = Arc::new(Mutex::new(MockOpenAiStreamState {
-            responses_body,
-            chat_body,
-            responses_calls: 0,
-            chat_calls: 0,
-        }));
-        let app = Router::new()
-            .route("/v1/responses", post(mock_stream_responses_handler))
-            .route("/v1/chat/completions", post(mock_stream_chat_handler))
-            .with_state(state.clone());
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        (format!("http://{addr}/v1"), state)
-    }
-
-    fn mock_chat_response(text: &str) -> Value {
-        serde_json::json!({
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": text
-                }
-            }],
-            "usage": {
-                "prompt_tokens": 2,
-                "completion_tokens": 3,
-                "total_tokens": 5
-            }
-        })
-    }
-
-    fn provider_with_api_mode(api_mode: OpenAiApiMode) -> OpenAiProvider {
-        let http_client = qq_maid_common::http_client::client();
-        OpenAiProvider {
-            responses_client: http_client.clone(),
-            chat_client: ChatCompletionsClient::new("test-key".to_owned(), None, http_client),
-            api_key: "test-key".to_owned(),
-            base_url: None,
-            model: "gpt-5.5".to_owned(),
-            api_mode,
-            stream: false,
-            media_max_bytes: 10 * 1024 * 1024,
-            max_output_tokens: 1200,
-        }
-    }
-
-    #[test]
-    fn openai_tool_calling_protocol_requires_responses_auto_mode() {
-        assert_eq!(
-            provider_with_api_mode(OpenAiApiMode::Auto).tool_calling_protocol(None),
-            Some(ToolCallingProtocol::OpenAiResponses)
-        );
-        assert_eq!(
-            provider_with_api_mode(OpenAiApiMode::ChatOnly).tool_calling_protocol(None),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn openai_chat_uses_responses_without_chat_fallback_when_responses_succeeds() {
-        let (base_url, state) = spawn_mock_openai(MockOpenAiState {
-            responses_status: AxumStatusCode::OK,
-            responses_body: serde_json::json!({"output_text": "responses ok"}),
-            chat_body: mock_chat_response("chat fallback"),
-            responses_calls: 0,
-            chat_calls: 0,
-            chat_requests: Vec::new(),
-        })
-        .await;
-        let http_client = qq_maid_common::http_client::client();
-        let chat_client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), http_client.clone());
-
-        let outcome = openai_chat_with_chat_fallback(OpenAiChatFallbackRequest {
-            api_mode: OpenAiApiMode::Auto,
-            stream: false,
-            responses_client: &http_client,
-            chat_client: &chat_client,
-            api_key: "test-key",
-            base_url: Some(&base_url),
-            provider: "openai",
-            model: "gpt-5.5",
-            media_max_bytes: 10 * 1024 * 1024,
-            max_output_tokens: 1200,
-            reasoning_effort: None,
-            messages: &[ChatMessage::user("hi")],
-        })
-        .await
-        .unwrap();
-
-        assert_eq!(outcome.reply, "responses ok");
-        let state = state.lock().await;
-        assert_eq!(state.responses_calls, 1);
-        assert_eq!(state.chat_calls, 0);
-    }
-
-    #[tokio::test]
-    async fn openai_chat_falls_back_to_chat_completions_after_responses_http_error() {
-        let (base_url, state) = spawn_mock_openai(MockOpenAiState {
-            responses_status: AxumStatusCode::BAD_REQUEST,
-            responses_body: serde_json::json!({"error": {"message": "invalid responses schema"}}),
-            chat_body: mock_chat_response("chat fallback ok"),
-            responses_calls: 0,
-            chat_calls: 0,
-            chat_requests: Vec::new(),
-        })
-        .await;
-        let http_client = qq_maid_common::http_client::client();
-        let chat_client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), http_client.clone());
-        let messages = [
-            ChatMessage::system("system"),
-            ChatMessage {
-                role: crate::provider::types::ChatRole::Assistant,
-                content: "old reply".to_owned(),
-                content_parts: Vec::new(),
-            },
-            ChatMessage::user("again"),
-        ];
-
-        let outcome = openai_chat_with_chat_fallback(OpenAiChatFallbackRequest {
-            api_mode: OpenAiApiMode::Auto,
-            stream: false,
-            responses_client: &http_client,
-            chat_client: &chat_client,
-            api_key: "test-key",
-            base_url: Some(&base_url),
-            provider: "openai",
-            model: "gpt-5.5",
-            media_max_bytes: 10 * 1024 * 1024,
-            max_output_tokens: 1200,
-            reasoning_effort: None,
-            messages: &messages,
-        })
-        .await
-        .unwrap();
-
-        assert_eq!(outcome.reply, "chat fallback ok");
-        let state = state.lock().await;
-        assert_eq!(state.responses_calls, 1);
-        assert_eq!(state.chat_calls, 1);
-        let request = state.chat_requests.first().unwrap();
-        assert_eq!(request["model"], "gpt-5.5");
-        assert_eq!(request["messages"][1]["role"], "assistant");
-        assert_eq!(request["messages"][1]["content"][0]["type"], "text");
-        assert_eq!(request["messages"][1]["content"][0]["text"], "old reply");
-        assert!(request.get("input").is_none());
-    }
-
-    #[tokio::test]
-    async fn openai_chat_only_uses_chat_completions_without_responses() {
-        let (base_url, state) = spawn_mock_openai(MockOpenAiState {
-            responses_status: AxumStatusCode::INTERNAL_SERVER_ERROR,
-            responses_body: serde_json::json!({"error": {"message": "responses should not be called"}}),
-            chat_body: mock_chat_response("chat only ok"),
-            responses_calls: 0,
-            chat_calls: 0,
-            chat_requests: Vec::new(),
-        })
-        .await;
-        let http_client = qq_maid_common::http_client::client();
-        let chat_client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), http_client.clone());
-
-        let outcome = openai_chat_with_chat_fallback(OpenAiChatFallbackRequest {
-            api_mode: OpenAiApiMode::ChatOnly,
-            stream: false,
-            responses_client: &http_client,
-            chat_client: &chat_client,
-            api_key: "test-key",
-            base_url: Some(&base_url),
-            provider: "openai",
-            model: "gpt-5.5",
-            media_max_bytes: 10 * 1024 * 1024,
-            max_output_tokens: 1200,
-            reasoning_effort: None,
-            messages: &[ChatMessage::user("hi")],
-        })
-        .await
-        .unwrap();
-
-        assert_eq!(outcome.reply, "chat only ok");
-        let state = state.lock().await;
-        assert_eq!(state.responses_calls, 0);
-        assert_eq!(state.chat_calls, 1);
-    }
-
-    #[tokio::test]
-    async fn openai_responses_stream_falls_back_before_first_delta() {
-        let (base_url, state) = spawn_mock_openai_stream(
-            "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"responses unavailable\"}}}\n\n"
-                .to_owned(),
-            concat!(
-                "data: {\"choices\":[{\"delta\":{\"content\":\"chat fallback\"}}]}\n\n",
-                "data: [DONE]\n\n",
-            )
-            .to_owned(),
-        )
-        .await;
-        let http_client = qq_maid_common::http_client::client();
-        let chat_client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), http_client.clone());
-
-        let stream = openai_auto_stream_with_chat_fallback(OpenAiChatFallbackRequest {
-            api_mode: OpenAiApiMode::Auto,
-            stream: true,
-            responses_client: &http_client,
-            chat_client: &chat_client,
-            api_key: "test-key",
-            base_url: Some(&base_url),
-            provider: "openai",
-            model: "gpt-5.5",
-            media_max_bytes: 10 * 1024 * 1024,
-            max_output_tokens: 1200,
-            reasoning_effort: None,
-            messages: &[ChatMessage::user("hi")],
-        })
-        .await
-        .unwrap();
-        let outcome = crate::provider::collect_llm_stream(stream, "openai", "gpt-5.5")
-            .await
-            .unwrap();
-
-        assert_eq!(outcome.reply, "chat fallback");
-        assert!(outcome.fallback_used);
-        let state = state.lock().await;
-        assert_eq!(state.responses_calls, 1);
-        assert_eq!(state.chat_calls, 1);
-    }
-
-    #[tokio::test]
-    async fn openai_responses_stream_does_not_fallback_after_delta() {
-        let (base_url, state) = spawn_mock_openai_stream(
-            concat!(
-                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
-                "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"broken\"}}}\n\n",
-            )
-            .to_owned(),
-            concat!(
-                "data: {\"choices\":[{\"delta\":{\"content\":\"must not append\"}}]}\n\n",
-                "data: [DONE]\n\n",
-            )
-            .to_owned(),
-        )
-        .await;
-        let http_client = qq_maid_common::http_client::client();
-        let chat_client =
-            ChatCompletionsClient::new("test-key", Some(&base_url), http_client.clone());
-
-        let stream = openai_auto_stream_with_chat_fallback(OpenAiChatFallbackRequest {
-            api_mode: OpenAiApiMode::Auto,
-            stream: true,
-            responses_client: &http_client,
-            chat_client: &chat_client,
-            api_key: "test-key",
-            base_url: Some(&base_url),
-            provider: "openai",
-            model: "gpt-5.5",
-            media_max_bytes: 10 * 1024 * 1024,
-            max_output_tokens: 1200,
-            reasoning_effort: None,
-            messages: &[ChatMessage::user("hi")],
-        })
-        .await
-        .unwrap();
-        let err = crate::provider::collect_llm_stream(stream, "openai", "gpt-5.5")
-            .await
-            .unwrap_err();
-
-        assert_eq!(err.stage, "sse");
-        let state = state.lock().await;
-        assert_eq!(state.responses_calls, 1);
-        assert_eq!(state.chat_calls, 0);
-    }
-
-    #[test]
-    fn effective_openai_model_strips_openai_prefix() {
-        assert_eq!(
-            effective_openai_model(Some("openai:gpt-5-mini"), "default").unwrap(),
-            "gpt-5-mini"
-        );
-        assert_eq!(
-            effective_openai_model(Some("gpt-5-mini"), "default").unwrap(),
-            "gpt-5-mini"
-        );
-        assert_eq!(effective_openai_model(None, "default").unwrap(), "default");
-    }
-
-    #[test]
-    fn effective_openai_model_rejects_deepseek_prefix() {
-        let err = effective_openai_model(Some("deepseek:deepseek-chat"), "default").unwrap_err();
-        assert_eq!(err.code, "bad_request");
-    }
-}
+mod tests;

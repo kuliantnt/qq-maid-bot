@@ -1,7 +1,7 @@
 # qq-maid-core 项目清单 —— 定义包元信息和依赖项。
 [package]
 name = "qq-maid-core"
-version = "0.1.16"
+version = "0.1.23"
 edition = "2024"
 
 # 主运行依赖
@@ -11,13 +11,13 @@ anyhow = "1"
 # 部署管理员密码只保存 Argon2id 哈希，不复用聊天身份或明文凭据。
 argon2 = "0.5"
 # 主密钥文件采用可移植文本格式，原文只在进程内解码。
-base64 = "0.22"
+base64 = "0.23"
 # 异步 trait 支持
 async-trait = "0.1"
 # HTML 清理
 ammonia = "4"
 # HTTP 服务框架
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 # 日期时间处理
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Web 可写敏感值使用带认证的 XChaCha20-Poly1305 密文保存。
@@ -44,7 +44,7 @@ qq-maid-common = { path = "../qq-maid-common" }
 # LLM Provider、路由、SSE、usage、健康状态和 Web Search 协议由独立 crate 承载。
 qq-maid-llm = { path = "../qq-maid-llm" }
 # SQLite 存储，当前承载 Session、Todo、Memory、RSS 订阅和去重状态
-rusqlite = { version = "0.40.1", default-features = false, features = ["bundled", "functions"] }
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "bundled", "functions"] }
 # 序列化/反序列化
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

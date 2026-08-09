@@ -303,6 +303,7 @@ pub(crate) fn test_service_with_provider_base_title_query_weather_train_models_a
             memory_store: MemoryStore::new(database.clone()),
             session_store: SessionStore::new(database.clone()),
             task_store: TodoStore::new(database.clone()),
+            voice_store: crate::runtime::tools::voice::VoicePreferenceStore::new(database.clone()),
             notification_store: crate::storage::notification::NotificationOutboxStore::new(
                 database.clone(),
             ),
@@ -370,6 +371,7 @@ pub(crate) fn test_service_with_provider_base_title_query_weather_train_models_a
             },
             ops_config: crate::runtime::tools::ops::OpsConfig::default(),
             command_prefix: Default::default(),
+            voice: crate::config::VoiceFeatureConfig::default(),
         },
     );
     (service, base)

@@ -1,9 +1,14 @@
 /** 未注册项只能来自已保存白名单，避免通过普通工具列表构造任意名称。 */
 export function agentToolOptions(registeredTools, savedNames, editable) {
+    const providerTools = [{
+            name: "image_generation",
+            description: "图片生成：仅在当前场景开启时向支持的 Provider 暴露原生图片工具",
+        }];
+    const allTools = [...providerTools, ...registeredTools.filter((tool) => tool.name !== "image_generation")];
     const selected = new Set(savedNames);
-    const registeredNames = new Set(registeredTools.map((tool) => tool.name));
+    const registeredNames = new Set(allTools.map((tool) => tool.name));
     return [
-        ...registeredTools.map((tool) => ({
+        ...allTools.map((tool) => ({
             ...tool,
             registered: true,
             checked: selected.has(tool.name),

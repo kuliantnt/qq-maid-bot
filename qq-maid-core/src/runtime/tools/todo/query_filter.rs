@@ -2,6 +2,7 @@
 
 use qq_maid_common::time_context::{
     RequestTimeContext, parse_date_range_expression, parse_local_datetime_for_comparison,
+    parse_single_date_expression,
 };
 
 use super::{
@@ -53,6 +54,12 @@ pub(crate) fn parse_todo_list_query(
                 set_time_filter(&mut query, TodoQueryTimeFilter::NoDueDate)?;
                 time_condition = Some("无截止时间".to_owned());
             }
+            "周期" | "周期性" | "重复" | "recurring" => {
+                set_recurring_filter(&mut query, true)?;
+            }
+            "一次" | "一次性" | "非周期" | "非重复" | "one-off" | "once" => {
+                set_recurring_filter(&mut query, false)?;
+            }
             "关键词" | "keyword" => {
                 let keyword = tokens[index + 1..].join(" ");
                 if keyword.trim().is_empty() {
@@ -74,6 +81,17 @@ pub(crate) fn parse_todo_list_query(
                         },
                     )?;
                     time_condition = Some(range.raw);
+                } else if let Some(date) = parse_single_date_expression(token, ctx) {
+                    // 支持 /todo list 2099-07-15 这类绝对日期；相对表达优先走 date_range。
+                    set_time_filter(
+                        &mut query,
+                        TodoQueryTimeFilter::DateRange {
+                            start: date.date,
+                            end: date.date,
+                            field: TodoListDateField::Planned,
+                        },
+                    )?;
+                    time_condition = Some(date.raw);
                 } else {
                     keyword_parts.push(token.to_owned());
                 }
@@ -102,6 +120,13 @@ pub(crate) fn parse_todo_list_query(
     }
     if let Some(keyword) = query.keyword.as_deref() {
         conditions.push(format!("关键词“{keyword}”"));
+    }
+    if let Some(recurring) = query.recurring {
+        conditions.push(if recurring {
+            "周期性待办".to_owned()
+        } else {
+            "一次性待办".to_owned()
+        });
     }
     Ok(ParsedTodoQuery {
         query,
@@ -139,4 +164,17 @@ fn set_time_filter(query: &mut TodoQuery, filter: TodoQueryTimeFilter) -> Result
     }
     query.time = Some(filter);
     Ok(())
+}
+
+fn set_recurring_filter(query: &mut TodoQuery, recurring: bool) -> Result<(), TodoError> {
+    match query.recurring {
+        Some(current) if current != recurring => {
+            Err(TodoError::bad_request("一次查询只能指定一个周期类型条件。"))
+        }
+        Some(_) => Ok(()),
+        None => {
+            query.recurring = Some(recurring);
+            Ok(())
+        }
+    }
 }

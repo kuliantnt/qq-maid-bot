@@ -41,7 +41,7 @@ pub(super) async fn run_worker(mut ctx: WorkerContext) -> WorkerExitReason {
                         scope_key = %mask_scope_key(&ctx.scope_key),
                         generation = ctx.generation,
                         dropped_messages,
-                        "dispatcher worker cancelled with queued messages"
+                        "dispatcher worker 取消时仍有排队消息"
                     );
                 }
                 return WorkerExitReason::Cancelled;
@@ -85,7 +85,7 @@ pub(super) async fn run_worker(mut ctx: WorkerContext) -> WorkerExitReason {
                 scope_key = %mask_scope_key(&ctx.scope_key),
                 generation = ctx.generation,
                 queued_messages = ctx.rx.len(),
-                "dispatcher worker dequeued message but command channel is closed"
+                "dispatcher worker 取出消息时命令通道已关闭"
             );
             return WorkerExitReason::Cancelled;
         }
@@ -103,13 +103,13 @@ pub(super) async fn run_worker(mut ctx: WorkerContext) -> WorkerExitReason {
                 scope_key = %mask_scope_key(&ctx.scope_key),
                 generation = ctx.generation,
                 error = %error,
-                "dispatcher worker failed to handle message"
+                "dispatcher worker 处理消息失败"
             );
         } else {
             debug!(
                 scope_key = %mask_scope_key(&ctx.scope_key),
                 generation = ctx.generation,
-                "dispatcher worker handled message"
+                "dispatcher worker 已处理消息"
             );
         }
     }

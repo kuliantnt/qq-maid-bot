@@ -16,8 +16,10 @@ use tokio::time::Instant;
 use crate::error::LlmError;
 
 use super::{
-    WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME, WebSearchTool, WebSearchToolRequest,
-    optional_string_field, parse_context_size, parse_max_results,
+    WEB_SEARCH_EMPTY_RESULT_MODEL_MESSAGE, WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME,
+    WebSearchArgumentError, WebSearchTool, WebSearchToolError, WebSearchToolRequest,
+    optional_string_field, parse_context_size, parse_max_results, parse_time_range, parse_topic,
+    web_search_outcome_has_evidence,
 };
 
 pub(super) const WEB_SEARCH_RESEARCH_MAX_TARGETS: usize = 5;
@@ -39,11 +41,13 @@ pub(super) async fn execute_research(
     context: &ToolContext,
     arguments: &Value,
     targets: Vec<ResearchTarget>,
-) -> Result<ToolOutput, LlmError> {
+) -> Result<ToolOutput, WebSearchToolError> {
     let dimensions = parse_comparison_dimensions(arguments.get("comparison_dimensions"))?;
     let raw_question = optional_string_field(arguments, "raw_question");
     let max_results = parse_max_results(arguments.get("max_results"))?;
     let context_size = parse_context_size(arguments.get("context_size"))?;
+    let topic = parse_topic(arguments.get("topic"))?;
+    let time_range = parse_time_range(arguments.get("time_range"))?;
     let total = targets.len();
     let model = tool
         .model_override
@@ -56,6 +60,8 @@ pub(super) async fn execute_research(
         let raw_question = raw_question.clone();
         let model = model.clone();
         let context_size = context_size.clone();
+        let topic = topic.clone();
+        let time_range = time_range.clone();
         async move {
             let started = Instant::now();
             let request = WebSearchToolRequest {
@@ -67,6 +73,9 @@ pub(super) async fn execute_research(
                 )),
                 max_results,
                 context_size,
+                topic,
+                time_range,
+                backend_override: tool.backend_override,
                 model_override: tool.model_override.clone(),
             };
             let outcome = tool
@@ -92,19 +101,53 @@ pub(super) async fn execute_research(
         .iter()
         .filter(|result| result["status"] == "success")
         .count();
-    Ok(ToolOutput::json(json!({
+    let result_count = results
+        .iter()
+        .filter_map(|result| result.get("sources").and_then(Value::as_array))
+        .map(Vec::len)
+        .sum::<usize>();
+    let all_empty = succeeded == 0
+        && results
+            .iter()
+            .all(|result| research_error_code(result).as_deref() == Some("empty_result"));
+    let mut output = json!({
         "ok": succeeded > 0,
+        "backend": tool.backend_label(),
         "mode": "multi_entity_research",
         "comparison_dimensions": dimensions,
         "successful": succeeded,
         "failed": total - succeeded,
+        "result_count": result_count,
         "results": results,
-    })))
+    });
+
+    if all_empty {
+        // 每个子查询都正常完成但没有证据时，向 Tool Loop 明确传递“执行完成、领域
+        // 无结果”。这不是网络失败，不能触发整批重试或失败进度事件。
+        output["execution_succeeded"] = Value::Bool(true);
+        output["result_count"] = Value::from(0);
+        output["error"] = json!({
+            "code": "empty_result",
+            "stage": "web_search",
+            "message": WEB_SEARCH_EMPTY_RESULT_MODEL_MESSAGE,
+        });
+    } else if succeeded == 0
+        && let Some(error) = output["results"]
+            .as_array()
+            .and_then(|results| results.iter().find_map(real_research_error))
+    {
+        // 不能用同批中的空结果掩盖真实故障；按原始目标顺序选择第一个真实错误，
+        // 让上层按 timeout / provider / parse 等明确语义处理。
+        output["error"] = error;
+        output["result_count"] = Value::from(0);
+    }
+
+    Ok(ToolOutput::json(output))
 }
 
 pub(super) fn parse_research_targets(
     value: Option<&Value>,
-) -> Result<Option<Vec<ResearchTarget>>, LlmError> {
+) -> Result<Option<Vec<ResearchTarget>>, WebSearchArgumentError> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -112,19 +155,25 @@ pub(super) fn parse_research_targets(
         return Ok(None);
     }
     let items = value.as_array().ok_or_else(|| {
-        LlmError::new(
-            "bad_tool_arguments",
+        WebSearchArgumentError::new(
+            "research_targets",
+            "invalid_type",
             "research_targets must be an array or null",
-            "tool",
+            Some(value),
+            None,
+            None,
         )
     })?;
     if !(2..=WEB_SEARCH_RESEARCH_MAX_TARGETS).contains(&items.len()) {
-        return Err(LlmError::new(
-            "bad_tool_arguments",
+        return Err(WebSearchArgumentError::new(
+            "research_targets",
+            "out_of_range",
             format!(
                 "research_targets must contain between 2 and {WEB_SEARCH_RESEARCH_MAX_TARGETS} items"
             ),
-            "tool",
+            Some(value),
+            None,
+            None,
         ));
     }
     items
@@ -143,7 +192,9 @@ pub(super) fn parse_research_targets(
         .map(Some)
 }
 
-pub(super) fn parse_comparison_dimensions(value: Option<&Value>) -> Result<Vec<String>, LlmError> {
+pub(super) fn parse_comparison_dimensions(
+    value: Option<&Value>,
+) -> Result<Vec<String>, WebSearchArgumentError> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
@@ -151,17 +202,23 @@ pub(super) fn parse_comparison_dimensions(value: Option<&Value>) -> Result<Vec<S
         return Ok(Vec::new());
     }
     let items = value.as_array().ok_or_else(|| {
-        LlmError::new(
-            "bad_tool_arguments",
+        WebSearchArgumentError::new(
+            "comparison_dimensions",
+            "invalid_type",
             "comparison_dimensions must be an array or null",
-            "tool",
+            Some(value),
+            None,
+            None,
         )
     })?;
     if items.len() > 8 {
-        return Err(LlmError::new(
-            "bad_tool_arguments",
+        return Err(WebSearchArgumentError::new(
+            "comparison_dimensions",
+            "out_of_range",
             "comparison_dimensions must not contain more than 8 items",
-            "tool",
+            Some(value),
+            None,
+            None,
         ));
     }
     items
@@ -170,34 +227,80 @@ pub(super) fn parse_comparison_dimensions(value: Option<&Value>) -> Result<Vec<S
             let text = item.as_str().map(str::trim).filter(|text| !text.is_empty());
             match text {
                 Some(text) if text.chars().count() <= 80 => Ok(text.to_owned()),
-                _ => Err(LlmError::new(
-                    "bad_tool_arguments",
+                Some(_text) => Err(WebSearchArgumentError::new(
+                    "comparison_dimensions",
+                    "too_long",
                     "comparison dimension must be a non-empty string up to 80 characters",
-                    "tool",
+                    Some(item),
+                    None,
+                    None,
+                )),
+                None => Err(WebSearchArgumentError::new(
+                    "comparison_dimensions",
+                    if item.is_null() || item.as_str().is_some() {
+                        "missing_or_empty"
+                    } else {
+                        "invalid_type"
+                    },
+                    "comparison dimension must be a non-empty string up to 80 characters",
+                    Some(item),
+                    None,
+                    None,
                 )),
             }
         })
         .collect()
 }
 
-fn required_bounded_string(value: &Value, key: &str, max_chars: usize) -> Result<String, LlmError> {
-    let text = value
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .ok_or_else(|| {
-            LlmError::new(
-                "bad_tool_arguments",
-                format!("research target requires non-empty {key}"),
-                "tool",
-            )
-        })?;
+fn required_bounded_string(
+    value: &Value,
+    key: &str,
+    max_chars: usize,
+) -> Result<String, WebSearchArgumentError> {
+    let field = format!("research_targets.{key}");
+    let Some(raw_value) = value.get(key) else {
+        return Err(WebSearchArgumentError::new(
+            field,
+            "missing_or_empty",
+            format!("research target requires non-empty {key}"),
+            None,
+            None,
+            (key == "query").then_some(0),
+        ));
+    };
+    let Some(text) = raw_value.as_str() else {
+        return Err(WebSearchArgumentError::new(
+            field,
+            if raw_value.is_null() {
+                "missing_or_empty"
+            } else {
+                "invalid_type"
+            },
+            format!("research target requires non-empty {key}"),
+            Some(raw_value),
+            None,
+            None,
+        ));
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(WebSearchArgumentError::new(
+            field,
+            "missing_or_empty",
+            format!("research target requires non-empty {key}"),
+            Some(raw_value),
+            None,
+            (key == "query").then_some(0),
+        ));
+    }
     if text.chars().count() > max_chars {
-        return Err(LlmError::new(
-            "bad_tool_arguments",
+        return Err(WebSearchArgumentError::new(
+            field,
+            "too_long",
             format!("research target {key} is too long"),
-            "tool",
+            Some(raw_value),
+            None,
+            (key == "query").then_some(text.chars().count()),
         ));
     }
     Ok(text.to_owned())
@@ -207,7 +310,7 @@ fn optional_bounded_string(
     value: &Value,
     key: &str,
     max_chars: usize,
-) -> Result<Option<String>, LlmError> {
+) -> Result<Option<String>, WebSearchArgumentError> {
     let Some(value) = value.get(key) else {
         return Ok(None);
     };
@@ -215,20 +318,26 @@ fn optional_bounded_string(
         return Ok(None);
     }
     let text = value.as_str().map(str::trim).ok_or_else(|| {
-        LlmError::new(
-            "bad_tool_arguments",
+        WebSearchArgumentError::new(
+            format!("research_targets.{key}"),
+            "invalid_type",
             format!("research target {key} must be a string or null"),
-            "tool",
+            Some(value),
+            None,
+            None,
         )
     })?;
     if text.is_empty() {
         return Ok(None);
     }
     if text.chars().count() > max_chars {
-        return Err(LlmError::new(
-            "bad_tool_arguments",
+        return Err(WebSearchArgumentError::new(
+            format!("research_targets.{key}"),
+            "too_long",
             format!("research target {key} is too long"),
-            "tool",
+            Some(value),
+            None,
+            None,
         ));
     }
     Ok(Some(text.to_owned()))
@@ -259,7 +368,7 @@ fn research_result_json(
     outcome: Result<WebSearchOutcome, LlmError>,
 ) -> Value {
     match outcome {
-        Ok(outcome) => json!({
+        Ok(outcome) if web_search_outcome_has_evidence(&outcome) => json!({
             "entity": target.entity,
             "assumption": target.assumption,
             "status": "success",
@@ -269,6 +378,19 @@ fn research_result_json(
             "facts": truncate_chars(&outcome.answer, WEB_SEARCH_RESEARCH_FACT_MAX_CHARS),
             "sources": outcome.sources.iter().take(WEB_SEARCH_RESEARCH_SOURCE_LIMIT)
                 .filter_map(compact_research_source_json).collect::<Vec<_>>(),
+        }),
+        Ok(outcome) => json!({
+            "entity": target.entity,
+            "assumption": target.assumption,
+            "status": "failed",
+            "model": truncate_chars(model, 100),
+            "provider": outcome.provider,
+            "elapsed_ms": outcome.elapsed_ms.max(elapsed_ms),
+            "error": {
+                "code": "empty_result",
+                "stage": "web_search",
+                "message": "web search returned no usable evidence",
+            }
         }),
         Err(err) => json!({
             "entity": target.entity,
@@ -283,6 +405,19 @@ fn research_result_json(
             }
         }),
     }
+}
+
+fn research_error_code(result: &Value) -> Option<String> {
+    result
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn real_research_error(result: &Value) -> Option<Value> {
+    let error = result.get("error")?;
+    (research_error_code(result).as_deref() != Some("empty_result")).then(|| error.clone())
 }
 
 fn compact_research_source_json(source: &WebSearchSource) -> Option<Value> {
@@ -312,7 +447,7 @@ fn log_research_result(
             provider = outcome.provider,
             elapsed_ms,
             status = "success",
-            "web search research item completed"
+            "联网搜索研究项处理完成"
         ),
         Err(err) => tracing::warn!(
             tool = WEB_SEARCH_TOOL_NAME,
@@ -327,7 +462,7 @@ fn log_research_result(
             },
             failure_stage = err.stage,
             error_code = err.code,
-            "web search research item failed"
+            "联网搜索研究项处理失败"
         ),
     }
 }

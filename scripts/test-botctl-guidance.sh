@@ -35,6 +35,7 @@ printf '%s\n' \
     'WEB_CONSOLE_ENABLED=true' \
     'LLM_MODEL=openai:legacy-model' \
     ' export TOOL_CALLING_ENABLED = true' \
+    'QQ_MAID_ENABLE_IMAGE=false' \
     'QWEATHER_API_KEY=' > "${runtime}/config/.env"
 printf '%s\n' 'qq-maid-bootstrap-v1:1:initialize-secret' > "${runtime}/config/secrets/bootstrap.token"
 output="$(start_and_stop "${runtime}")"
@@ -43,10 +44,11 @@ output="$(start_and_stop "${runtime}")"
 [[ "${output}" != *"initialize-secret"* ]]
 [[ "${output}" != *"legacy-model"* ]]
 grep -Fqx 'QWEATHER_API_KEY=' "${runtime}/config/.env"
-! grep -Eq '^[[:space:]]*(export[[:space:]]+)?(LLM_MODEL|TOOL_CALLING_ENABLED)[[:space:]]*=' "${runtime}/config/.env"
+! grep -Eq '^[[:space:]]*(export[[:space:]]+)?(LLM_MODEL|TOOL_CALLING_ENABLED|QQ_MAID_ENABLE_IMAGE)[[:space:]]*=' "${runtime}/config/.env"
 backup_files=("${runtime}"/config/.env.bak.v0.20.*)
 [[ "${#backup_files[@]}" -eq 1 ]]
 grep -Fqx 'LLM_MODEL=openai:legacy-model' "${backup_files[0]}"
+grep -Fqx 'QQ_MAID_ENABLE_IMAGE=false' "${backup_files[0]}"
 
 runtime="$(new_runtime password-reset)"
 printf '%s\n' 'WEB_CONSOLE_ENABLED=true' > "${runtime}/config/.env"
@@ -71,6 +73,9 @@ output="$(start_and_stop "${runtime}")"
 [[ "${output}" != *"首次配置"* ]]
 [[ "${output}" != *"/console/"* ]]
 [[ "${output}" != *"disabled-secret"* ]]
+output="$(QQ_MAID_RUNTIME_DIR="${runtime}" bash "${runtime}/botctl.sh" console)"
+[[ "${output}" == *"web console is disabled"* ]]
+[[ "${output}" != *"HTTP"* ]]
 
 runtime="$(new_runtime wildcard-host)"
 printf '%s\n' 'LLM_SERVER_HOST=0.0.0.0' 'LLM_SERVER_PORT=9989' 'WEB_CONSOLE_ENABLED=true' > "${runtime}/config/.env"

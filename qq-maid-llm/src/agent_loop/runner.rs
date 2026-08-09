@@ -9,20 +9,16 @@
 //! 非流式语义：返回与改造前等价的完整结果；工具副作用只在此执行一次，不因
 //! 后续模型或发送重试而重复。
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-};
 use std::time::Instant;
 
 use futures::future::{Either, select};
-use tokio::time::{Duration, timeout};
+use tokio::time::Duration;
 use tracing::{debug, warn};
 
 use crate::{
     agent_loop::{
-        AgentRunDiagnostics, AgentRunHandle, AgentStopReason, AgentTextDeltaFuture,
-        AgentTextDeltaSink, ToolLoopProgressSink,
+        AgentRunDiagnostics, AgentRunHandle, AgentStopReason, AgentTextDeltaSink,
+        ToolLoopProgressSink, tool_result_chars,
     },
     error::LlmError,
     metrics::MetricsRecorder,
@@ -35,6 +31,7 @@ use crate::{
 };
 
 use super::session::AgentStepSession;
+use super::streaming::{StreamingAdvanceOptions, advance_with_optional_streaming};
 use super::types::AgentAttemptBaseline;
 use super::types::{AgentStep, AgentToolCall, AgentToolResult};
 
@@ -150,40 +147,85 @@ pub(super) async fn run_agent_loop_with_timeouts(
                 attempt_baseline,
             ));
         }
-        // 最后一轮或最终回答预算阶段都在协议层显式禁用工具；Provider 若忽略
-        // tool_choice=none，下面会直接受控终止，不能再开启模型轮次。
+        // 最后一轮或最终回答预算阶段都在协议层禁用工具；Provider 若仍返回
+        // tool call，下面会直接受控终止，不能再开启模型轮次。
         let preserve_finalization_budget = force_finalization_without_tools
             || (run_handle.has_completed_tool_result_since(attempt_baseline.tool_results)
                 && run_handle.should_preserve_finalization_budget());
         let allow_tool_calls = round < max_rounds && !preserve_finalization_budget;
+        // Issue #361 诊断：每轮开始采样会话输入尺寸与进程内存，观察 Tool Loop
+        // 多轮输入是否有界；只输出计数与尺寸，不输出正文。采样全部放进 DEBUG
+        // 门控，默认级别不触碰会话上下文与 /proc 读取。
+        let round_size = if tracing::enabled!(tracing::Level::DEBUG) {
+            let estimate = session.input_size_estimate();
+            let mem = qq_maid_common::process_mem::process_memory_sample();
+            Some((estimate, mem))
+        } else {
+            None
+        };
         debug!(
             provider = provider.as_str(),
             model = %model,
             round,
             allow_tool_calls,
             preserve_finalization_budget,
+            input_item_count = round_size.as_ref().map(|(estimate, _)| estimate.item_count),
+            input_estimated_chars = round_size
+                .as_ref()
+                .map(|(estimate, _)| estimate.estimated_chars),
+            input_tool_result_chars = round_size
+                .as_ref()
+                .map(|(estimate, _)| estimate.tool_result_chars),
+            rss_kb = round_size.as_ref().and_then(|(_, mem)| mem.rss_kb),
+            vm_size_kb = round_size.as_ref().and_then(|(_, mem)| mem.vm_size_kb),
+            pss_kb = round_size.as_ref().and_then(|(_, mem)| mem.pss_kb),
+            private_dirty_kb = round_size.as_ref().and_then(|(_, mem)| mem.private_dirty_kb),
             remaining_budget_ms = run_handle.remaining_budget().map(|value| value.as_millis()),
-            "starting agent model round"
+            "正在开始 Agent 模型轮次"
         );
         let advance_future = advance_with_optional_streaming(
             session.as_mut(),
             &results,
             allow_tool_calls,
-            final_delta_sink.clone(),
-            streaming_timeout,
-            non_stream_timeout,
-            round,
+            StreamingAdvanceOptions {
+                final_delta_sink: final_delta_sink.clone(),
+                streaming_timeout,
+                non_stream_timeout,
+                round,
+            },
+            &run_handle,
         );
         let model_round_started = Instant::now();
         let advance_future = Box::pin(advance_future);
         let cancellation = Box::pin(run_handle.cancelled());
-        let advance_result = match select(advance_future, cancellation).await {
-            Either::Left((result, _)) => result,
-            Either::Right((_, _)) => Err(LlmError::new(
-                "cancelled",
-                "agent run cancelled",
-                "agent_loop",
-            )),
+        let advance_result = if let Some(remaining_budget) = run_handle.remaining_budget() {
+            let advance_or_cancel = Box::pin(async {
+                match select(advance_future, cancellation).await {
+                    Either::Left((result, _)) => result,
+                    Either::Right((_, _)) => Err(LlmError::new(
+                        "cancelled",
+                        "agent run cancelled",
+                        "agent_loop",
+                    )),
+                }
+            });
+            let budget = Box::pin(tokio::time::sleep(remaining_budget));
+            match select(advance_or_cancel, budget).await {
+                Either::Left((result, _)) => result,
+                Either::Right((_, _)) => {
+                    run_handle.cancel(AgentStopReason::Timeout);
+                    Err(LlmError::timeout("agent_loop"))
+                }
+            }
+        } else {
+            match select(advance_future, cancellation).await {
+                Either::Left((result, _)) => result,
+                Either::Right((_, _)) => Err(LlmError::new(
+                    "cancelled",
+                    "agent run cancelled",
+                    "agent_loop",
+                )),
+            }
         };
         debug!(
             provider = provider.as_str(),
@@ -192,7 +234,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
             model_round_elapsed_ms = model_round_started.elapsed().as_millis(),
             model_round_succeeded = advance_result.is_ok(),
             remaining_budget_ms = run_handle.remaining_budget().map(|value| value.as_millis()),
-            "agent model round completed"
+            "Agent 模型轮次已结束"
         );
         let advance = match advance_result {
             Ok(advance) => advance,
@@ -217,18 +259,50 @@ pub(super) async fn run_agent_loop_with_timeouts(
         match advance.step {
             AgentStep::FinalAnswer {
                 reply,
+                output_parts,
                 usage: step_usage,
             } => {
+                let step_input_tokens = step_usage.as_ref().and_then(|item| item.input_tokens);
                 usage = merge_usage(usage, step_usage);
+                // Issue #361 诊断：最终输入尺寸与进程内存只在 DEBUG 开启时采样，
+                // 默认级别不触碰会话上下文与 /proc 读取；DEBUG 关闭时这些字段
+                // 记录为空，避免 INFO 日志出现无意义的估算值。
+                let final_size = if tracing::enabled!(tracing::Level::DEBUG) {
+                    let estimate = session.input_size_estimate();
+                    let mem = qq_maid_common::process_mem::process_memory_sample();
+                    Some((estimate, mem))
+                } else {
+                    None
+                };
+                tracing::info!(
+                    provider = provider.as_str(),
+                    model = %model,
+                    tool_loop_used = true,
+                    model_rounds = run_handle.snapshot().model_rounds,
+                    input_tokens = step_input_tokens,
+                    input_item_count = final_size.as_ref().map(|(estimate, _)| estimate.item_count),
+                    input_estimated_chars = final_size
+                        .as_ref()
+                        .map(|(estimate, _)| estimate.estimated_chars),
+                    input_tool_result_chars = final_size
+                        .as_ref()
+                        .map(|(estimate, _)| estimate.tool_result_chars),
+                    rss_kb = final_size.as_ref().and_then(|(_, mem)| mem.rss_kb),
+                    vm_size_kb = final_size.as_ref().and_then(|(_, mem)| mem.vm_size_kb),
+                    pss_kb = final_size.as_ref().and_then(|(_, mem)| mem.pss_kb),
+                    private_dirty_kb = final_size.as_ref().and_then(|(_, mem)| mem.private_dirty_kb),
+                    "agent_loop_request_end"
+                );
                 debug!(
                     provider = provider.as_str(),
                     model = %model,
                     tool_loop_used = true,
                     model_rounds = run_handle.snapshot().model_rounds,
-                    "agent loop completed with final reply"
+                    "Agent Loop 已生成最终回复"
                 );
                 return Ok(ChatOutcome {
                     reply,
+                    output_parts,
                     metrics: recorder.finish(&provider, &model, false),
                     usage,
                     fallback_used,
@@ -245,7 +319,16 @@ pub(super) async fn run_agent_loop_with_timeouts(
                 calls,
                 usage: step_usage,
             } => {
+                let step_input_tokens = step_usage.as_ref().and_then(|item| item.input_tokens);
                 usage = merge_usage(usage, step_usage);
+                tracing::debug!(
+                    provider = provider.as_str(),
+                    model = %model,
+                    round,
+                    tool_call_count = calls.len(),
+                    input_tokens = step_input_tokens,
+                    "agent_loop_after_model_round"
+                );
                 emitted_tools.extend(calls.iter().map(|call| call.name.clone()));
                 run_handle.update(|diagnostics| {
                     diagnostics
@@ -273,7 +356,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
                         round,
                         preserve_finalization_budget,
                         tool_call_count = calls.len(),
-                        "provider returned tool calls after tools were disabled"
+                        "禁用工具后 Provider 仍返回了工具调用"
                     );
                     return Err(agent_error(
                         LlmError::new(code, message, "tool_loop"),
@@ -292,7 +375,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
                         tool_loop_used = true,
                         model_rounds = run_handle.snapshot().model_rounds,
                         max_rounds = max_rounds,
-                        "agent loop exceeded maximum rounds"
+                        "Agent Loop 已超过最大轮数"
                     );
                     return Err(agent_error(
                         LlmError::new(
@@ -326,7 +409,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
                         skipped_for_finalization_reserve = true,
                         has_completed_result,
                         has_successful_result,
-                        "agent tool batch rejected because only finalization budget remains"
+                        "仅剩最终回答预算，已拒绝 Agent 工具批次"
                     );
                     return Err(agent_error(
                         finalization_budget_error(),
@@ -337,16 +420,44 @@ pub(super) async fn run_agent_loop_with_timeouts(
                     ));
                 }
                 force_finalization_without_tools |= batch_budget_reserved;
-                let batch =
-                    execute_tool_batch(&calls, round, &mut executor, &run_handle, attempt_baseline)
-                        .await
-                        .map_err(|err| {
-                            let reason = stop_reason_for_error(&err);
-                            agent_error(err, &run_handle, &executor, reason, attempt_baseline)
-                        })?;
+                let batch = execute_tool_batch(
+                    &calls,
+                    round,
+                    &provider,
+                    &model,
+                    &mut executor,
+                    &run_handle,
+                    attempt_baseline,
+                )
+                .await
+                .map_err(|err| {
+                    let reason = stop_reason_for_error(&err);
+                    agent_error(err, &run_handle, &executor, reason, attempt_baseline)
+                })?;
                 results = batch.results;
                 force_finalization_without_tools |= batch.skipped_for_finalization;
                 sync_diagnostics(&run_handle, &executor, &emitted_tools, attempt_baseline);
+                // after_tool_result：只记录本轮结果的独立体积（不 clone、不序列化）。
+                // 本批结果尚未由 Provider 追加到会话 input，会话真实输入尺寸在
+                // Provider `advance` 的 append 之后、payload 构造之前单独记录
+                // （agent_loop_input_after_append），避免把“未追加”误标为“追加后”。
+                // 整段诊断计算放在 DEBUG 门控内：默认级别不触碰大型 Tool Result。
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    let result_chars = tool_result_chars(&results);
+                    let result_mem = qq_maid_common::process_mem::process_memory_sample();
+                    tracing::debug!(
+                        provider = provider.as_str(),
+                        model = %model,
+                        round,
+                        tool_result_count = results.len(),
+                        tool_result_chars = result_chars,
+                        rss_kb = result_mem.rss_kb,
+                        vm_size_kb = result_mem.vm_size_kb,
+                        pss_kb = result_mem.pss_kb,
+                        private_dirty_kb = result_mem.private_dirty_kb,
+                        "after_tool_result"
+                    );
+                }
                 // 工具启动时预算可能充足，但执行完成后已经进入最终回答预留区。
                 // 此时必须基于刚同步的真实结果重新判断，不能沿用批次启动前的状态。
                 let preserve_after_batch = run_handle.should_preserve_finalization_budget();
@@ -358,7 +469,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
                     round,
                     has_completed_result_after_batch,
                     has_successful_result_after_batch,
-                    "classified completed and successful agent tool results"
+                    "已完成 Agent 工具结果的完成与成功状态分类"
                 );
                 if preserve_after_batch {
                     if has_completed_result_after_batch {
@@ -369,7 +480,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
                             remaining_budget_ms =
                                 run_handle.remaining_budget().map(|value| value.as_millis()),
                             has_completed_result = false,
-                            "agent tool batch exhausted tool budget without a completed result"
+                            "Agent 工具批次已耗尽工具预算，且没有已完成的结果"
                         );
                         return Err(agent_error(
                             finalization_budget_error(),
@@ -395,221 +506,6 @@ pub(super) async fn run_agent_loop_with_timeouts(
         AgentStopReason::MaxRounds,
         attempt_baseline,
     ))
-}
-
-pub(super) async fn advance_with_optional_streaming(
-    session: &mut (dyn AgentStepSession + Send),
-    results: &[AgentToolResult],
-    allow_tool_calls: bool,
-    final_delta_sink: Option<AgentTextDeltaSink>,
-    streaming_timeout: Duration,
-    non_stream_timeout: Duration,
-    round: usize,
-) -> Result<AgentAdvance, LlmError> {
-    let Some(sink) = final_delta_sink else {
-        return advance_non_stream_with_timeout(
-            session,
-            results,
-            allow_tool_calls,
-            non_stream_timeout,
-        )
-        .await
-        .map(|step| AgentAdvance {
-            step,
-            fallback_used: false,
-        });
-    };
-    let emitted_visible_delta = Arc::new(AtomicBool::new(false));
-    let tracked_sink = track_visible_delta_sink(sink, emitted_visible_delta.clone());
-    let activity_counter = session.streaming_activity_counter();
-    let streaming_started = Instant::now();
-    let streaming = advance_streaming_until_complete_or_first_activity_timeout(
-        session,
-        results,
-        allow_tool_calls,
-        tracked_sink,
-        activity_counter,
-        streaming_timeout,
-    )
-    .await;
-    let streaming_elapsed_ms = streaming_started.elapsed().as_millis();
-    match streaming {
-        StreamingAttempt::Completed(Ok(Some(step))) => Ok(AgentAdvance {
-            step,
-            fallback_used: false,
-        }),
-        StreamingAttempt::Completed(Ok(None)) => {
-            fallback_to_non_stream(
-                session,
-                results,
-                allow_tool_calls,
-                non_stream_timeout,
-                round,
-                streaming_elapsed_ms,
-                "advance_streaming_none",
-                None,
-                false,
-            )
-            .await
-        }
-        StreamingAttempt::Completed(Err(err)) if !emitted_visible_delta.load(Ordering::SeqCst) => {
-            let diagnostics = session.streaming_diagnostics();
-            let fallback_reason = diagnostics
-                .fallback_reason
-                .as_deref()
-                .unwrap_or_else(|| classify_streaming_error(&err));
-            fallback_to_non_stream(
-                session,
-                results,
-                allow_tool_calls,
-                non_stream_timeout,
-                round,
-                streaming_elapsed_ms,
-                fallback_reason,
-                Some(&err),
-                true,
-            )
-            .await
-        }
-        StreamingAttempt::FirstActivityTimedOut
-            if !emitted_visible_delta.load(Ordering::SeqCst) =>
-        {
-            fallback_to_non_stream(
-                session,
-                results,
-                allow_tool_calls,
-                non_stream_timeout,
-                round,
-                streaming_elapsed_ms,
-                "streaming_step_timeout",
-                None,
-                true,
-            )
-            .await
-        }
-        StreamingAttempt::Completed(Err(err)) => Err(err),
-        StreamingAttempt::FirstActivityTimedOut => {
-            Err(LlmError::timeout("agent_stream_after_delta"))
-        }
-    }
-}
-
-enum StreamingAttempt {
-    Completed(Result<Option<AgentStep>, LlmError>),
-    FirstActivityTimedOut,
-}
-
-async fn advance_streaming_until_complete_or_first_activity_timeout(
-    session: &mut (dyn AgentStepSession + Send),
-    results: &[AgentToolResult],
-    allow_tool_calls: bool,
-    tracked_sink: AgentTextDeltaSink,
-    activity_counter: Option<Arc<AtomicUsize>>,
-    first_activity_timeout: Duration,
-) -> StreamingAttempt {
-    let Some(activity_counter) = activity_counter else {
-        return match timeout(
-            first_activity_timeout,
-            session.advance_streaming(results, allow_tool_calls, tracked_sink),
-        )
-        .await
-        {
-            Ok(result) => StreamingAttempt::Completed(result),
-            Err(_) => StreamingAttempt::FirstActivityTimedOut,
-        };
-    };
-
-    let streaming = Box::pin(session.advance_streaming(results, allow_tool_calls, tracked_sink));
-    let deadline = Box::pin(tokio::time::sleep(first_activity_timeout));
-    match select(streaming, deadline).await {
-        Either::Left((result, _)) => StreamingAttempt::Completed(result),
-        Either::Right((_, streaming)) => {
-            if activity_counter.load(Ordering::SeqCst) > 0 {
-                StreamingAttempt::Completed(streaming.await)
-            } else {
-                StreamingAttempt::FirstActivityTimedOut
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(super) struct AgentAdvance {
-    pub(super) step: AgentStep,
-    pub(super) fallback_used: bool,
-}
-
-async fn advance_non_stream_with_timeout(
-    session: &mut (dyn AgentStepSession + Send),
-    results: &[AgentToolResult],
-    allow_tool_calls: bool,
-    step_timeout: Duration,
-) -> Result<AgentStep, LlmError> {
-    timeout(step_timeout, session.advance(results, allow_tool_calls))
-        .await
-        .map_err(|_| LlmError::timeout("agent_step"))?
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn fallback_to_non_stream(
-    session: &mut (dyn AgentStepSession + Send),
-    results: &[AgentToolResult],
-    allow_tool_calls: bool,
-    non_stream_timeout: Duration,
-    round: usize,
-    streaming_elapsed_ms: u128,
-    fallback_reason: &str,
-    err: Option<&LlmError>,
-    fallback_used: bool,
-) -> Result<AgentAdvance, LlmError> {
-    let diagnostics = session.streaming_diagnostics();
-    let fallback_started = Instant::now();
-    let result =
-        advance_non_stream_with_timeout(session, results, allow_tool_calls, non_stream_timeout)
-            .await;
-    let non_stream_fallback_elapsed_ms = fallback_started.elapsed().as_millis();
-    tracing::info!(
-        provider = session.provider(),
-        model = %session.model(),
-        round,
-        allow_tool_calls,
-        follows_tool_results = !results.is_empty(),
-        streaming_elapsed_ms,
-        fallback_reason,
-        error_code = err.map(|item| item.code.as_str()).unwrap_or("none"),
-        error_stage = err.map(|item| item.stage.as_str()).unwrap_or("none"),
-        chunk_count = diagnostics.chunk_count,
-        sse_event_count = diagnostics.sse_event_count,
-        saw_done = diagnostics.saw_done,
-        saw_completed = diagnostics.saw_completed,
-        buffered_delta_count = diagnostics.buffered_delta_count,
-        active_function_call_count = diagnostics.active_function_call_count,
-        non_stream_fallback_elapsed_ms,
-        non_stream_fallback_succeeded = result.is_ok(),
-        "streaming agent fallback completed"
-    );
-    result
-        .map(|step| AgentAdvance {
-            step,
-            fallback_used,
-        })
-        .map_err(|mut err| {
-            if fallback_used {
-                let mut diagnostics = err.agent.take().map(|item| *item).unwrap_or_default();
-                diagnostics.streaming_fallback_used = true;
-                err.with_agent(diagnostics)
-            } else {
-                err
-            }
-        })
-}
-
-fn classify_streaming_error(err: &LlmError) -> &'static str {
-    if err.code == "http_error" || err.stage == "http" || err.stage == "sse" {
-        "http_sse_parse_error"
-    } else {
-        "provider_error_other"
-    }
 }
 
 fn agent_stop_reason(emitted_tools: &[String], executor: &ToolLoopExecutor<'_>) -> AgentStopReason {
@@ -658,6 +554,19 @@ fn sync_diagnostics(
         diagnostics.executed_tools.extend(executor.executed_tools());
         diagnostics.tool_results.truncate(baseline.tool_results);
         diagnostics.tool_results.extend(executor.tool_results());
+        // ToolLoopExecutor 内 result_index / retry_of 是候选局部下标；累计
+        // diagnostics 需要换成全局下标，否则跨 Provider 候选时会误指向前一个
+        // 候选的结果。tool_attempts 长度也独立截断，不假设与 tool_results 相等。
+        diagnostics.tool_attempts.truncate(baseline.tool_attempts);
+        diagnostics
+            .tool_attempts
+            .extend(executor.tool_attempts().into_iter().map(|mut attempt| {
+                attempt.result_index += baseline.tool_results;
+                if let Some(retry_of) = attempt.retry_of.as_mut() {
+                    *retry_of += baseline.tool_results;
+                }
+                attempt
+            }));
     });
 }
 
@@ -696,20 +605,6 @@ fn agent_error(
     ))
 }
 
-fn track_visible_delta_sink(
-    sink: AgentTextDeltaSink,
-    emitted_visible_delta: Arc<AtomicBool>,
-) -> AgentTextDeltaSink {
-    Arc::new(move |delta| {
-        let sink = sink.clone();
-        let emitted_visible_delta = emitted_visible_delta.clone();
-        Box::pin(async move {
-            emitted_visible_delta.store(true, Ordering::SeqCst);
-            sink(delta).await
-        }) as AgentTextDeltaFuture
-    })
-}
-
 /// 执行同轮一批工具调用，返回回填给下一轮 `advance` 的结果。
 ///
 /// 同轮工具调用必须先完成全部参数预绑定，再允许任何工具修改状态；Todo 的
@@ -718,6 +613,8 @@ fn track_visible_delta_sink(
 async fn execute_tool_batch(
     calls: &[AgentToolCall],
     round: usize,
+    provider: &str,
+    model: &str,
     executor: &mut ToolLoopExecutor<'_>,
     run_handle: &AgentRunHandle,
     baseline: AgentAttemptBaseline,
@@ -735,11 +632,14 @@ async fn execute_tool_batch(
                 },
                 round,
                 index,
+                calls.len(),
                 run_handle.tool_execution_deadline(),
             )
         })
         .collect::<Vec<_>>();
+    executor.begin_batch();
     let mut results = Vec::with_capacity(calls.len());
+    let mut stop_remaining_batch = false;
     let mut skipped_for_finalization = false;
     for (call, prepared) in calls.iter().zip(prepared_calls) {
         let tool_started_at = Instant::now();
@@ -747,6 +647,9 @@ async fn execute_tool_batch(
             .execute_prepared_call(
                 prepared,
                 |tool_name, _effect| {
+                    if stop_remaining_batch {
+                        return Ok(ToolCallStartDecision::SkipForFinalAnswer);
+                    }
                     let has_completed_result =
                         run_handle.has_completed_tool_result_since(baseline.tool_results);
                     let reserve_reached = run_handle.should_preserve_finalization_budget();
@@ -757,7 +660,7 @@ async fn execute_tool_batch(
                             run_handle.remaining_budget().map(|value| value.as_millis()),
                         skipped_for_finalization_reserve = reserve_reached,
                         has_completed_result,
-                        "checked agent tool start budget"
+                        "已检查 Agent 工具启动预算"
                     );
                     if !reserve_reached {
                         return Ok(ToolCallStartDecision::Execute);
@@ -772,28 +675,91 @@ async fn execute_tool_batch(
                 |result| run_handle.record_tool_result(result),
             )
             .await;
+        let tool_duration_ms = tool_started_at.elapsed().as_millis();
         debug!(
             tool = call.name,
             round,
-            tool_elapsed_ms = tool_started_at.elapsed().as_millis(),
+            tool_elapsed_ms = tool_duration_ms,
             tool_succeeded = output.is_ok(),
             remaining_budget_ms = run_handle.remaining_budget().map(|value| value.as_millis()),
-            "agent tool call completed"
+            "Agent 工具调用已结束"
         );
         let snapshot = run_handle.snapshot();
         let emitted_tools = snapshot.emitted_tools[baseline.emitted_tools..].to_vec();
         sync_diagnostics(run_handle, executor, &emitted_tools, baseline);
         let output = output?;
+        log_structured_tool_failure(
+            call,
+            round,
+            provider,
+            model,
+            tool_duration_ms,
+            &output.output,
+        );
         skipped_for_finalization |= output.skipped_for_finalization;
+        stop_remaining_batch |= output.stop_remaining_batch;
         results.push(AgentToolResult {
             call_id: call.call_id.clone(),
             output: output.output,
         });
     }
+    executor.finish_batch();
     Ok(ToolBatchOutcome {
         results,
         skipped_for_finalization,
     })
+}
+
+fn log_structured_tool_failure(
+    call: &AgentToolCall,
+    round: usize,
+    agent_provider: &str,
+    agent_model: &str,
+    duration_ms: u128,
+    output: &str,
+) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
+        return;
+    };
+    if value.get("ok").and_then(serde_json::Value::as_bool) != Some(false) {
+        return;
+    }
+    let error = value.get("error").unwrap_or(&serde_json::Value::Null);
+    warn!(
+        tool_name = call.name.as_str(),
+        tool_call_id = call.call_id.as_str(),
+        attempt = value
+            .get("attempts")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(round as u64 + 1),
+        duration_ms = duration_ms.min(u128::from(u64::MAX)) as u64,
+        error_kind = error
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("internal_error"),
+        retriable = error
+            .get("retriable")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        backend = value
+            .get("backend")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown"),
+        upstream_status = ?error.get("upstream_status").and_then(serde_json::Value::as_u64),
+        provider = value
+            .get("provider")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(agent_provider),
+        model = value
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(agent_model),
+        failure_layer = error
+            .get("stage")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("tool_loop"),
+        "Agent 工具调用失败"
+    );
 }
 
 struct ToolBatchOutcome {

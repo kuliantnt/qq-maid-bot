@@ -1,14 +1,15 @@
 //! 请求 / 响应类型定义。
 //!
-//! 提供 `RespondRequest`、`RespondResponse`、`ChatResponse` 以及
-//! `RespondPurpose` 等核心数据类型，用于在 HTTP facade 层与 Rust 内部
-//! 各子模块之间传递请求与响应。
+//! 提供 `RespondRequest`、`RespondResponse` 和 `RespondPurpose` 等 Core 内部
+//! 业务编排类型。消息内容块统一复用 `qq-maid-common`，`service` 模块只负责
+//! 转换 Core 与 Gateway 之间的调用和事件 envelope。
 
 use std::collections::HashMap;
 
 use qq_maid_llm::provider::types::{ChatMessage, ReasoningEffort, TokenUsage};
 
 use crate::{error::ErrorInfo, service::VisibleEntitySnapshot, util::metrics::LlmMetrics};
+use qq_maid_common::output_part::OutputPart;
 use qq_maid_common::{
     identity_context::{ConversationKind, IdentitySource, MessageContext},
     input_part::{MessageInputPart, QuotedMessageContext},
@@ -35,14 +36,14 @@ pub enum RespondPurpose {
 
 /// 聊天 / 功能请求。
 ///
-/// 承载来自 HTTP facade 或内部子 flow 的所有参数，
-/// 包括用户输入、会话上下文、系统提示词等。
+/// 承载 Core 业务入口或内部子 flow 的所有参数，包括用户输入、会话上下文、
+/// 系统提示词等；该结构暂时保留在 Core 内部编排链路中。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RespondRequest {
     /// 会话 ID，用于关联历史对话
     #[serde(default)]
     pub session_id: String,
-    /// 内部调用可按业务用途指定模型；外部 HTTP facade 不反序列化这个字段。
+    /// Core 内部调用可按业务用途指定模型。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// 请求级输出预算覆盖。
@@ -115,6 +116,9 @@ pub struct RespondRequest {
     /// 平台账号/机器人账号标识；只参与业务隔离键，不作为发送目标。
     #[serde(default)]
     pub account_id: Option<String>,
+    /// 当前群消息是否由 Gateway 判定为明确指向机器人；私聊不依赖此字段。
+    #[serde(default)]
+    pub addressed_to_bot: bool,
     /// 事件类型（如 "message"）
     #[serde(default)]
     pub event_type: String,
@@ -130,7 +134,10 @@ pub struct RespondRequest {
     /// 会话状态上下文
     #[serde(default)]
     pub session_context: String,
-    /// 最近 N 条历史消息
+    /// 已持久化的会话摘要锚点；与每轮变化的 session_context 分离以保持缓存前缀。
+    #[serde(default)]
+    pub history_summary: String,
+    /// 当前 Compact 批次内按时间追加的历史消息
     #[serde(default)]
     pub history_messages: Vec<ChatMessage>,
     /// 当前会话的完整序列化状态（用于压缩、待办修订等场景）
@@ -191,10 +198,6 @@ impl RespondRequest {
         }
     }
 
-    pub fn has_non_text_input_parts(&self) -> bool {
-        self.input_parts.iter().any(MessageInputPart::is_non_text)
-    }
-
     /// 判断是否为"标准"消息（具有 scope_key 或 content）。
     pub fn is_standard_message(&self) -> bool {
         !self.scope_key.trim().is_empty() || !self.content.trim().is_empty()
@@ -229,11 +232,13 @@ impl Default for RespondRequest {
             timestamp: None,
             platform: String::new(),
             account_id: None,
+            addressed_to_bot: false,
             event_type: String::new(),
             system_prompts: Vec::new(),
             memory_context: String::new(),
             knowledge_context: String::new(),
             session_context: String::new(),
+            history_summary: String::new(),
             history_messages: Vec::new(),
             session: serde_json::Value::Null,
             metadata: HashMap::new(),
@@ -241,29 +246,10 @@ impl Default for RespondRequest {
     }
 }
 
-/// LLM 聊天的原始响应。
-///
-/// 与 `RespondResponse` 的区别：`ChatResponse` 包含 LLM 返回的原始 `reply`
-/// 和 Token 用量等信息，供调用方进一步加工后再组装成 `RespondResponse`。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ChatResponse {
-    /// 是否成功
-    pub ok: bool,
-    /// LLM 原始回复内容
-    pub reply: Option<String>,
-    /// 调用指标（模型名、延迟等）
-    pub metrics: LlmMetrics,
-    /// Token 用量统计
-    pub usage: Option<TokenUsage>,
-    /// 错误信息（ok 为 false 时存在）
-    pub error: Option<ErrorInfo>,
-}
-
 /// 统一的响应结构。
 ///
-/// 所有路由分派最终都返回 `RespondResponse`。
-/// `text` 是对 `ChatResponse.reply` 进一步加工后的展示文本
-/// （如去除 Markdown 格式、翻译等），供 HTTP facade 直接发送给用户。
+/// Core 内部所有路由分派最终都返回 `RespondResponse`，再由 service 层转换为
+/// Gateway 消费的 `CoreResponse`。`text` 是对 Provider 回复进一步加工后的展示文本。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RespondResponse {
     /// 是否成功
@@ -274,6 +260,9 @@ pub struct RespondResponse {
     /// 结构化 Markdown 正文；仅在需要保留排版时返回。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub markdown: Option<String>,
+    /// Provider 返回的顺序化富媒体输出，只在 Core 内部传递。
+    #[serde(default, skip)]
+    pub output_parts: Vec<OutputPart>,
     /// 是否已被某个子 flow 处理
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handled: Option<bool>,
@@ -293,50 +282,7 @@ pub struct RespondResponse {
     /// 错误信息
     pub error: Option<ErrorInfo>,
     /// 当前回复绑定的工具可见实体快照。该字段只供 Gateway 写入引用索引，
-    /// 序列化时跳过，避免内部实体 ID 暴露到 HTTP/诊断面。
+    /// 序列化时跳过，避免内部实体 ID 暴露到稳定响应或诊断面。
     #[serde(default, skip)]
     pub visible_entity_snapshot: Option<VisibleEntitySnapshot>,
-}
-
-impl ChatResponse {
-    /// 构造成功响应。
-    pub fn ok(reply: impl Into<String>, metrics: LlmMetrics, usage: Option<TokenUsage>) -> Self {
-        Self {
-            ok: true,
-            reply: Some(reply.into()),
-            metrics,
-            usage,
-            error: None,
-        }
-    }
-
-    /// 构造错误响应。
-    pub fn error(metrics: LlmMetrics, error: ErrorInfo) -> Self {
-        Self {
-            ok: false,
-            reply: None,
-            metrics,
-            usage: None,
-            error: Some(error),
-        }
-    }
-}
-
-impl RespondResponse {
-    /// 从 `ChatResponse` 构造统一的响应。
-    pub fn from_chat(chat: ChatResponse, text: Option<String>, markdown: Option<String>) -> Self {
-        Self {
-            ok: chat.ok,
-            text,
-            markdown,
-            handled: Some(chat.ok),
-            session_id: None,
-            command: None,
-            diagnostics: None,
-            metrics: chat.metrics,
-            usage: chat.usage,
-            error: chat.error,
-            visible_entity_snapshot: None,
-        }
-    }
 }

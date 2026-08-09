@@ -3,6 +3,7 @@
 use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use qq_maid_common::command_prefix::CommandPrefix;
+use qq_maid_core::config::VoiceFeatureConfig;
 use thiserror::Error;
 
 mod managed;
@@ -25,8 +26,8 @@ pub const DEFAULT_C2C_VISIBLE_PROGRESS_STATUS_ENABLED: bool = true;
 pub const DEFAULT_AGENT_TYPING_ENABLED: bool = true;
 pub const DEFAULT_AGENT_TYPING_DELAY_MS: u64 = 1000;
 /// 是否在入站时调用 #229 群成员详情接口补全 actor/mention/引用 sender 的展示字段。
-/// 默认开启；拉取失败降级为 source=Event，不阻断主回复。可经环境变量关闭。
-pub const DEFAULT_MEMBER_DETAIL_ENRICH_ENABLED: bool = true;
+/// QQ 当前不再向应用提供该接口，因此默认关闭；仅在确认账号具备权限时显式开启。
+pub const DEFAULT_MEMBER_DETAIL_ENRICH_ENABLED: bool = false;
 /// 普通回复分段软限制默认值（非平台硬上限，仅保守软限制）。
 /// 默认对齐官方非流式长消息分段的 5000 字符基线，尽量减少段数；
 /// 真实 QQ 单条限制仍需真机验证后再校准。
@@ -64,6 +65,8 @@ pub enum GroupMessageMode {
 pub struct AppConfig {
     /// Gateway 本地命令与 Core 共用的聊天命令前缀。
     pub command_prefix: CommandPrefix,
+    /// 最终回复 TTS 配置；Provider 实现仍留在 Gateway。
+    pub voice: VoiceFeatureConfig,
     /// QQ 官方 Bot 是否启用。凭证成对存在时默认启用，保持旧配置行为。
     pub qq_official_enabled: bool,
     /// QQ 官方 Bot 凭证必须成对存在；`None` 表示渠道未绑定，不使用空串占位。
@@ -74,7 +77,6 @@ pub struct AppConfig {
     pub api_base: String,
     pub token_refresh_margin: Duration,
     pub enable_markdown: bool,
-    pub enable_image: bool,
     pub enable_group_messages: bool,
     pub verbose_log: bool,
     /// 是否在入站时调用 #229 群成员详情接口补全展示字段（#319）。
@@ -282,6 +284,7 @@ impl AppConfig {
                 value: command_prefix_raw,
             }
         })?;
+        let voice = VoiceFeatureConfig::from_environment(env);
         let qq_official_enabled = parse_bool(env, "QQ_BOT_ENABLED")?.unwrap_or(true);
         let app_id = optional_with_alias(env, "QQ_BOT_APP_ID", Some("QQ_APPID"));
         let app_secret = optional_with_alias(env, "QQ_BOT_APP_SECRET", Some("QQ_SECRET"));
@@ -312,7 +315,6 @@ impl AppConfig {
         let margin_seconds = parse_u64(env, "QQ_BOT_TOKEN_REFRESH_MARGIN_SECONDS")?
             .unwrap_or(DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS);
         let enable_markdown = parse_bool(env, "QQ_MAID_ENABLE_MARKDOWN")?.unwrap_or(true);
-        let enable_image = parse_bool(env, "QQ_MAID_ENABLE_IMAGE")?.unwrap_or(false);
         let enable_group_messages =
             parse_bool(env, "QQ_MAID_ENABLE_GROUP_MESSAGES")?.unwrap_or(false);
         let verbose_log = parse_bool(env, "QQ_MAID_GATEWAY_VERBOSE_LOG")?.unwrap_or(false);
@@ -399,6 +401,7 @@ impl AppConfig {
         let onebot11 = parse_onebot11_config(env)?;
         Ok(Self {
             command_prefix,
+            voice,
             qq_official_enabled,
             app_id,
             app_secret,
@@ -407,7 +410,6 @@ impl AppConfig {
             api_base,
             token_refresh_margin: Duration::from_secs(margin_seconds),
             enable_markdown,
-            enable_image,
             enable_group_messages,
             verbose_log,
             member_detail_enrich_enabled,

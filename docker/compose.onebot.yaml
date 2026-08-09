@@ -1,0 +1,5 @@
+services:
+  bot:
+    ports:
+      # 仅在 OneBot 客户端跨容器或主机连接时加载。
+      - "${QQ_MAID_ONEBOT_HOST:-127.0.0.1}:${QQ_MAID_ONEBOT_PORT:-8789}:8789"

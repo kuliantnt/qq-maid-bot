@@ -4,6 +4,7 @@
 //! 业务表结构由各业务模块提供 migration 定义，避免通用层反向依赖 RSS/Todo 等语义。
 
 use std::{
+    collections::HashSet,
     fmt, fs,
     marker::PhantomData,
     ops::{Deref, DerefMut},
@@ -38,6 +39,21 @@ const TEST_SQLITE_POOL_SIZE: usize = 2;
 pub struct SqliteMigration {
     pub name: &'static str,
     pub sql: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqliteMigrationPlan {
+    pub database_exists: bool,
+    pub applied: Vec<String>,
+    pub pending: Vec<String>,
+    pub unknown: Vec<String>,
+    pub last_applied_at: Option<String>,
+}
+
+/// 早期迁移测试和历史版本可能留下不再参与当前执行序列的 legacy 标记；这些标记只说明
+/// 数据来自旧 schema，不代表数据库由未来版本升级。新 migration 不得复用该前缀。
+pub fn is_compatible_historical_migration(name: &str) -> bool {
+    name.starts_with("legacy_")
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +114,7 @@ impl SqliteDatabase {
 
         let db_path = db_path.into();
         ensure_parent_dir(&db_path)?;
+        preflight_migration_space(&db_path)?;
         let mut migration_connection = open_configured_connection(&db_path)?;
         run_migrations(&mut migration_connection, migrations)?;
         drop(migration_connection);
@@ -150,6 +167,14 @@ impl SqliteDatabase {
 
     pub fn pool_size(&self) -> usize {
         self.inner.pool_size
+    }
+
+    /// 只读检查 schema 版本，不创建数据库、执行 migration 或改变 WAL 状态。
+    pub fn inspect_migrations(
+        db_path: impl AsRef<Path>,
+        migrations: &[SqliteMigration],
+    ) -> Result<SqliteMigrationPlan, DatabaseError> {
+        inspect_migrations(db_path.as_ref(), migrations)
     }
 
     #[cfg(test)]
@@ -286,6 +311,13 @@ impl DatabaseError {
         }
     }
 
+    fn incompatible(message: impl Into<String>) -> Self {
+        Self {
+            code: "schema_incompatible",
+            message: message.into(),
+        }
+    }
+
     pub(crate) fn from_sql(err: rusqlite::Error) -> Self {
         Self::io(format!("sqlite failed: {err}"))
     }
@@ -356,6 +388,30 @@ fn run_migrations(
         );",
     )
     .map_err(DatabaseError::from_sql)?;
+    let known = migrations
+        .iter()
+        .map(|migration| migration.name)
+        .collect::<HashSet<_>>();
+    let mut statement = conn
+        .prepare("SELECT name FROM app_sqlite_migrations")
+        .map_err(DatabaseError::from_sql)?;
+    let applied = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(DatabaseError::from_sql)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(DatabaseError::from_sql)?;
+    drop(statement);
+    let unknown = applied
+        .iter()
+        .filter(|name| !known.contains(name.as_str()) && !is_compatible_historical_migration(name))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown.is_empty() {
+        return Err(DatabaseError::incompatible(format!(
+            "database was migrated by a newer application; unknown migrations: {}. Use a compatible image or restore a matching backup",
+            unknown.join(", ")
+        )));
+    }
     for migration in migrations {
         let tx = conn.transaction().map_err(DatabaseError::from_sql)?;
         let already_applied = tx
@@ -376,6 +432,109 @@ fn run_migrations(
         }
         tx.commit().map_err(DatabaseError::from_sql)?;
     }
+    Ok(())
+}
+
+fn inspect_migrations(
+    path: &Path,
+    migrations: &[SqliteMigration],
+) -> Result<SqliteMigrationPlan, DatabaseError> {
+    if !path.exists() {
+        return Ok(SqliteMigrationPlan {
+            database_exists: false,
+            applied: Vec::new(),
+            pending: migrations.iter().map(|item| item.name.to_owned()).collect(),
+            unknown: Vec::new(),
+            last_applied_at: None,
+        });
+    }
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| DatabaseError::io(format!("failed to inspect sqlite db: {error}")))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(DatabaseError::io(
+            "sqlite db path must be a regular file and not a symbolic link",
+        ));
+    }
+    let connection = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(DatabaseError::from_sql)?;
+    let table_exists = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_sqlite_migrations')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(DatabaseError::from_sql)?;
+    let (applied, last_applied_at) = if table_exists {
+        let mut statement = connection
+            .prepare("SELECT name, applied_at FROM app_sqlite_migrations ORDER BY rowid")
+            .map_err(DatabaseError::from_sql)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(DatabaseError::from_sql)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DatabaseError::from_sql)?;
+        let last = rows.last().map(|(_, applied_at)| applied_at.clone());
+        (rows.into_iter().map(|(name, _)| name).collect(), last)
+    } else {
+        (Vec::new(), None)
+    };
+    let applied_set = applied.iter().map(String::as_str).collect::<HashSet<_>>();
+    let known_set = migrations
+        .iter()
+        .map(|migration| migration.name)
+        .collect::<HashSet<_>>();
+    let pending = migrations
+        .iter()
+        .filter(|migration| !applied_set.contains(migration.name))
+        .map(|migration| migration.name.to_owned())
+        .collect();
+    let unknown = applied
+        .iter()
+        .filter(|name| {
+            !known_set.contains(name.as_str()) && !is_compatible_historical_migration(name)
+        })
+        .cloned()
+        .collect();
+    Ok(SqliteMigrationPlan {
+        database_exists: true,
+        applied,
+        pending,
+        unknown,
+        last_applied_at,
+    })
+}
+
+#[cfg(unix)]
+fn preflight_migration_space(path: &Path) -> Result<(), DatabaseError> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = CString::new(parent.as_os_str().as_bytes())
+        .map_err(|_| DatabaseError::io("sqlite parent path contains NUL"))?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `parent` is a NUL-terminated path and `stats` points to writable memory.
+    if unsafe { libc::statvfs(parent.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return Err(DatabaseError::io(format!(
+            "failed to inspect sqlite filesystem capacity: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: statvfs succeeded and initialized the output structure.
+    let stats = unsafe { stats.assume_init() };
+    let available = (stats.f_bavail as u128) * (stats.f_frsize as u128);
+    let database_size = fs::metadata(path).map(|value| value.len()).unwrap_or(0) as u128;
+    let required = database_size.max(16 * 1024 * 1024);
+    if available < required {
+        return Err(DatabaseError::io(format!(
+            "insufficient free space before sqlite migration: need at least {required} bytes"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn preflight_migration_space(_path: &Path) -> Result<(), DatabaseError> {
     Ok(())
 }
 
@@ -556,6 +715,52 @@ mod tests {
 
         assert_eq!(err.code(), "migration_error");
         assert!(err.message().contains("broken_schema"));
+    }
+
+    #[test]
+    fn migration_status_is_read_only_and_reports_pending_and_last_success() {
+        let path =
+            std::env::temp_dir().join(format!("qq-maid-sqlite-plan-{}.db", uuid::Uuid::new_v4()));
+        let missing = SqliteDatabase::inspect_migrations(&path, TEST_MIGRATIONS).unwrap();
+        assert!(!missing.database_exists);
+        assert_eq!(missing.pending, vec!["test_schema"]);
+        assert!(
+            !path.exists(),
+            "read-only inspection must not create a database"
+        );
+
+        let database = SqliteDatabase::open(&path, TEST_MIGRATIONS).unwrap();
+        drop(database);
+        let current = SqliteDatabase::inspect_migrations(&path, TEST_MIGRATIONS).unwrap();
+        assert!(current.database_exists);
+        assert_eq!(current.applied, vec!["test_schema"]);
+        assert!(current.pending.is_empty());
+        assert!(current.unknown.is_empty());
+        assert!(current.last_applied_at.is_some());
+    }
+
+    #[test]
+    fn refuses_to_open_database_with_unknown_newer_migration() {
+        let path = std::env::temp_dir().join(format!(
+            "qq-maid-sqlite-newer-schema-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let database = SqliteDatabase::open(&path, TEST_MIGRATIONS).unwrap();
+        database
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO app_sqlite_migrations (name) VALUES ('future_schema_v99')",
+                [],
+            )
+            .unwrap();
+        drop(database);
+
+        let plan = SqliteDatabase::inspect_migrations(&path, TEST_MIGRATIONS).unwrap();
+        assert_eq!(plan.unknown, vec!["future_schema_v99"]);
+        let error = SqliteDatabase::open(&path, TEST_MIGRATIONS).unwrap_err();
+        assert_eq!(error.code(), "schema_incompatible");
+        assert!(error.message().contains("compatible image"));
     }
 
     #[test]

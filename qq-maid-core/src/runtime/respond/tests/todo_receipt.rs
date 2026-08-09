@@ -15,10 +15,7 @@ async fn todo_complete_receipt_is_lightweight_and_refreshes_pending_snapshot() {
     let owner = private_todo_owner();
     create_numbered_private_todos(&service, "待办", 1..=7);
 
-    service
-        .respond(private_message("看一下待办"))
-        .await
-        .unwrap();
+    service.respond(private_message("/todo")).await.unwrap();
     let response = service
         .respond(private_message("完成第一条"))
         .await
@@ -44,10 +41,7 @@ async fn todo_complete_receipt_refreshes_pending_snapshot_at_ten_item_limit() {
     let owner = private_todo_owner();
     create_numbered_private_todos(&service, "待办", 1..=12);
 
-    service
-        .respond(private_message("看一下待办"))
-        .await
-        .unwrap();
+    service.respond(private_message("/todo")).await.unwrap();
     let response = service
         .respond(private_message("完成第一条"))
         .await

@@ -1,0 +1,946 @@
+use super::{AggregationDispatcher, MessageAggregator, MessageAggregatorHandle};
+use crate::{
+    config::AppConfig,
+    gateway::{
+        dedupe::MessageDedupe,
+        dispatcher::DispatcherEnqueueError,
+        event::{C2cMessage, GroupMessage},
+        test_support::qq_official_test_config,
+    },
+    respond::{RespondClient, scope_key_from_c2c_message},
+};
+use async_trait::async_trait;
+use qq_maid_common::{
+    command_prefix::CommandPrefix, identity_context::IdentitySource, input_part::MessageInputPart,
+    output_part::AssistantOutput,
+};
+use qq_maid_core::service::{
+    CoreActor, CoreConversation, CoreError, CoreHealthSnapshot, CoreInboundClassification,
+    CoreInboundKind, CoreRequest, CoreRespondOutput, CoreResponse, CoreService, Platform,
+    UpstreamStatusSnapshot,
+};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+use tokio::{
+    sync::oneshot,
+    time::{advance, pause, timeout},
+};
+use tokio_util::sync::CancellationToken;
+
+#[derive(Default)]
+struct MockCore {
+    pending: Mutex<HashSet<String>>,
+    fail_classify: AtomicBool,
+}
+
+#[async_trait]
+impl CoreService for MockCore {
+    async fn respond(&self, _request: CoreRequest) -> Result<CoreRespondOutput, CoreError> {
+        Ok(CoreRespondOutput::Complete(Box::new(CoreResponse {
+            output: Some(AssistantOutput::text("ok")),
+            handled: Some(true),
+            session_id: None,
+            command: None,
+            diagnostics: None,
+            visible_entity_snapshot: None,
+            delivery_hint: None,
+        })))
+    }
+
+    async fn classify_inbound(
+        &self,
+        request: CoreRequest,
+    ) -> Result<CoreInboundClassification, CoreError> {
+        if self.fail_classify.load(Ordering::Relaxed) {
+            return Err(CoreError::new("internal", "classify", "failed"));
+        }
+        let scope = request.scope_key();
+        if self.pending.lock().unwrap().contains(&scope) {
+            return Ok(CoreInboundClassification {
+                kind: CoreInboundKind::Immediate,
+            });
+        }
+        let text = request.text.trim();
+        let is_command = text.starts_with('/') || text.starts_with('／');
+        Ok(CoreInboundClassification {
+            kind: if is_command {
+                CoreInboundKind::Immediate
+            } else {
+                CoreInboundKind::NormalChat
+            },
+        })
+    }
+
+    async fn upstream_check(&self) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    fn health_snapshot(&self) -> CoreHealthSnapshot {
+        CoreHealthSnapshot {
+            ok: true,
+            provider: "mock".to_owned(),
+            model: "mock".to_owned(),
+            stream: false,
+            upstream: UpstreamStatusSnapshot::default(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct MockDispatcher {
+    core: Arc<MockCore>,
+    c2c: Mutex<Vec<C2cMessage>>,
+    failure_notifications: Mutex<Vec<(String, String)>>,
+    attempt_counts: Mutex<HashMap<String, usize>>,
+    pending_acks: Mutex<VecDeque<(C2cMessage, oneshot::Sender<()>)>>,
+    closed: AtomicBool,
+    fail_next_enqueues: AtomicUsize,
+    fail_next_contents: Mutex<VecDeque<String>>,
+    notified_failures: Mutex<VecDeque<&'static str>>,
+}
+
+#[async_trait]
+impl AggregationDispatcher for MockDispatcher {
+    async fn enqueue_c2c(&self, message: C2cMessage) -> Result<(), DispatcherEnqueueError> {
+        self.record_attempt(&message);
+        if let Some(error) = self.next_enqueue_error(&message, true) {
+            return Err(error);
+        }
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(DispatcherEnqueueError::Unavailable {
+                reason: "dispatcher_closed",
+            });
+        }
+        self.c2c.lock().unwrap().push(message);
+        Ok(())
+    }
+
+    async fn enqueue_c2c_silent(&self, message: C2cMessage) -> Result<(), DispatcherEnqueueError> {
+        self.record_attempt(&message);
+        if let Some(error) = self.next_enqueue_error(&message, false) {
+            return Err(error);
+        }
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(DispatcherEnqueueError::Unavailable {
+                reason: "dispatcher_closed",
+            });
+        }
+        self.c2c.lock().unwrap().push(message);
+        Ok(())
+    }
+
+    async fn enqueue_c2c_with_processed_ack(
+        &self,
+        message: C2cMessage,
+        processed_ack: oneshot::Sender<()>,
+    ) -> Result<(), DispatcherEnqueueError> {
+        self.record_attempt(&message);
+        if let Some(error) = self.next_enqueue_error(&message, true) {
+            return Err(error);
+        }
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(DispatcherEnqueueError::Unavailable {
+                reason: "dispatcher_closed",
+            });
+        }
+        self.c2c.lock().unwrap().push(message.clone());
+        self.pending_acks
+            .lock()
+            .unwrap()
+            .push_back((message, processed_ack));
+        Ok(())
+    }
+
+    async fn enqueue_group(&self, _message: GroupMessage) -> Result<(), DispatcherEnqueueError> {
+        Ok(())
+    }
+
+    async fn notify_c2c_failure(&self, message: &C2cMessage, text: &str) -> anyhow::Result<()> {
+        self.failure_notifications
+            .lock()
+            .unwrap()
+            .push((message.message_id.clone(), text.to_owned()));
+        Ok(())
+    }
+}
+
+impl MockDispatcher {
+    fn record_attempt(&self, message: &C2cMessage) {
+        let mut counts = self.attempt_counts.lock().unwrap();
+        *counts.entry(message.content.clone()).or_default() += 1;
+    }
+
+    fn next_enqueue_error(
+        &self,
+        message: &C2cMessage,
+        notify_on_reject: bool,
+    ) -> Option<DispatcherEnqueueError> {
+        if let Some(reason) = self.notified_failures.lock().unwrap().pop_front() {
+            if notify_on_reject {
+                self.failure_notifications.lock().unwrap().push((
+                    message.message_id.clone(),
+                    "当前消息较多，请稍后再试。".to_owned(),
+                ));
+                return Some(DispatcherEnqueueError::RejectedAndHandled { reason });
+            }
+            return Some(DispatcherEnqueueError::Unavailable {
+                reason: "dispatcher_reject_suppressed",
+            });
+        }
+        if self
+            .fail_next_enqueues
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Some(DispatcherEnqueueError::Unavailable {
+                reason: "dispatcher_injected_failure",
+            });
+        }
+        let mut contents = self.fail_next_contents.lock().unwrap();
+        if let Some(index) = contents
+            .iter()
+            .position(|content| content == message.content.as_str())
+        {
+            contents.remove(index);
+            return Some(DispatcherEnqueueError::Unavailable {
+                reason: "dispatcher_injected_failure",
+            });
+        }
+        None
+    }
+
+    fn fail_next(&self, count: usize) {
+        self.fail_next_enqueues.store(count, Ordering::Relaxed);
+    }
+
+    fn fail_next_after_notifying(&self, reason: &'static str) {
+        self.notified_failures.lock().unwrap().push_back(reason);
+    }
+
+    fn messages(&self) -> Vec<C2cMessage> {
+        self.c2c.lock().unwrap().clone()
+    }
+
+    fn process_next(&self) {
+        let Some((message, ack)) = self.pending_acks.lock().unwrap().pop_front() else {
+            return;
+        };
+        self.apply_processed_side_effect(&message);
+        let _ = ack.send(());
+    }
+
+    fn process_by_message_id(&self, message_id: &str) {
+        let mut pending = self.pending_acks.lock().unwrap();
+        let index = pending
+            .iter()
+            .position(|(message, _)| message.message_id == message_id)
+            .expect("pending ack should exist");
+        let (message, ack) = pending.remove(index).unwrap();
+        drop(pending);
+        self.apply_processed_side_effect(&message);
+        let _ = ack.send(());
+    }
+
+    fn close_next_ack(&self) {
+        let _ = self.pending_acks.lock().unwrap().pop_front();
+    }
+
+    fn process_all(&self) {
+        while !self.pending_acks.lock().unwrap().is_empty() {
+            self.process_next();
+        }
+    }
+
+    fn apply_processed_side_effect(&self, message: &C2cMessage) {
+        let scope = scope_key_from_c2c_message(message);
+        let text = message.content.trim();
+        if text.starts_with("/todo add") || text.starts_with("/memory") {
+            self.core.pending.lock().unwrap().insert(scope);
+        } else if matches!(text, "确认" | "取消") {
+            self.core.pending.lock().unwrap().remove(&scope);
+        }
+    }
+
+    fn pending_barriers(&self) -> usize {
+        self.pending_acks.lock().unwrap().len()
+    }
+
+    fn failure_notifications(&self) -> Vec<(String, String)> {
+        self.failure_notifications.lock().unwrap().clone()
+    }
+}
+
+struct Harness {
+    aggregator: MessageAggregator,
+    dispatcher: Arc<MockDispatcher>,
+    core: Arc<MockCore>,
+    dedupe: Arc<MessageDedupe>,
+}
+
+fn test_config() -> AppConfig {
+    let mut config = qq_official_test_config();
+    config.app_id = Some("appid".to_owned());
+    config.enable_markdown = false;
+    config.enable_group_messages = true;
+    config.conversation_queue_capacity = 8;
+    config.max_active_conversation_workers = 4;
+    config.conversation_worker_idle_timeout = Duration::from_secs(60);
+    config.message_aggregation.quiet = Duration::from_millis(100);
+    config.message_aggregation.max_wait = Duration::from_millis(300);
+    config.message_aggregation.max_messages = 3;
+    config.message_aggregation.max_chars = 12;
+    config.message_aggregation.max_active_keys = 4;
+    config.markdown_chunk_soft_limit = 1800;
+    config.text_chunk_soft_limit = 1800;
+    config
+}
+
+fn harness_with_config(config: AppConfig) -> Harness {
+    harness_with_config_and_dedupe_ttl(config, Duration::from_secs(60))
+}
+
+fn harness_with_config_and_dedupe_ttl(config: AppConfig, dedupe_ttl: Duration) -> Harness {
+    let bot_instance = config.app_id.clone().expect("test QQ credentials");
+    let core = Arc::new(MockCore::default());
+    let dispatcher = Arc::new(MockDispatcher {
+        core: core.clone(),
+        ..MockDispatcher::default()
+    });
+    let dedupe = Arc::new(MessageDedupe::new(dedupe_ttl));
+    let aggregator = MessageAggregator::new_with_dispatcher(
+        config,
+        bot_instance,
+        RespondClient::new(core.clone()),
+        dispatcher.clone(),
+        dedupe.clone(),
+        CancellationToken::new(),
+    );
+    Harness {
+        aggregator,
+        dispatcher,
+        core,
+        dedupe,
+    }
+}
+
+fn harness() -> Harness {
+    harness_with_config(test_config())
+}
+
+fn c2c(id: &str, user: &str, content: &str) -> C2cMessage {
+    C2cMessage {
+        message_id: id.to_owned(),
+        current_msg_idx: None,
+        event_id: Some(format!("event-{id}")),
+        source_message_ids: vec![id.to_owned()],
+        source_event_ids: vec![format!("event-{id}")],
+        user_openid: user.to_owned(),
+        content: content.to_owned(),
+        reply: None,
+        timestamp: Some(format!("2026-06-10T12:00:0{id}+08:00")),
+        first_message_timestamp: Some(format!("2026-06-10T12:00:0{id}+08:00")),
+        last_message_timestamp: Some(format!("2026-06-10T12:00:0{id}+08:00")),
+        input_parts: if content.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![MessageInputPart::text(content)]
+        },
+        attachments: Vec::new(),
+    }
+}
+
+fn c2c_image(id: &str, user: &str, url: &str) -> C2cMessage {
+    let attachment = crate::gateway::event::Attachment {
+        content_type: Some("image/jpeg".to_owned()),
+        filename: Some(format!("{id}.jpg")),
+        url: Some(url.to_owned()),
+        size_bytes: None,
+        media_id: None,
+        file_id: None,
+        attachment_id: None,
+        asr_refer_text: None,
+        voice_wav_url: None,
+    };
+    let mut message = c2c(id, user, "");
+    message.input_parts = vec![attachment.to_input_part("qq_official")];
+    message.attachments = vec![attachment];
+    message
+}
+
+async fn yield_actor() {
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn wait_for_messages(dispatcher: &MockDispatcher, count: usize) {
+    for _ in 0..50 {
+        if dispatcher.messages().len() >= count {
+            return;
+        }
+        advance(Duration::ZERO).await;
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn wait_for_barrier_state(
+    handle: &MessageAggregatorHandle,
+    barrier_count: usize,
+    task_count: usize,
+) {
+    for _ in 0..50 {
+        let state = handle.debug_barrier_state().await;
+        if state.barrier_count == barrier_count && state.task_count == task_count {
+            return;
+        }
+        advance(Duration::ZERO).await;
+        tokio::task::yield_now().await;
+    }
+    let state = handle.debug_barrier_state().await;
+    assert_eq!(state.barrier_count, barrier_count);
+    assert_eq!(state.task_count, task_count);
+}
+
+async fn enqueue(handle: &MessageAggregatorHandle, message: C2cMessage) {
+    handle.enqueue_c2c(message).await.unwrap();
+    yield_actor().await;
+}
+
+#[tokio::test]
+async fn immediate_enqueue_failure_rolls_back_message_id_for_retry() {
+    let h = harness();
+    let handle = h.aggregator.handle();
+    h.dispatcher.fail_next(1);
+    assert!(handle.enqueue_c2c(c2c("1", "u1", "/todo")).await.is_err());
+    enqueue(&handle, c2c("1", "u1", "/todo retry")).await;
+
+    assert_eq!(h.dispatcher.messages().len(), 1);
+    assert_eq!(h.dispatcher.messages()[0].message_id, "1");
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn immediate_enqueue_failure_rolls_back_event_id_for_retry() {
+    let h = harness();
+    let handle = h.aggregator.handle();
+    let first = c2c("1", "u1", "/todo");
+    let mut retry = c2c("2", "u1", "/todo retry");
+    retry.event_id = first.event_id.clone();
+    retry.source_event_ids = first.source_event_ids.clone();
+
+    h.dispatcher.fail_next(1);
+    assert!(handle.enqueue_c2c(first).await.is_err());
+    enqueue(&handle, retry).await;
+
+    assert_eq!(h.dispatcher.messages().len(), 1);
+    assert_eq!(h.dispatcher.messages()[0].message_id, "2");
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn successful_immediate_dispatch_commits_message_and_event_ids() {
+    let h = harness();
+    let handle = h.aggregator.handle();
+    let first = c2c("1", "u1", "/todo");
+    let mut retry = c2c("2", "u1", "/todo retry");
+    retry.event_id = first.event_id.clone();
+    retry.source_event_ids = first.source_event_ids.clone();
+
+    enqueue(&handle, first).await;
+    enqueue(&handle, retry).await;
+
+    assert_eq!(h.dispatcher.messages().len(), 1);
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn quiet_timeout_flush_failure_rolls_back_and_notifies_user() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "hello")).await;
+    h.dispatcher.fail_next(1);
+    advance(Duration::from_millis(101)).await;
+    yield_actor().await;
+
+    assert!(h.dispatcher.messages().is_empty());
+    assert!(!h.dedupe.contains_recent("1"));
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![(
+            "1".to_owned(),
+            "当前服务暂时不可用，请稍后再试。".to_owned()
+        )]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn max_messages_flush_failure_rolls_back_and_notifies_once() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "a")).await;
+    enqueue(&handle, c2c("2", "u1", "b")).await;
+    h.dispatcher.fail_next(1);
+
+    assert!(handle.enqueue_c2c(c2c("3", "u1", "c")).await.is_err());
+    yield_actor().await;
+
+    assert!(h.dispatcher.messages().is_empty());
+    assert!(!h.dedupe.contains_recent("1"));
+    assert!(!h.dedupe.contains_recent("2"));
+    assert!(!h.dedupe.contains_recent("3"));
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![(
+            "3".to_owned(),
+            "当前服务暂时不可用，请稍后再试。".to_owned()
+        )]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn max_chars_flush_failure_rolls_back_and_notifies_once() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "123456")).await;
+    h.dispatcher.fail_next(1);
+
+    assert!(handle.enqueue_c2c(c2c("2", "u1", "123456")).await.is_err());
+    yield_actor().await;
+
+    assert!(h.dispatcher.messages().is_empty());
+    assert!(!h.dedupe.contains_recent("1"));
+    assert!(!h.dedupe.contains_recent("2"));
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![(
+            "2".to_owned(),
+            "当前服务暂时不可用，请稍后再试。".to_owned()
+        )]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_old_batch_flush_rejects_current_message_and_notifies_once_per_message() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "1234567")).await;
+    h.dispatcher.fail_next(1);
+    assert!(handle.enqueue_c2c(c2c("2", "u1", "/todo")).await.is_err());
+
+    assert!(h.dispatcher.messages().is_empty());
+    assert!(!h.dedupe.contains_recent("1"));
+    assert!(!h.dedupe.contains_recent("2"));
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![(
+            "2".to_owned(),
+            "当前服务暂时不可用，请稍后再试。".to_owned()
+        )]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn dispatcher_failure_for_immediate_message_rolls_back_and_notifies_user() {
+    let h = harness();
+    let handle = h.aggregator.handle();
+    h.dispatcher.fail_next(1);
+    assert!(handle.enqueue_c2c(c2c("1", "u1", "/todo")).await.is_err());
+
+    assert!(!h.dedupe.contains_recent("1"));
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![(
+            "1".to_owned(),
+            "当前服务暂时不可用，请稍后再试。".to_owned()
+        )]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn immediate_dispatch_unavailable_notifies_service_unavailable_once() {
+    let h = harness();
+    let handle = h.aggregator.handle();
+    h.dispatcher.fail_next(1);
+
+    assert!(
+        handle
+            .enqueue_c2c(c2c("1", "u1", "/memory 记住这个"))
+            .await
+            .is_err()
+    );
+
+    assert!(!h.dedupe.contains_recent("1"));
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![(
+            "1".to_owned(),
+            "当前服务暂时不可用，请稍后再试。".to_owned()
+        )]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn conversation_queue_full_does_not_double_notify() {
+    let h = harness();
+    let handle = h.aggregator.handle();
+    h.dispatcher
+        .fail_next_after_notifying("conversation_queue_full");
+
+    assert!(handle.enqueue_c2c(c2c("1", "u1", "/todo")).await.is_err());
+
+    assert!(!h.dedupe.contains_recent("1"));
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![("1".to_owned(), "当前消息较多，请稍后再试。".to_owned())]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn worker_slot_exhausted_does_not_double_notify() {
+    let h = harness();
+    let handle = h.aggregator.handle();
+    h.dispatcher
+        .fail_next_after_notifying("worker_slot_exhausted");
+
+    assert!(handle.enqueue_c2c(c2c("1", "u1", "/todo")).await.is_err());
+
+    assert!(!h.dedupe.contains_recent("1"));
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![("1".to_owned(), "当前消息较多，请稍后再试。".to_owned())]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn shutdown_flush_failure_rolls_back_reservations_without_user_notification() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "hello")).await;
+    h.dispatcher
+        .fail_next_after_notifying("conversation_queue_full");
+    h.aggregator.shutdown().await;
+
+    assert!(h.dispatcher.messages().is_empty());
+    assert!(!h.dedupe.contains_recent("1"));
+    assert!(h.dispatcher.failure_notifications().is_empty());
+}
+
+#[tokio::test]
+async fn single_message_quiet_timeout_flushes() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "hello")).await;
+    advance(Duration::from_millis(101)).await;
+    wait_for_messages(&h.dispatcher, 1).await;
+
+    assert_eq!(h.dispatcher.messages()[0].content, "hello");
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn multiple_messages_merge_in_order() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "a")).await;
+    enqueue(&handle, c2c("2", "u1", "b")).await;
+    advance(Duration::from_millis(101)).await;
+    wait_for_messages(&h.dispatcher, 1).await;
+
+    let messages = h.dispatcher.messages();
+    assert_eq!(messages[0].content, "a\nb");
+    assert_eq!(messages[0].message_id, "2");
+    assert_eq!(messages[0].source_message_ids, vec!["1", "2"]);
+    assert_eq!(messages[0].source_event_ids, vec!["event-1", "event-2"]);
+    assert_eq!(
+        messages[0].first_message_timestamp.as_deref(),
+        Some("2026-06-10T12:00:01+08:00")
+    );
+    assert_eq!(
+        messages[0].last_message_timestamp.as_deref(),
+        Some("2026-06-10T12:00:02+08:00")
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn image_then_text_aggregation_preserves_ordered_input_parts() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c_image("1", "u1", "https://example.test/a.jpg")).await;
+    enqueue(&handle, c2c("2", "u1", "帮我看下这个")).await;
+    advance(Duration::from_millis(101)).await;
+    wait_for_messages(&h.dispatcher, 1).await;
+
+    let messages = h.dispatcher.messages();
+    assert_eq!(messages[0].attachments.len(), 1);
+    assert_eq!(messages[0].input_parts.len(), 2);
+    assert!(matches!(
+        messages[0].input_parts[0],
+        MessageInputPart::Image { .. }
+    ));
+    assert_eq!(
+        messages[0].input_parts[1].text_content(),
+        Some("帮我看下这个")
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancel_clears_pending_image_aggregation_without_dispatching_to_core() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c_image("1", "u1", "https://example.test/a.jpg")).await;
+    enqueue(&handle, c2c("2", "u1", "/取消")).await;
+    advance(Duration::from_millis(101)).await;
+    yield_actor().await;
+
+    assert!(h.dispatcher.messages().is_empty());
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![("2".to_owned(), "已取消本次图片/文件处理。".to_owned())]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn full_width_slash_cancel_remains_compatible_with_default_prefix() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c_image("1", "u1", "https://example.test/a.jpg")).await;
+    enqueue(&handle, c2c("2", "u1", "／取消")).await;
+    advance(Duration::from_millis(101)).await;
+    yield_actor().await;
+
+    assert!(h.dispatcher.messages().is_empty());
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![("2".to_owned(), "已取消本次图片/文件处理。".to_owned())]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn configured_prefix_cancels_pending_image_aggregation() {
+    pause();
+    let mut config = test_config();
+    config.command_prefix = CommandPrefix::parse("#").unwrap();
+    let h = harness_with_config(config);
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c_image("1", "u1", "https://example.test/a.jpg")).await;
+    enqueue(&handle, c2c("2", "u1", "#取消")).await;
+    advance(Duration::from_millis(101)).await;
+    yield_actor().await;
+
+    assert!(h.dispatcher.messages().is_empty());
+    assert_eq!(
+        h.dispatcher.failure_notifications(),
+        vec![("2".to_owned(), "已取消本次图片/文件处理。".to_owned())]
+    );
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn quiet_deadline_resets() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "a")).await;
+    advance(Duration::from_millis(80)).await;
+    enqueue(&handle, c2c("2", "u1", "b")).await;
+    advance(Duration::from_millis(90)).await;
+    yield_actor().await;
+    assert!(h.dispatcher.messages().is_empty());
+    advance(Duration::from_millis(11)).await;
+    wait_for_messages(&h.dispatcher, 1).await;
+    assert_eq!(h.dispatcher.messages().len(), 1);
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn hard_deadline_does_not_reset() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "a")).await;
+    advance(Duration::from_millis(90)).await;
+    enqueue(&handle, c2c("2", "u1", "b")).await;
+    advance(Duration::from_millis(90)).await;
+    enqueue(&handle, c2c("3", "u1", "c")).await;
+    advance(Duration::from_millis(120)).await;
+    wait_for_messages(&h.dispatcher, 1).await;
+    assert_eq!(h.dispatcher.messages().len(), 1);
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn max_wait_forces_flush() {
+    pause();
+    let mut config = test_config();
+    config.message_aggregation.quiet = Duration::from_secs(60);
+    config.message_aggregation.max_wait = Duration::from_millis(300);
+    let h = harness_with_config(config);
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "a")).await;
+    advance(Duration::from_millis(301)).await;
+    wait_for_messages(&h.dispatcher, 1).await;
+    assert_eq!(h.dispatcher.messages().len(), 1);
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn max_messages_equal_and_exceeded_flushes() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "a")).await;
+    enqueue(&handle, c2c("2", "u1", "b")).await;
+    enqueue(&handle, c2c("3", "u1", "c")).await;
+    yield_actor().await;
+    assert_eq!(h.dispatcher.messages()[0].content, "a\nb\nc");
+    enqueue(&handle, c2c("4", "u1", "d")).await;
+    advance(Duration::from_millis(101)).await;
+    wait_for_messages(&h.dispatcher, 2).await;
+    assert_eq!(h.dispatcher.messages().len(), 2);
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn max_chars_equal_and_exceeded_flushes() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "123456")).await;
+    enqueue(&handle, c2c("2", "u1", "123456")).await;
+    yield_actor().await;
+    assert_eq!(h.dispatcher.messages()[0].content, "123456\n123456");
+    enqueue(&handle, c2c("3", "u1", "x")).await;
+    advance(Duration::from_millis(101)).await;
+    wait_for_messages(&h.dispatcher, 2).await;
+    assert_eq!(h.dispatcher.messages().len(), 2);
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn oversized_single_message_dispatches_immediately() {
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "1234567890123")).await;
+    assert_eq!(h.dispatcher.messages()[0].content, "1234567890123");
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn two_users_aggregate_independently() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "a")).await;
+    enqueue(&handle, c2c("2", "u2", "b")).await;
+    advance(Duration::from_millis(101)).await;
+    wait_for_messages(&h.dispatcher, 2).await;
+    assert_eq!(h.dispatcher.messages().len(), 2);
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn command_flushes_batch_and_preserves_order() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "a")).await;
+    enqueue(&handle, c2c("2", "u1", "/todo")).await;
+    let messages = h.dispatcher.messages();
+    assert_eq!(messages[0].content, "a");
+    assert_eq!(messages[1].content, "/todo");
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn consecutive_barriers_keep_pending_input_immediate() {
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "/todo add 无时间买牛奶")).await;
+    enqueue(&handle, c2c("2", "u1", "/resume")).await;
+    enqueue(&handle, c2c("3", "u1", "取消")).await;
+    let messages = h.dispatcher.messages();
+    assert_eq!(
+        messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["/todo add 无时间买牛奶", "/resume", "取消"]
+    );
+    assert_eq!(h.dispatcher.pending_barriers(), 3);
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn plain_cancel_without_pending_can_aggregate() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "取消")).await;
+    advance(Duration::from_millis(101)).await;
+    wait_for_messages(&h.dispatcher, 1).await;
+    assert_eq!(h.dispatcher.messages()[0].content, "取消");
+    assert_eq!(h.dispatcher.pending_barriers(), 0);
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn message_id_retry_is_deduped() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    enqueue(&handle, c2c("1", "u1", "a")).await;
+    enqueue(&handle, c2c("1", "u1", "a retry")).await;
+    advance(Duration::from_millis(101)).await;
+    wait_for_messages(&h.dispatcher, 1).await;
+    assert_eq!(h.dispatcher.messages()[0].content, "a");
+    h.aggregator.shutdown().await;
+}
+
+#[tokio::test]
+async fn event_id_retry_is_deduped_even_with_different_message_id() {
+    pause();
+    let h = harness();
+    let handle = h.aggregator.handle();
+    let first = c2c("1", "u1", "a");
+    let mut retry = c2c("2", "u1", "a retry");
+    retry.event_id = first.event_id.clone();
+    retry.source_event_ids = first.source_event_ids.clone();
+    enqueue(&handle, first).await;
+    enqueue(&handle, retry).await;
+    advance(Duration::from_millis(101)).await;
+    wait_for_messages(&h.dispatcher, 1).await;
+    assert_eq!(h.dispatcher.messages()[0].content, "a");
+    h.aggregator.shutdown().await;
+}
+
+mod retry;

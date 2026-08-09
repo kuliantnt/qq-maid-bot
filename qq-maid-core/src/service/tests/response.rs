@@ -6,6 +6,7 @@ fn core_response_keeps_public_fields_from_respond_response() {
         ok: true,
         text: Some("text".to_owned()),
         markdown: Some("**text**".to_owned()),
+        output_parts: Vec::new(),
         handled: Some(true),
         session_id: Some("session-1".to_owned()),
         command: Some("chat".to_owned()),
@@ -42,6 +43,101 @@ fn core_response_keeps_public_fields_from_respond_response() {
 }
 
 #[test]
+fn provider_text_parts_do_not_downgrade_markdown_channel() {
+    // OpenAI Responses 可能把最终聊天正文同时放进 Text part 与 markdown 通道。
+    // 合成后必须保留 Markdown part，避免群聊等非流式路径被 parts 优先逻辑降级成纯文本。
+    let response = CoreResponse::from(RespondResponse {
+        ok: true,
+        text: Some("Markdown 测试\n加粗 斜体 代码".to_owned()),
+        markdown: Some("# Markdown 测试\n\n- **加粗**\n- *斜体*\n- `代码`".to_owned()),
+        output_parts: vec![OutputPart::Text {
+            text: "# Markdown 测试\n\n- **加粗**\n- *斜体*\n- `代码`".to_owned(),
+        }],
+        handled: Some(true),
+        session_id: None,
+        command: None,
+        diagnostics: None,
+        visible_entity_snapshot: None,
+        metrics: LlmMetrics {
+            provider: "test".to_owned(),
+            model: "test".to_owned(),
+            stream: false,
+            ttfe_ms: None,
+            ttft_ms: None,
+            total_latency_ms: 1,
+        },
+        usage: None,
+        error: None,
+    });
+
+    let output = response.output.as_ref().expect("assistant output");
+    assert_eq!(
+        response.markdown_content(),
+        Some("# Markdown 测试\n\n- **加粗**\n- *斜体*\n- `代码`")
+    );
+    assert_eq!(
+        output.parts,
+        vec![OutputPart::Markdown {
+            markdown: "# Markdown 测试\n\n- **加粗**\n- *斜体*\n- `代码`".to_owned()
+        }]
+    );
+}
+
+#[test]
+fn media_parts_keep_markdown_channel_ahead_of_images() {
+    let response = CoreResponse::from(RespondResponse {
+        ok: true,
+        text: Some("先看图".to_owned()),
+        markdown: Some("# 标题".to_owned()),
+        output_parts: vec![
+            OutputPart::Text {
+                text: "# 标题".to_owned(),
+            },
+            OutputPart::Image {
+                media: OutputMedia {
+                    media_id: Some("image-1".to_owned()),
+                    fallback_text: Some("图片：封面".to_owned()),
+                    ..OutputMedia::default()
+                },
+            },
+        ],
+        handled: Some(true),
+        session_id: None,
+        command: None,
+        diagnostics: None,
+        visible_entity_snapshot: None,
+        metrics: LlmMetrics {
+            provider: "test".to_owned(),
+            model: "test".to_owned(),
+            stream: false,
+            ttfe_ms: None,
+            ttft_ms: None,
+            total_latency_ms: 1,
+        },
+        usage: None,
+        error: None,
+    });
+
+    let output = response.output.as_ref().expect("assistant output");
+    assert_eq!(output.markdown.as_deref(), Some("# 标题"));
+    assert_eq!(
+        output.parts,
+        vec![
+            OutputPart::Markdown {
+                markdown: "# 标题".to_owned()
+            },
+            OutputPart::Image {
+                media: OutputMedia {
+                    media_id: Some("image-1".to_owned()),
+                    fallback_text: Some("图片：封面".to_owned()),
+                    ..OutputMedia::default()
+                },
+            },
+        ]
+    );
+}
+
+#[test]
 fn assistant_output_text_builds_plain_fallback_part() {
     let output = AssistantOutput::text("hello");
 
@@ -64,6 +160,7 @@ fn core_response_with_output_sets_structured_output() {
         command: None,
         diagnostics: None,
         visible_entity_snapshot: None,
+        delivery_hint: None,
     }
     .with_output(AssistantOutput::markdown("fallback", "# title"));
 
@@ -90,6 +187,7 @@ fn text_content_and_markdown_content_read_structured_output() {
         command: None,
         diagnostics: None,
         visible_entity_snapshot: None,
+        delivery_hint: None,
     };
 
     assert_eq!(response.text_content(), Some("structured fallback"));
@@ -106,6 +204,7 @@ fn markdown_content_is_none_when_output_only_has_text() {
         command: None,
         diagnostics: None,
         visible_entity_snapshot: None,
+        delivery_hint: None,
     };
 
     assert_eq!(response.text_content(), Some("plain"));
@@ -121,6 +220,7 @@ fn output_absence_without_suppressed_marker_does_not_suppress_reply() {
         command: None,
         diagnostics: None,
         visible_entity_snapshot: None,
+        delivery_hint: None,
     };
 
     assert_eq!(response.text_content(), None);
@@ -140,7 +240,52 @@ fn explicit_suppressed_marker_suppresses_reply() {
             "reason": "test_suppressed_response",
         })),
         visible_entity_snapshot: None,
+        delivery_hint: None,
     };
 
     assert!(response.suppresses_reply());
+}
+
+#[test]
+fn voice_delivery_hint_is_kept_only_for_textual_final_output() {
+    let textual = CoreResponse {
+        output: Some(AssistantOutput::markdown("fallback", "# 标题")),
+        handled: Some(true),
+        session_id: None,
+        command: None,
+        diagnostics: None,
+        visible_entity_snapshot: None,
+        delivery_hint: None,
+    }
+    .with_delivery_hint_if_eligible(Some(CoreDeliveryHint::Voice));
+    assert_eq!(textual.delivery_hint, Some(CoreDeliveryHint::Voice));
+
+    for output in [
+        AssistantOutput {
+            text_fallback: "图片回复".to_owned(),
+            markdown: None,
+            parts: vec![OutputPart::Image {
+                media: OutputMedia::default(),
+            }],
+        },
+        AssistantOutput {
+            text_fallback: "文件回复".to_owned(),
+            markdown: None,
+            parts: vec![OutputPart::File {
+                media: OutputMedia::default(),
+            }],
+        },
+    ] {
+        let response = CoreResponse {
+            output: Some(output),
+            handled: Some(true),
+            session_id: None,
+            command: None,
+            diagnostics: None,
+            visible_entity_snapshot: None,
+            delivery_hint: None,
+        }
+        .with_delivery_hint_if_eligible(Some(CoreDeliveryHint::Voice));
+        assert_eq!(response.delivery_hint, None);
+    }
 }

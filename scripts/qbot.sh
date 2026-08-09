@@ -11,8 +11,6 @@ RELEASES_URL="https://github.com/${REPO_SLUG}/releases"
 API_LATEST_URL="https://api.github.com/repos/${REPO_SLUG}/releases/latest"
 GITHUB_ACCEL_PROXY="${QBOT_GITHUB_PROXY:-${GH_PROXY:-}}"
 GITHUB_ACCEL_PROXIES="${QBOT_GITHUB_PROXIES:-}"
-GITHUB_PROBE_CONNECT_TIMEOUT="${QBOT_GITHUB_PROBE_CONNECT_TIMEOUT:-5}"
-GITHUB_PROBE_MAX_TIME="${QBOT_GITHUB_PROBE_MAX_TIME:-12}"
 GITHUB_DOWNLOAD_CONNECT_TIMEOUT="${QBOT_GITHUB_DOWNLOAD_CONNECT_TIMEOUT:-10}"
 GITHUB_DOWNLOAD_MAX_TIME="${QBOT_GITHUB_DOWNLOAD_MAX_TIME:-300}"
 CURL_PROXY="${QBOT_CURL_PROXY:-}"
@@ -32,7 +30,7 @@ OBSOLETE_ENV_KEYS=(
     TITLE_MODEL MEMORY_MODEL COMPACT_MODEL TRANSLATION_MODEL
     DEEPSEEK_MODEL BIGMODEL_MODEL GEMINI_MODEL LLM_MAX_OUTPUT_TOKENS
     TOOL_CALLING_ENABLED TOOL_CALLING_GROUP_ENABLED TOOL_CALLING_MAX_ROUNDS
-    TODO_MODEL MEMBER_ID_MAPPING_FILE
+    TODO_MODEL MEMBER_ID_MAPPING_FILE QQ_MAID_ENABLE_IMAGE
 )
 AGENT_CONFIG_MIGRATION_VERSION="v0.20.2"
 AGENT_CONFIG_MIGRATION_MARKER_NAME=".agent-config-v0.20.2"
@@ -114,7 +112,8 @@ usage() {
   qbot log                    查看并跟随日志
   qbot health                 请求 /healthz
   qbot console                查看控制台 URL 状态
-  qbot install [version]      从 GitHub Releases 下载并安装，默认 latest
+  qbot install [version] [--web true|false]
+                              从 GitHub Releases 下载并安装，并选择是否启用 Web
   qbot update [version]       匹配版本号后更新，默认 latest
   qbot patch [version]        update 的别名
   qbot version                查看本地版本与最新版本
@@ -126,6 +125,7 @@ usage() {
   qbot deploy                 将本脚本安装为系统命令 (默认 /usr/local/bin/qbot)
 
 常用配置:
+  qbot install --web false  安装时关闭 Web，仅使用 CLI/文件配置
   qbot config bot --app-id 123 --app-secret xxx --sandbox false
   qbot config bot --unbind    解除 QQ 官方 Bot 绑定（重启后生效）
   qbot config ai --provider openai --api-key sk-xxx
@@ -135,7 +135,9 @@ usage() {
 
 目录: ${APP_DIR}
 项目: https://github.com/${REPO_SLUG}
-下载: 默认直连官方 GitHub；如需加速，可用 QBOT_GITHUB_PROXY 或 QBOT_GITHUB_PROXIES 指定可信镜像
+下载: 默认直连官方 GitHub；网络不稳定时可用 QBOT_GITHUB_PROXY（单个代理）或
+      QBOT_GITHUB_PROXIES（空格分隔的多个代理）指定可信前缀；官方源与代理会依次尝试并校验 SHA-256
+自动化: QBOT_INSTALL_WEB_CONSOLE=true|false 可指定非交互安装的 Web 选择
 EOF
 }
 
@@ -158,17 +160,37 @@ curl_qbot() {
 }
 
 github_accel_prefixes() {
-    echo ""
+    # 候选源顺序：官方直连（空串）→ QBOT_GITHUB_PROXY 单代理 → QBOT_GITHUB_PROXIES 多代理。
+    # 与 PowerShell 端 qbot.ps1 语义一致：按空白切分、去尾部斜杠、仅接受 http/https、
+    # 且必须含非空主机部分、按序去重；不内置任何用户未显式配置的第三方镜像。
+    printf '\n'
 
     {
-        if [[ -n "${GITHUB_ACCEL_PROXY}" ]]; then
-            echo "${GITHUB_ACCEL_PROXY%/}/"
-        fi
+        printf '%s\n' "${GITHUB_ACCEL_PROXY:-}"
 
-        if [[ -n "${GITHUB_ACCEL_PROXIES}" ]]; then
+        if [[ -n "${GITHUB_ACCEL_PROXIES:-}" ]]; then
             printf '%s\n' ${GITHUB_ACCEL_PROXIES}
         fi
-    } | awk 'NF {sub(/\/?$/, "/", $0); if (!seen[$0]++) print}'
+    } | awk '
+        NF {
+            value = $0
+            gsub(/^[ \t]+|[ \t]+$/, "", value)
+            while (value ~ /\/$/) { sub(/\/$/, "", value) }
+            if (value !~ /^https?:\/\//) {
+                print "忽略无效代理前缀（仅支持 http/https 绝对地址）: " value > "/dev/stderr"
+                next
+            }
+            rest = value
+            sub(/^https?:\/\//, "", rest)
+            # 主机部分必须非空：以字母/数字或 IPv6 的 "[" 开头，
+            # 拒绝 http://、http:///path、http://:8080 等无主机名的写法。
+            if (rest !~ /^[A-Za-z0-9]/ && substr(rest, 1, 1) != "[") {
+                print "忽略无效代理前缀（需为含非空主机的 http/https 绝对地址）: " value > "/dev/stderr"
+                next
+            }
+            if (!seen[value]++) print value
+        }
+    '
 }
 
 github_url_for_prefix() {
@@ -176,7 +198,7 @@ github_url_for_prefix() {
     local raw_url="$2"
 
     if [[ -n "${prefix}" ]]; then
-        echo "${prefix%/}/${raw_url}"
+        echo "${prefix}/${raw_url}"
     else
         echo "${raw_url}"
     fi
@@ -186,57 +208,10 @@ github_prefix_label() {
     local prefix="$1"
 
     if [[ -n "${prefix}" ]]; then
-        echo "${prefix%/}/"
+        echo "代理源 ${prefix}"
     else
-        echo "直连 GitHub"
+        echo "GitHub 官方源"
     fi
-}
-
-probe_github_prefix_ms() {
-    local prefix="$1"
-    local raw_url="$2"
-    local url result http_code total
-
-    url="$(github_url_for_prefix "${prefix}" "${raw_url}")"
-    result="$(
-        curl_qbot -L -sS --range 0-0 \
-            --connect-timeout "${GITHUB_PROBE_CONNECT_TIMEOUT}" \
-            --max-time "${GITHUB_PROBE_MAX_TIME}" \
-            -o /dev/null \
-            -w '%{http_code} %{time_total}' \
-            "${url}" 2>/dev/null || true
-    )"
-
-    http_code="${result%% *}"
-    total="${result#* }"
-    if [[ "${http_code}" =~ ^20[0-9]$ || "${http_code}" =~ ^30[0-9]$ ]]; then
-        awk -v sec="${total}" 'BEGIN { printf "%d", sec * 1000 }'
-    else
-        echo 999999
-    fi
-}
-
-sorted_github_sources() {
-    local raw_url="$1"
-    local tmp_file prefix latency order token
-
-    tmp_file="$(mktemp)"
-    order=0
-
-    while IFS= read -r prefix; do
-        latency="$(probe_github_prefix_ms "${prefix}" "${raw_url}")"
-        token="${prefix:-__DIRECT__}"
-        if [[ "${latency}" -lt 999999 ]]; then
-            echo "可用 GitHub 源: $(github_prefix_label "${prefix}") (${latency}ms)" >&2
-        else
-            echo "跳过不可用源: $(github_prefix_label "${prefix}")" >&2
-        fi
-        printf '%s\t%s\t%s\n' "${latency}" "${order}" "${token}" >> "${tmp_file}"
-        order=$((order + 1))
-    done < <(github_accel_prefixes)
-
-    sort -n -k1,1 -k2,2 "${tmp_file}" | awk -F '\t' '$1 < 999999 {print $1 "\t" $3}'
-    rm -f "${tmp_file}"
 }
 
 downloaded_file_is_valid() {
@@ -258,45 +233,60 @@ downloaded_file_is_valid() {
     esac
 }
 
-download_github_file() {
-    local raw_url="$1"
-    local output="$2"
-    local description="$3"
-    local latency prefix_token prefix url
+download_github_file_from_source() {
+    # 从单个候选源下载一个文件；网络/HTTP 失败或内容无效时返回 1，由调用方继续尝试下一来源。
+    local prefix="$1"
+    local raw_url="$2"
+    local output="$3"
+    local description="$4"
+    local url
+
+    url="$(github_url_for_prefix "${prefix}" "${raw_url}")"
+    echo "尝试从 $(github_prefix_label "${prefix}") 下载: ${description}" >&2
 
     rm -f "${output}"
-    echo "测速 GitHub 下载源: ${description}" >&2
-
-    while IFS=$'\t' read -r latency prefix_token; do
-        prefix="${prefix_token}"
-        [[ "${prefix}" == "__DIRECT__" ]] && prefix=""
-        url="$(github_url_for_prefix "${prefix}" "${raw_url}")"
-        echo "尝试下载源: $(github_prefix_label "${prefix}") (${latency}ms)" >&2
-
-        rm -f "${output}"
-        if curl_qbot -fL --retry 2 \
-            --connect-timeout "${GITHUB_DOWNLOAD_CONNECT_TIMEOUT}" \
-            --max-time "${GITHUB_DOWNLOAD_MAX_TIME}" \
-            -o "${output}" "${url}"; then
-            if downloaded_file_is_valid "${output}" "${description}"; then
-                return 0
-            fi
-            echo "下载结果无效，继续尝试下一个源: $(github_prefix_label "${prefix}")" >&2
-        fi
-    done < <(sorted_github_sources "${raw_url}")
-
-    echo "所有 GitHub 下载源失败，最后重试官方直连: ${description}" >&2
-    rm -f "${output}"
-    if curl_qbot -fL --retry 2 \
+    if ! curl_qbot -fL --retry 2 \
         --connect-timeout "${GITHUB_DOWNLOAD_CONNECT_TIMEOUT}" \
         --max-time "${GITHUB_DOWNLOAD_MAX_TIME}" \
-        -o "${output}" "${raw_url}"; then
-        if downloaded_file_is_valid "${output}" "${description}"; then
-            return 0
-        fi
+        -o "${output}" "${url}"; then
+        echo "下载失败（网络或 HTTP 错误）: $(github_prefix_label "${prefix}")" >&2
+        return 1
     fi
+    if ! downloaded_file_is_valid "${output}" "${description}"; then
+        echo "下载内容无效（文件为空或格式损坏）: $(github_prefix_label "${prefix}")" >&2
+        return 1
+    fi
+    return 0
+}
 
-    die "下载失败: ${description}"
+download_release_from_source() {
+    # 从单个候选源下载压缩包与 .sha256 并当场校验；任一环节失败即返回 1，由调用方回退下一来源。
+    local prefix="$1"
+    local version="$2"
+    local target="$3"
+    local tmp_dir="$4"
+    local package="$5"
+    local archive="$6"
+    local raw_url="$7"
+    local listing
+
+    download_github_file_from_source "${prefix}" "${raw_url}" "${tmp_dir}/${archive}" "${archive}" || return 1
+    download_github_file_from_source "${prefix}" "${raw_url}.sha256" "${tmp_dir}/${archive}.sha256" "${archive}.sha256" || return 1
+    if ! (cd "${tmp_dir}" && sha256sum -c "${archive}.sha256" >/dev/null 2>&1); then
+        echo "SHA-256 校验失败，该源内容无效: $(github_prefix_label "${prefix}")" >&2
+        return 1
+    fi
+    # 归档深度校验：解压前确认归档可完整读取且包含预期包目录，使 gzip 容器有效但
+    # 内容结构损坏的来源也能在单源成功前回退下一来源（与 Windows 端 ZIP 校验一致）。
+    listing="$(tar -tzf "${tmp_dir}/${archive}" 2>/dev/null)" || {
+        echo "压缩包无法完整读取（结构损坏）: $(github_prefix_label "${prefix}")" >&2
+        return 1
+    }
+    if ! grep -Eq "^${package}($|/)" <<<"${listing}"; then
+        echo "压缩包缺少预期包目录 ${package}，该源内容结构无效: $(github_prefix_label "${prefix}")" >&2
+        return 1
+    fi
+    return 0
 }
 
 install_deps() {
@@ -1885,10 +1875,24 @@ download_release() {
     local package="qq-maid-bot-${version}-${target}"
     local archive="${package}.tar.gz"
     local raw_url="${RELEASES_URL}/download/${version}/${archive}"
+    local prefix downloaded=0
 
     echo "下载 Release: ${version} (${target})" >&2
-    download_github_file "${raw_url}" "${tmp_dir}/${archive}" "${archive}"
-    download_github_file "${raw_url}.sha256" "${tmp_dir}/${archive}.sha256" "${archive}.sha256"
+
+    # 依次尝试官方源与全部用户代理源；只有压缩包格式有效且最终 SHA-256 校验通过才继续。
+    while IFS= read -r prefix; do
+        if download_release_from_source \
+            "${prefix}" "${version}" "${target}" "${tmp_dir}" "${package}" "${archive}" "${raw_url}"; then
+            downloaded=1
+            break
+        fi
+        echo "该来源不可用，继续尝试下一来源" >&2
+    done < <(github_accel_prefixes)
+
+    if ((downloaded != 1)); then
+        die "Release 下载失败: ${version} (${target})。所有 GitHub 下载源均不可用，已停止安装（未覆盖任何文件）。" \
+            "请检查网络后重试，也可设置 QBOT_GITHUB_PROXY（单个代理前缀）或 QBOT_GITHUB_PROXIES（空格分隔的多个代理前缀）指定可信加速源。"
+    fi
 
     (
         cd "${tmp_dir}"
@@ -1995,6 +1999,9 @@ copy_release_into_app() {
 
     # v0.20 统一从 agent.toml 读取 Agent 策略；保留旧键会让新版本明确拒绝启动。
     migrate_obsolete_env_config
+    if declare -F migrate_agent_web_search_config >/dev/null; then
+        migrate_agent_web_search_config
+    fi
 
     # 仅清理旧混合平台 Release 遗留的 Windows 控制文件，不触碰用户运行数据。
     local obsolete_windows_file
@@ -2014,21 +2021,31 @@ copy_release_into_app() {
 install_or_update() {
     local command_name="$1"
     local requested_version="${2:-latest}"
+    local requested_web="${3:-}"
 
     install_deps
 
-    local target version current tmp_dir release_dir was_running
+    local target version current tmp_dir release_dir was_running config_existed
     target="$(detect_target)"
     version="$(resolve_version "${requested_version}")"
     current="$(local_version 2>/dev/null || true)"
+    config_existed=0
+    [[ -f "${APP_DIR}/config/.env" ]] && config_existed=1
 
     tmp_dir="$(mktemp -d)"
     TMP_DIR_TO_CLEAN="${tmp_dir}"
 
     release_dir="$(download_release "${version}" "${target}" "${tmp_dir}")"
+    if [[ -f "${release_dir}/lib/agent-config.sh" ]]; then
+        # shellcheck source=scripts/lib/agent-config.sh
+        source "${release_dir}/lib/agent-config.sh"
+    fi
 
     if [[ "${command_name}" == "update" && -n "${current}" && "$(normalize_version "${current}")" == "${version}" ]]; then
         migrate_obsolete_env_config
+        if declare -F migrate_agent_web_search_config >/dev/null; then
+            migrate_agent_web_search_config
+        fi
         mark_agent_config_migration_complete "${current}" "${version}"
         rm -rf "${tmp_dir}"
         TMP_DIR_TO_CLEAN=""
@@ -2040,7 +2057,7 @@ install_or_update() {
     if [[ "${command_name}" == "update" ]] && agent_config_reset_required "${current}" "${version}"; then
         upgrade_agent_config_from_release \
             "${APP_DIR}/config/agent.toml" \
-            "${release_dir}/config/agent.toml" || die "替换 agent.toml 失败，已停止本次更新"
+            "${release_dir}/config/agent.example.toml" || die "替换 agent.toml 失败，已停止本次更新"
     fi
 
     was_running=0
@@ -2051,6 +2068,9 @@ install_or_update() {
     fi
 
     copy_release_into_app "${release_dir}" "${version}"
+    if [[ "${command_name}" == "install" ]]; then
+        configure_install_web_console "${requested_web}" "${config_existed}"
+    fi
     mark_agent_config_migration_complete "${current}" "${version}"
     rm -rf "${tmp_dir}"
     TMP_DIR_TO_CLEAN=""
@@ -2062,6 +2082,58 @@ install_or_update() {
     if ((was_running)); then
         echo "恢复启动 qbot"
         run_botctl start
+    fi
+}
+
+configure_install_web_console() {
+    local requested="${1:-}"
+    local config_existed="${2:-0}"
+    local answer normalized input_fd=0 output_fd=2 prompt_available=0
+
+    # 已有配置不因重复 install 被交互提示或改写；显式 --web 仍按用户要求更新。
+    if [[ -z "${requested}" && "${config_existed}" == "1" ]]; then
+        return 0
+    fi
+    if [[ -z "${requested}" ]]; then
+        requested="${QBOT_INSTALL_WEB_CONSOLE:-}"
+    fi
+    if [[ -z "${requested}" && -t 0 && -t 1 ]]; then
+        prompt_available=1
+    elif [[ -z "${requested}" ]] && { exec 9<>/dev/tty; } 2>/dev/null; then
+        # curl | bash 等安装方式的 stdin 是脚本本身；有控制终端时仍从 /dev/tty 询问用户。
+        prompt_available=1
+        input_fd=9
+        output_fd=9
+    fi
+    if [[ -z "${requested}" && "${prompt_available}" == "1" ]]; then
+        while :; do
+            printf '安装后是否启用 Web 控制台？[Y/n] ' >&"${output_fd}"
+            IFS= read -r -u "${input_fd}" answer || die "读取 Web 控制台选择失败"
+            case "${answer}" in
+                ""|y|Y|yes|YES|Yes)
+                    requested="true"
+                    break
+                    ;;
+                n|N|no|NO|No)
+                    requested="false"
+                    break
+                    ;;
+                *)
+                    ui_fail "请输入 y 或 n。"
+                    ;;
+            esac
+        done
+        [[ "${input_fd}" != "9" ]] || exec 9>&-
+    elif [[ -z "${requested}" ]]; then
+        requested="true"
+        echo "非交互安装未指定 --web，兼容默认启用；可用 --web false 关闭。"
+    fi
+    normalized="$(normalize_bool_value "${requested}")"
+    set_env_var WEB_CONSOLE_ENABLED "${normalized}"
+    if [[ "${normalized}" == "true" ]]; then
+        echo "Web 控制台：已启用（可继续通过 qbot config 使用纯 CLI 配置）"
+    else
+        echo "Web 控制台：已关闭；使用 qbot config 和 config/.env 完成配置"
     fi
 }
 
@@ -2124,7 +2196,32 @@ case "${1:-}" in
         run_botctl console
         ;;
     install)
-        install_or_update install "${2:-latest}"
+        shift
+        install_version="latest"
+        install_web=""
+        version_seen=0
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --web)
+                    shift
+                    [[ $# -gt 0 ]] || die "--web 缺少 true/false"
+                    install_web="$1"
+                    ;;
+                --no-web)
+                    install_web="false"
+                    ;;
+                --*)
+                    die "install 未知参数: $1"
+                    ;;
+                *)
+                    ((version_seen == 0)) || die "install 只能指定一个版本"
+                    install_version="$1"
+                    version_seen=1
+                    ;;
+            esac
+            shift
+        done
+        install_or_update install "${install_version}" "${install_web}"
         ;;
     update|upgrade)
         install_or_update update "${2:-latest}"

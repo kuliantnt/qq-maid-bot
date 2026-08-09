@@ -84,7 +84,9 @@ pub enum KnowledgeTruncationReason {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct KnowledgeEvidenceItem {
     pub chunk_id: String,
+    /// `relative_path` 是内部来源 key；展示和上下文渲染使用此可读标签。
     pub relative_path: String,
+    pub source_label: String,
     pub document_title: Option<String>,
     pub heading_path: Option<String>,
     pub start_line: Option<usize>,
@@ -152,7 +154,7 @@ pub(super) fn rendered_item(item: &KnowledgeEvidenceItem) -> String {
         text.push_str("片段：章节补充\n");
     }
     text.push_str("来源：");
-    text.push_str(&item.relative_path);
+    text.push_str(&item.source_label);
     if let (Some(start), Some(end)) = (item.start_line, item.end_line) {
         text.push_str(&format!("\n行号：{start}-{end}"));
     }

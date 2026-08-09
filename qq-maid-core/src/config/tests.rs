@@ -170,33 +170,6 @@ fn openai_base_urls_use_first_non_empty_url() {
 }
 
 #[test]
-fn openai_model_name_accepts_openai_gemini_prefix_and_bare_model() {
-    assert_eq!(
-        openai_model_name("openai:gpt-5.4-mini", "LLM_MODEL").unwrap(),
-        "openai:gpt-5.4-mini"
-    );
-    assert_eq!(
-        openai_model_name("gemini:gemini-2.5-flash", "OPENAI_SEARCH_MODEL").unwrap(),
-        "gemini:gemini-2.5-flash"
-    );
-    assert_eq!(
-        openai_model_name("gpt-5.4-mini", "OPENAI_SEARCH_MODEL").unwrap(),
-        "gpt-5.4-mini"
-    );
-}
-
-#[test]
-fn openai_model_name_rejects_non_openai_prefix() {
-    let err = openai_model_name("deepseek:deepseek-chat", "OPENAI_SEARCH_MODEL").unwrap_err();
-    assert_eq!(err.code, "config");
-    assert!(err.message.contains("supported: openai, gemini"));
-
-    let err = openai_model_name("bigmodel:glm-5.2", "OPENAI_SEARCH_MODEL").unwrap_err();
-    assert_eq!(err.code, "config");
-    assert!(err.message.contains("supported: openai, gemini"));
-}
-
-#[test]
 fn bot_display_name_uses_first_active_keyword_and_legacy_fallback() {
     let _guard = ENV_LOCK.lock().unwrap();
     let snapshot = EnvSnapshot::capture(&[
@@ -660,7 +633,45 @@ fn env_example_documents_knowledge_dir() {
     let env_example = include_str!("../../../runtime/config/.env.example");
 
     assert!(env_example.contains("KNOWLEDGE_DIR="));
+    assert!(env_example.contains("KNOWLEDGE_MAX_FILE_BYTES=52428800"));
     assert!(!env_example.contains("KNOWLEDGE_EMBEDDING_"));
+}
+
+#[test]
+fn knowledge_max_file_bytes_uses_independent_bounds() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let snapshot = EnvSnapshot::capture(&["KNOWLEDGE_MAX_FILE_BYTES"]);
+
+    unsafe {
+        env::set_var("KNOWLEDGE_MAX_FILE_BYTES", "65536");
+    }
+    assert_eq!(
+        env_u64_bounded_range(
+            "KNOWLEDGE_MAX_FILE_BYTES",
+            DEFAULT_KNOWLEDGE_MAX_FILE_BYTES,
+            MIN_KNOWLEDGE_MAX_FILE_BYTES,
+            MAX_KNOWLEDGE_MAX_FILE_BYTES,
+        )
+        .unwrap(),
+        65_536
+    );
+
+    unsafe {
+        env::set_var(
+            "KNOWLEDGE_MAX_FILE_BYTES",
+            (MIN_KNOWLEDGE_MAX_FILE_BYTES - 1).to_string(),
+        );
+    }
+    let error = env_u64_bounded_range(
+        "KNOWLEDGE_MAX_FILE_BYTES",
+        DEFAULT_KNOWLEDGE_MAX_FILE_BYTES,
+        MIN_KNOWLEDGE_MAX_FILE_BYTES,
+        MAX_KNOWLEDGE_MAX_FILE_BYTES,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "config");
+    assert!(error.message.contains("KNOWLEDGE_MAX_FILE_BYTES"));
+    snapshot.restore();
 }
 
 #[test]

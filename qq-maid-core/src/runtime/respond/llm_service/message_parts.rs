@@ -147,16 +147,53 @@ fn quoted_context_parts_for_model(
     quoted: &QuotedMessageContext,
     supports_vision: bool,
 ) -> Vec<MessageInputPart> {
+    let has_input_parts = !quoted.input_parts.is_empty();
     let mut parts = vec![MessageInputPart::Text {
-        text: quoted.fallback_text(),
+        // 结构化引用 parts 已包含正文和媒体，此处只保留引用边界与发送者信息。
+        text: if has_input_parts {
+            quoted.metadata_text()
+        } else {
+            quoted.fallback_text()
+        },
         source: Some(TextSource::Quote),
     }];
-    if quoted.lookup_found {
-        parts.extend(input_parts_for_model(
+    if has_input_parts {
+        parts.extend(quoted_input_parts_for_model(
             quoted.input_parts.clone(),
             supports_vision,
-            TextSource::Quote,
         ));
+    }
+    parts
+}
+
+fn quoted_input_parts_for_model(
+    input_parts: Vec<MessageInputPart>,
+    supports_vision: bool,
+) -> Vec<MessageInputPart> {
+    let mut parts = Vec::new();
+    for part in input_parts {
+        match part {
+            MessageInputPart::Text { text, .. } if !text.trim().is_empty() => {
+                // Provider 不接收 TextSource，标签必须与原始引用文字留在同一个 part 内。
+                parts.push(MessageInputPart::Text {
+                    text: format!("引用文本：{text}"),
+                    source: Some(TextSource::Quote),
+                });
+            }
+            MessageInputPart::Text { .. } => {}
+            MessageInputPart::Image { media }
+                if supports_vision && media.status == MediaStatus::Available =>
+            {
+                parts.push(MessageInputPart::Image { media });
+            }
+            other => parts.push(MessageInputPart::Text {
+                text: format!(
+                    "引用媒体：{}",
+                    media_fallback_for_model(&other, supports_vision)
+                ),
+                source: Some(TextSource::Quote),
+            }),
+        }
     }
     parts
 }

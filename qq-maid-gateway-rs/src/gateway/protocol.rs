@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use super::bot_identity::SharedBotIdentity;
 use super::{aggregator::MessageAggregatorHandle, ping::GatewayRuntimeStatus};
@@ -129,10 +129,10 @@ pub(super) async fn run_gateway_once(
 ) -> anyhow::Result<()> {
     info!(
         resume = resume.session_id.is_some() && resume.seq.is_some(),
-        "connecting QQ gateway websocket"
+        "正在连接 QQ Gateway WebSocket"
     );
     let (stream, _) = connect_async(gateway_url).await?;
-    info!("QQ gateway websocket connected");
+    info!("QQ Gateway WebSocket 已连接");
     runtime.record_gateway_connected();
     let (mut write, mut read) = stream.split();
 
@@ -153,7 +153,7 @@ pub(super) async fn run_gateway_once(
         .unwrap_or_else(|| Duration::from_secs(45));
     debug!(
         heartbeat_interval_ms = heartbeat_interval.as_millis(),
-        "QQ gateway hello received"
+        "已收到 QQ Gateway Hello"
     );
 
     send_identify_or_resume(&mut write, auth, config, resume).await?;
@@ -163,7 +163,7 @@ pub(super) async fn run_gateway_once(
     loop {
         tokio::select! {
             _ = shutdown_token.cancelled() => {
-                info!("gateway websocket loop received shutdown signal");
+                info!("Gateway WebSocket 循环收到关闭信号");
                 return Ok(());
             }
             _ = heartbeat.tick() => {
@@ -208,7 +208,7 @@ pub(super) async fn run_gateway_once(
                         write.send(Message::Pong(payload)).await?;
                     }
                     Message::Close(frame) => {
-                        debug!(?frame, "gateway sent close frame");
+                        debug!(?frame, "Gateway 已发送关闭帧");
                         return Ok(());
                     }
                     Message::Pong(_) => {}
@@ -248,7 +248,7 @@ where
                     .map(ToOwned::to_owned);
                 info!(
                     session_id_present = resume.session_id.is_some(),
-                    "QQ gateway ready"
+                    "QQ Gateway 已就绪"
                 );
                 bot_identity.absorb_ready_payload(&envelope.d);
                 runtime.record_ready();
@@ -256,7 +256,7 @@ where
             }
 
             if envelope.t.as_deref() == Some("RESUMED") {
-                info!(seq = ?resume.seq, "QQ gateway session resumed");
+                info!(seq = ?resume.seq, "QQ Gateway 会话已恢复");
                 runtime.record_resumed();
                 return Ok(());
             }
@@ -265,11 +265,11 @@ where
                 match parse_c2c_message(&envelope) {
                     Ok(Some(message)) => {
                         if let Err(err) = dispatcher.enqueue_c2c(message).await {
-                            warn!(error = %err, "failed to enqueue C2C message");
+                            warn!(error = %err, "C2C 消息入队失败");
                         }
                     }
                     Ok(None) => {}
-                    Err(err) => warn!(error = %err, "failed to parse C2C event"),
+                    Err(err) => warn!(error = %err, "C2C 事件解析失败"),
                 }
             } else if matches!(
                 envelope.t.as_deref(),
@@ -278,21 +278,21 @@ where
                 match parse_group_message(&envelope) {
                     Ok(Some(message)) => {
                         if let Err(err) = dispatcher.enqueue_group(message).await {
-                            warn!(error = %err, "failed to enqueue group message");
+                            warn!(error = %err, "群聊消息入队失败");
                         }
                     }
                     Ok(None) => {}
-                    Err(err) => warn!(error = %err, "failed to parse group event"),
+                    Err(err) => warn!(error = %err, "群聊事件解析失败"),
                 }
             } else {
                 debug!(
                     event = envelope.t.as_deref().unwrap_or("unknown"),
-                    "ignoring gateway dispatch event"
+                    "已忽略 Gateway 分发事件"
                 );
             }
         }
         OP_RECONNECT => {
-            warn!("gateway requested reconnect");
+            warn!("Gateway 要求重新连接");
             runtime.record_reconnect();
             return Err(anyhow!("gateway requested reconnect"));
         }
@@ -303,18 +303,18 @@ where
                 resume.session_id = None;
                 resume.seq = None;
             }
-            warn!(can_resume, "gateway invalid session");
+            warn!(can_resume, "Gateway 会话无效");
             send_identify_or_resume(write, auth, config, resume).await?;
         }
         OP_HELLO => {
-            debug!("received gateway hello after initial handshake");
+            debug!("初始握手完成后再次收到 Gateway Hello");
         }
         OP_HEARTBEAT_ACK => {
-            debug!("gateway heartbeat ack");
+            trace!("Gateway 心跳已确认");
             runtime.record_heartbeat_ack();
         }
         _ => {
-            debug!(op = envelope.op, "ignoring gateway opcode");
+            debug!(op = envelope.op, "已忽略 Gateway opcode");
         }
     }
 
@@ -333,12 +333,12 @@ where
     let token = auth.authorization_header().await?;
     let payload = match (resume.session_id.as_deref(), resume.seq) {
         (Some(session_id), Some(seq)) => {
-            info!(seq = seq, "sending QQ gateway resume");
+            info!(seq = seq, "正在发送 QQ Gateway Resume");
             json!({"op": OP_RESUME, "d": {"token": token, "session_id": session_id, "seq": seq}})
         }
         _ => {
             let intents = gateway_intents(config.group_message_mode);
-            info!(intents, "sending QQ gateway identify");
+            info!(intents, "正在发送 QQ Gateway Identify");
             json!({
                 "op": OP_IDENTIFY,
                 "d": {

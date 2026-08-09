@@ -41,9 +41,10 @@ use crate::{
     provider::types::{ChatRequest, ModelProvider, TokenUsage},
     tool::{ToolContext, ToolRegistry},
 };
+use qq_maid_common::output_part::OutputPart;
 
 pub use crate::agent_loop::{
-    AgentRunDiagnostics, AgentRunHandle, AgentStopReason, ToolExecutionResult,
+    AgentRunDiagnostics, AgentRunHandle, AgentStopReason, ToolExecutionAttempt, ToolExecutionResult,
 };
 
 // 候选链构建与 provider 预检 helper 来源于拆分后的子模块，这里 `use` 进来同时供
@@ -67,6 +68,8 @@ use crate::provider::types::ModelRoute;
 pub struct ChatOutcome {
     /// 模型返回的文本回复。
     pub reply: String,
+    /// Provider 返回的顺序化富媒体结果；空值表示沿用纯文本兼容路径。
+    pub output_parts: Vec<OutputPart>,
     /// 本次请求的指标记录（延迟、首 token 时间等）。
     pub metrics: LlmMetrics,
     /// 令牌用量统计（输入/输出/总计），部分提供商可能不返回。
@@ -117,6 +120,8 @@ pub enum ToolCallingProtocol {
 pub enum LlmStreamEvent {
     /// 模型正文增量。当前 Core/Gateway 只把它作为进程内保活和未来增量发送扩展依据。
     TextDelta(String),
+    /// 已确认完成的非文本输出（例如 Responses 图片生成结果）。
+    OutputPart(OutputPart),
     /// 成功终止事件。完整正文由 collector 聚合；usage 不单独作为终止信号。
     Completed {
         usage: Option<TokenUsage>,
@@ -255,6 +260,7 @@ pub async fn collect_llm_stream(
     let mut usage = None;
     let mut completed = false;
     let mut fallback_used = false;
+    let mut output_parts = Vec::new();
     while let Some(event) = stream.next().await {
         match event? {
             LlmStreamEvent::TextDelta(delta) => {
@@ -264,6 +270,7 @@ pub async fn collect_llm_stream(
                 }
                 reply.push_str(&delta);
             }
+            LlmStreamEvent::OutputPart(part) => output_parts.push(part),
             LlmStreamEvent::Completed {
                 usage: event_usage,
                 fallback_used: event_fallback_used,
@@ -287,7 +294,7 @@ pub async fn collect_llm_stream(
             "stream",
         ));
     }
-    if reply.trim().is_empty() {
+    if reply.trim().is_empty() && output_parts.is_empty() {
         return Err(LlmError::provider(
             "LLM stream returned empty text output",
             "provider",
@@ -295,6 +302,7 @@ pub async fn collect_llm_stream(
     }
     Ok(ChatOutcome {
         reply,
+        output_parts,
         metrics: recorder.finish(provider, model, true),
         usage,
         fallback_used,
@@ -305,14 +313,23 @@ pub async fn collect_llm_stream(
 pub(crate) fn outcome_to_stream(outcome: ChatOutcome) -> LlmStream {
     let usage = outcome.usage.clone();
     let reply = outcome.reply;
-    Box::pin(stream::iter(vec![
-        Ok(LlmStreamEvent::TextDelta(reply)),
-        Ok(LlmStreamEvent::Completed {
-            usage,
-            finish_reason: None,
-            fallback_used: outcome.fallback_used,
-        }),
-    ]))
+    let output_parts = outcome.output_parts;
+    let mut events = Vec::with_capacity(output_parts.len() + 2);
+    if !reply.is_empty() {
+        events.push(Ok(LlmStreamEvent::TextDelta(reply)));
+    }
+    events.extend(
+        output_parts
+            .into_iter()
+            .map(LlmStreamEvent::OutputPart)
+            .map(Ok),
+    );
+    events.push(Ok(LlmStreamEvent::Completed {
+        usage,
+        finish_reason: None,
+        fallback_used: outcome.fallback_used,
+    }));
+    Box::pin(stream::iter(events))
 }
 
 /// 根据配置构建 LLM 提供商实例。
@@ -385,21 +402,27 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
                         Arc::new(gemini::GeminiProvider::new(config)?),
                     )),
                     ModelProvider::Custom(_) => {
-                        let provider_config = config
-                            .openai_compatible_providers
-                            .iter()
-                            .find(|entry| entry.id == provider_kind)
-                            .ok_or_else(|| {
-                                LlmError::config(format!(
-                                    "provider `{}` is referenced by model routes but not configured",
-                                    provider_kind.as_str()
-                                ))
-                            })?;
                         let default_model =
                             first_model_for_provider(&provider_routes, &provider_kind)
                                 .unwrap_or_else(|| provider_kind.as_str().to_owned());
-                        providers.push((
-                            provider_kind.clone(),
+                        let provider: DynLlmProvider = if let Some(provider_config) = config
+                            .openai_responses_providers
+                            .iter()
+                            .find(|entry| entry.id == provider_kind)
+                        {
+                            Arc::new(openai::ConfiguredResponsesProvider::new(
+                                provider_config,
+                                default_model,
+                                config.stream,
+                                config.request_timeout_seconds,
+                                config.media_max_bytes,
+                                config.max_output_tokens,
+                            )?)
+                        } else if let Some(provider_config) = config
+                            .openai_compatible_providers
+                            .iter()
+                            .find(|entry| entry.id == provider_kind)
+                        {
                             Arc::new(openai_compatible::OpenAiCompatibleProvider::new(
                                 provider_config,
                                 default_model,
@@ -407,8 +430,14 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
                                 config.request_timeout_seconds,
                                 config.media_max_bytes,
                                 config.max_output_tokens,
-                            )?),
-                        ));
+                            )?)
+                        } else {
+                            return Err(LlmError::config(format!(
+                                "provider `{}` is referenced by model routes but not configured",
+                                provider_kind.as_str()
+                            )));
+                        };
+                        providers.push((provider_kind.clone(), provider));
                     }
                 }
             }

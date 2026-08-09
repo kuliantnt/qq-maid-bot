@@ -89,6 +89,13 @@ pub enum NotificationWriteOutcome {
     LeaseLost,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationDeliveryState {
+    Ready,
+    Cancelled,
+    LeaseLost,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct NotificationTask {
     pub id: i64,
@@ -150,6 +157,10 @@ impl NotificationOutboxStore {
         self.database.clone()
     }
 
+    pub(crate) fn database_path(&self) -> &std::path::Path {
+        self.database.path()
+    }
+
     /// 创建或更新同一个去重键下尚未终结的任务。
     ///
     /// 已发送任务不会被重开，避免业务层重复提交导致同一事件再次推送；若业务确实需要
@@ -160,131 +171,9 @@ impl NotificationOutboxStore {
         &self,
         request: NotificationUpsert,
     ) -> Result<NotificationTask, NotificationError> {
-        validate_upsert(&request)?;
-        let payload_json = serde_json::to_string(&request.payload)
-            .map_err(|err| NotificationError::bad_request(format!("invalid payload: {err}")))?;
-        let now = now_iso_cn();
         {
             let conn = self.connection()?;
-            conn.execute(
-                "INSERT INTO notification_outbox (
-                    source_type, source_id, dedupe_key, platform, account_id, target_type, target_id,
-                    channel, kind, payload_json, scheduled_at, status, attempts, max_attempts,
-                    next_attempt_at, locked_by, locked_at, sent_at, last_error,
-                    created_at, updated_at, cancelled_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13, NULL, NULL, NULL, NULL, NULL, ?14, ?14, NULL)
-                 ON CONFLICT(dedupe_key) DO UPDATE SET
-                    source_type = CASE
-                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.source_type
-                        ELSE excluded.source_type
-                    END,
-                    source_id = CASE
-                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.source_id
-                        ELSE excluded.source_id
-                    END,
-                    platform = CASE
-                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.platform
-                        ELSE excluded.platform
-                    END,
-                    account_id = CASE
-                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.account_id
-                        ELSE excluded.account_id
-                    END,
-                    target_type = CASE
-                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.target_type
-                        ELSE excluded.target_type
-                    END,
-                    target_id = CASE
-                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.target_id
-                        ELSE excluded.target_id
-                    END,
-                    channel = CASE
-                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.channel
-                        ELSE excluded.channel
-                    END,
-                    kind = CASE
-                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.kind
-                        ELSE excluded.kind
-                    END,
-                    payload_json = CASE
-                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.payload_json
-                        ELSE excluded.payload_json
-                    END,
-                    scheduled_at = CASE
-                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.scheduled_at
-                        ELSE excluded.scheduled_at
-                    END,
-                    status = CASE
-                        WHEN notification_outbox.status = 'sent' THEN notification_outbox.status
-                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.status
-                        WHEN notification_outbox.status = 'cancelled' AND ?15 = 0 THEN notification_outbox.status
-                        ELSE 'pending'
-                    END,
-                    attempts = CASE
-                        WHEN notification_outbox.status = 'sent' THEN notification_outbox.attempts
-                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.attempts
-                        WHEN notification_outbox.status = 'cancelled' AND ?15 = 0 THEN notification_outbox.attempts
-                        ELSE 0
-                    END,
-                    delivered_parts = CASE
-                        WHEN notification_outbox.status = 'sending'
-                            THEN notification_outbox.delivered_parts
-                        WHEN notification_outbox.status IN ('pending', 'retry')
-                            AND notification_outbox.platform = excluded.platform
-                            AND notification_outbox.account_id IS excluded.account_id
-                            AND notification_outbox.target_type = excluded.target_type
-                            AND notification_outbox.target_id = excluded.target_id
-                            AND notification_outbox.channel = excluded.channel
-                            AND notification_outbox.kind = excluded.kind
-                            AND notification_outbox.payload_json = excluded.payload_json
-                            THEN notification_outbox.delivered_parts
-                        ELSE 0
-                    END,
-                    max_attempts = CASE
-                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.max_attempts
-                        ELSE excluded.max_attempts
-                    END,
-                    next_attempt_at = CASE
-                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.next_attempt_at
-                        ELSE NULL
-                    END,
-                    locked_by = CASE
-                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.locked_by
-                        ELSE NULL
-                    END,
-                    locked_at = CASE
-                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.locked_at
-                        ELSE NULL
-                    END,
-                    last_error = CASE
-                        WHEN notification_outbox.status = 'sending' THEN notification_outbox.last_error
-                        ELSE NULL
-                    END,
-                    updated_at = excluded.updated_at,
-                    cancelled_at = CASE
-                        WHEN notification_outbox.status = 'cancelled' AND ?15 <> 0 THEN NULL
-                        ELSE notification_outbox.cancelled_at
-                    END
-                 WHERE notification_outbox.status <> 'sent'",
-                params![
-                    request.source_type,
-                    request.source_id,
-                    request.dedupe_key,
-                    request.target.platform,
-                    request.target.account_id,
-                    request.target.target_type.as_str(),
-                    request.target.target_id,
-                    request.channel,
-                    request.kind,
-                    payload_json,
-                    request.scheduled_at,
-                    NotificationStatus::Pending.as_str(),
-                    i64::from(request.max_attempts),
-                    now,
-                    if request.reactivate_cancelled { 1 } else { 0 },
-                ],
-            )
-            .map_err(NotificationError::from_sql)?;
+            upsert_on_connection(&conn, &request)?;
         }
         self.get_by_dedupe_key(&request.dedupe_key)?
             .ok_or_else(|| NotificationError::io("notification disappeared after upsert"))
@@ -296,25 +185,7 @@ impl NotificationOutboxStore {
         source_id: &str,
     ) -> Result<usize, NotificationError> {
         let conn = self.connection()?;
-        let now = now_iso_cn();
-        conn.execute(
-            "UPDATE notification_outbox
-             SET status = ?3,
-                 updated_at = ?4,
-                 cancelled_at = ?4,
-                 locked_by = NULL,
-                 locked_at = NULL
-             WHERE source_type = ?1
-               AND source_id = ?2
-               AND status IN ('pending', 'retry', 'sending', 'failed')",
-            params![
-                source_type,
-                source_id,
-                NotificationStatus::Cancelled.as_str(),
-                now,
-            ],
-        )
-        .map_err(NotificationError::from_sql)
+        cancel_by_source_on_connection(&conn, source_type, source_id)
     }
 
     /// 取消某类业务来源仍未终结的全部通知。用于业务明确无法跨进程恢复时清理旧快照；
@@ -422,6 +293,48 @@ impl NotificationOutboxStore {
             )
             .map_err(NotificationError::from_sql)?;
         Ok(write_outcome(changed))
+    }
+
+    /// 外部推送开始前复核当前分段的投递许可。
+    ///
+    /// Worker 领取后会把任务保留在内存中；业务取消或过期租约接管可能在真正调用平台
+    /// 之前改变数据库状态，因此不能只信任领取时的快照。
+    pub fn delivery_state(
+        &self,
+        id: i64,
+        worker_id: &str,
+        expected_delivered_parts: u32,
+    ) -> Result<NotificationDeliveryState, NotificationError> {
+        let conn = self.connection()?;
+        let state = conn
+            .query_row(
+                "SELECT status, locked_by, delivered_parts
+                 FROM notification_outbox
+                 WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, u32>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(NotificationError::from_sql)?;
+        let Some((status, locked_by, delivered_parts)) = state else {
+            return Ok(NotificationDeliveryState::LeaseLost);
+        };
+        if status == NotificationStatus::Cancelled.as_str() {
+            return Ok(NotificationDeliveryState::Cancelled);
+        }
+        if status == NotificationStatus::Sending.as_str()
+            && locked_by.as_deref() == Some(worker_id)
+            && delivered_parts == expected_delivered_parts
+        {
+            return Ok(NotificationDeliveryState::Ready);
+        }
+        Ok(NotificationDeliveryState::LeaseLost)
     }
 
     /// 在平台确认当前分段成功后推进持久化进度。条件更新保证重入时不会跳段。
@@ -550,6 +463,164 @@ impl NotificationOutboxStore {
             .connection()
             .map_err(NotificationError::from_database)
     }
+}
+
+/// 让需要跨领域原子写入的业务在自己的 SQLite 事务中复用同一套 Outbox 语义。
+/// 调用方只能传入已经由领域层构造并校验的通知快照，不能自行复制 SQL。
+pub(crate) fn upsert_on_connection(
+    conn: &Connection,
+    request: &NotificationUpsert,
+) -> Result<(), NotificationError> {
+    validate_upsert(request)?;
+    let payload_json = serde_json::to_string(&request.payload)
+        .map_err(|err| NotificationError::bad_request(format!("invalid payload: {err}")))?;
+    let now = now_iso_cn();
+    conn.execute(
+        "INSERT INTO notification_outbox (
+            source_type, source_id, dedupe_key, platform, account_id, target_type, target_id,
+            channel, kind, payload_json, scheduled_at, status, attempts, max_attempts,
+            next_attempt_at, locked_by, locked_at, sent_at, last_error,
+            created_at, updated_at, cancelled_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13, NULL, NULL, NULL, NULL, NULL, ?14, ?14, NULL)
+         ON CONFLICT(dedupe_key) DO UPDATE SET
+            source_type = CASE
+                WHEN notification_outbox.status = 'sending' THEN notification_outbox.source_type
+                ELSE excluded.source_type
+            END,
+            source_id = CASE
+                WHEN notification_outbox.status = 'sending' THEN notification_outbox.source_id
+                ELSE excluded.source_id
+            END,
+            platform = CASE
+                WHEN notification_outbox.status = 'sending' THEN notification_outbox.platform
+                ELSE excluded.platform
+            END,
+            account_id = CASE
+                WHEN notification_outbox.status = 'sending' THEN notification_outbox.account_id
+                ELSE excluded.account_id
+            END,
+            target_type = CASE
+                WHEN notification_outbox.status = 'sending' THEN notification_outbox.target_type
+                ELSE excluded.target_type
+            END,
+            target_id = CASE
+                WHEN notification_outbox.status = 'sending' THEN notification_outbox.target_id
+                ELSE excluded.target_id
+            END,
+            channel = CASE
+                WHEN notification_outbox.status = 'sending' THEN notification_outbox.channel
+                ELSE excluded.channel
+            END,
+            kind = CASE
+                WHEN notification_outbox.status = 'sending' THEN notification_outbox.kind
+                ELSE excluded.kind
+            END,
+            payload_json = CASE
+                WHEN notification_outbox.status = 'sending' THEN notification_outbox.payload_json
+                ELSE excluded.payload_json
+            END,
+            scheduled_at = CASE
+                WHEN notification_outbox.status = 'sending' THEN notification_outbox.scheduled_at
+                ELSE excluded.scheduled_at
+            END,
+            status = CASE
+                WHEN notification_outbox.status = 'sent' THEN notification_outbox.status
+                WHEN notification_outbox.status = 'sending' THEN notification_outbox.status
+                WHEN notification_outbox.status = 'cancelled' AND ?15 = 0 THEN notification_outbox.status
+                ELSE 'pending'
+            END,
+            attempts = CASE
+                WHEN notification_outbox.status = 'sent' THEN notification_outbox.attempts
+                WHEN notification_outbox.status = 'sending' THEN notification_outbox.attempts
+                WHEN notification_outbox.status = 'cancelled' AND ?15 = 0 THEN notification_outbox.attempts
+                ELSE 0
+            END,
+            delivered_parts = CASE
+                WHEN notification_outbox.status = 'sending'
+                    THEN notification_outbox.delivered_parts
+                WHEN notification_outbox.status IN ('pending', 'retry')
+                    AND notification_outbox.platform = excluded.platform
+                    AND notification_outbox.account_id IS excluded.account_id
+                    AND notification_outbox.target_type = excluded.target_type
+                    AND notification_outbox.target_id = excluded.target_id
+                    AND notification_outbox.channel = excluded.channel
+                    AND notification_outbox.kind = excluded.kind
+                    AND notification_outbox.payload_json = excluded.payload_json
+                    THEN notification_outbox.delivered_parts
+                ELSE 0
+            END,
+            max_attempts = CASE
+                WHEN notification_outbox.status = 'sending' THEN notification_outbox.max_attempts
+                ELSE excluded.max_attempts
+            END,
+            next_attempt_at = CASE
+                WHEN notification_outbox.status = 'sending' THEN notification_outbox.next_attempt_at
+                ELSE NULL
+            END,
+            locked_by = CASE
+                WHEN notification_outbox.status = 'sending' THEN notification_outbox.locked_by
+                ELSE NULL
+            END,
+            locked_at = CASE
+                WHEN notification_outbox.status = 'sending' THEN notification_outbox.locked_at
+                ELSE NULL
+            END,
+            last_error = CASE
+                WHEN notification_outbox.status = 'sending' THEN notification_outbox.last_error
+                ELSE NULL
+            END,
+            updated_at = excluded.updated_at,
+            cancelled_at = CASE
+                WHEN notification_outbox.status = 'cancelled' AND ?15 <> 0 THEN NULL
+                ELSE notification_outbox.cancelled_at
+            END
+         WHERE notification_outbox.status <> 'sent'",
+        params![
+            request.source_type.as_str(),
+            request.source_id.as_str(),
+            request.dedupe_key.as_str(),
+            request.target.platform.as_str(),
+            request.target.account_id.as_deref(),
+            request.target.target_type.as_str(),
+            request.target.target_id.as_str(),
+            request.channel.as_str(),
+            request.kind.as_str(),
+            payload_json,
+            request.scheduled_at.as_str(),
+            NotificationStatus::Pending.as_str(),
+            i64::from(request.max_attempts),
+            now,
+            if request.reactivate_cancelled { 1 } else { 0 },
+        ],
+    )
+    .map(|_| ())
+    .map_err(NotificationError::from_sql)
+}
+
+pub(crate) fn cancel_by_source_on_connection(
+    conn: &Connection,
+    source_type: &str,
+    source_id: &str,
+) -> Result<usize, NotificationError> {
+    let now = now_iso_cn();
+    conn.execute(
+        "UPDATE notification_outbox
+         SET status = ?3,
+             updated_at = ?4,
+             cancelled_at = ?4,
+             locked_by = NULL,
+             locked_at = NULL
+         WHERE source_type = ?1
+           AND source_id = ?2
+           AND status IN ('pending', 'retry', 'sending', 'failed')",
+        params![
+            source_type,
+            source_id,
+            NotificationStatus::Cancelled.as_str(),
+            now,
+        ],
+    )
+    .map_err(NotificationError::from_sql)
 }
 
 fn write_outcome(changed: usize) -> NotificationWriteOutcome {

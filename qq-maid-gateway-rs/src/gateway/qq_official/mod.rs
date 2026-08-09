@@ -5,3 +5,4 @@
 
 pub(crate) mod c2c;
 pub(crate) mod group;
+mod voice;

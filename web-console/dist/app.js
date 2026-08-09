@@ -1,11 +1,58 @@
-import { ConsoleApiError, fetchBootstrap, fetchConsoleStatus, fetchSession, issuePreAuth, initializeAdmin, loginAdmin, logoutAdmin, requestPasswordReset, resetAdminPassword, } from "./api.js";
+import { ConsoleApiError, fetchBootstrap, fetchConsoleStatus, fetchSession, fetchUserPreferences, listUserFiles, readUserFile, updateUserPreferences, uploadUserFile, deleteUserFile, issuePreAuth, initializeAdmin, loginAdmin, logoutAdmin, requestPasswordReset, resetAdminPassword, } from "./api.js";
 import { requiredElement, setText, togglePasswordReveal } from "./dom.js";
 import { renderDashboard } from "./views/dashboard.js";
 import { bindMarkdownPreview } from "./views/markdown.js";
 import { renderPlatforms } from "./views/platforms.js";
 import { renderStorage } from "./views/storage.js";
-import { initializeConfiguration } from "./views/configuration.js";
-const refreshButton = requiredElement("refresh-status", HTMLButtonElement);
+import { initializeConfiguration } from "./views/configuration/configuration.js";
+import { createThemeController } from "./theme.js";
+import { bindConsoleNavigation } from "./console-shell.js";
+import { initializeTodo } from "./views/todo/todo.js";
+import { disposeKnowledge, initializeKnowledge } from "./views/knowledge/knowledge.js";
+import { createBackgroundController, installBackgroundConsoleUnlock, unlockPreferencePatch } from "./background.js";
+import { cacheFileBlob, clearFileBlobCache, deleteCachedFileBlob, readCachedFileBlob } from "./file-cache.js";
+let localStorage = null;
+try {
+    localStorage = window.localStorage;
+}
+catch (cause) {
+    if (!(cause instanceof Error))
+        throw cause;
+}
+const themeController = createThemeController(localStorage, document.documentElement);
+const backgroundController = createBackgroundController(document.documentElement, document, (file, forceRefresh) => readFileWithCache(file, forceRefresh), async () => {
+    if (!userDataController)
+        return;
+    try {
+        // 解锁与切换特殊背景一次提交：kuliantnt、backgroundMode、activeBackgroundFileId 三个字段
+        // 同一次写入，避免刷新后只保留解锁标记而背景仍是旧的自定义背景。
+        await userDataController.updatePreferences(unlockPreferencePatch());
+    }
+    catch (cause) {
+        setText("configuration-result", cause instanceof Error ? cause.message : "特殊背景解锁状态保存失败");
+        // 持久化失败必须回滚本地 special，控制器据此恢复解锁前的背景，避免服务端与本地分裂。
+        throw cause;
+    }
+});
+installBackgroundConsoleUnlock(window, backgroundController);
+/** 优先读本地缓存；未命中或强制刷新时走现有 POST 读取，并把结果尽力写回缓存。 */
+async function readFileWithCache(file, forceRefresh) {
+    if (!forceRefresh) {
+        const cached = await readCachedFileBlob(file.url);
+        if (cached)
+            return cached;
+    }
+    const blob = await readUserFile({
+        fileId: file.fileId,
+        filename: file.filename,
+        contentType: "image/*",
+        size: 0,
+        createdAt: "",
+        url: file.url,
+    });
+    void cacheFileBlob(file.url, blob);
+    return blob;
+}
 const statusError = requiredElement("status-error", HTMLElement);
 const authForm = requiredElement("auth-form", HTMLFormElement);
 const logoutButton = requiredElement("logout", HTMLButtonElement);
@@ -13,8 +60,9 @@ let bootstrapStatus = null;
 let authMode = "login";
 let appBound = false;
 let autoRefreshTimer;
+let refreshInFlight = false;
+let userDataController = null;
 const AUTO_REFRESH_INTERVAL_MS = 30_000;
-refreshButton.addEventListener("click", () => void refreshStatus());
 authForm.addEventListener("submit", (event) => {
     event.preventDefault();
     void submitAuth();
@@ -30,44 +78,25 @@ requiredElement("console-toast", HTMLElement).addEventListener("click", (event) 
     event.currentTarget.hidden = true;
 });
 bindAutoRefresh();
+bindConsoleNavigation(backgroundController);
 void initialize();
 function bindAutoRefresh() {
     const toggle = requiredElement("auto-refresh", HTMLInputElement);
     toggle.addEventListener("change", () => {
-        window.clearInterval(autoRefreshTimer);
-        autoRefreshTimer = undefined;
-        if (!toggle.checked)
-            return;
-        autoRefreshTimer = window.setInterval(() => {
-            // 页面不可见或手动刷新进行中时跳过，避免叠加请求。
-            if (document.visibilityState === "visible" && !refreshButton.disabled)
-                void refreshStatus();
-        }, AUTO_REFRESH_INTERVAL_MS);
+        toggle.checked ? startAutoRefresh() : stopAutoRefresh();
     });
+}
+function startAutoRefresh() {
+    window.clearInterval(autoRefreshTimer);
+    autoRefreshTimer = window.setInterval(() => {
+        if (document.visibilityState === "visible")
+            void refreshStatus();
+    }, AUTO_REFRESH_INTERVAL_MS);
 }
 function stopAutoRefresh() {
     window.clearInterval(autoRefreshTimer);
     autoRefreshTimer = undefined;
     requiredElement("auto-refresh", HTMLInputElement).checked = false;
-}
-/** 导航 scrollspy：滚动时高亮当前视口内区块对应的导航项。 */
-function bindNavSpy() {
-    const links = [...document.querySelectorAll(".nav a[href^='#']")];
-    if (links.length === 0 || !("IntersectionObserver" in window))
-        return;
-    const observer = new IntersectionObserver((entries) => {
-        for (const entry of entries) {
-            if (!entry.isIntersecting)
-                continue;
-            for (const link of links)
-                link.classList.toggle("active", link.hash.slice(1) === entry.target.id);
-        }
-    }, { rootMargin: "-30% 0px -60% 0px" });
-    for (const link of links) {
-        const section = document.getElementById(link.hash.slice(1));
-        if (section)
-            observer.observe(section);
-    }
 }
 function clearCredentialInput(inputId, revealButtonId) {
     const input = requiredElement(inputId, HTMLInputElement);
@@ -118,10 +147,10 @@ function renderAuth(status) {
     reset.hidden = !status.initialized;
     reset.textContent = resetting ? "返回密码登录" : "重置管理员密码";
     setText("bootstrap-help", resetting
-        ? `请在运行目录读取 ${status.tokenFile}；同一个短时单次重置令牌也只在新生成时输出一次到控制台。重置成功后令牌与旧管理员会话全部失效。`
+        ? `请在运行目录读取 ${status.tokenFile}；可粘贴完整令牌字符串或仅粘贴 token。同一个短时单次重置令牌也只在新生成时输出一次到控制台。重置成功后令牌与旧管理员会话全部失效。`
         : status.initialized
             ? "管理员会话与聊天 session 相互独立。"
-            : `请在运行目录读取 ${status.tokenFile}；同一个短时单次令牌只在新生成时输出一次到控制台，使用成功后立即失效。`);
+            : `请在运行目录读取 ${status.tokenFile}；可粘贴完整令牌字符串或仅粘贴 token。同一个短时单次令牌只在新生成时输出一次到控制台，使用成功后立即失效。`);
 }
 async function submitAuth() {
     const username = requiredElement("auth-username", HTMLInputElement).value;
@@ -181,16 +210,76 @@ async function showConsole(username) {
     for (const item of document.querySelectorAll("[data-authenticated]"))
         item.hidden = false;
     setText("admin-username", username);
+    requiredElement("auto-refresh", HTMLInputElement).checked = true;
+    startAutoRefresh();
     if (!appBound) {
         bindMarkdownPreview();
-        bindNavSpy();
         appBound = true;
     }
-    await Promise.all([refreshStatus(), refreshConfiguration()]);
+    await Promise.all([refreshStatus(), hydrateUserData()]);
+    await refreshConfiguration();
+    await initializeTodo();
+    await initializeKnowledge();
+}
+async function hydrateUserData() {
+    try {
+        const [preferences, files] = await Promise.all([fetchUserPreferences(), listUserFiles()]);
+        // 服务端仅保存自定义色；主题预设继续沿用认证前从 localStorage 恢复的选择。
+        themeController.hydrate({
+            preset: themeController.current().preset,
+            customColors: preferences.customColors,
+        });
+        await backgroundController.hydrate({
+            fileIds: preferences.backgroundFileIds,
+            activeFileId: preferences.activeBackgroundFileId,
+            mode: preferences.backgroundMode,
+            kuliantnt: preferences.kuliantnt,
+        }, files);
+        let currentPreferences = preferences;
+        let currentFiles = files;
+        const dataController = {
+            get preferences() { return currentPreferences; },
+            get files() { return currentFiles; },
+            updatePreferences: async (patch) => {
+                currentPreferences = await updateUserPreferences(patch);
+                return currentPreferences;
+            },
+            uploadFile: async (file) => {
+                const uploaded = await uploadUserFile(file);
+                currentFiles = [...currentFiles, uploaded];
+                return uploaded;
+            },
+            deleteFile: async (file) => {
+                await deleteUserFile(file.fileId);
+                currentFiles = currentFiles.filter((candidate) => candidate.fileId !== file.fileId);
+                void deleteCachedFileBlob(file.url);
+                // 删除后以服务端返回的完整偏好为准，避免乐观更新与真实状态不一致。
+                currentPreferences = await fetchUserPreferences();
+            },
+        };
+        userDataController = dataController;
+        try {
+            // 认证成功后服务端偏好是唯一权威：把旧 cookie 一次性迁移进服务端偏好并清理。
+            await backgroundController.migrateFromLegacy({
+                kuliantnt: preferences.kuliantnt,
+                backgroundMode: preferences.backgroundMode,
+            }, async (patch) => {
+                currentPreferences = await dataController.updatePreferences(patch);
+            });
+        }
+        catch (cause) {
+            setText("configuration-result", cause instanceof Error ? cause.message : "背景解锁状态迁移失败");
+        }
+    }
+    catch (cause) {
+        userDataController = null;
+        backgroundController.dispose();
+        setText("configuration-result", cause instanceof Error ? cause.message : "用户界面偏好加载失败");
+    }
 }
 async function refreshConfiguration() {
     try {
-        await initializeConfiguration();
+        await initializeConfiguration(themeController, backgroundController, userDataController);
     }
     catch (cause) {
         setText("configuration-result", cause instanceof Error ? cause.message : "配置加载失败");
@@ -201,6 +290,10 @@ async function logout() {
         await logoutAdmin();
     }
     finally {
+        disposeKnowledge();
+        backgroundController.dispose();
+        void clearFileBlobCache();
+        userDataController = null;
         stopAutoRefresh();
         bootstrapStatus = null;
         authMode = "login";
@@ -209,8 +302,9 @@ async function logout() {
     }
 }
 async function refreshStatus() {
-    refreshButton.disabled = true;
-    refreshButton.textContent = "刷新中…";
+    if (refreshInFlight)
+        return;
+    refreshInFlight = true;
     statusError.textContent = "";
     try {
         const status = await fetchConsoleStatus();
@@ -223,7 +317,6 @@ async function refreshStatus() {
         statusError.textContent = cause instanceof Error ? cause.message : "状态刷新失败";
     }
     finally {
-        refreshButton.disabled = false;
-        refreshButton.textContent = "手动刷新";
+        refreshInFlight = false;
     }
 }

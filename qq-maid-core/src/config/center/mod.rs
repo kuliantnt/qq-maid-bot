@@ -23,7 +23,9 @@ use toml::Value;
 
 use crate::{config::AgentRuntimeConfig, storage::database::SqliteDatabase};
 
-pub use agent_file::{AgentConfigChange, AgentConfigFile, AgentConfigSnapshot};
+pub use agent_file::{
+    AgentConfigChange, AgentConfigFile, AgentConfigSnapshot, AgentProviderUpdate,
+};
 pub use field::{
     ManagedConfigApplyMode, ManagedConfigField, ManagedConfigSensitivity, ManagedConfigValueType,
 };
@@ -272,10 +274,19 @@ impl ConfigCenter {
             let managed_value = managed.values.get(field.key);
             let has_secret = secret_revisions.contains_key(field.key);
             let overridden = external.is_some() && (managed_value.is_some() || has_secret);
+            let deployment_disabled =
+                external.is_some_and(|value| is_external_console_disable_override(field, value));
 
             let (source, configured, value) =
                 if field.sensitivity == ManagedConfigSensitivity::Secret && has_secret {
                     (ConfigValueSource::EncryptedSecret, true, None)
+                } else if deployment_disabled {
+                    let raw = external.expect("deployment disable requires external value");
+                    (
+                        ConfigValueSource::Environment,
+                        true,
+                        Some(self.registry.parse_environment_value(field, raw)?),
+                    )
                 } else if let Some(value) = managed_value {
                     (ConfigValueSource::ManagedToml, true, Some(value.clone()))
                 } else if let Some(raw) = external {
@@ -305,7 +316,12 @@ impl ConfigCenter {
                 .then(|| managed_value.cloned())
                 .flatten();
             let running_value = if field.sensitivity == ManagedConfigSensitivity::Public {
-                if let Some(value) = self.running_managed.values.get(field.key) {
+                if deployment_disabled {
+                    Some(self.registry.parse_environment_value(
+                        field,
+                        external.expect("deployment disable requires external value"),
+                    )?)
+                } else if let Some(value) = self.running_managed.values.get(field.key) {
                     Some(value.clone())
                 } else if let Some(raw) = external {
                     Some(self.registry.parse_environment_value(field, raw)?)
@@ -515,6 +531,13 @@ impl ConfigCenter {
             match field.sensitivity {
                 ManagedConfigSensitivity::Public => {
                     if let Some(value) = managed_values.get(field.key) {
+                        // Web 控制台是部署面的安全开关：即使受管配置曾保存为开启，
+                        // 运维在进程环境或 .env 中显式关闭后也必须立即保持关闭。
+                        if external_value(external_environment, field)
+                            .is_some_and(|value| is_external_console_disable_override(field, value))
+                        {
+                            continue;
+                        }
                         remove_external_field_values(&mut resolved, field);
                         resolved.insert(
                             field.env_name.to_owned(),
@@ -604,4 +627,12 @@ fn external_value<'a>(
                 .get(name)
                 .filter(|value| !value.trim().is_empty())
         })
+}
+
+fn is_external_console_disable_override(field: &ManagedConfigField, value: &str) -> bool {
+    field.env_name == "WEB_CONSOLE_ENABLED"
+        && matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no" | "disabled" | "none"
+        )
 }

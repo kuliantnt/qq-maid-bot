@@ -18,7 +18,7 @@ jobs:
   # ==========================================================================
   # preflight：在矩阵构建前完成所有 tag 合法性检查
   #   - workflow_dispatch：直接放行构建，但不发布
-  #   - tag push：校验 master 祖先 + 非纯文档，任一不通过则拒绝
+  #   - tag push：校验 master 祖先 + 两个版本 tag 之间存在非纯文档变更
   # ==========================================================================
   preflight:
     name: Preflight check
@@ -26,6 +26,7 @@ jobs:
     outputs:
       allow_build: ${{ steps.check.outputs.allow_build }}
       allow_publish: ${{ steps.check.outputs.allow_publish }}
+      tag_commit: ${{ steps.check.outputs.tag_commit }}
 
     steps:
       - name: Checkout
@@ -61,6 +62,7 @@ jobs:
           # 1. 安全解析 tag 为 commit（兼容轻量 tag 和 annotated tag）
           tag_commit=$(git rev-list -n 1 "${TAG_NAME}")
           echo "Tag ${TAG_NAME} resolves to commit ${tag_commit}"
+          echo "tag_commit=${tag_commit}" >> "$GITHUB_OUTPUT"
 
           # 2. 校验 tag commit 属于 master 祖先
           #    使用完整 refspec 强制更新 origin/master，避免 --depth=1 等浅拉取
@@ -73,20 +75,27 @@ jobs:
           fi
           echo "Tag ${TAG_NAME} is on master ✓"
 
-          # 3. 获取第一父提交（用于 diff）
-          #    对 merge commit，^1 是 master 在被合并前的 HEAD
-          #    对普通 commit，^1 是上一个 commit
-          parent=$(git rev-parse "${tag_commit}^1" 2>/dev/null) || true
-          if [[ -z "${parent}" ]]; then
-            echo "::error::无法获取 tag commit 的父提交（可能是 root commit），拒绝构建"
-            exit 1
+          # 3. 找到当前 tag 之前、且已经位于当前 master 历史中的上一版 tag。
+          #    发布提交通常只修改 CHANGELOG.md；不能只比较它与第一父提交，
+          #    否则会把上一版以来已经合并的代码误判为纯文档发布。
+          previous_tag=$(git tag --merged "${tag_commit}" --list 'v*' --sort=-version:refname \
+            | awk -v current="${TAG_NAME}" '$0 != current { print; exit }')
+          if [[ -n "${previous_tag}" ]]; then
+            compare_base="${previous_tag}"
+            echo "Previous release tag: ${previous_tag}"
+          else
+            compare_base=$(git rev-parse "${tag_commit}^1" 2>/dev/null) || true
+            if [[ -z "${compare_base}" ]]; then
+              echo "::error::无法获取上一版 tag 或 tag commit 的父提交，拒绝构建"
+              exit 1
+            fi
+            echo "No previous release tag; using parent commit: ${compare_base}"
           fi
-          echo "Parent commit: ${parent}"
 
-          # 4. diff 第一父提交 .. tag commit
-          changed_files=$(git diff --name-only "${parent}" "${tag_commit}")
+          # 4. 比较上一版 tag（或首次发布的父提交）到当前 tag 的完整变更。
+          changed_files=$(git diff --name-only "${compare_base}" "${tag_commit}")
           if [[ -z "${changed_files}" ]]; then
-            echo "::error::tag commit 相对父提交无变更文件，拒绝构建"
+            echo "::error::tag commit 相对比较基线无变更文件，拒绝构建"
             exit 1
           fi
           echo "Changed files:"
@@ -118,8 +127,127 @@ jobs:
           echo "allow_build=${allow_build}" >> "$GITHUB_OUTPUT"
           echo "allow_publish=${allow_publish}" >> "$GITHUB_OUTPUT"
 
+  # Docker 正式标签只晋级 master Container workflow 已发布的 commit 镜像；
+  # 测试环境验证是否为硬门禁由独立仓库变量控制。
+  # 此 job 不执行 docker build；同一 manifest 同步到 GHCR 与 Docker Hub。
+  promote-container:
+    name: Promote existing container digest
+    needs: preflight
+    if: |
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.preflight.outputs.allow_publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    env:
+      GHCR_REPOSITORY: ghcr.io/kuliantnt/qq-maid-bot
+      DOCKERHUB_REPOSITORY: docker.io/kuliantnt/qq-maid-bot
+      REQUIRE_TEST_DEPLOY_FOR_RELEASE: ${{ vars.REQUIRE_TEST_DEPLOY_FOR_RELEASE || 'false' }}
+
+    steps:
+      - name: Checkout release gate
+        uses: actions/checkout@v7
+
+      - name: Verify container workflow and optional test deployment gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_COMMIT: ${{ needs.preflight.outputs.tag_commit }}
+        run: bash scripts/verify-container-release.sh
+
+      - name: Validate Docker Hub credentials
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          for name in DOCKERHUB_USERNAME DOCKERHUB_TOKEN; do
+            [[ -n "${!name}" ]] || {
+              echo "::error::缺少正式镜像发布 Secret: ${name}"
+              exit 1
+            }
+          done
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up crane
+        uses: imjasonh/setup-crane@v0.4
+
+      - name: Promote existing commit manifest
+        shell: bash
+        env:
+          TAG_COMMIT: ${{ needs.preflight.outputs.tag_commit }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          trap 'echo "::error::正式容器双渠道发布未完成；当前结果不能视为 GHCR 与 Docker Hub 均发布成功"' ERR
+          if [[ ! "${TAG_NAME}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::容器正式晋级仅接受 vX.Y.Z 稳定版本 tag"
+            exit 1
+          fi
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+          source="${GHCR_REPOSITORY}:sha-${TAG_COMMIT}"
+          digest="$(crane digest "${source}")" || {
+            echo "::error::commit 镜像不存在：${source}；tag 阶段不会重新构建"
+            exit 1
+          }
+
+          for platform in linux/amd64 linux/arm64; do
+            revision="$(crane config --platform "${platform}" "${GHCR_REPOSITORY}@${digest}" \
+              | jq -r '.config.Labels["org.opencontainers.image.revision"] // ""')"
+            [[ "${revision}" == "${TAG_COMMIT}" ]] || {
+              echo "::error::${platform} 镜像 revision=${revision} 与 tag commit=${TAG_COMMIT} 不一致"
+              exit 1
+            }
+          done
+
+          # crane copy 直接复制 master 阶段已经构建的 commit manifest，不触发 Docker build。
+          crane copy "${GHCR_REPOSITORY}@${digest}" "${DOCKERHUB_REPOSITORY}:${TAG_NAME}"
+          dockerhub_digest="$(crane digest "${DOCKERHUB_REPOSITORY}:${TAG_NAME}")"
+          [[ "${dockerhub_digest}" == "${digest}" ]] || {
+            echo "::error::Docker Hub manifest digest=${dockerhub_digest} 与已测试 GHCR digest=${digest} 不一致"
+            exit 1
+          }
+
+          for tag in "${TAG_NAME}" "${major}.${minor}" "${major}" latest; do
+            crane tag "${GHCR_REPOSITORY}@${digest}" "${tag}"
+            crane tag "${DOCKERHUB_REPOSITORY}@${dockerhub_digest}" "${tag}"
+            ghcr_tag_digest="$(crane digest "${GHCR_REPOSITORY}:${tag}")"
+            dockerhub_tag_digest="$(crane digest "${DOCKERHUB_REPOSITORY}:${tag}")"
+            [[ "${ghcr_tag_digest}" == "${digest}" ]] || {
+              echo "::error::GHCR 标签 ${tag} 的实际 manifest digest 不一致"
+              exit 1
+            }
+            [[ "${dockerhub_tag_digest}" == "${digest}" ]] || {
+              echo "::error::Docker Hub 标签 ${tag} 的实际 manifest digest 不一致"
+              exit 1
+            }
+          done
+
+          {
+            printf '%s\n' "GHCR manifest: \`${GHCR_REPOSITORY}@${digest}\`"
+            printf '%s\n' "Docker Hub manifest: \`${DOCKERHUB_REPOSITORY}@${dockerhub_digest}\`"
+            printf '%s\n' \
+              "tags: \`${TAG_NAME}\`, \`${major}.${minor}\`, \`${major}\`, \`latest\`"
+            printf '%s\n' "双渠道正式标签已逐项校验为同一实际 manifest digest。"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
   # ==========================================================================
-  # build-package：5 平台矩阵构建
+  # build-package：4 平台矩阵构建
   #   每个 Rust target 都使用对应架构的原生 GitHub-hosted runner，不做交叉编译
   #   仅当 preflight 输出 allow_build == 'true' 时执行
   # ==========================================================================
@@ -141,12 +269,6 @@ jobs:
           - target_triple: linux-aarch64
             build_target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-            archive_format: tar.gz
-            payload_profile: unix
-
-          - target_triple: macos-x86_64
-            build_target: x86_64-apple-darwin
-            os: macos-15-intel
             archive_format: tar.gz
             payload_profile: unix
 
@@ -236,7 +358,7 @@ jobs:
   # ==========================================================================
   publish-release:
     name: Publish GitHub Release
-    needs: [preflight, build-package]
+    needs: [preflight, build-package, promote-container]
     if: |
       startsWith(github.ref, 'refs/tags/v') &&
       needs.preflight.outputs.allow_publish == 'true'

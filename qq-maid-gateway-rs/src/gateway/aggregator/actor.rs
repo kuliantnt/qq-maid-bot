@@ -12,7 +12,7 @@ use tokio::{
     time::{Instant, sleep_until},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 use super::{
     batch::{
@@ -157,10 +157,10 @@ impl AggregatorActor {
         let reservation = match self.reserve_c2c_message(&message) {
             Ok(reservation) => reservation,
             Err(_) => {
-                debug!(
+                trace!(
                     scope_key = %mask_scope_key(&self.respond.scope_key_from_c2c_message(&message)),
                     message_id = %message.message_id,
-                    "duplicate C2C message ignored before aggregation dispatch"
+                    "重复的 C2C 消息在聚合分发前被忽略"
                 );
                 return Ok(());
             }
@@ -256,7 +256,7 @@ impl AggregatorActor {
                     scope_key = %mask_scope_key(&self.respond.scope_key_from_c2c_message(message)),
                     message_id = %message.message_id,
                     error = %error.log_summary(),
-                    "message aggregation classification failed; dispatching immediately"
+                    "消息聚合分类失败，将立即分发"
                 );
                 AggregationDecision::Immediate
             }
@@ -270,10 +270,10 @@ impl AggregatorActor {
         reservation: MessageReservation,
     ) -> anyhow::Result<()> {
         if self.is_duplicate_for_open_batch(&key, &message) {
-            debug!(
+            trace!(
                 scope_key = %mask_scope_key(&self.respond.scope_key_from_c2c_message(&message)),
                 message_id = %message.message_id,
-                "duplicate C2C message ignored by aggregation batch"
+                "消息聚合批次已忽略重复的 C2C 消息"
             );
             return Ok(());
         }
@@ -301,7 +301,7 @@ impl AggregatorActor {
                 scope_key = %mask_scope_key(&self.respond.scope_key_from_c2c_message(&message)),
                 active_keys = self.batches.len(),
                 max_active_keys = self.config.max_active_keys,
-                "message aggregation active key limit reached; dispatching immediately"
+                "消息聚合活动键达到上限，将立即分发"
             );
             return self
                 .dispatch_without_barrier_and_notify(
@@ -429,7 +429,7 @@ impl AggregatorActor {
                 stage,
                 aggregation_batch_size = batch_size,
                 reservation_released = true,
-                "message aggregation immediate dispatch failed; rolled back reservation"
+                "消息聚合立即分发失败，已回滚预留状态"
             );
             return Err(error);
         }
@@ -482,7 +482,7 @@ impl AggregatorActor {
                 stage,
                 aggregation_batch_size = batch_size,
                 reservation_released = true,
-                "message aggregation immediate dispatch failed; rolled back reservation"
+                "消息聚合立即分发失败，已回滚预留状态"
             );
             return Err(error);
         }
@@ -530,7 +530,7 @@ impl AggregatorActor {
             return;
         };
         if let Err(error) = self.flush_key(&key, reason, true).await {
-            warn!(error = %error, "message aggregation timer flush failed");
+            warn!(error = %error, "消息聚合定时刷新失败");
         }
     }
 
@@ -558,7 +558,7 @@ impl AggregatorActor {
                 stage = reason.as_str(),
                 aggregation_batch_size = batch_size,
                 reservation_released = true,
-                "message aggregation flush failed; rolled back batch reservations"
+                "消息聚合刷新失败，已回滚批次预留状态"
             );
             if notify_on_failure && !self.shutting_down {
                 self.notify_failure_if_needed(&message, Some(&error)).await;
@@ -579,7 +579,7 @@ impl AggregatorActor {
                     scope_key = %mask_scope_key(&format!("private:{}", key.conversation_id)),
                     error = %error,
                     remaining_failed_batches = failed,
-                    "message aggregation shutdown flush failed"
+                    "消息聚合关闭时刷新失败"
                 );
             }
         }
@@ -587,7 +587,7 @@ impl AggregatorActor {
             warn!(
                 failed_batches = failed,
                 remaining_batches = self.batches.len(),
-                "message aggregation shutdown left unsubmitted batch messages"
+                "消息聚合关闭后仍有未提交的批次消息"
             );
         }
     }
@@ -637,7 +637,7 @@ impl AggregatorActor {
         match result {
             Some(Ok(event)) => self.handle_barrier_event(event),
             Some(Err(error)) if error.is_cancelled() => {}
-            Some(Err(error)) => warn!(error = %error, "message aggregation barrier task failed"),
+            Some(Err(error)) => warn!(error = %error, "消息聚合屏障任务失败"),
             None => {}
         }
     }
@@ -653,18 +653,18 @@ impl AggregatorActor {
             return;
         }
         let Some(queue) = self.barriers.get_mut(&event.key) else {
-            debug!(
+            trace!(
                 barrier_token = event.token,
                 barrier_status = ?event.status,
-                "message aggregation ignored stale barrier event"
+                "消息聚合已忽略过期的屏障事件"
             );
             return;
         };
         let Some(entry) = queue.iter_mut().find(|entry| entry.token == event.token) else {
-            debug!(
+            trace!(
                 barrier_token = event.token,
                 barrier_status = ?event.status,
-                "message aggregation ignored unknown barrier token"
+                "消息聚合已忽略未知的屏障 token"
             );
             return;
         };
@@ -673,13 +673,13 @@ impl AggregatorActor {
             warn!(
                 scope_key = %mask_scope_key(&format!("private:{}", event.key.conversation_id)),
                 barrier_token = event.token,
-                "message aggregation barrier processed ack closed; releasing scope barrier"
+                "消息聚合屏障处理确认通道已关闭，正在释放作用域屏障"
             );
         } else {
             debug!(
                 scope_key = %mask_scope_key(&format!("private:{}", event.key.conversation_id)),
                 barrier_token = event.token,
-                "message aggregation barrier resolved"
+                "消息聚合屏障已解除"
             );
         }
         self.release_resolved_barriers(&event.key);
@@ -710,10 +710,11 @@ impl AggregatorActor {
         message: &C2cMessage,
         error: Option<&DispatcherEnqueueError>,
     ) {
-        // Dispatcher 容量拒绝已排队“当前消息较多”提示；Aggregator 只补齐未提示的不可用类失败，避免同一次失败双提示。
+        // Dispatcher 已排队“当前消息较多”提示，或按群冷却合并了重复提示；
+        // Aggregator 只补齐未处理的不可用类失败，避免同一次失败双提示。
         if matches!(
             error,
-            Some(DispatcherEnqueueError::RejectedAndNotified { .. })
+            Some(DispatcherEnqueueError::RejectedAndHandled { .. })
         ) {
             return;
         }
@@ -726,7 +727,7 @@ impl AggregatorActor {
                 scope_key = %mask_scope_key(&self.respond.scope_key_from_c2c_message(message)),
                 message_id = %message.message_id,
                 error = %error,
-                "message aggregation local failure notification send failed"
+                "消息聚合本地失败通知发送失败"
             );
         }
     }
@@ -882,6 +883,7 @@ mod tests {
     fn key_for_builds_private_scope_key_parts() {
         let config = AppConfig {
             command_prefix: Default::default(),
+            voice: qq_maid_core::config::VoiceFeatureConfig::default(),
             qq_official_enabled: true,
             app_id: Some("appid".to_owned()),
             app_secret: Some("secret".to_owned()),
@@ -890,7 +892,6 @@ mod tests {
             api_base: "https://example.test".to_owned(),
             token_refresh_margin: Duration::from_secs(60),
             enable_markdown: false,
-            enable_image: false,
             enable_group_messages: true,
             verbose_log: false,
             member_detail_enrich_enabled: false,

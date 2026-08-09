@@ -1,8 +1,6 @@
-use crate::{
-    gateway::outbound::RenderProfile, markdown::MarkdownPayload, media::ImagePayload,
-    respond::RespondResponse,
-};
-use qq_maid_core::service::{AssistantOutput, OutputPart};
+use crate::{gateway::outbound::RenderProfile, markdown::MarkdownPayload, media::ImagePayload};
+use qq_maid_common::output_part::{AssistantOutput, OutputMedia, OutputPart};
+use qq_maid_core::service::CoreResponse;
 
 const UNSUPPORTED_IMAGE_FALLBACK_TEXT: &str = "当前平台暂不支持发送这类图片内容。";
 const UNSUPPORTED_FILE_FALLBACK_TEXT: &str = "当前平台暂不支持发送这类文件内容。";
@@ -78,22 +76,128 @@ impl OutboundMessage {
 }
 
 pub(crate) fn render_respond_response_for_profile(
-    response: &RespondResponse,
+    response: &CoreResponse,
     profile: &RenderProfile,
 ) -> Option<OutboundMessage> {
-    let output = response.output.as_ref()?;
-    render_assistant_output_for_profile(output, profile)
+    let rendered = render_respond_response_parts_for_profile(response, profile);
+    match rendered.as_slice() {
+        [] => None,
+        [single] => Some(single.clone()),
+        many => profile.supports_text.then(|| OutboundMessage::Text {
+            text: many
+                .iter()
+                .map(OutboundMessage::fallback_text)
+                .filter(|text| !text.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        }),
+    }
 }
 
-fn render_assistant_output_for_profile(
+pub(crate) fn render_respond_response_parts_for_profile(
+    response: &CoreResponse,
+    profile: &RenderProfile,
+) -> Vec<OutboundMessage> {
+    response
+        .output
+        .as_ref()
+        .map(|output| render_assistant_output_parts_for_profile(output, profile))
+        .unwrap_or_default()
+}
+
+fn render_assistant_output_parts_for_profile(
     output: &AssistantOutput,
     profile: &RenderProfile,
-) -> Option<OutboundMessage> {
+) -> Vec<OutboundMessage> {
+    if !output.parts.is_empty() {
+        // 存在 markdown 通道时，Text part 通常是同一正文的重复表示；优先渲染 Markdown，
+        // 避免群聊等非流式路径被 Provider Text part 抢先降级成纯文本。
+        let prefer_markdown = profile.supports_markdown && output_has_markdown_channel(output);
+        let mut rendered = Vec::new();
+        let mut saw_markdown_part = false;
+        for part in &output.parts {
+            match part {
+                OutputPart::Text { text }
+                    if profile.supports_text && !prefer_markdown && !text.trim().is_empty() =>
+                {
+                    rendered.push(OutboundMessage::Text { text: text.clone() });
+                }
+                OutputPart::Markdown { markdown } if !markdown.trim().is_empty() => {
+                    saw_markdown_part = true;
+                    let fallback_text =
+                        if output.parts.len() == 1 && !output.text_fallback.trim().is_empty() {
+                            output.text_fallback.clone()
+                        } else {
+                            qq_maid_common::markdown::to_chat_text(markdown)
+                        };
+                    if profile.supports_markdown {
+                        rendered.push(OutboundMessage::Markdown {
+                            markdown: MarkdownPayload::new(markdown.clone()),
+                            fallback_text,
+                        });
+                    } else if profile.supports_text {
+                        rendered.push(OutboundMessage::Text {
+                            text: fallback_text,
+                        });
+                    }
+                }
+                OutputPart::Image { media } => {
+                    let fallback_text = media.fallback_text_or(UNSUPPORTED_IMAGE_FALLBACK_TEXT);
+                    if profile.supports_image {
+                        if let Some(image) = image_payload(media) {
+                            rendered.push(OutboundMessage::Image {
+                                image,
+                                fallback_text,
+                            });
+                        } else if profile.supports_text {
+                            rendered.push(OutboundMessage::ImagePlaceholder { fallback_text });
+                        }
+                    } else if profile.supports_text {
+                        rendered.push(OutboundMessage::ImagePlaceholder { fallback_text });
+                    }
+                }
+                OutputPart::File { media } if profile.supports_text => {
+                    rendered.push(OutboundMessage::AttachmentPlaceholder {
+                        fallback_text: media.fallback_text_or(UNSUPPORTED_FILE_FALLBACK_TEXT),
+                    });
+                }
+                _ => {}
+            }
+        }
+        // parts 只有重复 Text、没有 Markdown part 时，补上 markdown 字段，避免直接落到纯文本。
+        if prefer_markdown
+            && !saw_markdown_part
+            && let Some(markdown) = output
+                .markdown
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        {
+            let fallback_text = if !output.text_fallback.trim().is_empty() {
+                output.text_fallback.clone()
+            } else {
+                qq_maid_common::markdown::to_chat_text(markdown)
+            };
+            rendered.insert(
+                0,
+                OutboundMessage::Markdown {
+                    markdown: MarkdownPayload::new(markdown),
+                    fallback_text,
+                },
+            );
+        }
+        if !rendered.is_empty() {
+            return rendered;
+        }
+    }
+
     // 用户可见纯文本 fallback（媒体缺文案时使用平台默认文案），全空时整体不渲染。
-    let fallback_text = output.render_text_fallback(
+    let Some(fallback_text) = output.render_text_fallback(
         UNSUPPORTED_IMAGE_FALLBACK_TEXT,
         UNSUPPORTED_FILE_FALLBACK_TEXT,
-    )?;
+    ) else {
+        return Vec::new();
+    };
 
     if profile.supports_markdown && output_has_markdown_channel(output) {
         // 按 parts 拼接 Markdown（媒体 fallback 同样使用平台默认文案）；非空才出 Markdown。
@@ -102,16 +206,53 @@ fn render_assistant_output_for_profile(
             UNSUPPORTED_FILE_FALLBACK_TEXT,
         );
         if !markdown.trim().is_empty() {
-            return Some(OutboundMessage::Markdown {
+            return vec![OutboundMessage::Markdown {
                 markdown: MarkdownPayload::new(markdown),
                 fallback_text,
-            });
+            }];
         }
     }
 
-    profile.supports_text.then_some(OutboundMessage::Text {
-        text: fallback_text,
-    })
+    profile
+        .supports_text
+        .then_some(OutboundMessage::Text {
+            text: fallback_text,
+        })
+        .into_iter()
+        .collect()
+}
+
+fn image_payload(media: &OutputMedia) -> Option<ImagePayload> {
+    if let Some(file_info) = media
+        .media_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(ImagePayload::new(file_info));
+    }
+    if let Some(data) = media
+        .data_base64
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(ImagePayload::from_base64(data));
+    }
+    if let Some(local_path) = media
+        .local_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(ImagePayload::from_local_path(local_path));
+    }
+    media
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ImagePayload::from_url)
 }
 
 fn output_has_markdown_channel(output: &AssistantOutput) -> bool {
@@ -127,7 +268,6 @@ fn output_has_markdown_channel(output: &AssistantOutput) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qq_maid_core::service::OutputMedia;
 
     fn render_profile(enable_markdown: bool, enable_image: bool) -> RenderProfile {
         RenderProfile {
@@ -139,34 +279,34 @@ mod tests {
         }
     }
 
-    fn response_with_body(text: Option<&str>, markdown: Option<&str>) -> RespondResponse {
+    fn response_with_body(text: Option<&str>, markdown: Option<&str>) -> CoreResponse {
         // 测试直接构造 Core->Gateway 的结构化 output，不再绕旧 text/markdown 字段。
         let output = match (text, markdown) {
-            (Some(text), Some(markdown)) => Some(qq_maid_core::service::AssistantOutput::markdown(
-                text, markdown,
-            )),
-            (Some(text), None) => Some(qq_maid_core::service::AssistantOutput::text(text)),
+            (Some(text), Some(markdown)) => Some(AssistantOutput::markdown(text, markdown)),
+            (Some(text), None) => Some(AssistantOutput::text(text)),
             _ => None,
         };
-        RespondResponse {
+        CoreResponse {
             output,
             handled: Some(true),
             session_id: None,
             command: None,
             diagnostics: None,
             visible_entity_snapshot: None,
+            delivery_hint: None,
         }
     }
 
-    fn response_with_empty_output() -> RespondResponse {
+    fn response_with_empty_output() -> CoreResponse {
         // 渲染层在 output 缺失时返回 None，对应旧空正文路径。
-        RespondResponse {
+        CoreResponse {
             output: None,
             handled: Some(true),
             session_id: None,
             command: None,
             diagnostics: None,
             visible_entity_snapshot: None,
+            delivery_hint: None,
         }
     }
 
@@ -280,7 +420,7 @@ mod tests {
 
     #[test]
     fn structured_output_parts_render_markdown_when_supported() {
-        let response = RespondResponse {
+        let response = CoreResponse {
             output: Some(AssistantOutput {
                 text_fallback: "plain fallback".to_owned(),
                 markdown: None,
@@ -298,20 +438,22 @@ mod tests {
             command: None,
             diagnostics: None,
             visible_entity_snapshot: None,
+            delivery_hint: None,
         };
 
+        // 已有 Markdown part 时，重复 Text part 不再单独出站，避免群聊先发一段纯文本。
         assert_eq!(
-            render_respond_response_for_profile(&response, &render_profile(true, true)),
-            Some(OutboundMessage::Markdown {
-                markdown: MarkdownPayload::new("hello *plain*\n\n## title\n- item"),
-                fallback_text: "plain fallback".to_owned(),
-            })
+            render_respond_response_parts_for_profile(&response, &render_profile(true, true)),
+            vec![OutboundMessage::Markdown {
+                markdown: MarkdownPayload::new("## title\n- item"),
+                fallback_text: "title\n· item".to_owned(),
+            }]
         );
     }
 
     #[test]
     fn structured_output_degrades_to_text_for_text_only_profile() {
-        let response = RespondResponse {
+        let response = CoreResponse {
             output: Some(AssistantOutput {
                 text_fallback: String::new(),
                 markdown: None,
@@ -332,6 +474,7 @@ mod tests {
             command: None,
             diagnostics: None,
             visible_entity_snapshot: None,
+            delivery_hint: None,
         };
 
         assert_eq!(
@@ -343,8 +486,8 @@ mod tests {
     }
 
     #[test]
-    fn structured_image_part_uses_fallback_text_even_when_image_supported() {
-        let response = RespondResponse {
+    fn structured_image_part_renders_real_image_when_supported() {
+        let response = CoreResponse {
             output: Some(AssistantOutput {
                 text_fallback: String::new(),
                 markdown: None,
@@ -361,19 +504,21 @@ mod tests {
             command: None,
             diagnostics: None,
             visible_entity_snapshot: None,
+            delivery_hint: None,
         };
 
         assert_eq!(
             render_respond_response_for_profile(&response, &render_profile(false, true)),
-            Some(OutboundMessage::Text {
-                text: "图片：天气雷达".to_owned(),
+            Some(OutboundMessage::Image {
+                image: ImagePayload::new("image-media-id"),
+                fallback_text: "图片：天气雷达".to_owned(),
             })
         );
     }
 
     #[test]
     fn unsupported_structured_part_uses_explicit_fallback_text() {
-        let response = RespondResponse {
+        let response = CoreResponse {
             output: Some(AssistantOutput {
                 text_fallback: String::new(),
                 markdown: None,
@@ -386,19 +531,20 @@ mod tests {
             command: None,
             diagnostics: None,
             visible_entity_snapshot: None,
+            delivery_hint: None,
         };
 
         assert_eq!(
             render_respond_response_for_profile(&response, &render_profile(true, true)),
-            Some(OutboundMessage::Text {
-                text: UNSUPPORTED_FILE_FALLBACK_TEXT.to_owned(),
+            Some(OutboundMessage::AttachmentPlaceholder {
+                fallback_text: UNSUPPORTED_FILE_FALLBACK_TEXT.to_owned(),
             })
         );
     }
 
     #[test]
     fn output_with_empty_parts_falls_back_to_text_fallback_and_markdown() {
-        let response = RespondResponse {
+        let response = CoreResponse {
             output: Some(AssistantOutput {
                 text_fallback: "output fallback".to_owned(),
                 markdown: Some("**output markdown**".to_owned()),
@@ -409,6 +555,7 @@ mod tests {
             command: None,
             diagnostics: None,
             visible_entity_snapshot: None,
+            delivery_hint: None,
         };
 
         assert_eq!(
@@ -417,6 +564,33 @@ mod tests {
                 markdown: MarkdownPayload::new("**output markdown**"),
                 fallback_text: "output fallback".to_owned(),
             })
+        );
+    }
+
+    #[test]
+    fn markdown_channel_wins_over_duplicate_text_parts() {
+        let response = CoreResponse {
+            output: Some(AssistantOutput {
+                text_fallback: "Markdown 测试".to_owned(),
+                markdown: Some("# Markdown 测试\n\n- **加粗**".to_owned()),
+                parts: vec![OutputPart::Text {
+                    text: "# Markdown 测试\n\n- **加粗**".to_owned(),
+                }],
+            }),
+            handled: Some(true),
+            session_id: None,
+            command: None,
+            diagnostics: None,
+            visible_entity_snapshot: None,
+            delivery_hint: None,
+        };
+
+        assert_eq!(
+            render_respond_response_parts_for_profile(&response, &render_profile(true, true)),
+            vec![OutboundMessage::Markdown {
+                markdown: MarkdownPayload::new("# Markdown 测试\n\n- **加粗**"),
+                fallback_text: "Markdown 测试".to_owned(),
+            }]
         );
     }
 }

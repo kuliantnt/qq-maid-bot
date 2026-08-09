@@ -84,7 +84,7 @@ async fn todo_pending_list_shows_reminder_without_due_time() {
 }
 
 #[tokio::test]
-async fn natural_and_slash_status_queries_use_same_visible_order() {
+async fn explicit_status_queries_remember_visible_order() {
     let service = test_service();
     let owner = TodoStore::owner(Some("u1"), "group:g1");
     service
@@ -92,9 +92,10 @@ async fn natural_and_slash_status_queries_use_same_visible_order() {
         .set_items_for_test(&owner, &status_list_items())
         .unwrap();
 
-    for (slash, natural, expected_ids) in [
-        ("/todo", "查看待办", vec!["3", "2", "1"]),
-        ("/todo done", "查看已完成待办", vec!["5", "4"]),
+    // 自然语言状态查询已不再走确定性短路；编号快照只由显式 /todo 命令或 Tool 回执写入。
+    for (slash, expected_ids) in [
+        ("/todo", vec!["3", "2", "1"]),
+        ("/todo done", vec!["5", "4"]),
     ] {
         let expected_ids = expected_ids
             .iter()
@@ -102,9 +103,6 @@ async fn natural_and_slash_status_queries_use_same_visible_order() {
             .collect::<Vec<_>>();
         service.respond(message(slash)).await.unwrap();
         assert_eq!(last_todo_result_ids(&service), expected_ids, "{slash}");
-
-        service.respond(message(natural)).await.unwrap();
-        assert_eq!(last_todo_result_ids(&service), expected_ids, "{natural}");
     }
 }
 

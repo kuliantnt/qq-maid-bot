@@ -12,14 +12,19 @@ use serde_json::json;
 use std::{convert::Infallible, net::SocketAddr};
 
 use crate::management::{
-    AdminAuthError, PREAUTH_COOKIE_NAME, SECURE_PREAUTH_COOKIE_NAME, SECURE_SESSION_COOKIE_NAME,
+    PREAUTH_COOKIE_NAME, SECURE_PREAUTH_COOKIE_NAME, SECURE_SESSION_COOKIE_NAME,
     SESSION_COOKIE_NAME,
 };
 
-use super::{admin_context, api_error, respond};
-use crate::http::routes::OpsHttpState;
+use super::{admin_context, respond};
+use crate::http::{
+    api::common::{
+        auth_error_response as auth_error, csrf_token, error_response as api_error, origin_allowed,
+        session_cookie,
+    },
+    routes::OpsHttpState,
+};
 
-const CSRF_HEADER: &str = "x-csrf-token";
 const COOKIE_MAX_AGE_SECONDS: i64 = 12 * 60 * 60;
 
 struct OptionalPeer(Option<SocketAddr>);
@@ -536,40 +541,6 @@ async fn auth_logout(State(state): State<OpsHttpState>, headers: HeaderMap) -> R
     respond(&state, &headers, response)
 }
 
-pub(super) fn origin_allowed(headers: &HeaderMap) -> bool {
-    let Some(origin) = headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-    else {
-        return true;
-    };
-    let Some(host) = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-    else {
-        return false;
-    };
-    url::Url::parse(origin)
-        .ok()
-        .and_then(|url| {
-            url.host_str()
-                .map(|value| (value.to_owned(), url.port_or_known_default()))
-        })
-        .is_some_and(|(origin_host, origin_port)| {
-            let mut parts = host.rsplitn(2, ':');
-            let port_or_host = parts.next().unwrap_or_default();
-            let maybe_host = parts.next();
-            let (host_name, host_port) = match maybe_host {
-                Some(name) if port_or_host.parse::<u16>().is_ok() => {
-                    (name, port_or_host.parse::<u16>().ok())
-                }
-                _ => (host, None),
-            };
-            origin_host.eq_ignore_ascii_case(host_name)
-                && (host_port.is_none() || host_port == origin_port)
-        })
-}
-
 fn preauth_request_allowed(headers: &HeaderMap) -> bool {
     if !origin_allowed(headers) {
         return false;
@@ -608,17 +579,6 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .find_map(|(candidate, value)| (candidate == name).then(|| value.to_owned()))
 }
 
-pub(super) fn session_cookie(headers: &HeaderMap, secure: bool) -> Option<String> {
-    cookie_value(
-        headers,
-        if secure {
-            SECURE_SESSION_COOKIE_NAME
-        } else {
-            SESSION_COOKIE_NAME
-        },
-    )
-}
-
 fn preauth_cookie(headers: &HeaderMap, secure: bool) -> Option<String> {
     cookie_value(
         headers,
@@ -628,13 +588,6 @@ fn preauth_cookie(headers: &HeaderMap, secure: bool) -> Option<String> {
             PREAUTH_COOKIE_NAME
         },
     )
-}
-
-pub(super) fn csrf_token(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(CSRF_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
 }
 
 fn set_cookie(response: &mut Response, name: &str, value: &str, max_age: i64, secure: bool) {
@@ -690,17 +643,4 @@ fn clear_preauth_cookie(response: &mut Response, secure: bool) {
         },
         secure,
     );
-}
-
-pub(super) fn auth_error(error: AdminAuthError) -> Response {
-    let status = match error.code() {
-        "unauthenticated" | "invalid_credentials" => StatusCode::UNAUTHORIZED,
-        "csrf_failed" | "invalid_bootstrap_token" | "already_initialized" => StatusCode::FORBIDDEN,
-        "rate_limited" => StatusCode::TOO_MANY_REQUESTS,
-        "not_initialized" => StatusCode::CONFLICT,
-        "session_capacity_reached" => StatusCode::SERVICE_UNAVAILABLE,
-        "validation_error" => StatusCode::BAD_REQUEST,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    api_error(status, error.code(), error.message())
 }

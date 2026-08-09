@@ -96,6 +96,7 @@ pub(crate) struct GatewayCommandService {
     runtime: GatewayRuntimeStatus,
     respond: RespondClient,
     qq_auth: Option<AccessTokenManager>,
+    application_version: &'static str,
 }
 
 impl GatewayCommandService {
@@ -104,12 +105,14 @@ impl GatewayCommandService {
         runtime: GatewayRuntimeStatus,
         respond: RespondClient,
         qq_auth: Option<AccessTokenManager>,
+        application_version: &'static str,
     ) -> Self {
         Self {
             config,
             runtime,
             respond,
             qq_auth,
+            application_version,
         }
     }
 
@@ -128,7 +131,7 @@ impl GatewayCommandService {
                     config.token_refresh_margin,
                 )
             });
-        Self::new(config, runtime, respond, qq_auth)
+        Self::new(config, runtime, respond, qq_auth, env!("CARGO_PKG_VERSION"))
     }
 
     /// 返回 `Some` 表示本地命令已完全接管本轮消息，平台必须直接回包并停止后续 Core 流程。
@@ -170,7 +173,7 @@ impl GatewayCommandService {
             &self.runtime,
             &token_snapshot,
             &self.respond.health_snapshot(),
-            check_failure.as_deref(),
+            ping::PingReplyOptions::new(check_failure.as_deref(), self.application_version),
         );
         if let Some(notice) = check_notice {
             // 禁止主动探测的渠道仍返回本地健康快照；提示必须由 Gateway 静态生成，
@@ -297,6 +300,7 @@ mod tests {
             GatewayRuntimeStatus::new(),
             RespondClient::new(core.clone()),
             None,
+            env!("CARGO_PKG_VERSION"),
         );
 
         assert!(
@@ -316,6 +320,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ping_renders_injected_application_version_instead_of_gateway_crate_version() {
+        let core = Arc::new(CountingCore::default());
+        let config = AppConfig::from_map(&std::collections::HashMap::new()).unwrap();
+        let commands = GatewayCommandService::new(
+            config,
+            GatewayRuntimeStatus::new(),
+            RespondClient::new(core),
+            None,
+            // 聚合二进制必须注入主包版本，避免 Gateway crate 的内部版本泄漏到 `/ping`。
+            "application-version-test",
+        );
+
+        let output = commands
+            .try_handle("/ping", &qq_context(GatewayCommandConversation::Private))
+            .await
+            .expect("/ping 应由 Gateway 本地处理");
+        let rendered = output.render(&ReplyCapability::onebot11_text());
+
+        assert!(
+            rendered
+                .fallback_text()
+                .contains("版本 / application-version-test")
+        );
+        assert!(
+            !rendered
+                .fallback_text()
+                .contains(&format!("版本 / {}", env!("CARGO_PKG_VERSION")))
+        );
+    }
+
+    #[tokio::test]
     async fn custom_prefix_handles_ping_and_disables_old_or_repeated_prefixes() {
         let core = Arc::new(CountingCore::default());
         let mut config = AppConfig::from_map(&std::collections::HashMap::from([(
@@ -329,6 +364,7 @@ mod tests {
             GatewayRuntimeStatus::new(),
             RespondClient::new(core.clone()),
             None,
+            env!("CARGO_PKG_VERSION"),
         );
 
         let output = commands
@@ -365,6 +401,7 @@ mod tests {
             GatewayRuntimeStatus::new(),
             RespondClient::new(core.clone()),
             None,
+            env!("CARGO_PKG_VERSION"),
         );
 
         let output = commands
@@ -390,6 +427,7 @@ mod tests {
             GatewayRuntimeStatus::new(),
             RespondClient::new(core.clone()),
             None,
+            env!("CARGO_PKG_VERSION"),
         );
 
         let output = commands
@@ -419,6 +457,7 @@ mod tests {
             GatewayRuntimeStatus::new(),
             RespondClient::new(core.clone()),
             None,
+            env!("CARGO_PKG_VERSION"),
         );
 
         assert!(

@@ -2,12 +2,18 @@
 
 本文面向项目开发者和维护者，保留仓库级架构边界、开发命令、维护约定和检查规则。运行目录、部署、私有配置和运行数据细节已经分流到 [runtime/README.md](../runtime/README.md)；QQ 官方 gateway 细节见 [qq-maid-gateway-rs/README.md](../qq-maid-gateway-rs/README.md)；Rust Core 模块细节见 [qq-maid-core/README.md](../qq-maid-core/README.md)。
 
+当前稳定版本线为 `23.x`（`v0.23.9`）；发布变更与升级边界见 [CHANGELOG.md](../CHANGELOG.md)。
+
 如果只是第一次了解项目，请先阅读 [README.md](../README.md)。
+
+容器镜像、Compose、GHCR 标签、测试环境自动部署与回滚约定见
+[Docker 与 Compose 部署](./deployment/docker.md)。本地有 Docker 时可运行 `make docker-build`、
+`make docker-config` 和 `make test-docker`；容器构建必须从根 Workspace 使用唯一 `Cargo.lock`。
 
 ## 架构边界
 
-- `qq-maid-gateway-rs/`：QQ 官方 C2C / 群 at 和可选微信服务号接入层，负责平台事件接收、统一入站转换、`/ping` 诊断、回复发送和主动推送出口。
-- `qq-maid-core/`：Rust Core / 查询 / 记忆 / session / prompt / 业务 Tool 模块，通过 `CoreService` 提供进程内业务入口；HTTP 层固定公开 `GET /healthz`，启用只读控制台时再公开对应管理路由。
+- `qq-maid-gateway-rs/`：QQ 官方 C2C / 群 at、OneBot 11 反向 WebSocket 和可选微信服务号接入层，负责平台事件接收、统一入站转换、`/ping` 诊断、回复发送和主动推送出口；群主动推送的成员提醒在 Gateway 侧转换为平台协议。
+- `qq-maid-core/`：Rust Core / 查询 / 记忆 / session / prompt / 业务 Tool 模块，通过 `CoreService` 提供进程内业务入口；HTTP 层固定公开 `GET /healthz`，启用新版 Web Console 时再注册认证、配置和受保护的资源管理路由，新版 Console 逐步替代仓库原有前端入口。
 - `qq-maid-llm/`：模型协议、Provider 路由、fallback、SSE、usage、健康观测、OpenAI Web Search 和模型原生 Tool Loop 基础设施。
 - `src/main.rs`：统一 `qq-maid-bot` 程序入口，负责一次性初始化 dotenv / tracing，并按顺序拉起 Core HTTP 与 Gateway。
 - `qq-maid-common/`：两个及以上 crate 共享的无业务状态基础工具，目前承载身份上下文、输入输出结构、Markdown 安全转换、脱敏、时间和通用文本处理。
@@ -18,6 +24,8 @@
 QQ、OneBot、微信等入口接入相关能力优先在 gateway 的平台 adapter / sender 边界演进；模型协议、provider fallback 和 Tool Loop 协议优先在 `qq-maid-llm/` 演进；普通聊天、查询命令、记忆、session、待办、会话命令、prompt 和具体业务 Tool 等业务逻辑优先在 `qq-maid-core/` 内部维护。
 
 多平台入口维护时必须区分三类 ID：平台原始 ID 是 `ReplyTarget` / `DeliveryTarget` 的真实投递目标；`scope_key` / `owner_key` 是 Session、Pending、Memory、Todo 的业务隔离键；Core、LLM 和 Tool Loop 不应理解 QQ、OneBot 或微信协议字段。RSS、Notification、Todo 提醒和 Push 需要保留平台原始发送目标，不允许发送逻辑从 `scope_key` / `owner_key` 反解析 raw target。conversation / actor / interaction / owner / delivery target 的术语边界见 [scope-identity-boundary.md](./design/scope-identity-boundary.md)。
+
+主动推送的成员提醒使用平台无关的 `PushMention { user_id, display_name }`。Core 只传递实际成员身份和业务归属，Gateway 再按平台生成 QQ 官方 `<@user_id>` 或 OneBot `at` segment；`PushTarget.account_id` 只选择机器人发送账号，不能代替被提醒成员身份。旧通知 payload 缺少 `mentions` 时按空列表兼容。
 
 群聊和频道属于多人共享 conversation session。Session 历史通过可选 `turn_actor` 保存当轮成员的脱敏 `actor_ref`、展示名来源和群角色，并让对应 user/assistant 消息保持同一归属；会话压缩与上下文裁剪必须保留该归属。`actor_ref` 只用于模型上下文中的历史成员对齐，不得作为权限判断、平台投递目标或对用户展示的稳定标识。
 
@@ -31,11 +39,22 @@ QQ、OneBot、微信等入口接入相关能力优先在 gateway 的平台 adapt
 ├── AGENTS.md
 ├── README.md
 ├── docs/
+│   ├── README.md
 │   ├── DEVELOPMENT.md
+│   ├── deployment/
 │   ├── development/
-│   │   └── custom-tools.md
 │   ├── design/
+│   ├── analysis/
 │   └── tasks/
+│       └── archive/
+├── .dockerignore
+├── docker/
+│   ├── Dockerfile
+│   ├── compose.yaml
+│   ├── compose.console.yaml   # Compose override
+│   ├── compose.onebot.yaml    # Compose override
+│   ├── compose.wechat.yaml    # Compose override
+│   └── compose.env.example    # Compose 环境示例
 ├── LICENSE
 ├── scripts/
 │   ├── deploy-remote.sh
@@ -51,7 +70,7 @@ QQ、OneBot、微信等入口接入相关能力优先在 gateway 的平台 adapt
 │   ├── README.md
 │   └── config/
 │       ├── .env.example
-│       └── agent.toml
+│       └── agent.example.toml
 ├── web-console/
 │   ├── src/
 │   ├── dist/
@@ -89,6 +108,7 @@ make run
 
 ## 文档分工
 
+- [docs/README.md](./README.md)：仓库文档总导航、目录边界与归档约定。
 - [README.md](../README.md)：项目定位、核心能力、快速开始和用户可见指令示例。
 - [qq-maid-core/README.md](../qq-maid-core/README.md)：Rust Core 模块边界、HTTP facade、指令 flow、配置项和检查方式。
 - [qq-maid-gateway-rs/README.md](../qq-maid-gateway-rs/README.md)：QQ 官方 gateway、事件范围、消息发送、日志、`/ping` 和进程内主动推送。
@@ -96,7 +116,9 @@ make run
 - [runtime/config/.env.example](../runtime/config/.env.example)：环境变量模板和字段说明。
 - [config-center.md](./development/config-center.md)：受管 TOML、外部覆盖、敏感密文与主密钥边界。
 - [custom-tools.md](./development/custom-tools.md)：自定义 Tool 的注册、场景白名单、领域后处理和安全要求。
-- [web-console/README.md](../web-console/README.md)：只读管理面板的 TypeScript 源码、可复现构建与嵌入产物约定。
+- [management-api.md](./development/management-api.md)：管理员资源 API 的通用认证、响应、分页与 Todo 契约。
+- [console-user-data-api.md](./development/console-user-data-api.md)：独立前端使用的当前用户偏好与通用文件 API 契约。
+- [Web Console 前端文档](./README.md#开发与接口)：前端 API、组件、交互和主题契约已统一放在根 `docs/`；[web-console/README.md](../web-console/README.md) 负责源码、可复现构建、嵌入产物与增量修改流程。
 - [response-event-runtime.md](./design/response-event-runtime.md)：统一响应事件流的现状基线、事件模型和分阶段迁移边界。
 
 ## 常用命令
@@ -151,7 +173,7 @@ make clean
 Rust HTTP 层只公开外部运维 / 管理能力：
 
 - 始终公开：`GET /healthz`。
-- 仅在 `WEB_CONSOLE_ENABLED=true` 时公开：`GET /console/`、`GET /console/{asset}`、`GET /api/v1/console/status` 和 `POST /api/v1/markdown/render`；Markdown 预览路由同时处理 CORS preflight。
+- 仅在 `WEB_CONSOLE_ENABLED=true` 时公开：`GET /console/`、`GET /console/{asset}`、控制台认证/状态/配置接口、`POST /api/v1/markdown/render`，以及受管理员 Session、同源和 CSRF 保护的资源管理 API。管理员 actor 不参与 Todo owner/scope，但作为用户偏好和文件的私有归属；目标引用、全局分页、文件隔离和统一响应约定见 [管理 API 约定](./development/management-api.md)。
 
 旧 HTTP 路由 `/query`、HTTP `/memory`、`/v1/chat` 和内部 respond 主入口不再公开。查询、记忆、待办、会话和 RSS 都通过 `CoreService::respond` 进程内命令流程承载。
 
@@ -172,7 +194,7 @@ Rust HTTP 层只公开外部运维 / 管理能力：
 - 修改模型协议、Provider 路由、fallback、SSE、usage、健康观测、OpenAI Web Search 传输或 Tool Loop 协议时，优先修改 `qq-maid-llm/`。
 - Gateway 内部继续保持分层边界：`gateway/mod.rs` 负责顶层编排，`gateway/platform/` 负责平台协议到 `InboundMessage` / `CoreRequest` 的映射，`gateway/protocol.rs` 负责 WebSocket 协议与事件分发，`gateway/outbound.rs` 负责出站投递能力和发送状态记录，`respond.rs` 负责 CoreService 进程内桥接；不要把这些职责重新混回单个超长文件。
 - 修改普通聊天、查询命令、记忆、session、待办、会话命令、prompt 或具体业务 Tool 时，优先修改 `qq-maid-core/`。
-- Rust HTTP 层只公开 `GET /healthz`，以及启用控制台时的 `/console/`、静态资源、`/api/v1/console/status` 和 `/api/v1/markdown/render`；不要重新公开 `/query`、HTTP `/memory`、`/v1/chat` 或内部 respond 主入口。
+- Rust HTTP 层只公开 `GET /healthz`，以及启用控制台时的 `/console/`、静态资源、控制台运维接口、`/api/v1/markdown/render` 和受保护的领域管理 API；不要重新公开 `/query`、旧 HTTP `/memory`、`/v1/chat` 或内部 respond 主入口。
 - 通用日期、时间和时区语义优先复用 `qq-maid-common/src/time_context/`；跨 crate 的身份上下文、输入输出结构、Markdown 转换和脱敏也应优先复用 common 现有模块，不要在 Core 或 Gateway 重复实现。
 - Tool Calling 的最终目标参考 Codex 的受控工具调用体验，但本项目必须保持 QQ 场景边界：私聊优先、群聊谨慎、工具白名单、权限校验、超时和输出大小限制不可省略。
 - 自定义业务 Tool 的二开步骤见 [custom-tools.md](./development/custom-tools.md)，包括新增文件、注册、`agent.toml` 白名单和测试要求。
@@ -180,7 +202,7 @@ Rust HTTP 层只公开外部运维 / 管理能力：
 
 ## Agent Chat 与 Tool 边界
 
-普通纯文本消息在场景、Provider 能力、群聊开关和工具白名单允许时统一进入 Agent Chat。模型可在同一次原生响应中直接回答、请求澄清或发出 Tool Call；关键词分类只能提供状态提示和 diagnostics，不能决定模型是否看到工具。工具域业务判断必须收敛到 `qq-maid-core/src/runtime/tools/`，`runtime/respond/` 不直接理解 Todo、RSS、天气、火车、搜索等业务域的工具结果。
+普通消息（含 Provider 已适配的图片输入）在场景、Provider 能力、群聊开关和工具白名单允许时统一进入 Agent Chat。模型可在同一次原生响应中直接回答、请求澄清或发出 Tool Call；关键词分类只能提供状态提示和 diagnostics，不能决定模型是否看到工具。工具域业务判断必须收敛到 `qq-maid-core/src/runtime/tools/`，`runtime/respond/` 不直接理解 Todo、RSS、天气、火车、搜索等业务域的工具结果。
 
 Agent Runtime 的成功与失败共享同一份 `AgentRunDiagnostics`。成功时由 `ChatOutcome.agent` 返回；超时、取消、最大轮次、Provider 中断或 progress receiver 关闭时由 `LlmError.agent` 返回，调用方仍必须按 `Result::Err` 处理，不能把 diagnostics 当成成功回复。`model_rounds` 的固定语义是“整次请求已发起的模型请求次数”：跨候选累计，首轮为 1，最终超时或取消的在途请求也计入；它不是零基循环序号，也不是工具调用轮数。模型发出的工具、已启动工具和可信工具结果同样跨候选累计；单个候选 attempt 只拥有临时终止态，新候选开始时会清理上一候选的 `Failed` 等状态，请求级 Timeout/Cancelled 不会被后续清理或候选失败覆盖。
 
@@ -190,7 +212,7 @@ Agent Runtime 的成功与失败共享同一份 `AgentRunDiagnostics`。成功�
 
 - `runtime/respond/agent_route.rs`：Agent Runtime 能力入口，只用场景策略、Provider 能力和工具白名单等确定性条件决定是否暴露工具，并返回 `AgentRouteDecision`；不读取业务交互状态，也不生成状态提示。
 - `runtime/tools/status_classifier.rs`：聚合各业务域的轻量状态语义，只生成用户状态提示和 diagnostics；不得参与 Tool Schema、白名单或执行路径决策。
-- `runtime/tools/todo/route.rs`：Todo / Reminder 自然语言语义门面，只为状态提示和 diagnostics 提供候选 domain/action，不解析最终目标、编号、日期或写入语义。
+- `runtime/tools/todo/route.rs`：Todo / Reminder 高置信语义门面，为状态提示、diagnostics 和 Todo 成功文案验真提供领域候选；不得据此暴露或执行工具，也不解析最终目标、编号、日期或写入语义。
 - `runtime/tools/memory/`：Memory v3 领域边界，负责 personal、group profile、group 三类 target 的权限、可见性、召回、管理、pending、可信回执和专属 storage；Respond 只保留命令编排、结果渲染和必要会话快照。
 - `runtime/pending/`：跨业务域 `PreparedAction` envelope，负责 schema version、状态、actor/owner/scope、过期时间、revision 和原子领取等通用生命周期；具体业务 payload 与恢复执行仍由对应 `tools/<domain>/` 维护。
 - `runtime/tools/<domain>/`：具体业务域的关键词、状态字段、成功判断、失败文案、可见实体、pending、owner 和持久化不变量都应放在这里。

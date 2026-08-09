@@ -1,5 +1,9 @@
 # runtime/ — 源码运行目录与部署应用根目录模板
 
+服务器使用 GHCR 镜像和 Compose 时，请先看
+[Docker 与 Compose 部署](../docs/deployment/docker.md)。本文继续作为配置字段、原生 Release
+目录和控制脚本的权威说明；容器部署复用相同的 `runtime/` 相对路径语义。
+
 本目录是服务器运行目录示例，部署后会放置 release 二进制、控制脚本、配置模板和运行产物。真实 `.env`、私有 prompt、知识资料、SQLite、日志和 pid 都属于本地私有配置或运行数据，不应提交到公开仓库。
 
 ## 目录结构
@@ -7,7 +11,7 @@
 ```text
 runtime/
 ├── config/.env.example              # 可提交的环境变量模板
-├── config/agent.toml                # 可提交的非敏感 Agent 场景策略
+├── config/agent.example.toml        # 可提交的非敏感 Agent 场景策略模板
 ├── config/ops.example.toml          # 默认关闭的 `/ops` 白名单公开模板
 ├── config/runtime.example.toml      # 程序受管普通配置的公开格式示例
 ├── .env                             # 兼容环境变量文件，不提交
@@ -48,7 +52,7 @@ runtime/
 cp config/.env.example config/.env
 ```
 
-编辑 `runtime/config/.env`，填写至少一个入口渠道和模型 Provider 等必要配置。QQ 官方机器人凭证现在是可选绑定；微信-only 部署可以不填写 QQ AppID/AppSecret。默认 `runtime/config/agent.toml` 是非敏感 Agent 策略的唯一权威文件，并将私聊、群聊、辅助任务和搜索路线统一到 OpenAI GPT-5.6 Luna；`.env` 继续保存 `OPENAI_API_KEY`、Base URL 和普通运行参数。如不希望模型在普通私聊中主动调用工具，修改 `[scenes.private].tool_calling_enabled=false`。未显式配置 `PROMPT_DIR` 时，Core 使用默认 `config/prompts`；默认目录缺少真实 prompt 文件时会回退到内置通用 prompt。显式配置 `PROMPT_DIR` 后，缺文件或空文件会作为配置错误处理。
+编辑 `runtime/config/.env`，填写至少一个入口渠道和模型 Provider 等必要配置。QQ 官方机器人凭证现在是可选绑定；微信-only 部署可以不填写 QQ AppID/AppSecret。首次启动从二进制内嵌的同版默认 Agent 模板生成本地 `runtime/config/agent.toml`；Release 中的 `runtime/config/agent.example.toml` 仅用于参考、开发和升级迁移，修改该外部示例不会改变首次生成内容。`.env` 继续保存 `OPENAI_API_KEY`、Base URL 和普通运行参数。如不希望模型在普通私聊中主动调用工具，修改活动文件 `config/agent.toml` 中的 `[scenes.private].tool_calling_enabled=false`。未显式配置 `PROMPT_DIR` 时，Core 使用默认 `config/prompts`；默认目录缺少真实 prompt 文件时会回退到内置通用 prompt。显式配置 `PROMPT_DIR` 后，缺文件或空文件会作为配置错误处理。
 
 Rust 进程按当前工作目录依次尝试加载 `config/.env` 和 `.env`。`make run` 和部署控制脚本都会以 `runtime/` 作为工作目录启动，因此默认相对路径都按 `runtime/` 解析。
 
@@ -72,17 +76,17 @@ qbot restart
 
 - `PROMPT_DIR`：包含 `maid_system.md`、`mode_rules.md`、`session_context.md` 的目录。
 - `KNOWLEDGE_DIR`：Markdown 知识目录，留空时使用 `config/knowledge`。
-- `APP_DB_FILE`：通用 SQLite 文件路径，承载 Session、待办、长期记忆、RSS / Atom 订阅、通知 Outbox、Ops 入站幂等领取和知识检索索引。
-- `AGENT_CONFIG_FILE`：Agent 场景策略文件路径，默认 `config/agent.toml`。统一程序要求目标文件存在且完整合法；该路径只由 Bootstrap 配置决定，WebUI 不能指定其他文件。
+- `APP_DB_FILE`：通用 SQLite 文件路径，承载 Session、待办、长期记忆、RSS / Atom 订阅、通知 Outbox、Ops 入站幂等领取、控制台用户偏好、文件元数据和知识检索索引；控制台上传文件内容位于其父目录的 `console-files/`。
+- `AGENT_CONFIG_FILE`：Agent 场景策略文件路径，默认 `config/agent.toml`。默认路径缺失时由首次启动从二进制内嵌的同版模板自动生成；只读 `config check` 会直接校验该内嵌模板而不落盘。显式指定其他路径时，目标文件必须存在且完整合法。该路径只由 Bootstrap 配置决定，WebUI 不能指定其他文件。
 - `OPS_CONFIG_FILE`：`/ops` 白名单运维配置路径，默认 `config/ops.toml`。默认文件缺失时功能保持关闭；显式设置后文件缺失会启动失败。
 - `CHAT_COMMAND_PREFIX`：所有平台共用的单字符命令前缀，默认 `/`；也可通过 Web 控制台下拉框或 `runtime.toml` 的 `command.prefix` 设置为 `#`、`*` 等可见非空白字符，重启后生效。
 - `RUNTIME_CONFIG_FILE`：程序受管普通配置，默认 `config/runtime.toml`。文件不存在时首次启动会安全创建空配置，已有文件不会覆盖。
 - `MASTER_KEY_FILE`：解密主密钥文件，默认相对于受管配置目录的 `secrets/master.key`。首次缺失时安全生成；不得把主密钥原文写进 `.env`。
-- `WEB_CONSOLE_ENABLED`：部署管理入口开关。未显式配置的新实例默认开启并进入受保护首次向导；`false` 时页面、认证和配置 API 均不可访问，也不会生成 Bootstrap token。默认监听仍是回环地址，公网访问必须使用受信 TLS 反向代理。
+- `WEB_CONSOLE_ENABLED`：部署管理入口开关。未显式配置的新实例默认开启并进入受保护首次向导；在进程环境或 `.env` 中显式设为 `false` 时，即使配置中心曾保存为开启，也以部署侧关闭为准，页面、认证和配置 API 均不可访问，也不会生成 Bootstrap token。默认监听仍是回环地址，公网访问必须使用受信 TLS 反向代理。
 - `WEB_CONSOLE_TRUSTED_PROXY_IPS`：受信反向代理实际连接 IP 的逗号列表；只有命中列表才读取 `X-Forwarded-For`，不直接信任客户端头。
 - `WEB_CONSOLE_SECURE_COOKIES`：生产 HTTPS 或 TLS 终止代理必须显式设为 `true`，管理员与 PreAuth Cookie 将带 `Secure` 并使用 `__Host-` 前缀；本机 HTTP 开发保持 `false`。
 
-首次启动且尚无部署管理员时，程序在运行目录创建 `config/secrets/bootstrap.token`（约 22 字符、有效期 30 分钟，Unix 权限 `0600`），并把同一个 token 向启动控制台输出一次。Windows 不使用 Unix mode，文件保护取决于安装目录继承的 ACL；当前版本尚未主动创建或校验收紧的 Windows ACL，部署者应限制该目录仅允许机器人运行身份和必要的本机管理员访问，后续加固由 [#522](https://github.com/kuliantnt/qq-maid-bot/issues/522) 跟踪。程序只在 token 新生成时输出，状态查询、尚有效 token 的复用和后续重启不会重复输出，也不会写入结构化访问日志或长期状态；打开 `/console/` 建立首位管理员后令牌文件立即删除。管理员密码至少 6 个字符且只保存 Argon2id 哈希，浏览器会话使用 HttpOnly SameSite cookie 与稳定 CSRF。
+首次启动且尚无部署管理员时，程序在运行目录创建 `config/secrets/bootstrap.token`（约 22 字符、有效期 30 分钟，Unix 权限 `0600`），并把同一个 token 通过一次 `info` 启动日志事件输出。Windows 不使用 Unix mode，文件保护取决于安装目录继承的 ACL；当前版本尚未主动创建或校验收紧的 Windows ACL，部署者应限制该目录仅允许机器人运行身份和必要的本机管理员访问，后续加固由 [#522](https://github.com/kuliantnt/qq-maid-bot/issues/522) 跟踪。程序只在 token 新生成时输出，状态查询、尚有效 token 的复用和后续重启不会重复输出，也不会写入 API 或长期状态；打开 `/console/` 建立首位管理员后令牌文件立即删除。管理员密码至少 6 个字符且只保存 Argon2id 哈希，浏览器会话使用 HttpOnly SameSite cookie 与稳定 CSRF。
 
 忘记管理员密码时，在登录页点击“重置管理员密码”。服务端会在同一路径生成短时单次重置 token，并同样只向控制台输出一次；生成 token 不会立即停用旧密码或旧会话，读取文件或控制台中的 token 并提交新密码后才完成重置。重置成功后 token 文件立即删除，旧 token、旧密码和全部旧 Admin 会话同时失效。
 
@@ -123,7 +127,7 @@ ONEBOT11_MAX_MESSAGE_BYTES=1048576
 
 QQ 凭证可留空，因此 OneBot-only 配置能正常启动；也可以与 QQ 官方入口、微信入口在同一进程并存。入站支持私聊、群聊明确 `@` 机器人，以及引用当前进程内 ref_index 可命中的机器人消息时免 `@` 继续追问；ref_index 是进程内缓存，重启后引用旧消息会安全 miss。text、image、file 和未知消息段会保持顺序映射，安全的远程图片可以进入现有图片理解链路；文件和不可读媒体只生成摘要，不读取文件正文，图文混合消息可以正常进入 Core。
 
-OneBot 出站仅支持私聊、群聊纯文本回复，以及 Todo / RSS 等纯文本主动推送；不支持图片、文件、Markdown 平台消息、平台原生引用、`@` 消息段、流式输出或其他富媒体消息段。NapCat 配置步骤、验证证据和完整限制集中写在 [用 NapCat 接入小女仆](../docs/development/onebot11-napcat.md)，其他 OneBot 11 实现当前未经实机验证。
+OneBot 出站支持私聊、群聊纯文本与图片 segment，以及 Todo / RSS 等主动推送；群主动推送可使用标准 `at` segment 提醒实际成员，图片可来自 URL 或 base64。普通回复仍暂不支持文件、Markdown 平台消息、平台原生引用、`@` 消息段、流式输出或其他富媒体消息段。NapCat 配置步骤、验证证据和完整限制集中写在 [用 NapCat 接入小女仆](../docs/development/onebot11-napcat.md)，其他 OneBot 11 实现当前未经实机验证。
 
 完整变量和默认值以 [`config/.env.example`](./config/.env.example) 为准。
 
@@ -254,7 +258,7 @@ Markdown 文件
 
 - `providers`：可选的 OpenAI-compatible provider 元数据，例如 `mimo` 的 base URL、认证头和 API key 环境变量名；
 - `model_routes`：可选的命名模型候选链，例如覆盖内置 `private_main`、`group_main`、`aux`；
-- `search_routes`：可选的 `/查` 搜索模型，例如覆盖内置 `private_search`、`group_search`；裸模型或 `openai:` 走 OpenAI Responses web_search，`gemini:` 走 Gemini Google Search 工具；
+- `tools.web_search.routes`：`provider_native` 后端使用的 `/查` 搜索模型，例如覆盖内置 `private_search`、`group_search`；裸模型或 `openai:` 走 OpenAI Responses web_search，`gemini:` 走 Gemini Google Search 工具；
 - `profiles.fast / balanced / deep`：主模型路线、可选 `aux_route`、reasoning effort、最大 Tool Loop 轮数和输出预算；
 - `scenes.private / group`：群聊 / 私聊是否启用普通 AI 聊天、选择哪个 profile、是否允许 Tool Calling。
 
@@ -274,10 +278,10 @@ candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-flash", "mimo:mimo-v2.5"
 [model_routes.aux]
 candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-flash", "mimo:mimo-v2.5", "deepseek:deepseek-chat"]
 
-[search_routes.private_search]
+[tools.web_search.routes.private_search]
 model = "gpt-5.6-luna"
 
-[search_routes.group_search]
+[tools.web_search.routes.group_search]
 model = "gpt-5.6-luna"
 ```
 
@@ -302,7 +306,36 @@ candidates = ["mimo:mimo-v2.5-pro", "deepseek:deepseek-chat"]
 candidates = ["mimo:mimo-v2.5", "deepseek:deepseek-chat"]
 ```
 
-默认 Luna 路线需要在 `.env` 配置 `OPENAI_API_KEY`，并确认账号具备 `gpt-5.6-luna` API 访问权限。运行时始终按 `agent.toml` 候选中的 Provider 前缀自动路由；改用其他 Provider 时，`.env` 只需配置实际用到的 `DEEPSEEK_API_KEY` / `MIMO_API_KEY` 等敏感项，`agent.toml` 不写 key。Gemini 是内置 Provider，配置 `GEMINI_API_KEY` 后可直接在 `model_routes` 或 `search_routes` 使用 `gemini:` 前缀。`/查` 可走 OpenAI Responses web_search 或 Gemini Google Search 工具，不使用 `/查` 时可删除 `search_routes`。
+OpenCode 可直接在 Web 配置中心保存共用的 `OPENCODE_API_KEY`，并按需添加三个固定预设。卡片只允许修改 Base URL 和请求超时，`api_key_env`、认证 Header 与 Scheme 固定为 `OPENCODE_API_KEY`、`Authorization` 与 `Bearer`：
+
+```toml
+[providers.opencode_zen]
+kind = "openai_responses"
+base_url = "https://opencode.ai/zen/v1"
+api_key_env = "OPENCODE_API_KEY"
+auth_header = "Authorization"
+auth_scheme = "Bearer"
+chat_fallback = false
+
+[providers.opencode_zen_chat]
+kind = "openai_compatible"
+base_url = "https://opencode.ai/zen/v1"
+api_key_env = "OPENCODE_API_KEY"
+auth_header = "Authorization"
+auth_scheme = "Bearer"
+
+[providers.opencode_go]
+kind = "openai_compatible"
+base_url = "https://opencode.ai/zen/go/v1"
+api_key_env = "OPENCODE_API_KEY"
+auth_header = "Authorization"
+auth_scheme = "Bearer"
+```
+
+模型路线分别使用 `opencode_zen:<responses-model>`、`opencode_zen_chat:<chat-model>` 或 `opencode_go:<chat-model>`。模型 ID 以 OpenCode 当前文档为准；本版本不会根据模型名猜协议，也不支持要求 Anthropic `/messages` 的模型。
+OpenCode Zen Responses 以及其他自定义 `openai_responses` Provider 的 `chat_fallback` 只能省略或设为 `false`；Responses 失败时由模型候选链切换 Provider，不会在同一 Provider 内改用 Chat Completions。
+
+默认 Luna 路线需要在 `.env` 配置 `OPENAI_API_KEY`，并确认账号具备 `gpt-5.6-luna` API 访问权限。运行时始终按 `agent.toml` 候选中的 Provider 前缀自动路由；改用其他 Provider 时，`.env` 只需配置实际用到的 `DEEPSEEK_API_KEY` / `MIMO_API_KEY` 等敏感项，`agent.toml` 不写 key。Gemini 是内置 Provider，配置 `GEMINI_API_KEY` 后可直接在 `model_routes` 或 `tools.web_search.routes` 使用 `gemini:` 前缀。`/查` 可走 OpenAI Responses web_search、Gemini Google Search 或 Tavily；不使用 Provider 原生搜索时可保留 routes，后续切回时无需重新配置。
 
 ### `config/prompts/*.md`
 
@@ -330,7 +363,7 @@ runtime/
 └── qq-maid-bot
 ```
 
-Session、待办、长期记忆、RSS / Atom 订阅、RSS 去重状态和知识检索索引均保存在 `APP_DB_FILE` 指向的通用 SQLite 文件中。长期记忆只能通过明确记忆指令生成草稿，并由用户确认后写入；普通聊天不会自动写长期记忆。
+Session、待办、长期记忆、RSS / Atom 订阅、RSS 去重状态、控制台用户偏好、文件元数据和知识检索索引均保存在 `APP_DB_FILE` 指向的通用 SQLite 文件中。控制台上传文件内容保存在该数据库父目录的 `console-files/`，不会写入 SQLite Base64 字段。长期记忆只能通过明确记忆指令生成草稿，并由用户确认后写入；普通聊天不会自动写长期记忆。
 
 配置、prompt、知识源 Markdown、日志、pid、release 二进制和 gateway WebSocket 临时状态不属于 `APP_DB_FILE` 承载范围。
 
@@ -490,9 +523,9 @@ Win + R -> shell:startup
 
 ## Release 包
 
-Release 包采用白名单生成。Linux/macOS 包只包含 Unix 控制与诊断脚本，Windows 包只包含 `qbot.ps1`、`qbot.cmd`、`botctl.ps1`、`botctl.cmd` 和登录启动示例；两类包均包含对应平台的 `qq-maid-bot` 二进制、本文件、`config/.env.example`、`config/agent.toml`、公开 `.example` 配置模板、`VERSION` 和空的 `data/storage/` 目录。控制台静态资源已嵌入 release 二进制，不再复制独立 `static/` 目录。真实 `.env`、私有 prompt、私有知识资料、SQLite 数据库、日志、pid 和 `.bak` 备份不会被写入归档。
+Release 包采用白名单生成。Linux/macOS 包只包含 Unix 控制与诊断脚本，Windows 包只包含 `qbot.ps1`、`qbot.cmd`、`botctl.ps1`、`botctl.cmd` 和登录启动示例；两类包均包含对应平台的 `qq-maid-bot` 二进制、本文件、`config/.env.example`、供参考、开发和升级迁移使用的 `config/agent.example.toml`、其他公开 `.example` 配置模板、`VERSION` 和空的 `data/storage/` 目录。首次启动生成内容来自二进制内嵌的同版模板，不读取该外部示例文件。控制台静态资源已嵌入 release 二进制，不再复制独立 `static/` 目录。真实 `.env`、私有 prompt、私有知识资料、SQLite 数据库、日志、pid 和 `.bak` 备份不会被写入归档。
 
-GitHub Release 自动生成 `linux-x86_64`、`linux-aarch64`、`macos-x86_64`、`macos-aarch64` 和 `windows-x86_64` 包；Linux / macOS 使用 `.tar.gz`，Windows 使用 `.zip`。
+GitHub Release 自动生成 `linux-x86_64`、`linux-aarch64`、`macos-aarch64` 和 `windows-x86_64` 包；Linux / macOS 使用 `.tar.gz`，Windows 使用 `.zip`。macOS Intel（x86_64）不再提供官方预编译包。
 
 首次使用 Release 包：
 
@@ -508,6 +541,10 @@ cp config/.env.example config/.env
 ./botctl.sh start
 ```
 
+通过 `qbot install` 新装时会询问是否启用 Web 控制台；不需要 Web 的用户可选择否，或在
+非交互安装中使用 `qbot install --web false`。关闭 Web 不影响 `qbot config`、文件配置、
+Release/源码启动和机器人业务入口。
+
 Windows ZIP 解压后，在 PowerShell 中执行：
 
 ```powershell
@@ -517,6 +554,14 @@ notepad .\config\.env
 ```
 
 升级时不要直接覆盖已有运行目录中的私有文件和运行数据，尤其是 `config/.env`、`config/runtime.toml`、`config/secrets/master.key`、私有 prompt、私有知识资料、SQLite 数据库、日志和 pid。
+
+统一二进制提供 `config check`、`config sources`、`config migrate`、`migration status` 和
+`backup create/verify/restore` 运维子命令；迁移与恢复默认 dry-run，恢复只写入干净实例目录。
+启动进入 `setup_required` 或 `config check` 失败时，诊断会单独报告无效的
+`config/agent.toml` / `config/ops.toml` 路径和安全错误首行；API Key、Token、AppSecret
+及可能携带配置值的通用 Provider / Gateway 错误正文仍不会写入日志。
+命令、数据库与配置恢复包的 secret 边界和 schema 回滚限制见
+[配置迁移、备份恢复与安全升级](../docs/deployment/migration-backup.md)。
 
 ### Breaking changes
 

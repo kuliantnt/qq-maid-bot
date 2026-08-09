@@ -354,7 +354,7 @@ mod tests {
                 .capabilities
                 .outbound
                 .image,
-            ConsoleValueState::Disabled
+            ConsoleValueState::Supported
         );
         assert_eq!(
             snapshot.platforms[1].state,
@@ -482,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn onebot_reports_current_inbound_and_text_only_outbound_capabilities() {
+    fn onebot_reports_current_inbound_and_text_image_outbound_capabilities() {
         let config = AppConfig::from_map(&HashMap::from([
             ("QQ_BOT_ENABLED".to_owned(), "false".to_owned()),
             ("ONEBOT11_ENABLED".to_owned(), "true".to_owned()),
@@ -520,9 +520,9 @@ mod tests {
         let outbound = &capabilities.outbound;
         assert_eq!(outbound.text, ConsoleValueState::Supported);
         assert_eq!(outbound.markdown, ConsoleValueState::Unsupported);
-        assert_eq!(outbound.image, ConsoleValueState::Unsupported);
+        assert_eq!(outbound.image, ConsoleValueState::Supported);
         assert_eq!(outbound.file, ConsoleValueState::Unsupported);
-        assert_eq!(outbound.mixed_message, ConsoleValueState::Unsupported);
+        assert_eq!(outbound.mixed_message, ConsoleValueState::Supported);
         assert_eq!(outbound.streaming, ConsoleValueState::Unsupported);
         let json = serde_json::to_string(&snapshot).unwrap();
         assert!(!json.contains("private-onebot-token"));
@@ -533,7 +533,6 @@ mod tests {
     fn qq_c2c_and_group_scopes_follow_reply_capabilities() {
         let snapshot = snapshot_with(&[
             ("QQ_MAID_ENABLE_MARKDOWN", "true"),
-            ("QQ_MAID_ENABLE_IMAGE", "true"),
             ("QQ_MAID_C2C_FINAL_REPLY_STREAM_ENABLED", "true"),
             ("QQ_MAID_GROUP_MESSAGE_MODE", "mention"),
         ]);
@@ -549,7 +548,7 @@ mod tests {
         );
         assert_eq!(
             group.capabilities.outbound.image,
-            ConsoleValueState::Unsupported
+            ConsoleValueState::Supported
         );
         assert_eq!(
             c2c.capabilities.outbound.markdown,

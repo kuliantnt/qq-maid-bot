@@ -1,5 +1,12 @@
 use super::*;
 use crate::markdown::MarkdownPayload;
+use axum::{
+    Json, Router,
+    body::{Body, Bytes},
+    http::{Response, StatusCode},
+    routing::post,
+};
+use futures_util::stream;
 
 #[test]
 fn empty_reply_fallback_uses_configured_bot_display_name() {
@@ -17,17 +24,27 @@ use crate::{
     },
     media::ImagePayload,
 };
-use qq_maid_core::service::{CoreRespondFailure, CoreResponseStatus, CoreResponseStatusKind};
-use std::{collections::VecDeque, sync::Mutex};
+use qq_maid_core::{
+    config::{TtsProviderMode, VoiceFeatureConfig, VoiceFeatureStatus},
+    service::{CoreDeliveryHint, CoreRespondFailure, CoreResponseStatus, CoreResponseStatusKind},
+};
+use serde_json::{Value, json};
+use std::{
+    collections::VecDeque,
+    convert::Infallible,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::net::TcpListener;
 
 #[derive(Debug)]
 struct FakeEventStream {
-    events: VecDeque<RespondEvent>,
+    events: VecDeque<CoreResponseEvent>,
     output_policy: CoreOutputPolicy,
 }
 
 impl FakeEventStream {
-    fn new(events: impl IntoIterator<Item = RespondEvent>) -> Self {
+    fn new(events: impl IntoIterator<Item = CoreResponseEvent>) -> Self {
         Self {
             events: events.into_iter().collect(),
             output_policy: CoreOutputPolicy::DirectStream,
@@ -61,16 +78,28 @@ enum FakeCall {
         msg_id: Option<String>,
     },
     Image,
+    Voice(String),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FakeVoiceFailure {
+    Upload,
+    Send,
 }
 
 #[derive(Debug, Default)]
 struct FakeOutboundSender {
     calls: Mutex<Vec<FakeCall>>,
+    voice_failure: Mutex<Option<FakeVoiceFailure>>,
 }
 
 impl FakeOutboundSender {
     fn calls(&self) -> Vec<FakeCall> {
         self.calls.lock().unwrap().clone()
+    }
+
+    fn fail_voice_at(&self, failure: FakeVoiceFailure) {
+        *self.voice_failure.lock().unwrap() = Some(failure);
     }
 }
 
@@ -114,6 +143,236 @@ impl OutboundSender for FakeOutboundSender {
             self.calls.lock().unwrap().push(FakeCall::Image);
             Err(ApiError::Unsupported("image"))
         })
+    }
+
+    fn send_voice_url<'a>(
+        &'a self,
+        _target: &'a C2cReplyTarget,
+        audio_url: &'a str,
+    ) -> SendFuture<'a> {
+        Box::pin(async move {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(FakeCall::Voice(audio_url.to_owned()));
+            match *self.voice_failure.lock().unwrap() {
+                Some(FakeVoiceFailure::Upload) => Err(ApiError::VoiceUpload(Box::new(
+                    ApiError::InvalidMedia("mock upload failure"),
+                ))),
+                Some(FakeVoiceFailure::Send) => Err(ApiError::VoiceSend(Box::new(
+                    ApiError::InvalidMedia("mock send failure"),
+                ))),
+                None => Ok(SendMessageIds {
+                    message_id: Some("voice-id".to_owned()),
+                    ref_index_id: Some("REFIDX_voice_id".to_owned()),
+                }),
+            }
+        })
+    }
+}
+
+async fn qwen_mock_server(
+    status: StatusCode,
+    response: Value,
+) -> (String, Arc<Mutex<Vec<Value>>>, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = requests.clone();
+    let app = Router::new().route(
+        "/tts",
+        post(move |Json(payload): Json<Value>| {
+            let captured = captured.clone();
+            let response = response.clone();
+            async move {
+                captured.lock().unwrap().push(payload);
+                (status, Json(response))
+            }
+        }),
+    );
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{address}/tts"), requests, task)
+}
+
+async fn slow_qwen_body_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let app = Router::new().route(
+        "/tts",
+        post(|| async {
+            let body = Body::from_stream(stream::once(async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Ok::<Bytes, Infallible>(Bytes::from_static(
+                    br#"{"status_code":200,"output":{"audio":{"url":"https://audio.example.test/slow.wav"}}}"#,
+                ))
+            }));
+            Response::builder()
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap()
+        }),
+    );
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{address}/tts"), task)
+}
+
+fn enable_mock_qwen(config: &mut AppConfig, base_url: String) {
+    config.voice = VoiceFeatureConfig {
+        provider: TtsProviderMode::Qwen,
+        status: VoiceFeatureStatus::Available,
+        qwen_api_key: Some("test-key".to_owned()),
+        qwen_base_url: base_url,
+        qwen_model: "qwen3-tts-flash".to_owned(),
+        qwen_voice: "Cherry".to_owned(),
+        request_timeout: Duration::from_secs(1),
+        max_text_chars: 600,
+    };
+}
+
+fn voice_response() -> CoreResponse {
+    let mut response = respond_response("平台文字 fallback");
+    response.output = Some(qq_maid_common::output_part::AssistantOutput::markdown(
+        "平台文字 fallback",
+        "# 应朗读的标题\n\n- [项目主页](https://example.test/repo)",
+    ));
+    response.delivery_hint = Some(CoreDeliveryHint::Voice);
+    response
+}
+
+#[tokio::test]
+async fn voice_delivery_uses_common_speakable_markdown_and_skips_text_send_on_success() {
+    let (base_url, requests, task) = qwen_mock_server(
+        StatusCode::OK,
+        json!({
+            "status_code": 200,
+            "output": {"audio": {"url": "https://audio.example.test/result.wav?Signature=secret"}}
+        }),
+    )
+    .await;
+    let mut config = test_config();
+    enable_mock_qwen(&mut config, base_url);
+    let sender = FakeOutboundSender::default();
+    let response = voice_response();
+    let original = response.clone();
+
+    let (_, fallback_text) = send_c2c_respond_response_with_sender(
+        &sender,
+        &c2c_message(),
+        &response,
+        &config,
+        &ReplyCapability::qq_official_c2c(&config),
+    )
+    .await
+    .unwrap();
+    task.abort();
+
+    assert_eq!(
+        sender.calls(),
+        vec![FakeCall::Voice(
+            "https://audio.example.test/result.wav?Signature=secret".to_owned()
+        )]
+    );
+    assert_eq!(
+        requests.lock().unwrap()[0]["input"]["text"],
+        "应朗读的标题\n\n· 项目主页"
+    );
+    assert_eq!(fallback_text, "平台文字 fallback");
+    assert_eq!(response, original);
+}
+
+#[tokio::test]
+async fn tts_failure_sends_original_markdown_fallback_exactly_once() {
+    let (base_url, _, task) =
+        qwen_mock_server(StatusCode::BAD_GATEWAY, json!({"message": "mock failure"})).await;
+    let mut config = test_config();
+    enable_mock_qwen(&mut config, base_url);
+    let sender = FakeOutboundSender::default();
+
+    send_c2c_respond_response_with_sender(
+        &sender,
+        &c2c_message(),
+        &voice_response(),
+        &config,
+        &ReplyCapability::qq_official_c2c(&config),
+    )
+    .await
+    .unwrap();
+    task.abort();
+
+    assert_eq!(
+        sender.calls(),
+        vec![FakeCall::Markdown {
+            content: "# 应朗读的标题\n\n- [项目主页](https://example.test/repo)".to_owned(),
+            msg_id: Some("msg-1".to_owned()),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn tts_body_timeout_sends_original_markdown_fallback_exactly_once() {
+    let (base_url, task) = slow_qwen_body_server().await;
+    let mut config = test_config();
+    enable_mock_qwen(&mut config, base_url);
+    config.voice.request_timeout = Duration::from_millis(5);
+    let sender = FakeOutboundSender::default();
+
+    send_c2c_respond_response_with_sender(
+        &sender,
+        &c2c_message(),
+        &voice_response(),
+        &config,
+        &ReplyCapability::qq_official_c2c(&config),
+    )
+    .await
+    .unwrap();
+    task.abort();
+
+    assert_eq!(
+        sender.calls(),
+        vec![FakeCall::Markdown {
+            content: "# 应朗读的标题\n\n- [项目主页](https://example.test/repo)".to_owned(),
+            msg_id: Some("msg-1".to_owned()),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn qq_voice_upload_or_send_failure_each_falls_back_to_original_markdown_once() {
+    for failure in [FakeVoiceFailure::Upload, FakeVoiceFailure::Send] {
+        let (base_url, _, task) = qwen_mock_server(
+            StatusCode::OK,
+            json!({
+                "status_code": 200,
+                "output": {"audio": {"url": "https://audio.example.test/result.wav"}}
+            }),
+        )
+        .await;
+        let mut config = test_config();
+        enable_mock_qwen(&mut config, base_url);
+        let sender = FakeOutboundSender::default();
+        sender.fail_voice_at(failure);
+
+        send_c2c_respond_response_with_sender(
+            &sender,
+            &c2c_message(),
+            &voice_response(),
+            &config,
+            &ReplyCapability::qq_official_c2c(&config),
+        )
+        .await
+        .unwrap();
+        task.abort();
+
+        assert_eq!(
+            sender.calls(),
+            vec![
+                FakeCall::Voice("https://audio.example.test/result.wav".to_owned()),
+                FakeCall::Markdown {
+                    content: "# 应朗读的标题\n\n- [项目主页](https://example.test/repo)".to_owned(),
+                    msg_id: Some("msg-1".to_owned()),
+                },
+            ]
+        );
     }
 }
 
@@ -206,8 +465,8 @@ fn complete_c2c_reply_does_not_record_message_id_as_ref_index() {
 #[tokio::test]
 async fn disabled_stream_completed_sends_single_ordinary_reply() {
     let events = FakeEventStream::new([
-        RespondEvent::TextDelta("不应外发".to_owned()),
-        RespondEvent::Completed(Box::new(respond_response("最终回复"))),
+        CoreResponseEvent::TextDelta("不应外发".to_owned()),
+        CoreResponseEvent::Completed(Box::new(respond_response("最终回复"))),
     ]);
     let sender = FakeOutboundSender::default();
     let mut typing = None;
@@ -236,7 +495,7 @@ async fn disabled_stream_completed_sends_single_ordinary_reply() {
 #[tokio::test]
 async fn disabled_stream_completed_records_ref_index() {
     let config = test_config();
-    let events = FakeEventStream::new([RespondEvent::Completed(Box::new(respond_response(
+    let events = FakeEventStream::new([CoreResponseEvent::Completed(Box::new(respond_response(
         "最终回复",
     )))]);
     let sender = FakeOutboundSender::default();
@@ -268,18 +527,18 @@ async fn disabled_stream_completed_records_ref_index() {
 #[tokio::test]
 async fn disabled_stream_completed_records_rendered_parts_fallback_ref_index() {
     let config = test_config();
-    let response = RespondResponse {
-        output: Some(qq_maid_core::service::AssistantOutput {
+    let response = CoreResponse {
+        output: Some(qq_maid_common::output_part::AssistantOutput {
             text_fallback: String::new(),
             markdown: None,
             parts: vec![
-                qq_maid_core::service::OutputPart::Markdown {
+                qq_maid_common::output_part::OutputPart::Markdown {
                     markdown: "# 标题".to_owned(),
                 },
-                qq_maid_core::service::OutputPart::Image {
-                    media: qq_maid_core::service::OutputMedia {
+                qq_maid_common::output_part::OutputPart::Image {
+                    media: qq_maid_common::output_part::OutputMedia {
                         fallback_text: Some("图片：天气雷达".to_owned()),
-                        ..qq_maid_core::service::OutputMedia::default()
+                        ..qq_maid_common::output_part::OutputMedia::default()
                     },
                 },
             ],
@@ -289,8 +548,9 @@ async fn disabled_stream_completed_records_rendered_parts_fallback_ref_index() {
         command: None,
         diagnostics: None,
         visible_entity_snapshot: None,
+        delivery_hint: None,
     };
-    let events = FakeEventStream::new([RespondEvent::Completed(Box::new(response))]);
+    let events = FakeEventStream::new([CoreResponseEvent::Completed(Box::new(response))]);
     let sender = FakeOutboundSender::default();
     let mut typing = None;
     let ref_index = crate::gateway::ref_index::ref_index();
@@ -316,11 +576,11 @@ async fn disabled_stream_completed_records_rendered_parts_fallback_ref_index() {
 #[tokio::test]
 async fn disabled_stream_status_does_not_create_extra_reply() {
     let events = FakeEventStream::new([
-        RespondEvent::Status(CoreResponseStatus {
+        CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentStarted,
             text: "正在处理".to_owned(),
         }),
-        RespondEvent::Completed(Box::new(respond_response("最终回复"))),
+        CoreResponseEvent::Completed(Box::new(respond_response("最终回复"))),
     ]);
     let sender = FakeOutboundSender::default();
     let mut typing = None;
@@ -349,15 +609,15 @@ async fn disabled_stream_status_does_not_create_extra_reply() {
 #[tokio::test]
 async fn disabled_stream_progress_policy_sends_one_visible_hint_then_final_reply() {
     let events = FakeEventStream::new([
-        RespondEvent::Status(CoreResponseStatus {
+        CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentStarted,
             text: "小女仆正在处理…".to_owned(),
         }),
-        RespondEvent::Status(CoreResponseStatus {
+        CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentFinalizing,
             text: "小女仆正在确认结果…".to_owned(),
         }),
-        RespondEvent::Completed(Box::new(respond_response("最终回复"))),
+        CoreResponseEvent::Completed(Box::new(respond_response("最终回复"))),
     ])
     .with_policy(CoreOutputPolicy::ProgressThenComplete);
     let sender = FakeOutboundSender::default();
@@ -393,16 +653,16 @@ async fn disabled_stream_progress_policy_sends_one_visible_hint_then_final_reply
 #[tokio::test]
 async fn disabled_stream_progress_then_stream_sends_one_visible_hint_then_final_reply() {
     let events = FakeEventStream::new([
-        RespondEvent::Status(CoreResponseStatus {
+        CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentStarted,
             text: "小女仆正在处理…".to_owned(),
         }),
-        RespondEvent::Status(CoreResponseStatus {
+        CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentFinalizing,
             text: "小女仆正在确认结果…".to_owned(),
         }),
-        RespondEvent::TextDelta("不应外发".to_owned()),
-        RespondEvent::Completed(Box::new(respond_response("最终回复"))),
+        CoreResponseEvent::TextDelta("不应外发".to_owned()),
+        CoreResponseEvent::Completed(Box::new(respond_response("最终回复"))),
     ])
     .with_policy(CoreOutputPolicy::ProgressThenStream);
     let sender = FakeOutboundSender::default();
@@ -438,11 +698,11 @@ async fn disabled_stream_progress_then_stream_sends_one_visible_hint_then_final_
 #[tokio::test]
 async fn disabled_stream_progress_status_respects_visible_progress_config() {
     let events = FakeEventStream::new([
-        RespondEvent::Status(CoreResponseStatus {
+        CoreResponseEvent::Status(CoreResponseStatus {
             kind: CoreResponseStatusKind::AgentStarted,
             text: "小女仆正在处理…".to_owned(),
         }),
-        RespondEvent::Completed(Box::new(respond_response("最终回复"))),
+        CoreResponseEvent::Completed(Box::new(respond_response("最终回复"))),
     ])
     .with_policy(CoreOutputPolicy::ProgressThenComplete);
     let sender = FakeOutboundSender::default();
@@ -468,8 +728,8 @@ async fn disabled_stream_progress_status_respects_visible_progress_config() {
 #[tokio::test]
 async fn disabled_stream_failed_sends_safe_failure_without_reinvoking_core() {
     let events = FakeEventStream::new([
-        RespondEvent::TextDelta("不完整".to_owned()),
-        RespondEvent::Failed(CoreRespondFailure {
+        CoreResponseEvent::TextDelta("不完整".to_owned()),
+        CoreResponseEvent::Failed(CoreRespondFailure {
             kind: CoreFailureKind::LlmFailed,
             message: "上游服务暂时不可用，请稍后再试。".to_owned(),
             retryable: true,
@@ -505,7 +765,7 @@ async fn disabled_stream_failed_sends_safe_failure_without_reinvoking_core() {
 
 #[tokio::test]
 async fn disabled_stream_closed_before_completed_sends_fixed_failure_not_delta() {
-    let events = FakeEventStream::new([RespondEvent::TextDelta("半截回复".to_owned())]);
+    let events = FakeEventStream::new([CoreResponseEvent::TextDelta("半截回复".to_owned())]);
     let sender = FakeOutboundSender::default();
     let mut typing = None;
 

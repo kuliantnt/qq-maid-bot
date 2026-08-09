@@ -81,6 +81,8 @@ pub(crate) fn test_tool_context() -> ToolContext {
             interaction_scope_id: "private:u1".to_owned(),
         },
         tool_call_id: None,
+        tool_round: None,
+        retry_of: None,
         execution_deadline: None,
     }
 }

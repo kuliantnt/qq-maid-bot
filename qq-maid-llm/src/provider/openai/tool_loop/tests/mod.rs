@@ -2,13 +2,17 @@ use super::{
     payload::{enforce_tool_loop_budget, openai_tool_loop_payload},
     response::{FunctionCall, extract_function_calls},
     session::ResponsesAgentSession,
-    streaming::{finalize_responses_tool_loop_stream, observe_responses_function_call_event},
+    streaming::{
+        StreamFinalization, finalize_responses_tool_loop_stream,
+        observe_responses_function_call_event,
+    },
 };
 use crate::{
     agent_loop::{
-        AgentStep, AgentStepSession, AgentTextDeltaFuture, AgentTextDeltaSink, run_agent_loop,
+        AgentStep, AgentStepSession, AgentTextDeltaDelivery, AgentTextDeltaFuture,
+        AgentTextDeltaSink, run_agent_loop,
     },
-    context_budget::{ContextBudgetConfig, estimated_json_chars},
+    context_budget::ContextBudgetConfig,
     error::LlmError,
     provider::types::{ChatMessage, ReasoningEffort},
     sse::SseFrame,
@@ -40,7 +44,7 @@ fn recording_delta_sink(deltas: Arc<StdMutex<Vec<String>>>) -> AgentTextDeltaSin
         let deltas = deltas.clone();
         Box::pin(async move {
             deltas.lock().unwrap().push(delta);
-            Ok(())
+            Ok(AgentTextDeltaDelivery::Visible)
         }) as AgentTextDeltaFuture
     })
 }
@@ -92,6 +96,8 @@ fn test_context() -> ToolContext {
             interaction_scope_id: "private:u1".to_owned(),
         },
         tool_call_id: None,
+        tool_round: None,
+        retry_of: None,
         execution_deadline: None,
     }
 }
@@ -286,6 +292,19 @@ async fn mock_tool_loop_handler(
 ) -> Json<Value> {
     let mut state = state.lock().await;
     state.requests.push(body);
+    let latest = state.requests.last().expect("request recorded");
+    if (latest.get("tools").is_none() && latest.get("tool_choice").is_none())
+        || latest.get("tool_choice") == Some(&json!("none"))
+        || latest
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+    {
+        return Json(json!({
+            "output_text": "杭州今天有小雨，建议带伞。",
+            "output": [{"type":"message","content":[{"type":"output_text","text":"杭州今天有小雨，建议带伞。"}]}]
+        }));
+    }
     if state.requests.len() == 1 {
         return Json(json!({
             "output": [{
@@ -301,6 +320,21 @@ async fn mock_tool_loop_handler(
         "output": [{
             "type": "message",
             "content": [{"type": "output_text", "text": "杭州今天有小雨，建议带伞。"}]
+        }]
+    }))
+}
+
+async fn mock_disabled_tools_function_call_handler(
+    State(state): State<Arc<Mutex<ToolLoopMockState>>>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    state.lock().await.requests.push(body);
+    Json(json!({
+        "output": [{
+            "type": "function_call",
+            "name": "ok_tool",
+            "call_id": "call_forbidden",
+            "arguments": "{\"value\":\"must-not-run\"}"
         }]
     }))
 }
@@ -452,6 +486,24 @@ async fn spawn_tool_loop_mock() -> (String, Arc<Mutex<ToolLoopMockState>>) {
     (format!("http://{addr}/v1"), state)
 }
 
+async fn spawn_disabled_tools_function_call_mock() -> (String, Arc<Mutex<ToolLoopMockState>>) {
+    let state = Arc::new(Mutex::new(ToolLoopMockState {
+        requests: Vec::new(),
+    }));
+    let app = Router::new()
+        .route(
+            "/v1/responses",
+            post(mock_disabled_tools_function_call_handler),
+        )
+        .with_state(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}/v1"), state)
+}
+
 async fn completed_stream_that_never_closes() -> Response<Body> {
     let completed = Bytes::from_static(
             b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output_text\":\"direct answer\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"direct answer\"}]}]}}\n\n",
@@ -490,6 +542,72 @@ async fn spawn_never_closing_completed_stream() -> String {
 
 async fn spawn_never_closing_done_stream() -> String {
     let app = Router::new().route("/v1/responses", post(done_stream_that_never_closes));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}/v1")
+}
+
+#[derive(Clone)]
+struct StaticSseState {
+    body: Arc<String>,
+    calls: Arc<AtomicUsize>,
+}
+
+async fn static_sse_handler(State(state): State<StaticSseState>) -> Response<Body> {
+    state.calls.fetch_add(1, Ordering::SeqCst);
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(Body::from(state.body.as_str().to_owned()))
+        .unwrap()
+}
+
+async fn spawn_static_sse_stream(body: impl Into<String>) -> String {
+    spawn_counted_static_sse_stream(body).await.0
+}
+
+async fn spawn_counted_static_sse_stream(body: impl Into<String>) -> (String, Arc<AtomicUsize>) {
+    let state = StaticSseState {
+        body: Arc::new(body.into()),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let calls = state.calls.clone();
+    let app = Router::new()
+        .route("/v1/responses", post(static_sse_handler))
+        .with_state(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}/v1"), calls)
+}
+
+async fn reset_sse_handler() -> Response<Body> {
+    let delta = Bytes::from_static(
+        b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+    );
+    let body = Body::from_stream(
+        stream::once(async move { Ok::<Bytes, std::io::Error>(delta) }).chain(stream::once(
+            async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "simulated reset",
+                ))
+            },
+        )),
+    );
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(body)
+        .unwrap()
+}
+
+async fn spawn_reset_sse_stream() -> String {
+    let app = Router::new().route("/v1/responses", post(reset_sse_handler));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {

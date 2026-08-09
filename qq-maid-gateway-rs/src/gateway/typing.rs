@@ -14,7 +14,7 @@ use std::{
 
 use tokio::{task::JoinHandle, time::sleep};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{trace, warn};
 
 use super::{
     event::C2cMessage,
@@ -115,24 +115,26 @@ impl C2cTypingStatusGuard {
         let task_source_message_id = source_message_id.clone();
         let started_at = Instant::now();
 
-        debug!(
+        trace!(
+            event = "typing_status_scheduled",
             user = %masked_user,
             source_message_id = %source_message_id,
             transport,
             delay_ms,
-            "typing_status_scheduled"
+            "已安排输入状态发送任务"
         );
 
         let task = tokio::spawn(async move {
             let delay_finished = tokio::select! {
                 _ = task_token.cancelled() => {
-                    debug!(
+                    trace!(
+                        event = "typing_status_cancelled",
                         user = %task_masked_user,
                         source_message_id = %task_source_message_id,
                         transport,
                         delay_ms,
                         elapsed_ms = started_at.elapsed().as_millis(),
-                        "typing_status_cancelled"
+                        "输入状态发送任务已取消"
                     );
                     false
                 }
@@ -146,13 +148,14 @@ impl C2cTypingStatusGuard {
 
             let result = tokio::select! {
                 _ = task_token.cancelled() => {
-                    debug!(
+                    trace!(
+                        event = "typing_status_cancelled",
                         user = %task_masked_user,
                         source_message_id = %task_source_message_id,
                         transport,
                         delay_ms,
                         elapsed_ms = started_at.elapsed().as_millis(),
-                        "typing_status_cancelled"
+                        "输入状态发送任务已取消"
                     );
                     return;
                 }
@@ -164,24 +167,26 @@ impl C2cTypingStatusGuard {
             match result {
                 Ok(_) => {
                     task_sent.store(true, Ordering::SeqCst);
-                    debug!(
+                    trace!(
+                        event = "typing_status_sent",
                         user = %task_masked_user,
                         source_message_id = %task_source_message_id,
                         transport,
                         delay_ms,
                         elapsed_ms = started_at.elapsed().as_millis(),
-                        "typing_status_sent"
+                        "输入状态已发送"
                     );
                 }
                 Err(error) => {
                     warn!(
+                        event = "typing_status_send_failed",
                         user = %task_masked_user,
                         source_message_id = %task_source_message_id,
                         transport,
                         delay_ms,
                         elapsed_ms = started_at.elapsed().as_millis(),
                         error = %error.log_summary(),
-                        "typing_status_send_failed"
+                        "输入状态发送失败"
                     );
                 }
             }
@@ -213,14 +218,15 @@ impl C2cTypingStatusGuard {
         {
             *self.stop_reason.lock().unwrap() = Some(reason);
         }
-        debug!(
+        trace!(
+            event = "typing_status_stopped",
             user = %self.masked_user,
             source_message_id = %self.source_message_id,
             delay_ms = self.delay_ms,
             elapsed_ms = self.started_at.elapsed().as_millis(),
             sent = self.sent.load(Ordering::SeqCst),
             stop_reason = reason.as_str(),
-            "typing_status_stopped"
+            "输入状态发送任务已停止"
         );
     }
 

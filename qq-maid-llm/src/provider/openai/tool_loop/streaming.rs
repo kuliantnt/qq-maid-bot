@@ -11,19 +11,26 @@ use std::{
 use serde_json::{Value, json};
 
 use crate::{
-    agent_loop::{AgentStep, AgentStreamingDiagnostics, AgentTextDeltaSink, AgentToolCall},
+    agent_loop::{
+        AgentStep, AgentStreamingDiagnostics, AgentTextDeltaDelivery, AgentTextDeltaSink,
+        AgentToolCall,
+    },
     error::LlmError,
     metrics::MetricsRecorder,
-    sse::{SseFrame, parse_sse_frame, take_sse_frame},
+    sse::{SseFrame, is_ignorable_sse_eof_tail, parse_sse_frame, take_sse_frame},
 };
 
 use crate::provider::openai::{
     extract::{extract_response_output_text, extract_response_usage},
-    responses::{incomplete_stream_eof_error, stream_transport_error},
+    responses::{
+        incomplete_sse_frame_error, incomplete_stream_eof_error, is_connection_reset_error,
+        stream_transport_error,
+    },
     stream::{
         handle_openai_chat_stream_event, is_openai_responses_done_sentinel,
-        responses_stream_is_complete,
+        response_incomplete_reason, responses_event_type, responses_stream_is_complete,
     },
+    tool_calls_disabled_error,
 };
 
 use super::{
@@ -34,6 +41,15 @@ use super::{
     response::{append_response_output_items, extract_function_calls},
 };
 
+pub(super) struct StreamFinalization {
+    pub(super) allow_tool_calls: bool,
+    pub(super) answer: String,
+    pub(super) buffered_deltas: Vec<String>,
+    pub(super) completed_response: Option<Value>,
+    pub(super) completion_confirmed: bool,
+    pub(super) diagnostics: Arc<Mutex<AgentStreamingDiagnostics>>,
+}
+
 pub(super) async fn collect_responses_tool_loop_stream(
     mut response: reqwest::Response,
     input: &mut Vec<Value>,
@@ -42,6 +58,9 @@ pub(super) async fn collect_responses_tool_loop_stream(
     diagnostics: Arc<Mutex<AgentStreamingDiagnostics>>,
     activity_counter: Arc<AtomicUsize>,
 ) -> Result<AgentStep, LlmError> {
+    update_streaming_diagnostics(&diagnostics, |item| {
+        item.http_status = Some(response.status().as_u16());
+    });
     let mut frame_buffer = Vec::new();
     let mut recorder = MetricsRecorder::start();
     let mut answer = String::new();
@@ -53,30 +72,37 @@ pub(super) async fn collect_responses_tool_loop_stream(
     loop {
         while let Some(frame) = take_sse_frame(&mut frame_buffer) {
             let Some(event) = parse_sse_frame(&frame).inspect_err(|_| {
-                set_streaming_fallback_reason(&diagnostics, "http_sse_parse_error");
+                mark_stream_parse_error(&diagnostics);
             })?
             else {
                 continue;
             };
-            update_streaming_diagnostics(&diagnostics, |item| item.sse_event_count += 1);
+            observe_sse_event(&diagnostics, &event);
             activity_counter.fetch_add(1, Ordering::SeqCst);
             if is_openai_responses_done_sentinel(&event.data) {
-                update_streaming_diagnostics(&diagnostics, |item| item.saw_done = true);
+                update_streaming_diagnostics(&diagnostics, |item| {
+                    item.saw_done = true;
+                    item.stream_end_kind = Some("done_sentinel".to_owned());
+                });
                 if responses_stream_is_complete(saw_completed, &completed_response) {
                     sync_responses_stream_diagnostics(
                         &diagnostics,
                         saw_completed,
                         buffered_deltas.len(),
+                        buffered_text_chars(&buffered_deltas),
                         active_function_calls.len(),
                     );
                     return finalize_responses_tool_loop_stream(
                         input,
-                        allow_tool_calls,
                         text_delta_sink,
-                        answer,
-                        buffered_deltas,
-                        completed_response,
-                        saw_completed,
+                        StreamFinalization {
+                            allow_tool_calls,
+                            answer,
+                            buffered_deltas,
+                            completed_response,
+                            completion_confirmed: true,
+                            diagnostics,
+                        },
                     )
                     .await;
                 }
@@ -87,21 +113,24 @@ pub(super) async fn collect_responses_tool_loop_stream(
                         "output_text": answer.clone(),
                         "output": completed_output_items.clone(),
                     }));
-                    saw_completed = true;
                     sync_responses_stream_diagnostics(
                         &diagnostics,
                         saw_completed,
                         buffered_deltas.len(),
+                        buffered_text_chars(&buffered_deltas),
                         active_function_calls.len(),
                     );
                     return finalize_responses_tool_loop_stream(
                         input,
-                        allow_tool_calls,
                         text_delta_sink,
-                        answer,
-                        buffered_deltas,
-                        completed_response,
-                        saw_completed,
+                        StreamFinalization {
+                            allow_tool_calls,
+                            answer,
+                            buffered_deltas,
+                            completed_response,
+                            completion_confirmed: true,
+                            diagnostics,
+                        },
                     )
                     .await;
                 }
@@ -113,7 +142,7 @@ pub(super) async fn collect_responses_tool_loop_stream(
                 &mut completed_output_items,
             )
             .inspect_err(|_| {
-                set_streaming_fallback_reason(&diagnostics, "http_sse_parse_error");
+                mark_stream_parse_error(&diagnostics);
             })?;
             recorder.mark_event();
             match handle_openai_chat_stream_event(
@@ -125,28 +154,46 @@ pub(super) async fn collect_responses_tool_loop_stream(
             )
             .inspect_err(|err| {
                 if err.stage == "sse" && err.message.starts_with("invalid ") {
-                    set_streaming_fallback_reason(&diagnostics, "http_sse_parse_error");
+                    mark_stream_parse_error(&diagnostics);
                 }
             })? {
                 Some(delta) if allow_tool_calls => buffered_deltas.push(delta),
-                Some(delta) => text_delta_sink(delta).await?,
+                Some(delta) => {
+                    let delta_chars = delta.chars().count();
+                    update_streaming_diagnostics(&diagnostics, |item| {
+                        item.saw_text_delta = true;
+                    });
+                    let delivery = text_delta_sink(delta).await?;
+                    if delivery == AgentTextDeltaDelivery::Visible {
+                        update_streaming_diagnostics(&diagnostics, |item| {
+                            item.visible_text_chars += delta_chars;
+                        });
+                    }
+                }
                 None => {}
             }
             sync_responses_stream_diagnostics(
                 &diagnostics,
                 saw_completed,
                 buffered_deltas.len(),
+                buffered_text_chars(&buffered_deltas),
                 active_function_calls.len(),
             );
             if responses_stream_is_complete(saw_completed, &completed_response) {
+                update_streaming_diagnostics(&diagnostics, |item| {
+                    item.stream_end_kind = Some("response_completed".to_owned());
+                });
                 return finalize_responses_tool_loop_stream(
                     input,
-                    allow_tool_calls,
                     text_delta_sink,
-                    answer,
-                    buffered_deltas,
-                    completed_response,
-                    saw_completed,
+                    StreamFinalization {
+                        allow_tool_calls,
+                        answer,
+                        buffered_deltas,
+                        completed_response,
+                        completion_confirmed: true,
+                        diagnostics,
+                    },
                 )
                 .await;
             }
@@ -159,50 +206,49 @@ pub(super) async fn collect_responses_tool_loop_stream(
             }
             Ok(None) => break,
             Err(err) => {
-                set_streaming_fallback_reason(&diagnostics, "http_sse_parse_error");
+                let connection_reset = is_connection_reset_error(&err);
+                let stream_end_kind = if err.is_timeout() {
+                    "http_stream_timeout"
+                } else if connection_reset {
+                    "connection_reset"
+                } else {
+                    "http_stream_error"
+                };
+                update_streaming_diagnostics(&diagnostics, |item| {
+                    item.connection_reset = connection_reset;
+                    item.stream_end_kind = Some(stream_end_kind.to_owned());
+                });
                 return Err(stream_transport_error(
-                    format!("OpenAI tool loop stream failed: {err}"),
+                    err,
+                    "OpenAI tool loop stream failed",
                     &answer,
                 ));
             }
         }
     }
 
+    // `Response::chunk()` 返回 Ok(None) 才表示 HTTP body 正常 EOF。先记录传输层
+    // 事实，再检查尾部残帧；若尾帧损坏，normal_eof 与 parse_error 会同时为 true，
+    // stream_end_kind 则明确标记 SSE 截断，且绝不会进入兼容完成。
+    update_streaming_diagnostics(&diagnostics, |item| item.normal_eof = true);
+
     if !frame_buffer.is_empty() {
-        let Some(event) = parse_sse_frame(&frame_buffer).inspect_err(|_| {
-            set_streaming_fallback_reason(&diagnostics, "http_sse_parse_error");
-        })?
-        else {
+        if is_ignorable_sse_eof_tail(&frame_buffer) {
             frame_buffer.clear();
-            return finalize_responses_tool_loop_stream(
-                input,
-                allow_tool_calls,
-                text_delta_sink,
-                answer,
-                buffered_deltas,
-                completed_response,
+        } else {
+            update_streaming_diagnostics(&diagnostics, |item| {
+                item.parse_error = true;
+                item.stream_end_kind = Some("sse_incomplete_frame".to_owned());
+            });
+            set_streaming_fallback_reason(&diagnostics, "sse_incomplete_frame");
+            sync_responses_stream_diagnostics(
+                &diagnostics,
                 saw_completed,
-            )
-            .await;
-        };
-        update_streaming_diagnostics(&diagnostics, |item| item.sse_event_count += 1);
-        activity_counter.fetch_add(1, Ordering::SeqCst);
-        if is_openai_responses_done_sentinel(&event.data) {
-            update_streaming_diagnostics(&diagnostics, |item| item.saw_done = true);
-        }
-        if !is_openai_responses_done_sentinel(&event.data) {
-            recorder.mark_event();
-            match handle_openai_chat_stream_event(
-                event,
-                &mut recorder,
-                &mut answer,
-                &mut completed_response,
-                &mut saw_completed,
-            )? {
-                Some(delta) if allow_tool_calls => buffered_deltas.push(delta),
-                Some(delta) => text_delta_sink(delta).await?,
-                None => {}
-            }
+                buffered_deltas.len(),
+                buffered_text_chars(&buffered_deltas),
+                active_function_calls.len(),
+            );
+            return Err(incomplete_sse_frame_error(&answer));
         }
     }
 
@@ -210,24 +256,140 @@ pub(super) async fn collect_responses_tool_loop_stream(
         &diagnostics,
         saw_completed,
         buffered_deltas.len(),
+        buffered_text_chars(&buffered_deltas),
         active_function_calls.len(),
     );
 
+    let explicit_completion = responses_stream_is_complete(saw_completed, &completed_response);
+    let stream_diagnostics = diagnostics
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if explicit_completion {
+        update_streaming_diagnostics(&diagnostics, |item| {
+            item.stream_end_kind = Some("response_completed".to_owned());
+        });
+    }
+    let done_completion = !explicit_completion
+        && stream_diagnostics.saw_done
+        && active_function_calls.is_empty()
+        && (!answer.trim().is_empty() || !completed_output_items.is_empty());
+    if done_completion {
+        completed_response = Some(json!({
+            "output_text": answer.clone(),
+            "output": completed_output_items.clone(),
+        }));
+    }
+    let compatible_eof_completion = !explicit_completion
+        && !done_completion
+        && stream_diagnostics.normal_eof
+        && !answer.trim().is_empty()
+        && active_function_calls.is_empty()
+        && completed_output_items.is_empty()
+        && !stream_diagnostics.explicit_failure_event
+        && !stream_diagnostics.parse_error
+        && !stream_diagnostics.connection_reset;
+    if compatible_eof_completion {
+        completed_response = Some(json!({
+            "output_text": answer.clone(),
+            "output": [],
+        }));
+        update_streaming_diagnostics(&diagnostics, |item| {
+            item.stream_end_kind = Some("normal_eof_compatible_completion".to_owned());
+        });
+        tracing::warn!(
+            http_status = response.status().as_u16(),
+            saw_text_delta = !answer.trim().is_empty(),
+            buffered_text_chars = buffered_text_chars(&buffered_deltas),
+            active_function_call_count = active_function_calls.len(),
+            last_sse_event_type = ?stream_diagnostics.last_sse_event_type,
+            "OpenAI Responses 流在正常 HTTP EOF 后按兼容规则完成"
+        );
+    } else if !explicit_completion && !completed_output_items.is_empty() {
+        // function call 已完整结束但缺少协议终止事件时，不能执行工具，也不能把同轮
+        // 草稿文本释放成最终回答；保留 completed items 仅用于准确识别该截断边界。
+        const END_KIND: &str = "normal_eof_completed_function_call_without_terminal_event";
+        update_streaming_diagnostics(&diagnostics, |item| {
+            item.stream_end_kind = Some(END_KIND.to_owned());
+        });
+        set_streaming_fallback_reason(&diagnostics, END_KIND);
+    } else if !explicit_completion {
+        update_streaming_diagnostics(&diagnostics, |item| {
+            item.stream_end_kind = Some(if active_function_calls.is_empty() {
+                "normal_eof_no_content".to_owned()
+            } else {
+                "normal_eof_active_function_call".to_owned()
+            });
+        });
+    }
+
     finalize_responses_tool_loop_stream(
         input,
-        allow_tool_calls,
         text_delta_sink,
-        answer,
-        buffered_deltas,
-        completed_response,
-        saw_completed,
+        StreamFinalization {
+            allow_tool_calls,
+            answer,
+            buffered_deltas,
+            completed_response,
+            completion_confirmed: explicit_completion
+                || done_completion
+                || compatible_eof_completion,
+            diagnostics,
+        },
     )
     .await
 }
 
+fn observe_sse_event(diagnostics: &Arc<Mutex<AgentStreamingDiagnostics>>, event: &SseFrame) {
+    let parsed = (!is_openai_responses_done_sentinel(&event.data))
+        .then(|| serde_json::from_str::<Value>(&event.data).ok())
+        .flatten();
+    // JSON type 是权威协议字段，避免外层 event header 错配污染诊断和正文分类。
+    let event_type = if is_openai_responses_done_sentinel(&event.data) {
+        Some("[DONE]".to_owned())
+    } else {
+        parsed
+            .as_ref()
+            .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned))
+            .or_else(|| event.event.clone())
+    };
+    let incomplete_reason = parsed.as_ref().and_then(response_incomplete_reason);
+    update_streaming_diagnostics(diagnostics, |item| {
+        item.sse_event_count += 1;
+        if incomplete_reason.is_some() {
+            item.incomplete_reason = incomplete_reason;
+        }
+        if let Some(event_type) = event_type {
+            item.explicit_failure_event |= matches!(
+                event_type.as_str(),
+                "response.failed" | "response.incomplete" | "error"
+            );
+            if item.explicit_failure_event {
+                item.stream_end_kind = Some("explicit_failure_event".to_owned());
+            }
+            item.last_sse_event_type = Some(event_type);
+        }
+    });
+}
+
+fn buffered_text_chars(buffered_deltas: &[String]) -> usize {
+    buffered_deltas
+        .iter()
+        .map(|delta| delta.chars().count())
+        .sum()
+}
+
+fn mark_stream_parse_error(diagnostics: &Arc<Mutex<AgentStreamingDiagnostics>>) {
+    update_streaming_diagnostics(diagnostics, |item| {
+        item.parse_error = true;
+        item.stream_end_kind = Some("sse_parse_error".to_owned());
+    });
+    set_streaming_fallback_reason(diagnostics, "sse_parse_error");
+}
+
 pub(super) fn observe_responses_function_call_event(
     event: &SseFrame,
-    active_function_calls: &mut HashSet<u64>,
+    active_function_calls: &mut HashSet<String>,
     completed_output_items: &mut Vec<Value>,
 ) -> Result<(), LlmError> {
     let value = serde_json::from_str::<Value>(&event.data).map_err(|err| {
@@ -236,12 +398,8 @@ pub(super) fn observe_responses_function_call_event(
             "sse",
         )
     })?;
-    let event_type = event
-        .event
-        .as_deref()
-        .or_else(|| value.get("type").and_then(Value::as_str))
-        .unwrap_or("");
-    let output_index = value.get("output_index").and_then(Value::as_u64);
+    let event_type = responses_event_type(event, &value)?;
+    let call_key = function_call_key(&value);
     match event_type {
         "response.output_item.added" => {
             if value
@@ -249,23 +407,22 @@ pub(super) fn observe_responses_function_call_event(
                 .and_then(|item| item.get("type"))
                 .and_then(Value::as_str)
                 == Some("function_call")
-                && let Some(index) = output_index
             {
-                active_function_calls.insert(index);
+                active_function_calls
+                    .insert(call_key.unwrap_or_else(|| "unindexed_function_call".to_owned()));
             }
         }
         "response.function_call_arguments.delta" => {
-            if let Some(index) = output_index {
-                active_function_calls.insert(index);
-            }
+            active_function_calls
+                .insert(call_key.unwrap_or_else(|| "unindexed_function_call".to_owned()));
         }
         "response.output_item.done" => {
             if let Some(item) = value.get("item")
                 && item.get("type").and_then(Value::as_str) == Some("function_call")
             {
                 completed_output_items.push(item.clone());
-                if let Some(index) = output_index {
-                    active_function_calls.remove(&index);
+                if let Some(call_key) = call_key {
+                    active_function_calls.remove(&call_key);
                 }
             }
         }
@@ -274,16 +431,40 @@ pub(super) fn observe_responses_function_call_event(
     Ok(())
 }
 
+fn function_call_key(value: &Value) -> Option<String> {
+    value
+        .get("output_index")
+        .and_then(Value::as_u64)
+        .map(|index| format!("output_index:{index}"))
+        .or_else(|| {
+            value
+                .get("item_id")
+                .and_then(Value::as_str)
+                .map(|id| format!("item_id:{id}"))
+        })
+        .or_else(|| {
+            value
+                .get("item")
+                .and_then(|item| item.get("id").or_else(|| item.get("call_id")))
+                .and_then(Value::as_str)
+                .map(|id| format!("item:{id}"))
+        })
+}
+
 pub(super) async fn finalize_responses_tool_loop_stream(
     input: &mut Vec<Value>,
-    allow_tool_calls: bool,
     text_delta_sink: AgentTextDeltaSink,
-    mut answer: String,
-    buffered_deltas: Vec<String>,
-    completed_response: Option<Value>,
-    saw_completed: bool,
+    finalization: StreamFinalization,
 ) -> Result<AgentStep, LlmError> {
-    if !saw_completed {
+    let StreamFinalization {
+        allow_tool_calls,
+        mut answer,
+        buffered_deltas,
+        completed_response,
+        completion_confirmed,
+        diagnostics,
+    } = finalization;
+    if !completion_confirmed {
         return Err(incomplete_stream_eof_error(
             "OpenAI Responses tool loop stream ended before response.completed",
             &answer,
@@ -299,11 +480,7 @@ pub(super) async fn finalize_responses_tool_loop_stream(
     let calls = extract_function_calls(&body)?;
     if !calls.is_empty() {
         if !allow_tool_calls {
-            return Err(LlmError::new(
-                "tool_loop_limit",
-                "tool loop returned tool calls when tool calls are disabled",
-                "tool_loop",
-            ));
+            return Err(tool_calls_disabled_error());
         }
         append_response_output_items(input, &body)?;
         return Ok(AgentStep::ToolCalls {
@@ -325,7 +502,8 @@ pub(super) async fn finalize_responses_tool_loop_stream(
     {
         answer = completed_answer;
     }
-    if answer.trim().is_empty() {
+    let output_parts = crate::provider::openai::extract::extract_response_output_parts(&body);
+    if answer.trim().is_empty() && output_parts.is_empty() {
         return Err(LlmError::provider(
             "OpenAI tool loop returned empty final text output",
             "provider",
@@ -333,15 +511,28 @@ pub(super) async fn finalize_responses_tool_loop_stream(
     }
     if allow_tool_calls {
         if buffered_deltas.is_empty() {
-            text_delta_sink(answer.clone()).await?;
+            let answer_chars = answer.chars().count();
+            let delivery = text_delta_sink(answer.clone()).await?;
+            if delivery == AgentTextDeltaDelivery::Visible {
+                update_streaming_diagnostics(&diagnostics, |item| {
+                    item.visible_text_chars += answer_chars;
+                });
+            }
         } else {
             for delta in buffered_deltas {
-                text_delta_sink(delta).await?;
+                let delta_chars = delta.chars().count();
+                let delivery = text_delta_sink(delta).await?;
+                if delivery == AgentTextDeltaDelivery::Visible {
+                    update_streaming_diagnostics(&diagnostics, |item| {
+                        item.visible_text_chars += delta_chars;
+                    });
+                }
             }
         }
     }
     Ok(AgentStep::FinalAnswer {
         reply: answer,
+        output_parts,
         usage: step_usage,
     })
 }

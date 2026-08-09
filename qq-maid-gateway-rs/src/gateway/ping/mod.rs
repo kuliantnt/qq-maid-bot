@@ -22,10 +22,7 @@ use crate::{
 use qq_maid_common::time_context::now_unix_seconds_marker;
 use qq_maid_core::service::CoreHealthSnapshot;
 
-use self::{
-    healthz::{LlmUpstreamSnapshot, core_health_snapshot},
-    render::render_ping_reply,
-};
+use self::healthz::{LlmUpstreamSnapshot, core_health_snapshot};
 
 pub use self::status::{GatewayRuntimeSnapshot, GatewayRuntimeStatus, InvalidSessionSnapshot};
 
@@ -34,6 +31,21 @@ enum PingMode {
     Summary,
     All,
     Check,
+}
+
+/// `/ping` 编排层的附加输入，避免版本注入继续扩大稳定诊断接口的参数列表。
+pub(crate) struct PingReplyOptions<'a> {
+    check_failure: Option<&'a str>,
+    application_version: &'a str,
+}
+
+impl<'a> PingReplyOptions<'a> {
+    pub(crate) fn new(check_failure: Option<&'a str>, application_version: &'a str) -> Self {
+        Self {
+            check_failure,
+            application_version,
+        }
+    }
 }
 
 pub fn is_ping_command(text: &str) -> bool {
@@ -73,22 +85,26 @@ pub(crate) fn build_ping_reply(
     runtime: &GatewayRuntimeStatus,
     token_snapshot: &AccessTokenSnapshot,
     core_health: &CoreHealthSnapshot,
-    check_failure: Option<&str>,
+    options: PingReplyOptions<'_>,
 ) -> String {
     let mut llm_health = core_health_snapshot(core_health);
-    if let Some(summary) = check_failure {
+    if let Some(summary) = options.check_failure {
         // 主动检查的直接失败必须覆盖旧 healthz 快照，避免 `/ping check` 误报绿色。
         llm_health.upstream = LlmUpstreamSnapshot::Error {
             last_checked_at: Some(now_unix_seconds_marker()),
             error_summary: summary.to_owned(),
         };
     }
-    render_ping_reply(
-        command_text,
+    render::render_ping_reply_at_with_version(
         context,
         config,
         runtime,
         token_snapshot,
         &llm_health,
+        render::PingRenderOptions::new(
+            parse_ping_mode(command_text).unwrap_or(PingMode::Summary),
+            qq_maid_common::time_context::now_unix_seconds(),
+            options.application_version,
+        ),
     )
 }

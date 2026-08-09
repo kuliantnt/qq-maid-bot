@@ -9,8 +9,19 @@ use std::{
 };
 
 use anyhow::Context;
-use qq_maid_core::service::{CoreInboundKind, CoreRespondFailure};
+use qq_maid_core::service::{
+    CoreDeliveryHint, CoreInboundKind, CoreRespondFailure, CoreRespondOutput, CoreResponse,
+    CoreResponseEvent,
+};
 use tracing::{debug, info, warn};
+
+use super::voice::{VoiceDeliveryAttempt, try_group_voice_delivery};
+
+mod ingress;
+
+#[cfg(test)]
+pub(crate) use ingress::GroupIngressFacts;
+pub(crate) use ingress::{GroupIngressPreprocessor, PreparedGroupMessage};
 
 fn empty_group_reply_fallback_text(bot_display_name: &str) -> String {
     format!("唔，{bot_display_name}刚刚没整理出可用回复。可以再说一次。")
@@ -25,19 +36,19 @@ fn group_cooldown_hint_text(bot_display_name: &str) -> String {
 }
 
 #[cfg(test)]
-use super::super::group_filter::should_process_group_message;
 use super::super::{
-    bot_identity::SharedBotIdentity,
+    bot_identity::SharedBotIdentity, dedupe::MessageDedupe,
+    group_filter::should_process_group_message,
+};
+use super::super::{
     cache::BotOutboundCache,
     command::{GatewayCommandContext, GatewayCommandConversation, GatewayCommandService},
-    dedupe::MessageDedupe,
     event::{GroupEventType, GroupMessage},
-    group_filter::{
-        GroupCooldowns, group_message_addresses_bot, mentions_current_bot,
-        should_ignore_group_message, should_process_group_message_with_prefix,
-    },
+    group_filter::{GroupCooldowns, group_message_addresses_bot, mentions_current_bot},
     logging::{group_message_log_summary, mask_openid},
-    media_fetch::{MediaFetchContext, fetch_qq_official_image_attachments},
+    media_fetch::{
+        MediaFetchContext, fetch_qq_official_image_attachments, fetch_qq_official_quoted_images,
+    },
     outbound::{
         ReplyCapability, ReplyTarget, RuntimeRecordingGroupSender, send_group_text_with_status,
     },
@@ -49,11 +60,14 @@ use super::super::{
 use crate::{
     api::{GroupOutboundSender, QqApiClient, SendMessageIds},
     config::AppConfig,
-    message_chunk::{ChunkLimits, OutboundSendError, send_group_outbound_chunked},
-    render::{OutboundMessage, render_respond_response_for_profile},
-    respond::{
-        RespondClient, RespondEvent, RespondResponse, RespondTransport, respond_error_to_qq_text,
+    gateway::event::strip_contaminated_quote_from_context,
+    message_chunk::{
+        ChunkLimits, OutboundSendError, QQ_GROUP_PASSIVE_REPLY_BUDGET,
+        plan_qq_passive_reply_outbounds, send_group_outbound_chunked,
     },
+    render::{OutboundMessage, render_respond_response_parts_for_profile},
+    respond::{RespondClient, respond_error_to_qq_text},
+    tts::provider_from_config,
 };
 
 fn group_reply_mention_prefix(
@@ -71,9 +85,7 @@ fn group_reply_mention_prefix(
     message
         .member_openid
         .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|member_openid| format!("<@{member_openid}>"))
+        .and_then(platform::qq_official::member_mention)
 }
 
 fn prefix_group_reply_outbound(
@@ -127,7 +139,7 @@ async fn send_cooldown_hint(
             message_id = %message.message_id,
             group = %mask_openid(&message.group_openid),
             error = %error.log_summary(),
-            "group cooldown hint send failed"
+            "群聊冷却提示发送失败"
         );
     }
 }
@@ -150,16 +162,29 @@ pub(super) async fn handle_group_message_for_test(
 ) -> anyhow::Result<()> {
     let commands =
         GatewayCommandService::from_config(config.clone(), runtime.clone(), respond.clone());
-    handle_group_message(
+    let Some(mut message) = ingress::preprocess_group_message(
+        message,
+        config,
+        respond,
+        dedupe,
+        group_outbound_cache,
+        bot_identity,
+        ref_index,
+    ) else {
+        return Ok(());
+    };
+    // 测试 helper 直接绕过 Dispatcher，视为已经确认接收重型消息。
+    if let Some(reservation) = message.dedupe_reservation.take() {
+        reservation.commit();
+    }
+    handle_prepared_group_message(
         message,
         config,
         &commands,
         respond,
         api,
-        dedupe,
         group_outbound_cache,
         group_cooldowns,
-        bot_identity,
         runtime,
         ref_index,
     )
@@ -167,43 +192,45 @@ pub(super) async fn handle_group_message_for_test(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_group_message(
-    mut message: GroupMessage,
+pub(crate) async fn handle_prepared_group_message(
+    prepared: PreparedGroupMessage,
     config: &AppConfig,
     commands: &GatewayCommandService,
     respond: &RespondClient,
     api: &QqApiClient,
-    dedupe: &MessageDedupe,
     group_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
     group_cooldowns: &Arc<Mutex<GroupCooldowns>>,
-    bot_identity: &SharedBotIdentity,
     runtime: &GatewayRuntimeStatus,
     ref_index: &SharedRefIndex,
 ) -> anyhow::Result<()> {
-    log_group_message_received(&message, config.verbose_log);
-    let masked_group = mask_openid(&message.group_openid);
-    let respond_content = crate::respond::build_group_respond_content_with_prefix(
-        &message,
-        &config.group_active_keywords,
-        config.command_prefix,
+    let PreparedGroupMessage {
+        mut message,
+        respond_content,
+        command_content,
+        facts,
+        dedupe_checked,
+        passive_observed,
+        dedupe_reservation,
+    } = prepared;
+    debug_assert!(
+        dedupe_reservation.is_none(),
+        "重型群消息进入 worker 前必须完成 reservation 提交或回滚"
     );
-    observe_group_message_ref_index(&message, respond, ref_index);
-    if should_ignore_group_message(
-        &message,
-        &respond_content,
-        &masked_group,
-        group_outbound_cache,
-    ) {
-        return Ok(());
-    }
-    if dedupe.is_duplicate(&message.message_id) {
-        info!(
-            message_id = %message.message_id,
-            group = %masked_group,
-            "duplicate group message ignored"
-        );
-        return Ok(());
-    }
+    debug_assert!(dedupe_checked, "重型群消息必须先完成复合去重");
+    debug_assert!(
+        !passive_observed,
+        "进入重型队列的群消息不得提前写入 passive observation"
+    );
+    let masked_group = mask_openid(&message.group_openid);
+    debug!(
+        message_id = %message.message_id,
+        group = %masked_group,
+        local_command_candidate = facts.local_command_candidate,
+        mentions_current_bot = facts.mentions_current_bot,
+        active_keyword = facts.active_keyword,
+        replies_to_bot = facts.replies_to_bot,
+        "群聊消息已进入重型回复阶段"
+    );
     let command_context = GatewayCommandContext {
         platform_name: "QQ 官方机器人",
         platform_code: "qq_official_gateway_rs",
@@ -216,13 +243,13 @@ pub(crate) async fn handle_group_message(
         attachment_count: message.attachments.len(),
     };
     if let Some(output) = commands
-        .try_handle(&respond_content, &command_context)
+        .try_handle(&command_content, &command_context)
         .await
     {
         info!(
             message_id = %message.message_id,
             group = %masked_group,
-            "local Gateway command matched for QQ group"
+            "QQ 群聊已匹配本地 Gateway 命令"
         );
         send_group_local_command(
             api,
@@ -232,26 +259,6 @@ pub(crate) async fn handle_group_message(
             output.render(&ReplyCapability::qq_official_group(config)),
         )
         .await?;
-        return Ok(());
-    }
-    if !should_process_group_message_with_prefix(
-        config.group_message_mode,
-        &config.group_active_keywords,
-        config.command_prefix,
-        &message,
-        &respond_content,
-        bot_identity,
-        group_outbound_cache,
-    ) {
-        let active_keyword_count = config.group_active_keywords.len();
-        debug!(
-            message_id = %message.message_id,
-            group = %masked_group,
-            event_type = message.event_type.as_respond_event_type(),
-            mode = ?config.group_message_mode,
-            active_keyword_count,
-            "group message ignored by mode policy"
-        );
         return Ok(());
     }
     // 只用轻量、身份完整的 Core request 读取确定性命令和当前 actor 可见 Pending；
@@ -274,7 +281,7 @@ pub(crate) async fn handle_group_message(
                     group = %masked_group,
                     member = %message.member_openid.as_deref().map(mask_openid).unwrap_or_default(),
                     error = %error.log_summary(),
-                    "group inbound classification failed; preserving normal chat cooldown"
+                    "群聊入站分类失败，将保留普通聊天冷却状态"
                 );
                 false
             }
@@ -294,7 +301,7 @@ pub(crate) async fn handle_group_message(
                 message_id = %message.message_id,
                 group = %masked_group,
                 member = %message.member_openid.as_deref().map(mask_openid).unwrap_or_default(),
-                "group message throttled by cooldown; sending lightweight hint"
+                "群聊消息触发冷却限制，正在发送轻量提示"
             );
             send_cooldown_hint(api, runtime, &message, config.bot_display_name()).await;
         } else {
@@ -302,28 +309,37 @@ pub(crate) async fn handle_group_message(
                 message_id = %message.message_id,
                 group = %masked_group,
                 member = %message.member_openid.as_deref().map(mask_openid).unwrap_or_default(),
-                "group message ignored by cooldown"
+                "群聊消息因冷却限制被忽略"
             );
         }
         return Ok(());
     }
 
+    let media_client = qq_maid_common::http_client::client();
+    let media_context = MediaFetchContext {
+        platform: "qq_official",
+        app_id: config
+            .app_id
+            .clone()
+            .context("QQ group handler requires a bound channel")?,
+        peer_id: message.group_openid.clone(),
+        root_dir: config.media_dir.clone(),
+        timeout: config.media_download_timeout,
+        max_bytes: config.media_max_bytes,
+    };
     fetch_qq_official_image_attachments(
-        &qq_maid_common::http_client::client(),
-        &MediaFetchContext {
-            platform: "qq_official",
-            app_id: config
-                .app_id
-                .clone()
-                .context("QQ group handler requires a bound channel")?,
-            peer_id: message.group_openid.clone(),
-            root_dir: config.media_dir.clone(),
-            timeout: config.media_download_timeout,
-            max_bytes: config.media_max_bytes,
-        },
+        &media_client,
+        &media_context,
         &message.message_id,
         &mut message.input_parts,
         &message.attachments,
+    )
+    .await;
+    fetch_qq_official_quoted_images(
+        &media_client,
+        &media_context,
+        &message.message_id,
+        message.reply.as_mut(),
     )
     .await;
 
@@ -333,13 +349,19 @@ pub(crate) async fn handle_group_message(
             &config.group_active_keywords,
             config.command_prefix,
         ));
+    // 在群聊归一化正文后、RefIndex enrich 前检测引用文字污染。
+    // 归一化已移除 @机器人/唤醒词/分隔符，此时当前正文与 Core 最终一致。
+    // 完整 RefIndex 命中会覆盖 input_parts；被动观察命中则用索引正文与事件媒体合并。
+    if let Some(ref mut quoted) = inbound.quoted {
+        strip_contaminated_quote_from_context(quoted, &inbound.text);
+    }
     {
         let mut index = ref_index.lock().unwrap();
         index.enrich_inbound(&mut inbound);
     }
     // 成员详情补全（#319）：best-effort 调用 #229 补全 actor / mention / 引用 sender
     // 的展示字段，失败降级 source=Event，不阻断主回复流程。补全后再 insert_inbound，
-    // 让索引里存的是补全后的 sender。配置开关默认开启，可经环境变量关闭。
+    // 让索引里存的是补全后的 sender。接口当前默认关闭，仅可经环境变量显式开启。
     if config.member_detail_enrich_enabled {
         platform::member_enrich::enrich_inbound_member_details(api, &mut inbound).await;
     }
@@ -351,7 +373,7 @@ pub(crate) async fn handle_group_message(
     info!(
         message_id = %message.message_id,
         group = %masked_group,
-        "calling respond backend for group"
+        "正在调用群聊回复后端"
     );
     let transport = match respond.respond_inbound(&inbound, respond_content).await {
         Ok(response) => {
@@ -369,7 +391,7 @@ pub(crate) async fn handle_group_message(
                 local_fallback = true,
                 fallback_reason = "respond_error",
                 qq_error_text = %log_text,
-                "respond backend call failed; sending local group fallback"
+                "回复后端调用失败，正在发送本地群聊降级回复"
             );
             let sent_message_id = send_group_text_with_status(
                 api,
@@ -392,7 +414,7 @@ pub(crate) async fn handle_group_message(
     };
 
     match transport {
-        RespondTransport::Complete(response) => {
+        CoreRespondOutput::Complete(response) => {
             send_group_respond_response(
                 api,
                 runtime,
@@ -404,7 +426,7 @@ pub(crate) async fn handle_group_message(
             )
             .await?;
         }
-        RespondTransport::Stream(stream) => match consume_respond_stream(stream).await {
+        CoreRespondOutput::Stream(stream) => match consume_respond_stream(stream).await {
             GroupStreamOutcome::Completed(response) => {
                 send_group_respond_response(
                     api,
@@ -452,6 +474,19 @@ async fn send_group_local_command(
         config.markdown_chunk_soft_limit,
         config.text_chunk_soft_limit,
     );
+    let (mut planned, limits, truncated) =
+        plan_qq_passive_reply_outbounds(&[outbound], &limits, QQ_GROUP_PASSIVE_REPLY_BUDGET);
+    let outbound = planned
+        .pop()
+        .expect("single local command outbound must produce a send plan");
+    if truncated {
+        warn!(
+            message_id = target.msg_id.as_deref().unwrap_or(""),
+            group = %mask_openid(&target.group_openid),
+            reply_budget = QQ_GROUP_PASSIVE_REPLY_BUDGET,
+            "QQ 群聊被动回复在发送前已截断"
+        );
+    }
     send_group_outbound_chunked(&sender, &target, &outbound, &limits, |_, _| {})
         .await
         .map(|_| ())
@@ -461,58 +496,23 @@ async fn send_group_local_command(
         })
 }
 
-fn observe_group_message_ref_index(
-    message: &GroupMessage,
-    respond: &RespondClient,
-    ref_index: &SharedRefIndex,
-) {
-    if message.author_is_self || message.author_is_bot || message.current_msg_idx.is_none() {
-        return;
-    }
-    let inbound = respond.prepare_inbound(platform::qq_official::inbound_from_group(message));
-    match ref_index.lock() {
-        Ok(mut index) => index.insert_inbound(&inbound),
-        Err(_) => warn!(
-            message_id = %message.message_id,
-            group = %mask_openid(&message.group_openid),
-            "group inbound ref_index observe skipped because index lock is poisoned"
-        ),
-    }
-}
-
 async fn send_group_respond_response(
     api: &QqApiClient,
     runtime: &GatewayRuntimeStatus,
     config: &AppConfig,
     group_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
     message: &GroupMessage,
-    response: &RespondResponse,
+    response: &CoreResponse,
     ref_index: &SharedRefIndex,
 ) -> anyhow::Result<()> {
     if response.suppresses_reply() {
         debug!(
             message_id = %message.message_id,
             group = %mask_openid(&message.group_openid),
-            "group reply suppressed by Core"
+            "群聊回复已被 Core 抑制"
         );
         return Ok(());
     }
-    let capability = ReplyCapability::qq_official_group(config);
-    let outbound = match render_respond_response_for_profile(response, &capability.render) {
-        Some(outbound) => outbound,
-        None => {
-            warn!(
-            message_id = %message.message_id,
-            group = %mask_openid(&message.group_openid),
-            fallback_reason = "empty_rendered_response",
-            "respond backend produced no group reply text; sending local fallback"
-            );
-            OutboundMessage::Text {
-                text: empty_group_reply_fallback_text(config.bot_display_name()),
-            }
-        }
-    };
-    let outbound = prefix_group_reply_outbound(message, outbound, &capability);
     let sender = RuntimeRecordingGroupSender {
         inner: api,
         runtime,
@@ -523,39 +523,87 @@ async fn send_group_respond_response(
     )
     .to_qq_group_target()
     .expect("QQ group reply target should adapt to QQ API target");
-    let limits = ChunkLimits::new(
-        config.markdown_chunk_soft_limit,
-        config.text_chunk_soft_limit,
-    );
-    // 普通群回复统一走分段编排：每个成功发送并返回 message id 的分段写入
-    // `BotOutboundCache`；失败分段不写，错误向上传递为 PartiallySent / NotSent。
-    match send_group_outbound_chunked(&sender, &target, &outbound, &limits, |_, sent_ids| {
+    // 普通文字回复不构造 TTS Provider，也不克隆凭证或创建新的 HTTP Client handle。
+    let provider = (response.delivery_hint == Some(CoreDeliveryHint::Voice))
+        .then(|| provider_from_config(&config.voice))
+        .flatten();
+    if let VoiceDeliveryAttempt::Delivered(sent_ids) =
+        try_group_voice_delivery(provider.as_deref(), &sender, &target, response).await
+    {
         record_group_bot_outbound_send(
             group_outbound_cache,
             ref_index,
             message,
             response,
             config,
-            sent_ids,
-            outbound.fallback_text(),
+            &sent_ids,
+            response.text_content().unwrap_or_default(),
         );
-    })
-    .await
-    {
-        Ok(_) => Ok(()),
-        Err(OutboundSendError::NotSent { source }) => Err(source.into()),
-        Err(OutboundSendError::PartiallySent { source, .. }) => {
-            // 已成功前段已写入 cache，这里只把底层错误向上传递，不伪造完整送达。
-            Err(source.into())
+        return Ok(());
+    }
+    let capability = ReplyCapability::qq_official_group(config);
+    let mut outbounds = render_respond_response_parts_for_profile(response, &capability.render);
+    if outbounds.is_empty() {
+        warn!(
+            message_id = %message.message_id,
+            group = %mask_openid(&message.group_openid),
+            fallback_reason = "empty_rendered_response",
+            "回复后端未生成群聊回复文本，正在发送本地降级回复"
+        );
+        outbounds.push(OutboundMessage::Text {
+            text: empty_group_reply_fallback_text(config.bot_display_name()),
+        });
+    }
+    let outbounds = outbounds
+        .into_iter()
+        .map(|outbound| prefix_group_reply_outbound(message, outbound, &capability))
+        .collect::<Vec<_>>();
+    let limits = ChunkLimits::new(
+        config.markdown_chunk_soft_limit,
+        config.text_chunk_soft_limit,
+    );
+    let (outbounds, limits, truncated) =
+        plan_qq_passive_reply_outbounds(&outbounds, &limits, QQ_GROUP_PASSIVE_REPLY_BUDGET);
+    if truncated {
+        warn!(
+            message_id = target.msg_id.as_deref().unwrap_or(""),
+            group = %mask_openid(&target.group_openid),
+            reply_budget = QQ_GROUP_PASSIVE_REPLY_BUDGET,
+            "QQ 群聊被动回复在发送前已截断"
+        );
+    }
+    // 普通群回复统一走分段编排：每个成功发送并返回 message id 的分段写入
+    // `BotOutboundCache`；失败分段不写，错误向上传递为 PartiallySent / NotSent。
+    for outbound in &outbounds {
+        match send_group_outbound_chunked(&sender, &target, outbound, &limits, |_, sent_ids| {
+            record_group_bot_outbound_send(
+                group_outbound_cache,
+                ref_index,
+                message,
+                response,
+                config,
+                sent_ids,
+                outbound.fallback_text(),
+            );
+        })
+        .await
+        {
+            Ok(_) => {}
+            Err(OutboundSendError::NotSent { source }) => return Err(source.into()),
+            Err(OutboundSendError::PartiallySent { source, .. }) => {
+                // 已成功前段已写入 cache，这里只把底层错误向上传递，不伪造完整送达。
+                return Err(source.into());
+            }
         }
     }
+    Ok(())
 }
 
 fn record_group_bot_outbound_send(
     group_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
     ref_index: &SharedRefIndex,
     message: &GroupMessage,
-    response: &RespondResponse,
+    response: &CoreResponse,
     config: &AppConfig,
     sent_ids: &SendMessageIds,
     text: &str,
@@ -578,7 +626,7 @@ fn record_group_bot_outbound_send(
 
 #[derive(Debug)]
 enum GroupStreamOutcome {
-    Completed(RespondResponse),
+    Completed(CoreResponse),
     Failed(CoreRespondFailure),
     ClosedBeforeCompleted,
 }
@@ -592,38 +640,36 @@ where
     let mut text_delta_count = 0_usize;
     while let Some(event) = stream.recv_event().await {
         match event {
-            RespondEvent::Status(status) => {
+            CoreResponseEvent::Status(status) => {
                 status_event_count += 1;
                 debug!(
                     status_kind = status.kind.as_str(),
                     response_delivery_mode = "progress_status",
                     status_chars = status.text.chars().count(),
                     status_event_count,
-                    "group stream status event recorded without group progress send"
+                    "群聊流式状态事件已记录，未发送群聊进度状态"
                 );
             }
-            RespondEvent::TextDelta(delta) => {
+            CoreResponseEvent::TextDelta(delta) => {
                 if !delta.is_empty() {
                     text_delta_count += 1;
                 }
             }
-            RespondEvent::Completed(response) => {
+            CoreResponseEvent::Completed(response) => {
                 debug!(
                     response_delivery_mode = output_policy.as_str(),
-                    text_delta_count,
-                    status_event_count,
-                    "group stream collapsed into single Completed response"
+                    text_delta_count, status_event_count, "群聊回复流已合并为单条 Completed 回复"
                 );
                 return GroupStreamOutcome::Completed(*response);
             }
-            RespondEvent::Failed(failure) => {
+            CoreResponseEvent::Failed(failure) => {
                 warn!(
                     kind = ?failure.kind,
                     retryable = failure.retryable,
                     response_delivery_mode = output_policy.as_str(),
                     text_delta_count,
                     status_event_count,
-                    "core respond stream failed"
+                    "Core 回复流失败"
                 );
                 return GroupStreamOutcome::Failed(failure);
             }
@@ -669,7 +715,7 @@ fn log_group_message_received(message: &GroupMessage, verbose_log: bool) {
             attachment_count = summary.attachment_count,
             is_ping = summary.is_ping,
             extracted_content = %extracted_content,
-            "received group message"
+            "已收到群聊消息"
         );
     } else {
         info!(
@@ -681,7 +727,7 @@ fn log_group_message_received(message: &GroupMessage, verbose_log: bool) {
             mention_count = summary.mention_count,
             attachment_count = summary.attachment_count,
             is_ping = summary.is_ping,
-            "received group message"
+            "已收到群聊消息"
         );
     }
 }

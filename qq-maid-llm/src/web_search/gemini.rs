@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::{
     config::LlmConfig,
-    error::LlmError,
+    error::{LlmError, LlmErrorKind},
     metrics::duration_ms,
     provider::types::{ModelId, ModelProvider},
 };
@@ -98,11 +98,28 @@ impl WebSearchExecutor for GeminiWebSearchExecutor {
             .send()
             .await
             .map_err(|err| {
-                if err.is_timeout() {
-                    LlmError::timeout("http")
+                let stage = if err.is_timeout() {
+                    "http_request_timeout"
                 } else {
-                    LlmError::http(format!("Gemini web query request failed: {err}"))
-                }
+                    "http_request"
+                };
+                let mapped = LlmError::from_error_source(
+                    &err,
+                    LlmErrorKind::Network,
+                    stage,
+                    "Gemini web query request failed",
+                );
+                tracing::warn!(
+                    provider = "gemini",
+                    model,
+                    stream = false,
+                    timeout_stage = mapped.stage.as_str(),
+                    elapsed_ms = started.elapsed().as_millis(),
+                    error_kind = mapped.kind().as_str(),
+                    error = %err,
+                    "Gemini 联网搜索传输失败"
+                );
+                mapped
             })?;
 
         let status = response.status();
@@ -111,7 +128,7 @@ impl WebSearchExecutor for GeminiWebSearchExecutor {
         }
 
         let body: Value = response.json().await.map_err(|err| {
-            LlmError::provider(format!("invalid Gemini query JSON: {err}"), "json")
+            LlmError::from_response_source(&err, "failed to read Gemini web query JSON")
         })?;
         let answer = extract_gemini_output_text(&body).ok_or_else(|| {
             LlmError::provider("Gemini web query returned empty text output", "provider")
@@ -214,14 +231,14 @@ fn trace_gemini_query_payload(req: &WebSearchRequest, url: &str, model: &str, pa
         tools = %tools,
         input_chars = input.chars().count(),
         query_chars = req.query.trim().chars().count(),
-        "gemini query request payload summary"
+        "Gemini 查询请求载荷摘要"
     );
 
     if trace_query_input_enabled() {
         tracing::trace!(
             upstream_url = url,
             input = %input,
-            "gemini query request input"
+            "Gemini 查询请求输入"
         );
     }
 }
@@ -237,12 +254,7 @@ async fn gemini_status_error(status: StatusCode, response: reqwest::Response) ->
             status.as_u16()
         )
     };
-    match status.as_u16() {
-        401 | 403 => LlmError::config(message),
-        429 => LlmError::new("rate_limited", message, "http"),
-        500..=599 => LlmError::new("upstream_unavailable", message, "http"),
-        _ => LlmError::http(message),
-    }
+    LlmError::from_upstream_status(status.as_u16(), message, "http")
 }
 
 fn extract_gemini_output_text(body: &Value) -> Option<String> {
@@ -350,6 +362,9 @@ mod tests {
             raw_question: Some("/查 Gemini 搜索".to_owned()),
             max_results: Some(4),
             context_size: Some("high".to_owned()),
+            topic: None,
+            time_range: None,
+            backend_override: None,
             model_override: None,
         };
         let payload = gemini_web_search_payload(&req, &req.query, 4);

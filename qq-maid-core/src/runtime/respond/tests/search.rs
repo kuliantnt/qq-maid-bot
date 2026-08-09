@@ -30,6 +30,29 @@ impl RecordingWebSearchExecutor {
     }
 }
 
+#[test]
+fn web_search_errors_have_actionable_user_replies() {
+    let cases = [
+        ("web_search_disabled", "配置中关闭"),
+        ("web_search_not_configured", "TAVILY_API_KEY"),
+        ("tavily_auth_error", "API Key 无效"),
+        ("rate_limited", "上游限流"),
+        ("quota_exhausted", "额度已用尽"),
+        ("empty_result", "没查到明确结果"),
+        ("invalid_arguments", "参数无效"),
+        ("bad_tool_arguments", "参数无效"),
+    ];
+
+    for (code, expected) in cases {
+        let error = LlmError::new(code, "test error", "test");
+        let reply = crate::runtime::respond::search_flow::format_web_search_error_reply(&error);
+        assert!(
+            reply.contains(expected),
+            "unexpected reply for {code}: {reply}"
+        );
+    }
+}
+
 #[async_trait]
 impl WebSearchExecutor for LongAnswerWebSearchExecutor {
     async fn query(&self, req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
@@ -103,7 +126,7 @@ impl WebSearchExecutor for RecordingWebSearchExecutor {
 }
 
 #[tokio::test]
-async fn natural_search_agent_can_call_web_search_without_router_rewrite() {
+async fn model_web_search_call_does_not_depend_on_text_status_intent() {
     let provider = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_call_json(
@@ -132,7 +155,7 @@ async fn natural_search_agent_can_call_web_search_without_router_rewrite() {
         );
 
     let response = service
-        .respond(private_message("可以联网查一下"))
+        .respond(private_message("帮我确认这个说法是否可靠"))
         .await
         .unwrap();
 
@@ -152,7 +175,7 @@ async fn natural_search_agent_can_call_web_search_without_router_rewrite() {
 
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["respond_route"], "agent_runtime");
-    assert_eq!(diagnostics["route_domains"], serde_json::json!(["search"]));
+    assert_eq!(diagnostics["route_domains"], serde_json::json!([]));
     assert_eq!(diagnostics["used_search"], true);
     assert_eq!(
         diagnostics["agent_executed_tools"],

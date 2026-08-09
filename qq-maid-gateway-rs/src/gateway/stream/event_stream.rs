@@ -1,15 +1,14 @@
 use std::{future::Future, pin::Pin};
 
 use super::super::{outbound::RuntimeRecordingSender, typing::TypingStopReason};
-use crate::{
-    api::{C2cStreamState, OutboundSender, StreamSendResult},
-    markdown::MarkdownPayload,
-    respond::RespondEvent,
+use super::types::C2cStreamState;
+use crate::api::{OutboundSender, StreamSendResult};
+use qq_maid_core::service::{
+    CoreFailureKind, CoreOutputPolicy, CoreRespondFailure, CoreResponseEvent,
 };
-use qq_maid_core::service::{CoreFailureKind, CoreOutputPolicy, CoreRespondFailure};
 
 pub(crate) type RespondEventFuture<'a> =
-    Pin<Box<dyn Future<Output = Option<RespondEvent>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Option<CoreResponseEvent>> + Send + 'a>>;
 pub(crate) type StreamSendFuture<'a> = Pin<Box<dyn Future<Output = StreamSendResult> + Send + 'a>>;
 
 /// Core 流事件来源抽象，用于把 QQ 流事件消费者与真实 Core channel 解耦，便于覆盖异常分支。
@@ -37,10 +36,9 @@ pub(crate) trait C2cStreamSender: OutboundSender {
         &'a self,
         user_openid: &'a str,
         msg_id: Option<&'a str>,
-        markdown: &'a MarkdownPayload,
+        content_raw: &'a str,
         stream_state: &'a mut C2cStreamState,
-        stream_state_value: u8,
-        reset: Option<bool>,
+        input_state: u8,
     ) -> StreamSendFuture<'a>;
 }
 
@@ -49,21 +47,19 @@ impl C2cStreamSender for RuntimeRecordingSender<'_> {
         &'a self,
         user_openid: &'a str,
         msg_id: Option<&'a str>,
-        markdown: &'a MarkdownPayload,
+        content_raw: &'a str,
         stream_state: &'a mut C2cStreamState,
-        stream_state_value: u8,
-        reset: Option<bool>,
+        input_state: u8,
     ) -> StreamSendFuture<'a> {
         Box::pin(async move {
             let result = self
                 .inner
-                .send_c2c_markdown_stream(
+                .send_c2c_stream_message(
                     user_openid,
                     msg_id,
-                    markdown,
-                    stream_state,
-                    stream_state_value,
-                    reset,
+                    content_raw,
+                    &mut stream_state.transport,
+                    input_state,
                 )
                 .await;
             match &result {

@@ -5,11 +5,18 @@ use tracing::warn;
 
 use crate::gateway::logging::mask_openid;
 use crate::gateway::ref_index::qq::{
-    MSG_TYPE_QUOTE, RawMessageScene, RawMsgElement, parse_ref_indices,
+    RawArkData, RawMessageScene, RawMsgElement, parse_ref_indices,
 };
 use qq_maid_common::input_part::{
     MediaStatus, MessageInputPart, MessageMedia, QuotedMediaSummary, TextSource,
 };
+
+mod content_normalizer;
+mod quoted_payload;
+
+use content_normalizer::normalize_qq_inbound_content;
+pub(crate) use quoted_payload::strip_contaminated_quote_from_context;
+use quoted_payload::{QuotedPayloadFallback, parse_quoted_message_elements};
 
 pub const EVENT_C2C_MESSAGE_CREATE: &str = "C2C_MESSAGE_CREATE";
 pub const EVENT_GROUP_AT_MESSAGE_CREATE: &str = "GROUP_AT_MESSAGE_CREATE";
@@ -80,7 +87,8 @@ pub struct GroupMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupMention {
-    pub is_you: bool,
+    /// 是否已由 Gateway 判定为当前机器人；不是 QQ raw event 字段。
+    pub is_current_bot: bool,
     pub member_role: Option<GroupMemberRole>,
     /// 被提及者的平台结构化 ID（群场景优先 member openid，其次 user openid / id）。
     /// 仅当平台事件未提供任何稳定 ID 时为 None。
@@ -127,7 +135,7 @@ pub struct Attachment {
     pub size_bytes: Option<u64>,
     #[serde(default, alias = "media_id")]
     pub media_id: Option<String>,
-    #[serde(default, alias = "file_id")]
+    #[serde(default, alias = "file_id", alias = "fileid")]
     pub file_id: Option<String>,
     #[serde(default, alias = "attachment_id", alias = "id")]
     pub attachment_id: Option<String>,
@@ -163,6 +171,8 @@ struct RawC2cMessage {
     message_type: Option<u64>,
     #[serde(default)]
     msg_elements: Vec<RawMsgElement>,
+    #[serde(default)]
+    ark_data: Option<RawArkData>,
     #[serde(default)]
     timestamp: Option<String>,
     #[serde(default)]
@@ -201,6 +211,8 @@ struct RawGroupMessage {
     #[serde(default)]
     msg_elements: Vec<RawMsgElement>,
     #[serde(default)]
+    ark_data: Option<RawArkData>,
+    #[serde(default)]
     timestamp: Option<String>,
     #[serde(default)]
     attachments: Vec<Attachment>,
@@ -238,8 +250,15 @@ struct RawAuthor {
 
 #[derive(Debug, Deserialize)]
 struct RawMention {
+    /// 部分 QQ 全量群事件仍带有该兼容字段；稳定 target_id 存在时由 Gateway 优先校验 ID。
     #[serde(default)]
     is_you: Option<bool>,
+    /// `all` 表示 @全体成员。QQ 可能同时下发 `is_you=true`，但这不代表单独 @ 当前机器人。
+    #[serde(default)]
+    scope: Option<String>,
+    /// QQ 全量群事件可能同时标记被提及者是否为机器人；仅用于约束兼容 is_you 证据。
+    #[serde(default)]
+    bot: Option<bool>,
     #[serde(default)]
     member_role: Option<String>,
     // QQ mention 对象可能以下任一字段携带被提及者稳定 ID。
@@ -257,13 +276,6 @@ struct RawMention {
 struct RawMessageReply {
     #[serde(default, alias = "id")]
     message_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct QuotedPayloadFallback {
-    content: Option<String>,
-    input_parts: Vec<MessageInputPart>,
-    media_summaries: Vec<QuotedMediaSummary>,
 }
 
 #[derive(Debug, Error)]
@@ -299,28 +311,23 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
         raw.openid.as_deref(),
     )
     .ok_or(EventError::MissingUserOpenid)?;
-    let parsed_content = parse_safe_content_parts(&raw.content.unwrap_or_default(), "qq_official");
-    let base_content = parsed_content.text.trim().to_owned();
-    let ref_indices = parse_ref_indices(
-        raw.message_scene.as_ref(),
+    let normalized = normalize_qq_inbound_content(
         raw.message_type,
+        raw.content.as_deref().unwrap_or_default(),
+        &raw.attachments,
+        raw.ark_data.as_ref(),
         &raw.msg_elements,
     );
+    let base_content = normalized.text;
+    let ref_indices = parse_ref_indices(raw.message_scene.as_ref());
     let reply = extract_message_reply(
         &base_content,
         raw.reply.as_ref(),
         raw.quote.as_ref(),
         ref_indices.ref_msg_idx.clone(),
-        quoted_payload_fallback(raw.message_type, &raw.msg_elements),
+        parse_quoted_message_elements(raw.message_type, &raw.msg_elements),
     );
     let timestamp = raw.timestamp;
-    let input_parts = input_parts_from_content_and_attachments(
-        &base_content,
-        parsed_content.input_parts,
-        &raw.attachments,
-        "qq_official",
-        TextSource::Transcript,
-    );
     Ok(Some(C2cMessage {
         source_message_ids: vec![message_id.clone()],
         source_event_ids: event_id.iter().cloned().collect(),
@@ -333,7 +340,7 @@ pub fn parse_c2c_message(envelope: &GatewayEnvelope) -> Result<Option<C2cMessage
         first_message_timestamp: timestamp.clone(),
         last_message_timestamp: timestamp.clone(),
         timestamp,
-        input_parts,
+        input_parts: normalized.input_parts,
         attachments: raw.attachments,
     }))
 }
@@ -366,8 +373,7 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
         raw.member_openid.as_deref(),
         raw.user_openid.as_deref(),
     );
-    let member_role =
-        resolve_group_member_role(raw.member_role.as_deref(), author.as_ref(), &raw.mentions);
+    let member_role = resolve_group_member_role(raw.member_role.as_deref(), author.as_ref());
     let author_is_bot = raw.bot.or(raw.is_bot).unwrap_or(false)
         || author
             .as_ref()
@@ -378,26 +384,21 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
             .as_ref()
             .and_then(|author| author.self_sent.or(author.is_self))
             .unwrap_or(false);
-    let parsed_content = parse_safe_content_parts(&raw.content.unwrap_or_default(), "qq_official");
-    let base_content = parsed_content.text.trim().to_owned();
-    let ref_indices = parse_ref_indices(
-        raw.message_scene.as_ref(),
+    let normalized = normalize_qq_inbound_content(
         raw.message_type,
+        raw.content.as_deref().unwrap_or_default(),
+        &raw.attachments,
+        raw.ark_data.as_ref(),
         &raw.msg_elements,
     );
+    let base_content = normalized.text;
+    let ref_indices = parse_ref_indices(raw.message_scene.as_ref());
     let reply = extract_message_reply(
         &base_content,
         raw.reply.as_ref(),
         raw.quote.as_ref(),
         ref_indices.ref_msg_idx.clone(),
-        quoted_payload_fallback(raw.message_type, &raw.msg_elements),
-    );
-    let input_parts = input_parts_from_content_and_attachments(
-        &base_content,
-        parsed_content.input_parts,
-        &raw.attachments,
-        "qq_official",
-        TextSource::Transcript,
+        parse_quoted_message_elements(raw.message_type, &raw.msg_elements),
     );
     Ok(Some(GroupMessage {
         message_id,
@@ -413,7 +414,7 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
             .collect::<Vec<_>>(),
         reply,
         timestamp: raw.timestamp,
-        input_parts,
+        input_parts: normalized.input_parts,
         attachments: raw.attachments,
         event_type,
         author_is_bot,
@@ -424,42 +425,47 @@ pub fn parse_group_message(envelope: &GatewayEnvelope) -> Result<Option<GroupMes
 fn resolve_group_member_role(
     top_member_role: Option<&str>,
     author: Option<&RawAuthor>,
-    mentions: &[RawMention],
 ) -> Option<GroupMemberRole> {
     first_non_empty([
         top_member_role,
         author.and_then(|author| author.member_role.as_deref()),
-        mentions.iter().find_map(|mention| {
-            mention
-                .is_you
-                .unwrap_or(false)
-                .then_some(mention.member_role.as_deref())
-                .flatten()
-        }),
     ])
     .map(|value| GroupMemberRole::from_raw(&value))
 }
 
 fn raw_group_mention(mention: &RawMention) -> GroupMention {
+    let is_everyone = mention
+        .scope
+        .as_deref()
+        .is_some_and(|scope| scope.trim().eq_ignore_ascii_case("all"));
     GroupMention {
-        // 官方结构化 mention 里的 is_you 是普通群消息判断“是否 @ 当前机器人”的可信来源。
-        is_you: mention.is_you.unwrap_or(false),
+        // 没有稳定 ID 时暂存协议兼容标记；明确标记为普通成员时不接受 is_you，避免
+        // 把普通成员误认为当前机器人。@全体成员即使带 is_you=true 也不得触发机器人。
+        // bot 缺失时保留旧 QQ 事件兼容行为。
+        is_current_bot: !is_everyone
+            && mention.is_you.unwrap_or(false)
+            && mention.bot != Some(false),
         member_role: mention
             .member_role
             .as_deref()
             .map(GroupMemberRole::from_raw),
         // 群场景优先 member openid，其次 user openid / openid / id；
-        // 都缺失时返回 None，上游据此降级为 TextWeak 弱候选或丢弃。
-        target_id: first_non_empty([
-            mention.member_openid.as_deref(),
-            mention.user_openid.as_deref(),
-            mention.openid.as_deref(),
-            mention.mention_id.as_deref(),
-        ]),
+        // @全体成员不绑定单个身份，必须丢弃可能伴随下发的兼容 ID，避免后续误判。
+        target_id: if is_everyone {
+            None
+        } else {
+            first_non_empty([
+                mention.member_openid.as_deref(),
+                mention.user_openid.as_deref(),
+                mention.openid.as_deref(),
+                mention.mention_id.as_deref(),
+            ])
+        },
     }
 }
 
 // reply 只提取一层 message_id，不递归解析引用消息正文或其它扩展字段。
+// 当 msg_elements 已提供引用内容时，即使没有 reference_id 也应保留 payload。
 fn extract_message_reply(
     content: &str,
     reply: Option<&RawMessageReply>,
@@ -467,6 +473,10 @@ fn extract_message_reply(
     ref_msg_idx: Option<String>,
     fallback: QuotedPayloadFallback,
 ) -> Option<MessageReply> {
+    // 污染检测已移至群聊/C2C 处理层，在归一化正文后、RefIndex enrich 之前执行。
+    let has_payload = fallback.content.is_some()
+        || !fallback.input_parts.is_empty()
+        || !fallback.media_summaries.is_empty();
     let reference_id = reply
         .and_then(|item| item.message_id.as_deref())
         .or_else(|| quote.and_then(|item| item.message_id.as_deref()))
@@ -475,44 +485,18 @@ fn extract_message_reply(
         .or_else(|| extract_cq_reply_message_id(content))
         .map(str::to_owned)
         .or_else(|| ref_msg_idx.clone());
-    reference_id.map(|message_id| MessageReply {
-        message_id,
-        ref_msg_idx,
-        content: fallback.content,
-        input_parts: fallback.input_parts,
-        media_summaries: fallback.media_summaries,
-    })
-}
-
-fn quoted_payload_fallback(
-    message_type: Option<u64>,
-    msg_elements: &[RawMsgElement],
-) -> QuotedPayloadFallback {
-    if message_type != Some(MSG_TYPE_QUOTE) {
-        return QuotedPayloadFallback::default();
-    }
-    let Some(element) = msg_elements.first() else {
-        return QuotedPayloadFallback::default();
-    };
-    let raw_content = element.content.as_deref().unwrap_or_default();
-    let parsed = parse_safe_content_parts(raw_content, "qq_official");
-    let content = parsed.text.trim().to_owned();
-    let input_parts = input_parts_from_content_and_attachments(
-        &content,
-        parsed.input_parts,
-        &element.attachments,
-        "qq_official",
-        TextSource::Quote,
-    );
-    let media_summaries = input_parts
-        .iter()
-        .filter_map(QuotedMediaSummary::from_input_part)
-        .collect::<Vec<_>>();
-
-    QuotedPayloadFallback {
-        content: (!content.is_empty()).then_some(content),
-        input_parts,
-        media_summaries,
+    // 即使没有 reference_id，只要 msg_elements 提供了引用内容，也保留 payload。
+    // 此时 RefIndex 查询和引用定位元数据降级为不可用，但引用正文和媒体仍可进入模型。
+    if reference_id.is_some() || has_payload {
+        Some(MessageReply {
+            message_id: reference_id.unwrap_or_default(),
+            ref_msg_idx,
+            content: fallback.content,
+            input_parts: fallback.input_parts,
+            media_summaries: fallback.media_summaries,
+        })
+    } else {
+        None
     }
 }
 
@@ -581,7 +565,7 @@ fn legacy_author_id_fallback(event_type: &str, author: Option<&RawAuthor>) -> Op
     warn!(
         event_type = %event_type,
         identity = %mask_openid(value),
-        "QQ identity resolved through untrusted author.id fallback"
+        "QQ 身份通过不可信的 author.id 降级路径解析"
     );
     Some(value.to_owned())
 }

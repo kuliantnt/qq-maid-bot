@@ -13,7 +13,9 @@ use super::super::{
     dedupe::MessageDedupe,
     event::C2cMessage,
     logging::{c2c_message_log_summary, mask_openid},
-    media_fetch::{MediaFetchContext, fetch_qq_official_image_attachments},
+    media_fetch::{
+        MediaFetchContext, fetch_qq_official_image_attachments, fetch_qq_official_quoted_images,
+    },
     outbound::{
         DeliveryMode, ReplyCapability, ReplyTarget, RuntimeRecordingSender,
         send_c2c_text_with_status,
@@ -24,18 +26,22 @@ use super::super::{
     stream::stream_respond_c2c,
     typing::{C2cTypingStatusGuard, TypingStopReason},
 };
+use super::voice::{VoiceDeliveryAttempt, try_c2c_voice_delivery};
 use crate::{
-    api::{OutboundSender, QqApiClient, SendMessageIds, send_outbound_with_fallback},
+    api::{OutboundSender, QqApiClient, SendMessageIds},
     config::AppConfig,
-    message_chunk::{ChunkLimits, OutboundSendError, send_c2c_outbound_chunked},
-    render::{OutboundMessage, render_respond_response_for_profile},
-    respond::{
-        RespondClient, RespondEvent, RespondResponse, RespondTransport, build_respond_content,
-        respond_error_to_qq_text,
+    gateway::event::strip_contaminated_quote_from_context,
+    message_chunk::{
+        ChunkLimits, OutboundSendError, QQ_C2C_PASSIVE_REPLY_BUDGET,
+        plan_qq_passive_reply_outbounds, send_c2c_outbound_chunked,
     },
+    render::{OutboundMessage, render_respond_response_parts_for_profile},
+    respond::{RespondClient, build_respond_content, respond_error_to_qq_text},
+    tts::provider_from_config,
 };
 use qq_maid_core::service::{
-    CoreFailureKind, CoreInboundKind, CoreOutputPolicy, CoreRespondFailure, CoreResponseStatus,
+    CoreDeliveryHint, CoreFailureKind, CoreInboundKind, CoreOutputPolicy, CoreRespondFailure,
+    CoreRespondOutput, CoreResponse, CoreResponseEvent, CoreResponseStatus,
 };
 
 const CORE_STREAM_CLOSED_FALLBACK_TEXT: &str = "处理失败，请稍后再试。";
@@ -44,7 +50,7 @@ fn empty_reply_fallback_text(bot_display_name: &str) -> String {
     format!("唔，{bot_display_name}刚刚没整理出可用回复。可以再说一次。")
 }
 
-type RespondEventFuture<'a> = Pin<Box<dyn Future<Output = Option<RespondEvent>> + Send + 'a>>;
+type RespondEventFuture<'a> = Pin<Box<dyn Future<Output = Option<CoreResponseEvent>> + Send + 'a>>;
 
 trait RespondEventStream: Send {
     fn recv_event<'a>(&'a mut self) -> RespondEventFuture<'a>;
@@ -73,7 +79,7 @@ async fn send_c2c_respond_response(
     api: &QqApiClient,
     runtime: &GatewayRuntimeStatus,
     message: &C2cMessage,
-    response: &RespondResponse,
+    response: &CoreResponse,
     config: &AppConfig,
     ref_index: &SharedRefIndex,
 ) -> anyhow::Result<()> {
@@ -125,75 +131,104 @@ pub(crate) fn record_c2c_bot_outbound_refs(
 pub(crate) async fn send_c2c_respond_response_with_sender<S: OutboundSender + ?Sized>(
     sender: &S,
     message: &C2cMessage,
-    response: &RespondResponse,
+    response: &CoreResponse,
     config: &AppConfig,
     capability: &ReplyCapability,
 ) -> anyhow::Result<(Vec<SendMessageIds>, String)> {
     let masked_user = mask_openid(&message.user_openid);
-    let outbound = match render_respond_response_for_profile(response, &capability.render) {
-        Some(outbound) => outbound,
-        None => {
-            warn!(
-            message_id = %message.message_id,
-            user = %masked_user,
-            fallback_reason = "empty_rendered_response",
-            "respond backend produced no reply text; sending local fallback"
-            );
-            OutboundMessage::Text {
-                text: empty_reply_fallback_text(config.bot_display_name()),
-            }
-        }
-    };
-
     let target = ReplyTarget::qq_c2c(
         message.user_openid.clone(),
         Some(message.message_id.clone()),
     )
     .to_qq_c2c_target()
     .expect("QQ C2C reply target should adapt to QQ API target");
+    // 普通文字回复不构造 TTS Provider，也不克隆凭证或创建新的 HTTP Client handle。
+    let provider = (response.delivery_hint == Some(CoreDeliveryHint::Voice))
+        .then(|| provider_from_config(&config.voice))
+        .flatten();
+    if let VoiceDeliveryAttempt::Delivered(sent_ids) =
+        try_c2c_voice_delivery(provider.as_deref(), sender, &target, response).await
+    {
+        return Ok((
+            vec![sent_ids],
+            response.text_content().unwrap_or_default().to_owned(),
+        ));
+    }
+    let mut outbounds = render_respond_response_parts_for_profile(response, &capability.render);
+    if outbounds.is_empty() {
+        warn!(
+            message_id = %message.message_id,
+            user = %masked_user,
+            fallback_reason = "empty_rendered_response",
+            "回复后端未生成回复文本，正在发送本地降级回复"
+        );
+        outbounds.push(OutboundMessage::Text {
+            text: empty_reply_fallback_text(config.bot_display_name()),
+        });
+    }
+
     debug!(
         message_id = target.msg_id.as_deref().unwrap_or(""),
         user = %masked_user,
-        reply_len = outbound.fallback_text().chars().count(),
-        "preparing QQ reply"
+        reply_parts = outbounds.len(),
+        "正在准备 QQ 回复"
     );
     let limits = ChunkLimits::new(
         config.markdown_chunk_soft_limit,
         config.text_chunk_soft_limit,
     );
+    let (outbounds, limits, truncated) =
+        plan_qq_passive_reply_outbounds(&outbounds, &limits, QQ_C2C_PASSIVE_REPLY_BUDGET);
+    if truncated {
+        warn!(
+            message_id = target.msg_id.as_deref().unwrap_or(""),
+            user = %masked_user,
+            reply_budget = QQ_C2C_PASSIVE_REPLY_BUDGET,
+            "QQ C2C 被动回复在发送前已截断"
+        );
+    }
     // 普通回复统一走分段编排：长回复拆成多条逐段发送，段间失败返回 PartiallySent。
-    let fallback_text = outbound.fallback_text().to_owned();
-    match send_c2c_outbound_chunked(sender, &target, &outbound, &limits, |_, _| {}).await {
-        Ok(sent_ids) => Ok((sent_ids, fallback_text)),
-        Err(OutboundSendError::NotSent { source }) => {
-            warn!(
-                message_id = target.msg_id.as_deref().unwrap_or(""),
-                user = %masked_user,
-                error = %source.log_summary(),
-                "QQ reply send failed before any chunk was sent"
-            );
-            Err(source.into())
-        }
-        Err(OutboundSendError::PartiallySent {
-            source,
-            sent_chunks,
-            total_chunks,
-            failed_chunk_index,
-            remaining_chars,
-        }) => {
-            warn!(
-                message_id = target.msg_id.as_deref().unwrap_or(""),
-                user = %masked_user,
-                error = %source.log_summary(),
+    let fallback_text = outbounds
+        .iter()
+        .map(OutboundMessage::fallback_text)
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let mut all_sent_ids = Vec::new();
+    for outbound in &outbounds {
+        match send_c2c_outbound_chunked(sender, &target, outbound, &limits, |_, _| {}).await {
+            Ok(sent_ids) => all_sent_ids.extend(sent_ids),
+            Err(OutboundSendError::NotSent { source }) => {
+                warn!(
+                    message_id = target.msg_id.as_deref().unwrap_or(""),
+                    user = %masked_user,
+                    error = %source.log_summary(),
+                    "QQ 回复在任何分片发送前失败"
+                );
+                return Err(source.into());
+            }
+            Err(OutboundSendError::PartiallySent {
+                source,
                 sent_chunks,
                 total_chunks,
                 failed_chunk_index,
                 remaining_chars,
-                "QQ reply partially sent; some chunks already delivered"
-            );
-            Err(source.into())
+            }) => {
+                warn!(
+                    message_id = target.msg_id.as_deref().unwrap_or(""),
+                    user = %masked_user,
+                    error = %source.log_summary(),
+                    sent_chunks,
+                    total_chunks,
+                    failed_chunk_index,
+                    remaining_chars,
+                    "QQ 回复仅部分发送，已有部分分片送达"
+                );
+                return Err(source.into());
+            }
         }
     }
+    Ok((all_sent_ids, fallback_text))
 }
 
 // 私聊消息处理需要贯穿 QQ 回复、LLM 调用、去重和诊断状态，保持参数显式便于看清跨层依赖。
@@ -221,7 +256,7 @@ pub(crate) async fn handle_c2c_message(
         debug!(
             message_id = %message.message_id,
             user = %masked_user,
-            "ignoring empty C2C message"
+            "已忽略空 C2C 消息"
         );
         return Ok(());
     }
@@ -244,7 +279,7 @@ pub(crate) async fn handle_c2c_message(
         info!(
             message_id = %message.message_id,
             user = %masked_user,
-            "local /ping command matched"
+            "已匹配本地 /ping 命令"
         );
         let target = ReplyTarget::qq_c2c(message.user_openid, Some(message.message_id))
             .to_qq_c2c_target()
@@ -255,44 +290,74 @@ pub(crate) async fn handle_c2c_message(
             message_id = target.msg_id.as_deref().unwrap_or(""),
             user = %mask_openid(&target.user_openid),
             reply_len = outbound.fallback_text().chars().count(),
-            "preparing local /ping reply"
+            "正在准备本地 /ping 回复"
         );
         let sender = RuntimeRecordingSender {
             inner: api,
             runtime,
         };
-        send_outbound_with_fallback(&sender, &target, &outbound)
-            .await
-            .inspect_err(|err| {
-                warn!(
-                    message_id = target.msg_id.as_deref().unwrap_or(""),
-                    user = %mask_openid(&target.user_openid),
-                    error = %err.log_summary(),
-                    "local /ping QQ reply send failed"
-                );
-            })?;
+        let limits = ChunkLimits::new(
+            config.markdown_chunk_soft_limit,
+            config.text_chunk_soft_limit,
+        );
+        let (outbounds, limits, truncated) =
+            plan_qq_passive_reply_outbounds(&[outbound], &limits, QQ_C2C_PASSIVE_REPLY_BUDGET);
+        if truncated {
+            warn!(
+                message_id = target.msg_id.as_deref().unwrap_or(""),
+                user = %mask_openid(&target.user_openid),
+                reply_budget = QQ_C2C_PASSIVE_REPLY_BUDGET,
+                "本地 /ping 回复在发送前已截断"
+            );
+        }
+        for outbound in &outbounds {
+            send_c2c_outbound_chunked(&sender, &target, outbound, &limits, |_, _| {})
+                .await
+                .inspect_err(|err| {
+                    warn!(
+                        message_id = target.msg_id.as_deref().unwrap_or(""),
+                        user = %mask_openid(&target.user_openid),
+                        error = %err,
+                        "本地 /ping QQ 回复发送失败"
+                    );
+                })?;
+        }
         return Ok(());
     }
+    let media_client = qq_maid_common::http_client::client();
+    let media_context = MediaFetchContext {
+        platform: "qq_official",
+        app_id: config
+            .app_id
+            .clone()
+            .context("QQ C2C handler requires a bound channel")?,
+        peer_id: message.user_openid.clone(),
+        root_dir: config.media_dir.clone(),
+        timeout: config.media_download_timeout,
+        max_bytes: config.media_max_bytes,
+    };
     fetch_qq_official_image_attachments(
-        &qq_maid_common::http_client::client(),
-        &MediaFetchContext {
-            platform: "qq_official",
-            app_id: config
-                .app_id
-                .clone()
-                .context("QQ C2C handler requires a bound channel")?,
-            peer_id: message.user_openid.clone(),
-            root_dir: config.media_dir.clone(),
-            timeout: config.media_download_timeout,
-            max_bytes: config.media_max_bytes,
-        },
+        &media_client,
+        &media_context,
         &message.message_id,
         &mut message.input_parts,
         &message.attachments,
     )
     .await;
+    fetch_qq_official_quoted_images(
+        &media_client,
+        &media_context,
+        &message.message_id,
+        message.reply.as_mut(),
+    )
+    .await;
 
     let mut inbound = respond.prepare_inbound(platform::qq_official::inbound_from_c2c(&message));
+    // C2C 正文无寻址前缀，raw == 归一化正文，但仍在此统一执行污染检测。
+    // C2C 只写入完整 RefIndex 记录，命中时仍由索引原文覆盖 input_parts；本处只影响 miss。
+    if let Some(ref mut quoted) = inbound.quoted {
+        strip_contaminated_quote_from_context(quoted, &inbound.text);
+    }
     {
         let mut index = ref_index.lock().unwrap();
         index.enrich_inbound(&mut inbound);
@@ -302,7 +367,7 @@ pub(crate) async fn handle_c2c_message(
     info!(
         message_id = %message.message_id,
         user = %masked_user,
-        "calling respond backend"
+        "正在调用回复后端"
     );
     let mut typing = schedule_agent_typing_if_needed(
         config,
@@ -329,7 +394,7 @@ pub(crate) async fn handle_c2c_message(
                 local_fallback = true,
                 fallback_reason = "respond_error",
                 qq_error_text = %qq_text,
-                "respond backend call failed; sending local QQ fallback"
+                "回复后端调用失败，正在发送本地 QQ 降级回复"
             );
             send_c2c_text_with_status(
                 api,
@@ -347,7 +412,7 @@ pub(crate) async fn handle_c2c_message(
                     local_fallback = true,
                     fallback_reason = "respond_error",
                     qq_error_text = %qq_text,
-                    "local QQ fallback send failed"
+                    "本地 QQ 降级回复发送失败"
                 );
             })?;
             return Ok(());
@@ -355,13 +420,15 @@ pub(crate) async fn handle_c2c_message(
     };
 
     match transport {
-        RespondTransport::Complete(response) => {
+        CoreRespondOutput::Complete(response) => {
             stop_typing(&mut typing, TypingStopReason::FinalReply);
             send_c2c_respond_response(api, runtime, &message, &response, config, ref_index).await?;
         }
-        RespondTransport::Stream(stream) => {
+        CoreRespondOutput::Stream(stream) => {
             let capability = ReplyCapability::qq_official_c2c(config);
-            if should_use_c2c_streaming(&capability) {
+            if should_use_c2c_streaming(&capability)
+                && stream.output_policy() != CoreOutputPolicy::CompleteThenSend
+            {
                 stream_respond_c2c(stream, api, runtime, &message, config, typing, ref_index)
                     .await?;
             } else {
@@ -413,7 +480,7 @@ async fn schedule_agent_typing_if_needed(
                 message_id = %message.message_id,
                 user = %mask_openid(&message.user_openid),
                 error = %error.log_summary(),
-                "agent typing classification failed; skipping typing status"
+                "Agent 输入状态分类失败，已跳过输入状态发送"
             );
             None
         }
@@ -444,7 +511,7 @@ where
     let mut progress_status_send_attempted = false;
     while let Some(event) = stream.recv_event().await {
         match event {
-            RespondEvent::Status(status) => {
+            CoreResponseEvent::Status(status) => {
                 status_event_count += 1;
                 debug!(
                     message_id = %message.message_id,
@@ -453,7 +520,7 @@ where
                     response_delivery_mode = "progress_status",
                     status_chars = status.text.chars().count(),
                     status_event_count,
-                    "C2C stream disabled; status event recorded without separate final send"
+                        "C2C 流式发送已禁用，状态事件已记录且不单独发送最终回复"
                 );
                 if should_send_disabled_progress_status(
                     config.c2c_visible_progress_status_enabled,
@@ -464,12 +531,12 @@ where
                     send_disabled_progress_status(sender, message, &status).await;
                 }
             }
-            RespondEvent::TextDelta(delta) => {
+            CoreResponseEvent::TextDelta(delta) => {
                 if !delta.is_empty() {
                     text_delta_count += 1;
                 }
             }
-            RespondEvent::Completed(response) => {
+            CoreResponseEvent::Completed(response) => {
                 stop_typing(typing, TypingStopReason::FinalReply);
                 let capability = ReplyCapability::qq_official_c2c(config);
                 let (sent_ids, fallback_text) = send_c2c_respond_response_with_sender(
@@ -488,7 +555,7 @@ where
                         final_send_exit = "ordinary_reply",
                         text_delta_count,
                         status_event_count,
-                        "C2C stream disabled; ordinary final reply sent"
+                            "C2C 流式发送已禁用，普通最终回复已发送"
                     );
                 })
                 .inspect_err(|send_err| {
@@ -500,7 +567,7 @@ where
                         text_delta_count,
                         status_event_count,
                         error = %send_err,
-                        "C2C stream disabled; ordinary final reply failed"
+                            "C2C 流式发送已禁用，普通最终回复发送失败"
                     );
                 })?;
                 if let Some(ref_index) = ref_index {
@@ -515,7 +582,7 @@ where
                 }
                 return Ok(DisabledStreamOutcome::Completed);
             }
-            RespondEvent::Failed(failure) => {
+            CoreResponseEvent::Failed(failure) => {
                 stop_typing(typing, failure_stop_reason(&failure));
                 warn!(
                     message_id = %message.message_id,
@@ -524,7 +591,7 @@ where
                     retryable = failure.retryable,
                     text_delta_count,
                     status_event_count,
-                    "core respond stream failed while C2C stream was disabled"
+                    "C2C 流式发送禁用期间 Core 回复流失败"
                 );
                 send_local_c2c_failure_text(sender, message, &failure.message).await?;
                 return Ok(DisabledStreamOutcome::Failed(failure.kind));
@@ -535,7 +602,7 @@ where
     warn!(
         message_id = %message.message_id,
         user = %mask_openid(&message.user_openid),
-        "core respond stream closed before Completed while C2C stream was disabled"
+        "C2C 流式发送禁用期间 Core 回复流在 Completed 前关闭"
     );
     send_local_c2c_failure_text(sender, message, CORE_STREAM_CLOSED_FALLBACK_TEXT).await?;
     Ok(DisabledStreamOutcome::ClosedBeforeCompleted)
@@ -573,7 +640,7 @@ async fn send_disabled_progress_status<S: OutboundSender + ?Sized>(
                 user = %mask_openid(&message.user_openid),
                 status_kind = status.kind.as_str(),
                 response_delivery_mode = "progress_status",
-                "C2C stream disabled; progress status sent"
+                "C2C 流式发送已禁用，进度状态已发送"
             );
         }
         Err(error) => {
@@ -583,7 +650,7 @@ async fn send_disabled_progress_status<S: OutboundSender + ?Sized>(
                 status_kind = status.kind.as_str(),
                 response_delivery_mode = "progress_status",
                 error = %error,
-                "C2C stream disabled; progress status send failed"
+                "C2C 流式发送已禁用，进度状态发送失败"
             );
         }
     }
@@ -629,7 +696,7 @@ fn log_c2c_message_received(message: &C2cMessage, verbose_log: bool) {
             attachment_count = summary.attachment_count,
             is_ping = summary.is_ping,
             extracted_content = %extracted_content,
-            "received C2C message"
+            "已收到 C2C 消息"
         );
     } else {
         info!(
@@ -638,7 +705,7 @@ fn log_c2c_message_received(message: &C2cMessage, verbose_log: bool) {
             content_len = summary.content_len,
             attachment_count = summary.attachment_count,
             is_ping = summary.is_ping,
-            "received C2C message"
+            "已收到 C2C 消息"
         );
     }
 }

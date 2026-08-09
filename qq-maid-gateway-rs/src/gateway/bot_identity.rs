@@ -1,7 +1,8 @@
 //! Gateway 侧机器人身份观测。
 //!
-//! 普通群消息是否 @ 当前机器人只信任官方结构化 mention 的 `is_you` 标记；
-//! 这里保留 READY 身份学习和旧配置读取，便于日志观测与兼容旧运行配置。
+//! `GROUP_AT_MESSAGE_CREATE` 事件本身表示当前机器人被 @；普通群消息优先保留 QQ 提供的
+//! 当前机器人标记，再用 mention 稳定 ID 与 READY 学到的机器人身份集合补充确认。
+//! `is_current_bot` 是 Gateway 内部语义，READY 学习和旧配置仍用于兼容不同 QQ 事件。
 
 use std::{
     collections::HashSet,
@@ -30,7 +31,7 @@ impl BotIdentity {
         }
     }
 
-    #[cfg(test)]
+    /// 检查给定 ID 是否匹配已知的机器人身份（精确字符串匹配）。
     pub(crate) fn contains(&self, value: &str) -> bool {
         let value = value.trim();
         !value.is_empty() && self.ids.read().unwrap().contains(value)
@@ -51,7 +52,7 @@ impl BotIdentity {
             info!(
                 learned_bot_identity_count = added,
                 total_bot_identity_count = ids.len(),
-                "learned QQ bot identity candidates from READY"
+                "已从 READY 事件获取 QQ 机器人身份候选项"
             );
         }
     }

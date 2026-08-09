@@ -5,14 +5,54 @@
 //! Gateway/平台层实现。
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use std::str::FromStr;
+use std::{collections::HashSet, str::FromStr};
 
 use crate::{identity::parse_stable_scope_key, service::VisibleEntitySnapshot};
 
 pub const QQ_OFFICIAL_PLATFORM: &str = "qq_official";
 pub const ONEBOT11_PLATFORM: &str = "onebot11";
+
+/// 平台无关的主动推送成员提醒。
+///
+/// `user_id` 只表达平台成员身份，`display_name` 仅供不支持原生 mention 时安全展示；
+/// Core 不在这里生成 QQ 标记、OneBot segment 或其他平台协议内容。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PushMention {
+    pub user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+impl PushMention {
+    pub fn new(user_id: impl Into<String>, display_name: Option<String>) -> Self {
+        Self {
+            user_id: user_id.into(),
+            display_name,
+        }
+    }
+}
+
+/// 忽略空 ID，并按用户 ID 稳定去重；昵称不参与身份判断。
+pub fn normalize_push_mentions(mentions: Vec<PushMention>) -> Vec<PushMention> {
+    let mut seen = HashSet::new();
+    mentions
+        .into_iter()
+        .filter_map(|mention| {
+            let user_id = mention.user_id.trim().to_owned();
+            if user_id.is_empty() || !seen.insert(user_id.clone()) {
+                return None;
+            }
+            let display_name = clean_optional(mention.display_name);
+            Some(PushMention {
+                user_id,
+                display_name,
+            })
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushTargetType {
@@ -159,11 +199,30 @@ mod tests {
         assert_eq!(target.account_id.as_deref(), Some("bot-1"));
         assert_eq!(target.target_id, "user-1");
     }
+
+    #[test]
+    fn mentions_ignore_empty_ids_and_stably_deduplicate_by_user_id() {
+        let mentions = normalize_push_mentions(vec![
+            PushMention::new(" user-1 ", Some(" 张三 ".to_owned())),
+            PushMention::new("", Some("空".to_owned())),
+            PushMention::new("user-2", None),
+            PushMention::new("user-1", Some("另一个昵称".to_owned())),
+        ]);
+
+        assert_eq!(
+            mentions,
+            vec![
+                PushMention::new("user-1", Some("张三".to_owned())),
+                PushMention::new("user-2", None),
+            ]
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushIntent {
     pub target: PushTarget,
+    pub mentions: Vec<PushMention>,
     pub message_type: String,
     pub text: String,
     pub fallback_text: Option<String>,

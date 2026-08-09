@@ -539,6 +539,60 @@ fn auto_rejects_only_custom_provider_without_configured_key() {
 }
 
 #[test]
+fn auto_rejects_configured_responses_provider_without_api_key() {
+    let mut config = app_config(ProviderMode::Auto, "opencode_zen:gpt-test");
+    config.openai_api_key = None;
+    config
+        .openai_responses_providers
+        .push(OpenAiResponsesProviderConfig {
+            id: ModelProvider::Custom("opencode_zen".to_owned()),
+            base_url: "https://opencode.ai/zen/v1".to_owned(),
+            api_key_env: "OPENCODE_API_KEY".to_owned(),
+            api_key: None,
+            auth: HttpAuthConfig::default(),
+            request_timeout_seconds: None,
+            chat_fallback: false,
+        });
+
+    let err = match build_provider(&config) {
+        Ok(_) => panic!("build_provider should reject a Responses route without its API key"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.code, "config");
+    assert!(err.message.contains("LLM_MODEL"));
+    assert!(err.message.contains("no available provider"));
+}
+
+#[test]
+fn auto_skips_responses_candidate_without_key_and_keeps_other_provider() {
+    let mut config = app_config(
+        ProviderMode::Auto,
+        "opencode_zen:gpt-test,openai:gpt-5.4-mini",
+    );
+    config
+        .openai_responses_providers
+        .push(OpenAiResponsesProviderConfig {
+            id: ModelProvider::Custom("opencode_zen".to_owned()),
+            base_url: "https://opencode.ai/zen/v1".to_owned(),
+            api_key_env: "OPENCODE_API_KEY".to_owned(),
+            api_key: None,
+            auth: HttpAuthConfig::default(),
+            request_timeout_seconds: None,
+            chat_fallback: false,
+        });
+
+    let providers = auto_required_provider_kinds(&config).unwrap();
+    let provider = build_provider(&config).unwrap();
+
+    assert_eq!(providers, vec![ModelProvider::OpenAi]);
+    assert_eq!(
+        provider.model(),
+        "opencode_zen:gpt-test,openai:gpt-5.4-mini"
+    );
+}
+
+#[test]
 fn provider_preflight_and_build_share_undeclared_provider_validation() {
     let config = app_config(ProviderMode::Auto, "missing_provider:model");
 
@@ -551,4 +605,114 @@ fn provider_preflight_and_build_share_undeclared_provider_validation() {
     assert_eq!(preflight.code, build.code);
     assert_eq!(preflight.message, build.message);
     assert!(preflight.message.contains("providers.missing_provider"));
+}
+
+#[test]
+fn same_model_name_under_distinct_custom_providers_passes_preflight_and_build() {
+    let route = "routera:gpt-5.6-luna,routerb:gpt-5.6-luna";
+    let mut config = app_config(ProviderMode::Auto, route);
+    config.openai_api_key = None;
+    config.openai_compatible_providers = ["routera", "routerb"]
+        .into_iter()
+        .map(|id| OpenAiCompatibleProviderConfig {
+            id: ModelProvider::Custom(id.to_owned()),
+            base_url: format!("https://{id}.example/v1"),
+            api_key_env: format!("{}_API_KEY", id.to_ascii_uppercase()),
+            api_key: Some(format!("test-{id}-key")),
+            auth: HttpAuthConfig::default(),
+            request_timeout_seconds: None,
+        })
+        .collect();
+
+    preflight_provider_config(&config).unwrap();
+    let provider = build_provider(&config).unwrap();
+
+    assert_eq!(provider.model(), route);
+}
+
+#[test]
+fn configured_responses_search_route_passes_provider_preflight() {
+    let mut config = app_config(ProviderMode::Auto, "openai:gpt-main");
+    set_configured_route(
+        &mut config,
+        "tools.web_search.routes.private_search",
+        "xai:grok-4",
+    );
+    config
+        .openai_responses_providers
+        .push(OpenAiResponsesProviderConfig {
+            id: ModelProvider::Custom("xai".to_owned()),
+            base_url: "https://api.x.ai/v1".to_owned(),
+            api_key_env: "XAI_API_KEY".to_owned(),
+            api_key: Some("test-xai-key".to_owned()),
+            auth: HttpAuthConfig::default(),
+            request_timeout_seconds: None,
+            chat_fallback: false,
+        });
+
+    preflight_provider_config(&config).unwrap();
+    build_provider(&config).unwrap();
+}
+
+#[test]
+fn same_model_name_does_not_weaken_undeclared_provider_validation() {
+    let mut config = app_config(
+        ProviderMode::Auto,
+        "routera:gpt-5.6-luna,routerb:gpt-5.6-luna",
+    );
+    config.openai_api_key = None;
+    config
+        .openai_compatible_providers
+        .push(OpenAiCompatibleProviderConfig {
+            id: ModelProvider::Custom("routera".to_owned()),
+            base_url: "https://routera.example/v1".to_owned(),
+            api_key_env: "ROUTERA_API_KEY".to_owned(),
+            api_key: Some("test-routera-key".to_owned()),
+            auth: HttpAuthConfig::default(),
+            request_timeout_seconds: None,
+        });
+
+    let error = preflight_provider_config(&config).unwrap_err();
+
+    assert_eq!(error.stage, "config");
+    assert!(
+        error
+            .message
+            .contains("providers.routerb is not configured")
+    );
+}
+
+#[test]
+fn provider_id_cannot_be_declared_for_two_protocols() {
+    let mut config = app_config(ProviderMode::Auto, "routera:gpt-5.6-luna");
+    config.openai_api_key = None;
+    config
+        .openai_compatible_providers
+        .push(OpenAiCompatibleProviderConfig {
+            id: ModelProvider::Custom("routera".to_owned()),
+            base_url: "https://routera.example/v1".to_owned(),
+            api_key_env: "ROUTERA_API_KEY".to_owned(),
+            api_key: Some("test-key".to_owned()),
+            auth: HttpAuthConfig::default(),
+            request_timeout_seconds: None,
+        });
+    config
+        .openai_responses_providers
+        .push(OpenAiResponsesProviderConfig {
+            id: ModelProvider::Custom("routera".to_owned()),
+            base_url: "https://routera.example/v1".to_owned(),
+            api_key_env: "ROUTERA_API_KEY".to_owned(),
+            api_key: Some("test-key".to_owned()),
+            auth: HttpAuthConfig::default(),
+            request_timeout_seconds: None,
+            chat_fallback: false,
+        });
+
+    let error = preflight_provider_config(&config).unwrap_err();
+
+    assert!(
+        error
+            .message
+            .contains("provider `routera` is declared more than once")
+    );
 }

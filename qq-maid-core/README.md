@@ -8,7 +8,7 @@ QQ 平台事件解析、白名单、`/ping` 本地诊断和消息回发不在本
 
 - HTTP 层默认只公开进程级 `GET /healthz`；本地 Web 控制台默认关闭，启用后才注册 `/console/`、只读状态 API 和 `/api/v1/markdown/render`。
 - 普通聊天、查询、列车时刻、天气、翻译、会话命令、长期记忆、Todo、RSS、`/ops` 指令和业务 Tool 都通过 `CoreService::respond` 进程内分发。
-- Session、Todo、长期记忆、RSS / Atom 订阅、RSS 去重状态和知识检索索引统一写入 `APP_DB_FILE` 指向的 SQLite。
+- Session、Todo、长期记忆、RSS / Atom 订阅、RSS 去重状态、控制台用户偏好、文件元数据和知识检索索引统一写入 `APP_DB_FILE` 指向的 SQLite；控制台上传文件内容保存在数据库同级的 `console-files/`。
 - 长期记忆可通过确定性 `/memory` 命令或 `save_memory` Tool 写入；只有用户明确要求长期保存时才应调用 Tool，普通陈述不会自动写入。新增校验通过后直接保存，破坏性管理仍需确认。
 - RSS 后台轮询、Todo 单次提醒和 Todo 每日提醒由本模块调度，推送内容先写入 Notification Outbox，再由统一 Worker 通过进程内 `PushSink` 交给 gateway 发送。
 - OpenAI / DeepSeek、模型候选链 fallback、Web Search 传输、Tool Loop 协议和上游健康观测由 `qq-maid-llm` 提供，Core 只保留业务调用边界和 Tool 注册。
@@ -80,11 +80,11 @@ Notification Outbox 是业务生产者与平台投递之间的唯一主动推送
 - `dedupe_key`：业务生产者生成的稳定幂等键；同一业务事件重复提交必须命中同一键，业务确实要产生新提醒时再生成新键。
 - `target`：`PushTarget { platform, account_id, target_type, target_id }`，必须由业务在创建任务时显式传入真实投递目标；`scope_key` 只能辅助继承 platform/account，不能替代 raw target。
 - `channel` / `kind`：渠道族和通知类型标签，例如当前使用 `channel=push`、`kind=rss_update` / `todo_reminder` / `todo_daily_reminder`。
-- `payload`：已渲染的内容快照，当前 Worker 识别 `{ message_type, text, fallback_text }`；业务内容、标题、摘要、Todo 展示格式都应在入队前确定。
+- `payload`：已渲染的内容快照，当前 Worker 识别 `{ message_type, text, fallback_text, mentions }`；`mentions` 是可选的平台无关成员提醒列表，历史 payload 缺少该字段时按空列表读取。业务内容、标题、摘要、Todo 展示格式和提醒归属都应在入队前确定。
 - `scheduled_at`：计划投递时间；立即通知也写成当前时间附近的同一任务模型，不拆另一套立即发送系统。
 - `status`：`pending -> sending -> sent` 或 `pending/sending -> retry -> failed`，业务取消走 `cancelled`；发送失败的 retry / failed 由 Worker 根据 `attempts` 和 `max_attempts` 决定。
 
-当前落地来源包括：RSS 新条目在 `runtime/rss/scheduler.rs` 中按订阅和条目生成 `rss_update`；Todo 单次提醒在 `runtime/tools/todo/reminder.rs` 中按待办和提醒时间生成 `todo_reminder`，编辑提醒会取消旧未终结任务；Todo 每日提醒在 `runtime/tools/todo/reminder_worker.rs` 中按 owner 和日期生成 `todo_daily_reminder`，只负责每日快照入队，真实发送失败由统一 Worker 重试。`TODO_DAILY_REMINDER_ENABLED` 只控制后台调度是否启动，用户/范围级开关由私聊 `/todo daily on`、`/todo daily off` 和 `/todo daily status` 维护。
+当前落地来源包括：RSS 新条目在 `runtime/rss/scheduler.rs` 中按订阅和条目生成 `rss_update`；Todo 单次提醒在 `runtime/tools/todo/reminder.rs` 中按待办和提醒时间生成 `todo_reminder`，编辑提醒会取消旧未终结任务，并在群聊个人 Todo 上携带实际 owner 的成员提醒；Todo 每日提醒在 `runtime/tools/todo/reminder_worker.rs` 中按 owner 和日期生成 `todo_daily_reminder`，只负责每日快照入队，真实发送失败由统一 Worker 重试。`TODO_DAILY_REMINDER_ENABLED` 只控制后台调度是否启动，用户/范围级开关由私聊 `/todo daily on`、`/todo daily off` 和 `/todo daily status` 维护。
 
 Todo 提醒当前支持分钟/小时级调度边界：自然语言可以创建“X 分钟后提醒”，重复规则可以创建“每 N 分钟提醒”或“每 N 小时提醒”。Notification Worker 只负责投递和回写 sent/retry/failed；发送成功后的 Todo 重排由 Todo reminder 侧的 sent hook 处理，它会根据 Todo 当前状态把同一个待办推进到下一次提醒，并重新写入一个新的 outbox。发送失败、Todo 已完成/非 pending、重复处理旧 outbox 或提醒时间锚点不匹配时不会重排。错过触发后采用“推进到下一次未来时间”的补偿策略，不补齐离线期间每一分钟的历史提醒。
 
@@ -94,7 +94,7 @@ Todo 提醒当前支持分钟/小时级调度边界：自然语言可以创建�
 
 ### 部署管理控制台
 
-仅当 `WEB_CONSOLE_ENABLED=true` 时注册。新实例没有 Provider 或平台凭据时进入 `setup_required`，仍保留 `/healthz` 和受保护的 `/console/`，但不构造业务 Provider、Worker 或 Gateway。首次启动会在 `config/secrets/bootstrap.token` 生成约 22 字符、短时单次的 token，并向启动控制台输出一次；普通状态请求、有效 token 复用和重启不会重复输出，初始化成功后文件立即删除。登录页也可按相同边界生成密码重置 token，提交成功后撤销全部旧 Admin 会话。
+仅当 `WEB_CONSOLE_ENABLED=true` 时注册。新实例没有 Provider 或平台凭据时进入 `setup_required`，仍保留 `/healthz` 和受保护的 `/console/`，但不构造业务 Provider、Worker 或 Gateway。首次启动会在 `config/secrets/bootstrap.token` 生成约 22 字符、短时单次的 token，并通过一次 `info` 启动日志事件输出；普通状态请求、有效 token 复用和重启不会重复输出，初始化成功后文件立即删除。登录页也可按相同边界生成密码重置 token，提交成功后撤销全部旧 Admin 会话。
 
 配置详情和写接口要求独立于聊天 session 的部署管理员服务端会话。密码最少 6 个字符并使用 Argon2id 哈希；登录/初始化/重置受限流、SameSite HttpOnly cookie、CSRF、会话轮换/过期和脱敏审计保护。普通字段写入受管 `runtime.toml`，secret 认证加密写入 SQLite，Agent 路线与 Tool Calling 结构化修改现有 `agent.toml`。所有修改携带 revision；冲突不会覆盖人工新文件。分步首次向导允许保存整体尚未完成的配置，但页面和 `/healthz` 会继续报告 `setup_required`，直至重启后完整预检通过。
 
@@ -103,6 +103,8 @@ Todo 提醒当前支持分钟/小时级调度边界：自然语言可以创建�
 服务不会启用任意来源 CORS。`WEB_CONSOLE_ALLOWED_ORIGINS` 为空时仅同源；认证 cookie 不作为反向代理身份断言。控制台仍只适合本机或受控内网，不建议将 8787 裸露到公网；确需外部访问时必须由受信反向代理提供 TLS，并保留应用自身认证、CSRF 和权限校验。
 
 前端源码和构建说明见 [`../web-console/README.md`](../web-console/README.md)。Rust 直接嵌入已提交的 `web-console/dist/`，普通 Cargo 构建和运行不需要 Node.js。
+
+Todo 管理接口复用同一管理员 Session、同源和 CSRF 安全边界，并统一使用 `/api/v1/console/todo/*` POST 路由。部署管理员全局管理聊天入口的同一批 Todo；管理员 actor 只用于认证、审计和限流，Todo 仍保留 QQ / OneBot / 微信真实 owner、conversation scope 与提醒目标。目标引用、全局分页、Outbox 原子更新、平台限制和后续 Memory API 的复用边界见 [管理 API 约定](../docs/development/management-api.md)。
 
 ## 指令能力
 
@@ -133,15 +135,15 @@ runtime/.env
 
 常用配置项：
 
-- `config/agent.toml` / `AGENT_CONFIG_FILE`：非敏感 Agent 场景策略文件，也是模型路线、搜索路线、Profile、Scene、Tool Calling 和工具白名单的唯一权威来源。文件统一描述 `fast / balanced / deep` 档位、群聊 / 私聊策略、Tool Loop 轮数、输出预算、工具白名单、`/查` 搜索路线和 OpenAI-compatible provider 元数据；标题、Memory、压缩、翻译等内部任务使用当前场景 Profile 的 `aux_route`，未配置时继承 `main_route`。文件缺失、引用非法或内容不完整都会拒绝启动，不再从环境变量合成兼容策略。
-- `OPENAI_API_KEY`、`OPENAI_BASE_URLS`、`OPENAI_API_MODE`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`BIGMODEL_API_KEY`、`BIGMODEL_BASE_URL`、`GEMINI_API_KEY`、`GEMINI_BASE_URL`、`MIMO_API_KEY`：Provider 凭证和连接配置；Core 解析后传给 `qq-maid-llm`。`OPENAI_BASE_URLS` 为逗号分隔时取第一个非空地址。`OPENAI_API_MODE=auto` 优先 Responses API 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于只实现 Chat Completions 的网关。MiMo 等自定义 Provider 的公开连接元数据可在 `agent.toml [providers.*]` 声明，真实 key 只能由 `api_key_env` 指向环境变量，不能写入 `agent.toml`。
+- `config/agent.toml` / `AGENT_CONFIG_FILE`：非敏感 Agent 场景策略文件，也是模型路线、联网搜索后端与搜索路线、Profile、Scene、Tool Calling 和工具白名单的唯一权威来源。`[tools.web_search]` 可选择 `provider_native`、`tavily` 或 `disabled`，并配置结果数量、搜索深度、主题、时间范围和 Tavily 独立超时；`[tools.web_search.routes.*]` 保存 OpenAI、Gemini 或自定义 `openai_responses` 原生搜索路线。文件还统一描述 `fast / balanced / deep` 档位、群聊 / 私聊策略、Tool Loop 轮数、输出预算和 OpenAI-compatible provider 元数据；标题、Memory、压缩、翻译等内部任务使用当前场景 Profile 的 `aux_route`，未配置时继承 `main_route`。文件缺失、引用非法或内容不完整都会拒绝启动，不再从环境变量合成兼容策略。
+- `OPENAI_API_KEY`、`OPENAI_BASE_URLS`、`OPENAI_API_MODE`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`BIGMODEL_API_KEY`、`BIGMODEL_BASE_URL`、`GEMINI_API_KEY`、`GEMINI_BASE_URL`、`MIMO_API_KEY`、`OPENCODE_API_KEY`：Provider 凭证和连接配置；Core 解析后传给 `qq-maid-llm`。`OPENAI_BASE_URLS` 为逗号分隔时取第一个非空地址。`OPENAI_API_MODE=auto` 优先 Responses API 并在可恢复错误时降级 Chat Completions；`chat_only` 仅用于只实现 Chat Completions 的网关。MiMo、OpenCode 等自定义 Provider 的公开连接元数据可在 `agent.toml [providers.*]` 声明，真实 key 只能由 `api_key_env` 指向环境变量，不能写入 `agent.toml`。OpenCode Zen Responses、Zen Chat 与 Go 共用 `OPENCODE_API_KEY`；`/messages` 模型暂不支持。Tavily 密钥使用配置中心的 `tools.web_search.tavily.api_key` 或兼容环境变量 `TAVILY_API_KEY`，同样不得写入 `agent.toml`。
 - `LLM_SERVER_HOST`、`LLM_SERVER_PORT`、`LLM_REQUEST_TIMEOUT_SECONDS`：外部健康 / 控制台 HTTP 服务和请求超时行为；`AGENT_FINALIZATION_RESERVE_SECONDS` 为最终无工具回答预留时间，短请求会按总预算裁剪。
 - `WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT_SECONDS`、`WEB_SEARCH_IDLE_TIMEOUT_SECONDS`、`WEB_SEARCH_ABSOLUTE_TIMEOUT_SECONDS`：Agent Tool 与 `/查` 共用的搜索流首活动、静默和独立绝对超时，默认分别为 60、30、120 秒，以兼容联网搜索首字较慢或总耗时较长的上游。
-- `WEB_CONSOLE_ENABLED`、`WEB_CONSOLE_ALLOWED_ORIGINS`：部署管理控制台和跨域 allowlist；新实例默认开启但监听默认仍为 `127.0.0.1`，显式设为 false 时页面、认证和配置 API 全部关闭。
+- `WEB_CONSOLE_ENABLED`、`WEB_CONSOLE_ALLOWED_ORIGINS`：部署管理控制台和跨域 allowlist；新实例默认开启但监听默认仍为 `127.0.0.1`。进程环境或 `.env` 显式设为 false 时具有关闭优先级，即使配置中心曾保存为开启，页面、认证和配置 API 也全部关闭。
 - `APP_DB_FILE`：统一 SQLite 文件，承载业务数据和知识检索索引。
 - `QQ_MAID_DB_POOL_MAX_SIZE`：本地 SQLite 连接池大小，默认 8，合法范围 1～32；独立于 `MAX_CONCURRENT_RESPONSES`。
 - `MEMORY_CONSOLIDATION_*`：确定性长期记忆整理开关与时间、数量、来源、单次记录数和字符门槛；默认关闭，只归档同一完整作用域内正文与语义键完全相同的重复项，不读取聊天正文、不调用模型。
-- `MEMORY_DREAM_*`：独立于确定性整理的 Session Dream 开关与时间、新 Session 数、单批 Session 数、输入字符软上限和输出候选数门槛；默认关闭，只读取带稳定消息 ID 的活跃及归档用户消息，不读取 Session Summary。
+- `MEMORY_DREAM_*`：独立于确定性整理的 Session Dream 开关、冷却、首次触发路径的 Session 数、单批 Session 数、输入字符软上限和输出候选数门槛；默认关闭。首次批次需满足“Session 数与 30 条消息”“3 个本地活跃日期与 50 条消息”或“距上次成功 7 天与 60 条消息”之一；成功批次若被字符或 Session 上限截断，后续普通聊天调度每次只续处理一批，不重新累计首次门槛。Dream 只读取带稳定消息 ID 的活跃及归档用户消息，不读取 Session Summary。
 - `PROMPT_DIR`：固定 prompt 目录。
 - `KNOWLEDGE_DIR`：Markdown 知识目录；留空时使用 `config/knowledge`，启动时自动同步到 SQLite FTS5，普通聊天按需检索片段。
 - `RSS_*`：RSS / Atom 轮询、去重、推送和 SSRF 防护相关配置。
@@ -154,7 +156,7 @@ runtime/.env
 candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-chat"]
 ```
 
-候选项按从左到右的优先级执行。`qq-maid-llm` 会在超时、HTTP/网络错误、Provider 协议错误、上游空响应、429 和 5xx 等可恢复失败后尝试下一个候选；配置错误、本地请求构造错误和业务参数错误不会继续请求其他模型。当前普通聊天使用请求开始时解析出的 `ResolvedAgentPolicy`；会话标题、Memory 草稿、会话压缩、翻译命令和 RSS 翻译使用同一场景策略中的 `aux_route`，缺省辅助路线时继承当前场景 `main_route`。Tool Loop 使用同一请求级策略中的模型、输出预算、reasoning effort 和最大轮数；`/查` 按场景 `search_route` 选择 OpenAI Responses web_search 或 Gemini Google Search 工具。
+候选项按从左到右的优先级执行。`qq-maid-llm` 会在超时、HTTP/网络错误、Provider 协议错误、上游空响应、429 和 5xx 等可恢复失败后尝试下一个候选；配置错误、本地请求构造错误和业务参数错误不会继续请求其他模型。当前普通聊天使用请求开始时解析出的 `ResolvedAgentPolicy`；会话标题、Memory 草稿、会话压缩、翻译命令和 RSS 翻译使用同一场景策略中的 `aux_route`，缺省辅助路线时继承当前场景 `main_route`。Tool Loop 使用同一请求级策略中的模型、输出预算、reasoning effort 和最大轮数；`/查` 与自然语言 `web_search` 共用 `[tools.web_search]` 后端：`provider_native` 将裸搜索模型兼容为内置 OpenAI，并按显式前缀选择 OpenAI Responses、自定义 `openai_responses` 或 Gemini Google Search；`openai_compatible` 不冒充原生搜索，需改用 Tavily。`tavily` 使用统一 Tavily Search 执行器，`disabled` 则关闭该能力。
 
 完整字段以 [runtime/config/.env.example](../runtime/config/.env.example) 为准。真实 `.env`、API Key、Prompt、Markdown 知识资料、SQLite、日志和聊天记录不要提交到仓库。
 

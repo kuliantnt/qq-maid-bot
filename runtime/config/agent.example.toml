@@ -1,0 +1,132 @@
+# 小女仆机器人 Agent 策略示例（非敏感，可随 release 分发）。
+#
+# 模型路线、搜索路线、Profile、Scene、Tool Calling 与 Tool 白名单均以本文件为准。
+#
+# 不要在这里写 API Key、Access Token、私有 Base URL、真实 prompt、用户资料、群资料、
+# openid、群 ID、聊天记录、SQLite 路径或日志路径。
+version = 1
+
+# preflight 每轮只做一次低成本本地检索，高相关时注入少量主证据；
+# knowledge_search 仍可供 Agent 深入检索。tool 完全依赖 Agent，auto 仅作紧急回退。
+[knowledge]
+mode = "preflight"
+
+# 本地语义召回默认关闭，避免升级后隐式下载模型。启用后首次启动会下载公开模型；
+# 模型推理、文档正文与知识向量均留在本机，关闭后稳定退回纯 BM25。
+[knowledge.embedding]
+enabled = false
+cache_dir = "cache/knowledge-embedding"
+
+# 可声明非敏感的 OpenAI-compatible provider 元数据；真实 API key 仍只从环境变量读取。
+# 下面注册 MiMo provider，并将它放入默认降级候选；未配置 MIMO_API_KEY 时会跳过该候选。
+# Gemini 是内置 provider，不需要在 [providers.*] 声明；配置 GEMINI_API_KEY 后可直接
+# 在模型路线或搜索路线里使用 gemini: 前缀。
+[providers.mimo]
+kind = "openai_compatible"
+base_url = "https://api.xiaomimimo.com/v1"
+api_key_env = "MIMO_API_KEY"
+auth_header = "Authorization"
+auth_scheme = "Bearer"
+
+# OpenCode 默认不启用，也不会自动加入现有模型路线。管理员可在 Web 配置中心添加
+# opencode_zen（Responses）、opencode_zen_chat（Chat Completions）和
+# opencode_go（Chat Completions）；三者共用 OPENCODE_API_KEY。
+# 需要 Anthropic /messages 的模型当前暂不支持，不能配置到上述 Chat Provider 后期待自动改协议。
+
+# 默认将私聊、群聊和辅助任务的第一候选统一到 GPT-5.6 Luna，
+# 同时保留 Gemini、MiMo 和 DeepSeek 降级候选；未配置对应 API Key 的 provider 会被跳过。
+# API Key 仍必须放在 .env 的 OPENAI_API_KEY，不得写入本文件。
+[model_routes.private_main]
+candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-pro", "mimo:mimo-v2.5-pro", "deepseek:deepseek-chat"]
+
+[model_routes.group_main]
+candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-flash", "mimo:mimo-v2.5", "deepseek:deepseek-chat"]
+
+[model_routes.aux]
+candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-flash", "mimo:mimo-v2.5", "deepseek:deepseek-chat"]
+
+# 联网搜索统一配置。裸模型兼容为内置 OpenAI；显式 `provider:model` 会严格选择
+# Gemini 或声明为 openai_responses 的自定义 Provider，不按模型名猜测。
+[tools.web_search]
+backend = "provider_native"
+# 每个底层搜索子请求的结果数硬上限；多目标调研逐目标应用，模型只能下调。
+max_results = 5
+search_depth = "basic"
+topic = "general"
+# time_range = "week"
+connect_timeout_seconds = 10
+first_response_timeout_seconds = 30
+total_timeout_seconds = 60
+
+[tools.web_search.routes.private_search]
+model = "gpt-5.6-luna"
+
+[tools.web_search.routes.group_search]
+model = "gpt-5.6-luna"
+
+# Gemini 示例：将对应 route 的 model 改为 "gemini:gemini-2.5-flash"。
+# 自定义 Responses 示例：声明 `[providers.xai] kind = "openai_responses"` 后使用
+# `model = "xai:grok-4"`；openai_compatible 不提供 Provider 原生搜索。
+# Tavily 示例：将 backend 改为 "tavily"，并在配置中心设置 TAVILY_API_KEY。
+
+# fast / balanced / deep 是可复用档位；main_route 引用内置或显式声明的模型路线。
+# aux_route 是标题、Memory 草稿、会话压缩和翻译共用的辅助模型路线；省略时继承 main_route。
+[profiles.fast]
+main_route = "group_main"
+aux_route = "aux"
+reasoning_effort = "low"
+max_tool_rounds = 2
+max_output_tokens = 1200
+
+[profiles.balanced]
+main_route = "private_main"
+aux_route = "aux"
+reasoning_effort = "medium"
+max_tool_rounds = 5
+max_output_tokens = 1200
+
+[profiles.deep]
+main_route = "private_main"
+aux_route = "aux"
+reasoning_effort = "high"
+max_tool_rounds = 8
+max_output_tokens = 2400
+
+# 私聊普通聊天：默认 balanced，并允许白名单 Tool Loop。
+[scenes.private]
+enabled = true
+profile = "balanced"
+main_route = "private_main"
+search_route = "private_search"
+tool_calling_enabled = true
+enabled_tools = [
+  "image_generation",
+  "get_weather",
+  "get_train_schedule",
+  "get_rss_recent_items",
+  "manage_rss_subscriptions",
+  "web_search",
+  "knowledge_search",
+  "list_todos",
+  "get_todo",
+  "create_todo",
+  "complete_todos",
+  "edit_todo",
+  "manage_recurring_reminder",
+  "restore_todos",
+  "delete_todos",
+  "merge_todos",
+  "save_memory",
+]
+
+# 群聊普通聊天：默认 fast，完整 Tool Loop 默认关闭；save_memory 保留 Memory-only 路径。
+# 确需开启完整群聊 Tool Loop 时，先确认群聊白名单、权限边界和敏感信息脱敏。
+# 默认群聊白名单不包含 Todo；如需开放 Todo 查询，请显式加入 list_todos / get_todo，
+# 并先确认群聊 Todo owner 语义符合预期。
+[scenes.group]
+enabled = true
+profile = "fast"
+main_route = "group_main"
+search_route = "group_search"
+tool_calling_enabled = false
+enabled_tools = ["get_weather", "get_train_schedule", "get_rss_recent_items", "manage_rss_subscriptions", "web_search", "knowledge_search", "save_memory"]

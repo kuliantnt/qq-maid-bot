@@ -26,7 +26,7 @@ OBSOLETE_ENV_KEYS=(
     TITLE_MODEL MEMORY_MODEL COMPACT_MODEL TRANSLATION_MODEL
     DEEPSEEK_MODEL BIGMODEL_MODEL GEMINI_MODEL LLM_MAX_OUTPUT_TOKENS
     TOOL_CALLING_ENABLED TOOL_CALLING_GROUP_ENABLED TOOL_CALLING_MAX_ROUNDS
-    TODO_MODEL MEMBER_ID_MAPPING_FILE
+    TODO_MODEL MEMBER_ID_MAPPING_FILE QQ_MAID_ENABLE_IMAGE
 )
 
 usage() {
@@ -339,6 +339,10 @@ health() {
 
 console() {
     load_env
+    if ! web_console_enabled; then
+        echo "web console is disabled by WEB_CONSOLE_ENABLED=false"
+        return 0
+    fi
     command -v curl >/dev/null 2>&1 || die "curl is required for console"
     local url status
     url="$(server_url)"

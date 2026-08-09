@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use qq_maid_common::identity_context::ConversationKind;
+use qq_maid_common::{identity_context::ConversationKind, output_part::AssistantOutput};
 use qq_maid_llm::provider::types::{ChatMessage, ChatRequest, ChatRole};
 use tokio::time::timeout;
 use tracing::warn;
@@ -19,10 +19,11 @@ use crate::{
 };
 
 use super::{
-    AgentRequestBudget, AssistantOutput, CoreActor, CoreConversation, CoreError,
-    CoreGroupMemberRole, CoreHealthSnapshot, CoreInboundClassification, CoreRequest,
-    CoreRespondOutput, CoreResponse, CoreService, Platform, ProgressStatusConfig, error_core_error,
-    output_policy_for_stream, start_core_response_stream, warn_core_error,
+    AgentRequestBudget, CoreActor, CoreConversation, CoreDeliveryHint, CoreError,
+    CoreGroupMemberRole, CoreHealthSnapshot, CoreInboundClassification, CoreOutputPolicy,
+    CoreRequest, CoreRespondOutput, CoreResponse, CoreService, Platform, ProgressStatusConfig,
+    StreamDeliveryConfig, error_core_error, output_policy_for_stream, start_core_response_stream,
+    warn_core_error,
 };
 
 #[derive(Clone)]
@@ -51,6 +52,7 @@ impl CoreHandle {
                 memory_store: state.stores.memory_store.clone(),
                 session_store: state.stores.session_store.clone(),
                 task_store: state.stores.todo_store.clone(),
+                voice_store: state.stores.voice_store.clone(),
                 notification_store: state.stores.notification_store.clone(),
                 ops_execution_store: state.stores.ops_execution_store.clone(),
                 ops_task_registry: state.stores.ops_task_registry.clone(),
@@ -80,6 +82,27 @@ impl CoreService for CoreHandle {
         let state = self.state.as_ref();
         let planned = service.plan_core_respond(&req).map_err(CoreError::from)?;
         let respond_plan = planned.plan();
+        let voice_delivery_enabled = if matches!(
+            respond_plan,
+            RespondPlan::StreamingChat | RespondPlan::AgentRuntime
+        ) {
+            match service.voice_service.delivery_enabled_for_request(&req) {
+                Ok(enabled) => enabled,
+                Err(error) => {
+                    // 语音是可选投递增强，偏好表临时不可用不能阻断普通文字回复。
+                    // 日志仅保留作用域、阶段和稳定错误码，不输出 SQL 或存储错误正文。
+                    warn!(
+                        scope_key,
+                        error_code = error.code(),
+                        error_stage = "voice_preference",
+                        "读取语音偏好失败，改用文本投递"
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
         if matches!(
             respond_plan,
             RespondPlan::CommandEvent
@@ -89,8 +112,13 @@ impl CoreService for CoreHandle {
         ) {
             // 微信服务号同步 XML 回包无法承载直出流式；这里仅对微信禁用 direct stream，
             // 让 Gateway 消费 Completed 后再渲染 XML，QQ 官方流式行为保持不变。
-            let provider_stream_enabled = state.provider.stream_enabled() && !force_complete_sync;
-            let output_policy = output_policy_for_stream(respond_plan, provider_stream_enabled);
+            let provider_stream_enabled =
+                state.provider.stream_enabled() && !force_complete_sync && !voice_delivery_enabled;
+            let output_policy = if voice_delivery_enabled {
+                CoreOutputPolicy::CompleteThenSend
+            } else {
+                output_policy_for_stream(respond_plan, provider_stream_enabled)
+            };
             let status_hint = planned.status_hint();
             let bot_display_name = service.bot_display_name().to_owned();
             let status_audience = if req
@@ -109,8 +137,12 @@ impl CoreService for CoreHandle {
                         service,
                         req,
                         planned,
-                        output_policy,
-                        provider_stream_enabled,
+                        StreamDeliveryConfig {
+                            output_policy,
+                            provider_stream_enabled,
+                            delivery_hint: voice_delivery_enabled
+                                .then_some(CoreDeliveryHint::Voice),
+                        },
                         AgentRequestBudget {
                             request_timeout: Duration::from_secs(
                                 state.config.request_timeout_seconds,
@@ -136,7 +168,14 @@ impl CoreService for CoreHandle {
                 }
                 Err(_) => {
                     let err = LlmError::timeout("stream_init");
-                    error_core_error(&scope_key, &err);
+                    error_core_error(
+                        &scope_key,
+                        &err,
+                        state.provider.name(),
+                        state.provider.model(),
+                        state.provider.stream_enabled(),
+                        state.config.request_timeout_seconds,
+                    );
                     let _metrics = recorder.fail(
                         state.provider.name(),
                         state.provider.model(),
@@ -164,7 +203,7 @@ impl CoreService for CoreHandle {
                     scope_key,
                     error_code = err.code,
                     error_stage = err.stage,
-                    "core respond returned business error"
+                    "Core 响应返回业务错误"
                 );
                 Err(err)
             }
@@ -174,7 +213,14 @@ impl CoreService for CoreHandle {
             }
             Err(_) => {
                 let err = LlmError::timeout("request");
-                error_core_error(&scope_key, &err);
+                error_core_error(
+                    &scope_key,
+                    &err,
+                    state.provider.name(),
+                    state.provider.model(),
+                    state.provider.stream_enabled(),
+                    state.config.request_timeout_seconds,
+                );
                 let _metrics = recorder.fail(
                     state.provider.name(),
                     state.provider.model(),
@@ -298,6 +344,7 @@ impl From<CoreRequest> for RespondRequest {
             channel_id,
             platform: value.platform.as_str().to_owned(),
             account_id: value.account_id,
+            addressed_to_bot: value.addressed_to_bot,
             event_type: event_type.to_owned(),
             message_id: value.message_id,
             ..Default::default()
@@ -309,11 +356,7 @@ impl From<RespondResponse> for CoreResponse {
     fn from(value: RespondResponse) -> Self {
         // `RespondResponse` 仍按 text/markdown 双通道组装正文，属于 Core 内部中间结构；
         // 这里将其合成为唯一的结构化 `AssistantOutput` 输出，不再向 Gateway 暴露旧字段。
-        let output = match (value.text, value.markdown) {
-            (Some(text), Some(markdown)) => Some(AssistantOutput::markdown(text, markdown)),
-            (Some(text), None) => Some(AssistantOutput::text(text)),
-            _ => None,
-        };
+        let output = synthesize_assistant_output(value.text, value.markdown, value.output_parts);
         Self {
             output,
             handled: value.handled,
@@ -321,8 +364,71 @@ impl From<RespondResponse> for CoreResponse {
             command: value.command,
             diagnostics: value.diagnostics,
             visible_entity_snapshot: value.visible_entity_snapshot,
+            delivery_hint: None,
         }
     }
+}
+
+/// 把 Core 内部 text/markdown 双通道与结构化 parts 合成 Gateway 可渲染的 `AssistantOutput`。
+///
+/// Provider 可能把最终聊天正文放进 `OutputPart::Text`；若同时存在 markdown 通道，
+/// 这些 Text part 只是 markdown 的重复表示，不能优先于 markdown 出站，否则群聊等
+/// 非流式路径会退化成纯文本。图片/文件等富媒体 part 继续保留。
+fn synthesize_assistant_output(
+    text: Option<String>,
+    markdown: Option<String>,
+    output_parts: Vec<qq_maid_common::output_part::OutputPart>,
+) -> Option<AssistantOutput> {
+    use qq_maid_common::output_part::OutputPart;
+
+    let markdown = markdown
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let text_parts = output_parts
+        .iter()
+        .filter_map(|part| match part {
+            OutputPart::Text { text } if !text.trim().is_empty() => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let media_parts = output_parts
+        .into_iter()
+        .filter(|part| !matches!(part, OutputPart::Text { .. } | OutputPart::Markdown { .. }))
+        .collect::<Vec<_>>();
+
+    if media_parts.is_empty() {
+        return match (text, markdown) {
+            (Some(text), Some(markdown)) => Some(AssistantOutput::markdown(text, markdown)),
+            (Some(text), None) => Some(AssistantOutput::text(text)),
+            (None, Some(markdown)) => {
+                let text = qq_maid_common::markdown::to_chat_text(&markdown);
+                Some(AssistantOutput::markdown(text, markdown))
+            }
+            (None, None) if !text_parts.is_empty() => {
+                // 没有 markdown 通道时，保留 Provider 仅返回的 Text parts，避免丢正文。
+                Some(AssistantOutput::text(text_parts.join("\n\n")))
+            }
+            (None, None) => None,
+        };
+    }
+
+    let text_fallback = text.unwrap_or_else(|| text_parts.join("\n\n"));
+    let mut parts = Vec::with_capacity(media_parts.len() + usize::from(markdown.is_some()));
+    if let Some(markdown) = markdown.clone() {
+        parts.push(OutputPart::Markdown { markdown });
+    } else if !text_fallback.trim().is_empty() {
+        // 有富媒体但没有 markdown 时，保留纯文本 part，保证图文顺序可渲染。
+        parts.push(OutputPart::Text {
+            text: text_fallback.clone(),
+        });
+    }
+    parts.extend(media_parts);
+
+    Some(AssistantOutput {
+        text_fallback,
+        markdown,
+        parts,
+    })
 }
 
 fn respond_options(config: &AppConfig) -> RespondServiceOptions {
@@ -348,6 +454,7 @@ fn respond_options(config: &AppConfig) -> RespondServiceOptions {
         agent_config: config.agent_config.clone(),
         ops_config: config.ops_config.clone(),
         command_prefix: config.command_prefix,
+        voice: config.voice.clone(),
     }
 }
 

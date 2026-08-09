@@ -2,6 +2,7 @@ target/
 dist/
 # Web 控制台产物由 Rust 编译期直接嵌入，必须提交；仅忽略本地依赖。
 web-console/node_modules/
+web-console/dist-demo/
 !web-console/dist/
 !web-console/dist/**
 __pycache__/
@@ -9,6 +10,10 @@ __pycache__/
 .vscode/
 # 本地部署配置，可能包含远端路径或账号信息，不进入 Git。
 scripts/deploy.conf
+# Compose 实例变量、当前 digest 与部署状态属于本机运行配置。
+compose.env
+.image.env
+deployments/
 # 根级历史残留，防止误建。
 data/
 
@@ -18,6 +23,10 @@ data/
 # 真实环境变量文件可能残留在旧模块或误运行子目录，显式兜底避免迁移期误提交。
 **/.env
 config/.env
+config/agent.toml
+config/runtime.toml
+config/ops.toml
+config/secrets/
 config/world.md
 config/context_modules.toml
 config/prompts/*.md
@@ -59,6 +68,7 @@ qq-maid-gateway-rs/config/.env
 # 不提交真实配置、运行产物、二进制和部署脚本副本。
 runtime/.env
 runtime/config/.env
+runtime/config/agent.toml
 runtime/config/ops.toml
 runtime/config/runtime.toml
 # 配置中心主密钥及以后新增的本机秘密只存在于持久化运行目录。
@@ -89,3 +99,5 @@ runtime/qq-maid-healthcheck.sh
 runtime/llmctl.sh
 runtime/gatewayctl.sh
 runtime/config/knowledge/project_docs/.qq-maid-project-docs-kb
+runtime/botmon.sh
+runtime/qq-maid-systemd.sh

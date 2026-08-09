@@ -16,7 +16,7 @@ use futures_util::FutureExt;
 use thiserror::Error;
 use tokio::{sync::mpsc, task::AbortHandle, time::timeout};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::{
     config::AppConfig,
@@ -150,7 +150,7 @@ impl OneBotScopeDispatcher {
                 Err(_) => {
                     debug!(
                         scope_key = %mask_scope_key(&scope_key),
-                        "ignored duplicate OneBot 11 message before Core dispatch"
+                        "重复的 OneBot 11 消息在分发至 Core 前被忽略"
                     );
                     return Ok(OneBotEnqueueOutcome::Duplicate);
                 }
@@ -179,7 +179,7 @@ impl OneBotScopeDispatcher {
                     warn!(
                         scope_key = %mask_scope_key(&scope_key),
                         queue_capacity = self.inner.queue_capacity,
-                        "rejected OneBot 11 inbound message because scope queue is full"
+                        "作用域队列已满，已拒绝 OneBot 11 入站消息"
                     );
                     return Err(OneBotEnqueueError::ScopeQueueFull);
                 }
@@ -212,7 +212,7 @@ impl OneBotScopeDispatcher {
                 scope_key = %mask_scope_key(&scope_key),
                 active_scopes = state.scopes.len(),
                 max_active_scopes = self.inner.max_active_scopes,
-                "rejected OneBot 11 inbound message because active scope limit is reached"
+                "活动作用域数量达到上限，已拒绝 OneBot 11 入站消息"
             );
             return Err(OneBotEnqueueError::ActiveScopeLimit);
         }
@@ -241,12 +241,12 @@ impl OneBotScopeDispatcher {
         if let Some(reservation) = reservation {
             reservation.commit();
         }
-        info!(
+        debug!(
             scope_key = %mask_scope_key(&scope_key),
             generation,
             active_scopes = state.scopes.len(),
             max_active_scopes = self.inner.max_active_scopes,
-            "OneBot 11 scope dispatcher created worker"
+            "OneBot 11 作用域 dispatcher 已创建 worker"
         );
         Ok(OneBotEnqueueOutcome::Accepted)
     }
@@ -280,7 +280,7 @@ impl OneBotScopeDispatcher {
                 .collect::<Vec<_>>();
             warn!(
                 remaining_workers = abort_handles.len(),
-                "OneBot 11 scope dispatcher cancellation timed out; aborting workers"
+                "OneBot 11 作用域 dispatcher 取消超时，正在中止 worker"
             );
             for abort_handle in abort_handles {
                 abort_handle.abort();
@@ -301,11 +301,11 @@ impl OneBotScopeDispatcher {
             remaining_scopes
         };
         if remaining_scopes == 0 {
-            info!("OneBot 11 scope dispatcher shutdown completed");
+            info!("OneBot 11 作用域 dispatcher 已完成关闭");
         } else {
             warn!(
                 remaining_scopes,
-                "OneBot 11 scope dispatcher stopped with stale scope entries"
+                "OneBot 11 作用域 dispatcher 停止后仍有过期作用域条目"
             );
         }
     }
@@ -338,10 +338,10 @@ async fn run_scope_worker(
                     Ok(inbound) => inbound,
                     Err(mpsc::error::TryRecvError::Empty) => {
                         remove_scope_generation(&mut state, &scope_key, generation);
-                        debug!(
+                        trace!(
                             scope_key = %mask_scope_key(&scope_key),
                             generation,
-                            "OneBot 11 scope dispatcher reclaimed idle worker"
+                            "OneBot 11 作用域 dispatcher 已回收空闲 worker"
                         );
                         return;
                     }
@@ -359,7 +359,7 @@ async fn run_scope_worker(
             warn!(
                 scope_key = %mask_scope_key(&scope_key),
                 generation,
-                "OneBot 11 scope worker panicked"
+                "OneBot 11 作用域 worker 发生 panic"
             );
             break;
         }

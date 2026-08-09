@@ -30,6 +30,7 @@ use crate::{
             rss::{RssFetchConfig, RssFetcher, RssStore},
             todo::TodoStore,
             train::{DynTrainExecutor, build_train_executor},
+            voice::VoicePreferenceStore,
             weather::{DynWeatherExecutor, build_weather_executor},
         },
     },
@@ -43,6 +44,7 @@ pub struct CoreStores {
     pub memory_store: MemoryStore,
     pub session_store: SessionStore,
     pub todo_store: TodoStore,
+    pub voice_store: VoicePreferenceStore,
     pub notification_store: NotificationOutboxStore,
     pub ops_execution_store: OpsExecutionStore,
     pub ops_task_registry: OpsTaskRegistry,
@@ -92,7 +94,7 @@ impl CoreRuntimeState {
     ) -> anyhow::Result<Self> {
         tracing::info!(
             agent_policy = %config.agent_config.diagnostic_summary()?,
-            "agent policy loaded"
+            "Agent 策略已加载"
         );
         let upstream_status = UpstreamStatus::default();
         let llm_gate = (config.max_concurrent_responses > 0)
@@ -116,6 +118,7 @@ impl CoreRuntimeState {
             memory_store: MemoryStore::new(database.clone()),
             session_store: SessionStore::new(database.clone()),
             todo_store: TodoStore::new(database.clone()),
+            voice_store: VoicePreferenceStore::new(database.clone()),
             notification_store: NotificationOutboxStore::new(database.clone()),
             ops_execution_store: OpsExecutionStore::new(database.clone()),
             ops_task_registry: OpsTaskRegistry::default(),

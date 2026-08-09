@@ -15,6 +15,7 @@ pub const KNOWLEDGE_SEARCH_TOOL_NAME: &str = "knowledge_search";
 const MAX_QUERY_CHARS: usize = 2_000;
 const MAX_QUERIES: usize = 4;
 const MAX_RESULTS: usize = 8;
+const MAX_CALLS_PER_REQUEST: usize = 2;
 const BODY_TRUNCATION_MARKER: &str = "\n[正文因字符预算已裁剪]";
 
 /// 只读知识证据查询，不负责生成最终答案或写入知识文件。
@@ -70,6 +71,42 @@ impl Tool for KnowledgeSearchTool {
         ToolEffect::ReadOnly
     }
 
+    fn max_calls_per_request(&self) -> Option<usize> {
+        Some(MAX_CALLS_PER_REQUEST)
+    }
+
+    fn deduplication_key(&self, arguments: &Value) -> Option<String> {
+        // 查询语义对大小写、连续空白和 additional_queries 顺序不敏感；使用规范化
+        // 参数复用 ToolLoopExecutor 的统一只读缓存，避免重复执行和重复注入证据。
+        let query = arguments
+            .get("query")
+            .and_then(Value::as_str)
+            .map(normalize_query)?;
+        let mut additional = arguments
+            .get("additional_queries")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(normalize_query)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        additional.sort();
+        additional.dedup();
+        let max_results = arguments
+            .get("max_results")
+            .and_then(Value::as_u64)
+            .unwrap_or(MAX_RESULTS as u64);
+        serde_json::to_string(&json!({
+            "query": query,
+            "additional_queries": additional,
+            "max_results": max_results,
+        }))
+        .ok()
+    }
+
     async fn execute(
         &self,
         _context: ToolContext,
@@ -123,6 +160,14 @@ impl Tool for KnowledgeSearchTool {
             self.output_max_chars,
         )))
     }
+}
+
+fn normalize_query(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 fn parse_max_results(value: Option<&Value>) -> Result<usize, LlmError> {
@@ -332,8 +377,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        runtime::tools::knowledge::{KNOWLEDGE_MIGRATIONS, KnowledgeStore, render_context},
-        storage::database::SqliteDatabase,
+        runtime::tools::knowledge::{KnowledgeStore, render_context},
+        storage::{APP_MIGRATIONS, database::SqliteDatabase},
     };
 
     fn context() -> ToolContext {
@@ -352,6 +397,8 @@ mod tests {
                 interaction_scope_id: "private:user-1".to_owned(),
             },
             tool_call_id: Some("call-1".to_owned()),
+            tool_round: None,
+            retry_of: None,
             execution_deadline: None,
         }
     }
@@ -366,8 +413,7 @@ mod tests {
         let knowledge_dir = base.join("knowledge");
         fs::create_dir_all(&knowledge_dir).unwrap();
         fs::write(knowledge_dir.join("guide.md"), content).unwrap();
-        let database =
-            SqliteDatabase::open_temp("qq-maid-knowledge-tool", KNOWLEDGE_MIGRATIONS).unwrap();
+        let database = SqliteDatabase::open_temp("qq-maid-knowledge-tool", APP_MIGRATIONS).unwrap();
         let index = KnowledgeIndex::new(KnowledgeStore::new(database), Path::new(&knowledge_dir));
         index.sync().unwrap();
         KnowledgeSearchTool::new(index, output_max_chars)
@@ -381,6 +427,22 @@ mod tests {
         assert!(!tool.metadata().parameters.to_string().contains("path"));
     }
 
+    #[test]
+    fn equivalent_queries_share_normalized_deduplication_key() {
+        let tool = tool();
+        let left = tool.deduplication_key(&json!({
+            "query": " RAG-504  是什么 ",
+            "max_results": null,
+            "additional_queries": ["超时", "错误码"]
+        }));
+        let right = tool.deduplication_key(&json!({
+            "query": "rag-504 是什么",
+            "max_results": 8,
+            "additional_queries": ["错误码", "超时"]
+        }));
+        assert_eq!(left, right);
+    }
+
     #[tokio::test]
     async fn returns_structured_evidence_without_answer_generation() {
         let tool = tool();
@@ -392,6 +454,7 @@ mod tests {
         assert!(output.value["ok"].as_bool().unwrap());
         assert_eq!(output.value["status"], "ok");
         assert_eq!(output.value["items"][0]["relative_path"], "guide.md");
+        assert_eq!(output.value["items"][0]["source_label"], "guide.md");
         assert!(
             output.value["items"][0]["body_excerpt"]
                 .as_str()
@@ -496,6 +559,7 @@ mod tests {
                 super::super::KnowledgeEvidenceItem {
                     chunk_id: "lexical".to_owned(),
                     relative_path: "guide.md".to_owned(),
+                    source_label: "guide.md".to_owned(),
                     document_title: None,
                     heading_path: None,
                     start_line: Some(1),
@@ -507,6 +571,7 @@ mod tests {
                 super::super::KnowledgeEvidenceItem {
                     chunk_id: "adjacent".to_owned(),
                     relative_path: "guide.md".to_owned(),
+                    source_label: "guide.md".to_owned(),
                     document_title: None,
                     heading_path: None,
                     start_line: Some(3),

@@ -34,6 +34,7 @@ require_any_executable qq-maid-bot qq-maid-bot.exe
 
 case "${PAYLOAD_PROFILE}" in
     windows)
+        require_file lib/agent-config.ps1
         require_file qbot.ps1
         require_file qbot.cmd
         require_file botctl.ps1
@@ -41,6 +42,7 @@ case "${PAYLOAD_PROFILE}" in
         require_file windows-startup-example.bat
         ;;
     unix)
+        require_file lib/agent-config.sh
         require_executable botctl.sh
         require_executable validate-runtime.sh
         require_executable diagnose-network.sh
@@ -49,6 +51,8 @@ case "${PAYLOAD_PROFILE}" in
         require_executable qq-maid-systemd.sh
         ;;
     all)
+        require_file lib/agent-config.sh
+        require_file lib/agent-config.ps1
         require_file qbot.ps1
         require_file qbot.cmd
         require_executable botctl.sh
@@ -67,7 +71,7 @@ case "${PAYLOAD_PROFILE}" in
 esac
 
 require_file config/.env.example
-require_file config/agent.toml
+require_file config/agent.example.toml
 require_file config/ops.example.toml
 require_file config/runtime.example.toml
 require_file README.md

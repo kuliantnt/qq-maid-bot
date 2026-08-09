@@ -1,8 +1,8 @@
 //! 请求响应路由与分派。
 //!
-//! 本模块是 LLM 响应的入口层，负责接收外部（HTTP facade 或内部子 flow）
-//! 发来的 `RespondRequest`，根据请求类型和会话状态将其分派到对应的子处理
-//! 模块（聊天、翻译、待办、记忆、天气、搜索、会话管理），最终返回 `RespondResponse`。
+//! 本模块是 Core 内部 LLM 响应编排入口，接收 service 层或内部子 flow 的请求，
+//! 按请求类型和会话状态分派到聊天、翻译、待办、记忆、天气、搜索和会话管理，
+//! 最终返回内部 `RespondResponse`，再由 service 层转换为稳定响应类型。
 
 use std::{future::Future, pin::Pin};
 
@@ -34,7 +34,7 @@ use crate::{
 };
 
 mod types;
-pub use types::{ChatResponse, RespondPurpose, RespondRequest, RespondResponse};
+pub use types::{RespondPurpose, RespondRequest, RespondResponse};
 
 pub(crate) mod agent_outcome;
 mod agent_route;
@@ -44,13 +44,13 @@ pub(crate) mod command_render;
 pub(crate) mod common;
 mod conversation_session;
 mod help;
-mod interaction_state;
+// pub(crate)：tools 域的确定性 Todo 短路需要复用同一 interaction scope 派生。
+pub(crate) mod interaction_state;
 pub(crate) mod llm_service;
 mod memory_flow;
 mod ops_flow;
 mod pending;
 mod pending_dispatch;
-mod radar_flow;
 mod router;
 mod rss_flow;
 pub(crate) mod search_flow;
@@ -62,15 +62,21 @@ mod title;
 mod tool_runtime;
 pub(crate) mod train_flow;
 mod translation_flow;
+mod voice_flow;
 pub(crate) mod weather_flow;
 
-pub(crate) use crate::runtime::tools::{StatusAudience, StatusHint, StatusPhase, status_hint_text};
+pub(crate) use crate::runtime::tools::{
+    StatusAudience, StatusHint, StatusPhase, status_hint_for_tool_name, status_hint_text,
+};
 use chat_flow::ChatFlowSinks;
 use command_dispatcher::{CommandDispatcher, DispatchOutcome};
 use common::session_error;
 use interaction_state::{
     command_bypasses_pending, prepare_message_context_for_model, respond_interaction_meta,
     respond_meta, session_pending_visible_to_user, shared_session_turn_actor,
+};
+use llm_service::context_diagnostics::{
+    log_request_stage_snapshot, request_stage_snapshot, warn_large_request_context_snapshot,
 };
 
 /// `RustRespondService` 需要的持久化存储集合。
@@ -84,6 +90,8 @@ pub struct RespondStores {
     pub session_store: SessionStore,
     /// 任务存储；当前实现由 Todo 业务模块提供。
     pub task_store: TaskStore,
+    /// 会话级语音回复偏好。
+    pub voice_store: crate::runtime::tools::voice::VoicePreferenceStore,
     /// 统一通知 Outbox 存储
     pub notification_store: NotificationOutboxStore,
     /// Ops 入站执行原子领取存储。
@@ -135,6 +143,8 @@ pub struct RespondServiceOptions {
     pub ops_config: OpsConfig,
     /// 当前进程统一使用的聊天命令前缀。
     pub command_prefix: CommandPrefix,
+    /// TTS 能力预检快照；只用于控制偏好是否允许开启。
+    pub voice: crate::config::VoiceFeatureConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,13 +271,15 @@ pub struct RustRespondService {
     /// 列车时刻查询执行器
     train_executor: DynTrainExecutor,
     /// Codex / Claude Code Radar 公开数据读取执行器
-    radar_executor: DynRadarExecutor,
+    pub(crate) radar_executor: DynRadarExecutor,
     /// 长期记忆存储
     pub(crate) memory_store: MemoryStore,
     /// 会话记录存储
     pub(crate) session_store: SessionStore,
     /// 任务存储；当前实现由 Todo 业务模块提供。
     pub(crate) task_store: TaskStore,
+    /// 语音偏好领域门面，统一处理配置、权限与持久化。
+    pub(crate) voice_service: crate::runtime::tools::voice::VoicePreferenceService,
     /// 统一通知 Outbox 存储
     pub(crate) notification_store: NotificationOutboxStore,
     /// `/ops` 权限、白名单执行和结果通知门面。
@@ -342,6 +354,10 @@ impl RustRespondService {
             stores.ops_execution_store.clone(),
             stores.ops_task_registry.clone(),
         );
+        let voice_service = crate::runtime::tools::voice::VoicePreferenceService::new(
+            stores.voice_store,
+            options.voice,
+        );
         Self {
             provider,
             query_executor: executors.query_executor,
@@ -351,6 +367,7 @@ impl RustRespondService {
             memory_store: stores.memory_store,
             session_store: stores.session_store,
             task_store: stores.task_store,
+            voice_service,
             notification_store: stores.notification_store,
             ops_service,
             rss_store: stores.rss_store,
@@ -402,6 +419,11 @@ impl RustRespondService {
         &self.bot_display_name
     }
 
+    /// Todo / Memory 等 Core 业务展示统一读取手动展示名；该存储不参与权限判断。
+    pub(crate) fn display_name_store(&self) -> &DisplayNameStore {
+        &self.display_name_store
+    }
+
     /// 统一的请求响应入口。
     ///
     /// 分派顺序：
@@ -436,9 +458,15 @@ impl RustRespondService {
         final_delta_sink: Option<qq_maid_llm::agent_loop::AgentTextDeltaSink>,
         run_handle: Option<qq_maid_llm::agent_loop::AgentRunHandle>,
     ) -> Result<RespondResponse, LlmError> {
-        match CommandDispatcher::new(self).dispatch(req, planned).await? {
-            DispatchOutcome::Respond(response) => Ok(*response),
-            DispatchOutcome::Chat(chat) => {
+        // Issue #361 诊断：请求入口与退出阶段各采样一次上下文尺寸与进程内存，
+        // 用于区分暖机高水位、有界增长与请求级大对象滞留。
+        let stage_snapshot = request_stage_snapshot(&req);
+        log_request_stage_snapshot("before_route", &stage_snapshot);
+        warn_large_request_context_snapshot("before_route", &stage_snapshot);
+        let outcome = CommandDispatcher::new(self).dispatch(req, planned).await;
+        let result = match outcome {
+            Ok(DispatchOutcome::Respond(response)) => Ok(*response),
+            Ok(DispatchOutcome::Chat(chat)) => {
                 self.handle_chat(
                     *chat,
                     ChatFlowSinks {
@@ -449,7 +477,12 @@ impl RustRespondService {
                 )
                 .await
             }
-        }
+            Err(err) => Err(err),
+        };
+        // Issue #361 诊断：请求结束阶段在成功与错误路径都采样一次，便于区分
+        // 有界增长与请求级大对象滞留（错误路径也不能漏采样）。
+        log_request_stage_snapshot("request_end", &stage_snapshot);
+        result
     }
 
     /// 仅供 Core 进程内 stream 边界使用的真流式入口。

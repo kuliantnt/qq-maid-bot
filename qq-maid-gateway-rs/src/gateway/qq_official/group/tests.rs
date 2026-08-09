@@ -14,9 +14,9 @@ fn local_group_hints_use_configured_bot_display_name() {
 
 #[tokio::test]
 async fn group_stream_timeout_sends_core_safe_failure_text() {
-    let stream = FakeGroupEventStream::new([RespondEvent::Failed(CoreRespondFailure {
+    let stream = FakeGroupEventStream::new([CoreResponseEvent::Failed(CoreRespondFailure {
         kind: CoreFailureKind::LlmTimeout,
-        message: "LLM 服务处理超时，请稍后再试。".to_owned(),
+        message: "LLM 请求超时，请稍后重试。".to_owned(),
         retryable: true,
         agent: None,
     })]);
@@ -39,7 +39,7 @@ async fn group_stream_timeout_sends_core_safe_failure_text() {
                 group_openid: "group-1".to_owned(),
                 msg_id: Some("group-msg-1".to_owned()),
             },
-            "LLM 服务处理超时，请稍后再试。".to_owned(),
+            "LLM 请求超时，请稍后重试。".to_owned(),
         )]
     );
     assert!(cache.lock().unwrap().contains("failure-message-id"));
@@ -50,6 +50,28 @@ async fn group_stream_timeout_sends_core_safe_failure_text() {
             .contains_ref_index_id("REFIDX_failure")
     );
 }
+
+#[tokio::test]
+async fn group_stream_collapse_uses_completed_body_without_delta_concat() {
+    let completed = crate::gateway::test_support::respond_response_fixture(
+        "【联网查询】\n\n没查到明确结果。可以换一个关键词再试。",
+    );
+    let stream = FakeGroupEventStream::new([
+        CoreResponseEvent::TextDelta("Reuters、CNBC、TechCrunch 的未经验证新闻正文".to_owned()),
+        CoreResponseEvent::Completed(Box::new(completed)),
+    ]);
+
+    let response = match consume_respond_stream(stream).await {
+        GroupStreamOutcome::Completed(response) => response,
+        other => panic!("expected completed group stream, got {other:?}"),
+    };
+
+    let text = response.text_content().unwrap();
+    assert_eq!(text.matches("没查到明确结果").count(), 1);
+    assert!(!text.contains("Reuters"));
+    assert!(!text.contains("CNBC"));
+    assert!(!text.contains("TechCrunch"));
+}
 use crate::{
     api::{ApiError, GroupReplyTarget, QqApiClient, SendFuture},
     auth::AccessTokenManager,
@@ -58,7 +80,7 @@ use crate::{
     markdown::MarkdownPayload,
 };
 use axum::{Router, body::Bytes, routing::get};
-use qq_maid_common::input_part::{MessageInputPart, MessageMedia};
+use qq_maid_common::input_part::{MediaStatus, MessageInputPart, MessageMedia};
 use qq_maid_core::service::{
     CoreError, CoreFailureKind, CoreHealthSnapshot, CoreInboundClassification, CoreOutputPolicy,
     CoreRequest, CoreRespondOutput, CoreService, UpstreamStatusSnapshot,
@@ -73,11 +95,11 @@ use tokio::net::TcpListener;
 
 #[derive(Debug)]
 struct FakeGroupEventStream {
-    events: VecDeque<RespondEvent>,
+    events: VecDeque<CoreResponseEvent>,
 }
 
 impl FakeGroupEventStream {
-    fn new(events: impl IntoIterator<Item = RespondEvent>) -> Self {
+    fn new(events: impl IntoIterator<Item = CoreResponseEvent>) -> Self {
         Self {
             events: events.into_iter().collect(),
         }
@@ -157,7 +179,7 @@ fn qq_group_capability() -> ReplyCapability {
 }
 
 struct MockCore {
-    response: RespondResponse,
+    response: CoreResponse,
     respond_calls: Arc<AtomicUsize>,
     classify_calls: Arc<AtomicUsize>,
     immediate_inputs: Vec<String>,
@@ -220,13 +242,14 @@ fn respond_client_with_classification(
         respond_calls,
         classify_calls,
         immediate_inputs,
-        RespondResponse {
+        CoreResponse {
             output: None,
             handled: Some(true),
             session_id: None,
             command: None,
             diagnostics: None,
             visible_entity_snapshot: None,
+            delivery_hint: None,
         },
     )
 }
@@ -235,7 +258,7 @@ fn respond_client_with_response(
     respond_calls: Arc<AtomicUsize>,
     classify_calls: Arc<AtomicUsize>,
     immediate_inputs: Vec<&str>,
-    response: RespondResponse,
+    response: CoreResponse,
 ) -> RespondClient {
     RespondClient::new(Arc::new(MockCore {
         response,
@@ -249,11 +272,13 @@ fn api_client() -> QqApiClient {
     QqApiClient::new(
         qq_maid_common::http_client::client(),
         "http://127.0.0.1:1",
-        AccessTokenManager::new(
+        AccessTokenManager::new_with_cached_token_for_test(
             qq_maid_common::http_client::client(),
             "app",
             "secret",
             Duration::from_secs(60),
+            "test-access-token",
+            Duration::from_secs(3600),
         ),
     )
 }
@@ -262,9 +287,9 @@ fn assert_group_send_error(err: anyhow::Error) {
     assert!(
         matches!(
             err.downcast_ref::<ApiError>(),
-            Some(ApiError::Auth(_) | ApiError::Http(_) | ApiError::Status { .. })
+            Some(ApiError::Http(_) | ApiError::Status { .. })
         ),
-        "expected QQ send/auth error from fake API endpoint, got: {err:#}"
+        "expected QQ API send error without authentication request, got: {err:#}"
     );
 }
 

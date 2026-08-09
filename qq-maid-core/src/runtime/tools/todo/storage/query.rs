@@ -66,6 +66,34 @@ pub(super) fn query_items_by_status(
     collect_rows(rows)
 }
 
+/// 列出某个群 conversation scope 下所有创建者的未完成待办。
+///
+/// 该查询只按服务端生成的完整 `scope_key` 精确匹配，不接受模糊群 ID；调用方仍需
+/// 先校验当前操作者的群角色。普通 Todo 列表继续使用 owner + scope 查询，不得复用
+/// 本入口放宽个人所有权边界。
+pub(super) fn query_pending_items_by_group_scope(
+    conn: &Connection,
+    scope_key: &str,
+) -> Result<Vec<TodoItem>, TodoError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, user_id, scope_key, title, detail, raw_text,
+                    due_date, due_at, reminder_at, time_precision, recurrence_kind,
+                    recurrence_interval_days, recurrence_interval, recurrence_unit, status,
+                    created_at, updated_at, completed_at
+             FROM todos
+             WHERE scope_key = ?1 AND status = ?2",
+        )
+        .map_err(TodoError::from_sql)?;
+    let rows = stmt
+        .query_map(
+            params![scope_key, TodoStatus::Pending.as_str()],
+            todo_item_from_row,
+        )
+        .map_err(TodoError::from_sql)?;
+    collect_rows(rows)
+}
+
 /// 按 owner_key + 一组私聊 scope 读取指定状态的待办。
 ///
 /// reminder 按某个 owner 查 pending 时可能命中该 owner 名下的多个历史 private scope，

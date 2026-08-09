@@ -1,0 +1,5 @@
+services:
+  bot:
+    ports:
+      # 仅在微信回调需要入站时加载；容器内 WECHAT_SERVICE_BIND_HOST 必须设为 0.0.0.0。
+      - "${QQ_MAID_WECHAT_HOST:-127.0.0.1}:${QQ_MAID_WECHAT_PORT:-8788}:8788"

@@ -2,12 +2,9 @@ use crate::runtime::respond::tests::support::{message, test_meta, test_service};
 use crate::runtime::{
     pending::PreparedAction,
     session::{SessionMeta, now_iso_cn},
-    tools::{
-        CompleteTodoTool,
-        todo::{
-            ClarificationCandidate, PendingTodoClarification, TodoItemDraft, TodoPendingPayload,
-            TodoStatus, TodoStore, TodoTimePrecision,
-        },
+    tools::todo::{
+        ClarificationCandidate, CompleteTodoTool, PendingTodoClarification, TodoItemDraft,
+        TodoPendingPayload, TodoStatus, TodoStore, TodoTimePrecision,
     },
 };
 use crate::service::CoreInboundKind;
@@ -149,15 +146,17 @@ async fn prepared_bulk_delete_confirm_executes_once_and_clears_pending() {
         ),
     );
 
-    let stored = service
-        .session_store
-        .get_or_create_active(&test_meta())
-        .unwrap()
-        .pending_operation
-        .expect("missing prepared action");
-    assert_eq!(stored.scope_key(), "group:g1");
-    assert!(!stored.expires_at().is_empty());
-    assert_eq!(stored.revision(), 1);
+    // 通用 envelope 的 scope、expiry、revision 由 Pending 与 Todo payload 单测覆盖；
+    // 本层保留确认前确实存在 pending 的用户可见生命周期断言。
+    assert!(
+        service
+            .session_store
+            .get_or_create_active(&test_meta())
+            .unwrap()
+            .pending_operation
+            .is_some(),
+        "确认前必须存在 pending 操作"
+    );
 
     let first = service.respond(message("确认")).await.unwrap();
     assert!(first.text.unwrap().contains("已永久删除 1 条进行中待办"));
@@ -291,7 +290,23 @@ fn inbound_classification_marks_business_commands_immediate() {
 }
 
 #[test]
-fn inbound_classification_marks_natural_todo_queries_immediate() {
+fn inbound_classification_marks_explicit_todo_commands_immediate() {
+    let service = test_service();
+
+    for input in [
+        "/todo",
+        "/todo list",
+        "/todo all",
+        "/todo done",
+        "查看完整结果",
+    ] {
+        let classification = service.classify_inbound(message(input)).unwrap();
+        assert_eq!(classification.kind, CoreInboundKind::Immediate, "{input}");
+    }
+}
+
+#[test]
+fn inbound_classification_marks_natural_todo_queries_as_normal_chat() {
     let service = test_service();
 
     for input in [
@@ -301,9 +316,10 @@ fn inbound_classification_marks_natural_todo_queries_immediate() {
         "查询代办",
         "查看所有待办",
         "查看已完成待办",
+        "查看周期性待办",
     ] {
         let classification = service.classify_inbound(message(input)).unwrap();
-        assert_eq!(classification.kind, CoreInboundKind::Immediate, "{input}");
+        assert_eq!(classification.kind, CoreInboundKind::NormalChat, "{input}");
     }
 }
 
@@ -663,11 +679,11 @@ async fn stable_group_visible_todo_snapshots_are_isolated_by_actor() {
         .unwrap();
 
     service
-        .respond(stable_group_message("看一下待办", "u1"))
+        .respond(stable_group_message("/todo", "u1"))
         .await
         .unwrap();
     service
-        .respond(stable_group_message("看一下待办", "u2"))
+        .respond(stable_group_message("/todo", "u2"))
         .await
         .unwrap();
 
@@ -718,6 +734,8 @@ async fn stable_group_visible_todo_snapshots_are_isolated_by_actor() {
                     interaction_scope_id: format!("{}:actor:u2", stable_group_scope()),
                 },
                 tool_call_id: Some("call-u2-complete".to_owned()),
+                tool_round: None,
+                retry_of: None,
                 execution_deadline: None,
             },
             json!({"numbers": [1], "reference": null}),

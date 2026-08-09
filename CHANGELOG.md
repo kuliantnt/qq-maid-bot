@@ -2,6 +2,567 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.23.9] - 2026-08-08
+
+### Release Focus
+
+* **Todo 提醒澄清与工具回执收口**：恢复“已定位待办、只缺提醒时刻”场景的跨轮澄清，并收紧 Todo 工具结果聚合，确保用户看到的成功或失败回执都来自真实执行结果。
+* **职责拆分与部署文档补齐**：完成 Core、Gateway、LLM 及测试支持模块的职责化拆分，补充面向 Linux 服务器的 Docker 人话版部署指南。
+
+### Changed
+
+* **可恢复的提醒时间澄清**：用户只提供提醒日期时，`edit_todo` 保留已确认的待办候选和原始表达，写入现有 session pending 状态并追问具体时刻；后续回复会在同一候选作用域内恢复执行。
+* **Todo 整轮回执聚合**：将 Todo 列表、写操作、关联列表和可见快照的投影集中到领域回执模块；模型自纠参数错误时不把已被后续成功调用覆盖的中间失败展示给用户，独立失败仍保留真实错误。
+* **模块职责化整理**：拆分管理认证、Gateway 回复与测试、LLM 上下文预算和 Provider 测试等大文件，保持现有依赖方向和外部入口不变。
+* **Docker 部署引导**：新增从安装 Docker、准备目录、选择镜像到启动控制台的分步说明，并补充镜像加速、固定版本和常见故障提示。
+
+### Fixed
+
+* **提醒日期缺时刻无法跨轮完成**：修复模型因通用提示词禁止调用写工具而无法保存澄清的问题；只给出“下午两点”等孤立时间时，不再误修改最近一条待办。
+* **Todo 参数错误回执泄漏**：修复同一工具后续轮次已纠正成功时仍向用户暴露旧参数错误的问题；未被纠正的错误继续进入真实失败回执和诊断轨迹。
+* **Agent 候选超时误终止**（PR #662）：区分单个模型候选 / Agent 单步 timeout 与整体 Agent deadline；总预算仍充足且未发送可见正文、未启动工具副作用时，局部超时可以继续切换候选，真正耗尽总 deadline 时仍会阻止后续模型和工具启动。流式超时后的非流式兼容回退不会重复追加 session input。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.23.9`；本次实际修改的 `qq-maid-core`、`qq-maid-gateway-rs`、`qq-maid-llm` 分别提升到 `0.1.23`、`0.1.17`、`0.1.12`，`qq-maid-common` 保持 `0.1.4`。
+* 本版本不新增 SQLite migration、配置迁移或运行时入口。提醒澄清复用现有 session pending、候选快照和 Notification Outbox 边界；升级前仍建议按常规备份运行配置、数据库和主密钥。
+
+## [v0.23.8] - 2026-08-06
+
+### Release Focus
+
+* **群消息轻量入站与工具流正文收口**：QQ 官方群消息先在重型回复队列前完成轻量去重、触发判定与被忽略消息的引用观察，再按群串行处理真正需要回复的消息，并修复去重记录提前提交导致的丢消息风险；同时把工具活动后的未验真文本严格限制为草稿缓冲，`response.incomplete` 等失败路径直接丢弃并允许候选降级。
+
+### Changed
+
+* **群消息观察与回复队列拆分**：QQ 官方群消息在进入群级重型回复队列前，按到达顺序完成 mention 归一化、QQ 复合去重和触发判定；确定不触发回复的消息立即把事件已携带的正文和轻量媒体引用写入 RefIndex，不下载媒体、不补全成员、不调用 Core。真正触发回复的消息才进入按群串行的重型队列；容量拒绝的用户可见提示增加同群 10 秒冷却，聚合器不再重复兜底提示。
+* **Web Search 结果数硬上限**：`tools.web_search.max_results` 明确为每个底层搜索子请求的结果数硬上限，多目标调研逐目标应用，模型参数只能下调、不能静默扩大单项成本。
+
+### Fixed
+
+* **工具流内容泄漏与 incomplete 降级**（PR #654）：工具活动后的 Provider 文本仅作为未验真草稿缓冲，整轮成功并完成领域投影后才外发；失败、超时、协议错误或 `response.incomplete` 时直接丢弃。候选链判定改为以下游确认最终正文已外发为准，`Buffered` 草稿不会阻止候选切换，并补齐 Core + 候选链跨层降级回归测试。
+* **群消息去重提前提交**：QQ 群消息复合去重改为 reservation 语义，Dispatcher 确认接收重型消息后才提交，入队失败显式回滚；避免预处理完成到确认接收之间提前留下 committed 记录，导致后续消息被误判为重复而丢失。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.23.8`，实际修改的 `qq-maid-core` 提升到 `0.1.22`、`qq-maid-llm` 提升到 `0.1.11`、`qq-maid-gateway-rs` 提升到 `0.1.16`；`qq-maid-common` 版本保持不变。
+* 本版本不新增 SQLite migration、配置迁移或运行时入口。`tools.web_search.max_results` 语义从软限制收紧为每子请求硬上限，模型参数不再能扩大单项成本，已有配置无需迁移；升级前仍建议按常规备份运行配置、数据库和主密钥。
+
+## [v0.23.7] - 2026-08-06
+
+### Release Focus
+
+* **启动诊断与联网查询稳定性**：补齐配置文件问题的安全诊断，收紧 Agent 工具结果与最终正文的投影边界，并修复可选联网查询参数被模型错误序列化时的兼容问题，让部署排障和失败回执更接近真实执行结果。
+
+### Changed
+
+* **启动配置诊断**（PR #650）：`setup_required` 与 `config check` 会区分 Agent、Ops、Provider 和 Gateway 配置问题，报告安全的配置文件路径及错误首行；顶层失败保留完整 `anyhow` 错误链，结构化日志写入 stderr，不污染 CLI 的机器可读 stdout。
+* **Agent 最终正文投影**（PR #652）：工具调用开始后暂存模型最终草稿，等领域结果投影完成后只发送可信最终正文；工具失败、超时和流式 / 非流式分支继续保留真实的部分回复语义，避免模型草稿与错误回执重复发送。
+
+### Fixed
+
+* **联网查询空 `time_range`**（PR #652）：将模型传入的字符串 `"null"` 按未设置处理；无效工具参数返回明确的本地参数错误，不再误报为上游网络故障，也不会把模型声称的成功当作真实查询结果。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.23.7`，实际修改的 `qq-maid-core` 提升到 `0.1.21`；`qq-maid-common`、`qq-maid-gateway-rs` 和 `qq-maid-llm` 版本保持不变。
+* 本版本不新增 SQLite migration、配置迁移或运行时入口。Bootstrap / 密码重置令牌仍只在新生成时输出一次，但改为结构化 `info` 启动日志事件；升级前仍建议按常规备份运行配置、数据库和主密钥。
+
+## [v0.23.6] - 2026-08-05
+
+### Release Focus
+
+* **QQ 官方 `/stream_messages` 流式协议迁移**：将 C2C 流式回复收敛到官方累计替换模型，补齐候选切换、官方游标和引用索引语义，避免长回复、重生成和限流场景下丢正文或重复发送。
+
+### Changed
+
+* **官方累计替换发送**（PR #649）：`input_mode=replace` 持续提交累计全文，首个成功响应建立 StreamSession，后续请求复用同一 `stream_msg_id` 和 `msg_seq`；完成请求只发送一次 `input_state=10`。
+* **官方游标与限流重试**（PR #649）：请求开始即消费连续 `index`，成功、网络错误和普通不可重试错误都不复用可能已被服务端消费的游标；HTTP 429 与 QQ `err_code=50002` 以有限指数退避和新 index 重试，普通 4xx、鉴权错误和其他错误不重试。
+* **候选正文 Rollover**（PR #649）：当最终候选改写已展示正文的前缀时，先完成旧 StreamSession，再以一次新的普通用户可见回复发送完整候选；长度回退、同长度改写和更长改写都不会静默丢弃候选或重复旧正文。
+
+### Fixed
+
+* **QQ C2C `ref_idx` 保留**（PR #649）：状态保存最近一次成功响应返回的非空 `ext_info.ref_idx`；complete 返回新值时覆盖，缺失时沿用此前值，绝不使用 stream message ID、消息 ID 或源消息 ID 伪造引用索引。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.23.6`，实际修改的 `qq-maid-gateway-rs` 提升到 `0.1.15`，`qq-maid-common`、`qq-maid-core` 和 `qq-maid-llm` 版本保持不变。
+* 本版本不新增 SQLite migration、配置迁移或新的运行时入口；继续使用官方 `/stream_messages`，不恢复旧的流式协议路径。升级前按常规备份运行配置、数据库和主密钥。
+
+## [v0.23.5] - 2026-08-05
+
+### Release Focus
+
+* **知识库托管文件与控制台管理**：本版本把知识库从单纯的目录同步扩展为受保护的托管文件生命周期，补齐上传、异步索引、状态查询、下载、删除和失败重试；同时收口 Web Search 参数诊断与 LLM 流式回退边界，让控制台和 Agent 运行更容易观察与恢复。
+
+### Added
+
+* **知识库托管文件生命周期**（PR #644）：新增部署管理员专用的知识库文件 API 和后台处理 worker，支持 Markdown 能力探测、分页列表、上传、下载、删除和失败重试；文件状态按 `pending`、`processing`、`ready`、`failed` 真实反映索引进度，知识库来源明确区分可管理的 `managed` 文件与只读的 `directory` 文档。
+* **知识库控制台页面**（PR #645）：Web Console 新增知识库页面，覆盖分页、上传限制提示、状态轮询、下载、删除确认和失败重试，并补齐窄屏展示、登出和上传阻断等交互测试；`web-console/dist/` 与源码保持可复现同步。
+
+### Changed
+
+* **Web Search 参数诊断与 Agent 自纠**（PR #638）：将研究目标、主题、时间范围、结果数量和上下文尺寸等参数校验收敛到独立领域模块；Tool Loop 收到结构化参数错误后可以修正请求，非法参数不会被错误缓存为终态失败，搜索结果和失败摘要继续遵守脱敏边界。
+* **Docker 文件布局**（PR #640）：将 Dockerfile、Compose 文件和环境示例归入 `docker/`，Makefile、Container workflow、部署文档和测试同步使用显式 `-f docker/compose.yaml`；远程部署 bundle 继续兼容根级 `compose.yaml`。
+* **CI 按变更范围分流**（PR #639）：前端独立执行 `npm ci`、类型检查、构建、测试和 `dist` 可复现校验；Rust、Shell、Windows 检查按实际路径触发，减少无关检查并保留发布门禁。
+* **项目日志中文化**（PR #647）：项目自有日志正文统一使用中文，结构化字段、状态值、协议标识和上游错误保持稳定；知识库 worker 的空轮询不再持续刷高频日志，Gateway 关键诊断可见性保持不变。
+
+### Fixed
+
+* **LLM 流式结束与回退预算**（PR #646）：修复 Agent 流式完成判定、Responses 兼容 EOF、SSE 可忽略尾部和流式失败后的非流式回退预算，补齐跨候选回退、超时和诊断轨迹测试。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.23.5`；本次实际变更的 `qq-maid-core`、`qq-maid-llm`、`qq-maid-gateway-rs` 分别提升到 `0.1.20`、`0.1.10`、`0.1.14`，`qq-maid-common` 保持 `0.1.4`。
+* 本版本包含知识库托管文件相关的 SQLite migration（知识 schema V4、控制台用户文件用途 V3），启动时自动执行。旧的控制台背景文件保持 `background` 用途，已关联知识托管记录的历史文件会安全迁移为 `knowledge`；升级前请备份 `APP_DB_FILE`、数据库父目录下的 `console-files/`、配置和主密钥。
+* 新增可选环境变量 `KNOWLEDGE_MAX_FILE_BYTES`，默认 50 MiB，允许范围为 16 KiB 至 100 MiB；它只控制知识库托管文件，通用控制台文件的 10 MiB 限制保持不变，不需要手工配置迁移。
+* 知识库 API 仍只在 `WEB_CONSOLE_ENABLED=true` 时注册，并继续要求部署管理员 Session、同源校验和 CSRF；目录来源文档只读，正在处理的托管文件不能删除。Docker 源码 Compose 命令需要改用 `docker/` 路径。
+
+## [v0.23.4] - 2026-08-02
+
+### Release Focus
+
+* **发布下载链路与 AI Radar 数据升级**：本版本一边收口 Linux / Windows Release 安装器的多来源下载与校验，一边升级 Codex Radar 的公开数据读取、展示和领域模块边界，让发布安装与 `/radar` 日常查询都更容易诊断和维护。
+
+### Added
+
+* **Release 多代理候选下载与校验**（PR #633）：Linux、Windows 安装器统一支持 `QBOT_GITHUB_PROXY` 与 `QBOT_GITHUB_PROXIES`，按官方源和代理候选顺序回退；每个候选都必须通过归档格式、预期顶层目录和 SHA-256 校验后才允许安装，并补齐代理前缀、损坏归档、Windows ZIP 和失败退出码回归测试。
+* **Codex Radar 公开指标**（PR #636）：补充预测摘要、24h / 48h 概率、额度明细、模型 IQ 排名和 24h 社区评分等可选字段；`/radar` 会按真实更新时间展示可用指标，缺失的公开字段继续隐藏，不用空文案伪造数据。
+
+### Changed
+
+* **Radar 领域模块收口**（PR #636）：将公开数据客户端、字段解析、命令 Flow、格式化展示、类型和测试集中到 `qq-maid-core/src/runtime/tools/radar/`，`respond` 层只保留跨域调度与服务装配；时间展示、三级榜单标题和部分数据源失败后的局部结果展示同步统一。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.23.4`；本次修改的 `qq-maid-core` 提升到 `0.1.19`，其他内部 crate 版本保持不变。
+* 本版本无 SQLite migration 和必需配置迁移；`QBOT_GITHUB_PROXY` / `QBOT_GITHUB_PROXIES` 只是安装器可选环境变量，不影响已有运行配置、数据库、主密钥和运行目录。升级前仍建议按常规备份。
+* `/radar`、`/rader`、`/雷达` 及 `issue` 反馈入口保持兼容；公开 Radar 接口或网络不可用时仍按真实失败与部分结果返回，不能保证所有可选指标始终存在。
+
+## [v0.23.3] - 2026-08-01
+
+### Release Focus
+
+* **从配置中心重构到前端交互收口**：本版本沿着 PR #627 → #629 → #630 → #631 的链路，把控制台的业务布局、前端模块边界、模型请求超时诊断和 Todo 截止日期语义收拢到同一套可验证的实现里。
+
+### Changed
+
+* **配置中心按业务场景重组**（PR #627）：移除没有其他调用方的 Provider 连接测试面板、前端请求和后端专用路由；配置页按模型与供应商、模型路由、联网与工具、记忆与知识库、回复与语音、平台接入、待办与通知、系统与安全等场景组织，同时保留自动保存、串行队列、revision 冲突、Secret replace/clear 和输入恢复边界。后端路由测试文件同步拆分，前端契约文档统一迁移到根 `docs/`。
+* **LLM 与联网搜索超时分类**（PR #629）：沿请求、首包、响应体、SSE 流式读取和项目总超时链路保留结构化 Timeout，避免候选全部失败时被重建成泛化的 `provider_error`；OpenAI Responses、Chat Completions、OpenAI Compatible、Gemini Search、OpenAI Search 和 Tavily Search 共用同一分类语义，日志补充超时阶段与安全诊断字段。
+* **控制台前端模块化与交互优化**（PR #630）：将配置中心和 Todo 页面按职责拆分，集中管理 API 路径，保留原有后端契约、自动保存、校验、分页和保存冲突语义；同时完善 Todo 高级筛选、创建弹窗、删除操作位置、模型路线 Chip 编辑器、OpenCode 模板和特殊背景布局，并提交可复现的 `dist` 产物。
+
+### Fixed
+
+* **Todo 仅设置截止日期**（PR #631）：日期和时间继续使用统一字段组，但只填写日期时仅提交 `due_date`，填写时间后才生成一致的 `due_at`，自动推导 `time_precision`，并拒绝只有时间没有日期的输入。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.23.3`；内部 crate 版本保持 `v0.23.2` 的版本号，不改变 workspace 依赖方向。
+* 本版本无新增 SQLite migration 和必需配置迁移；已有配置、数据库、主密钥和运行目录可按常规备份后直接升级。Provider 连接测试入口移除后，正式启动预检和 Provider 正常运行链路保持不变。
+* 控制台后端 API、自动保存、revision 冲突、Secret 脱敏、Todo 分页与管理边界保持兼容；前端详细契约见根目录 [`docs/`](./docs/README.md)。
+
+## [v0.23.2] - 2026-07-31
+
+### Release Focus
+
+* **控制台合并阻塞收口与主题语义化**：将控制台背景状态统一为服务端权威并补全 Todo 管理页面，控制台默认不再展示背景图并大幅压缩嵌入资源；配色由三色预设重构为语义化主题 token，同时修复静态资源缓存、导航状态机、自动保存丢输入与 Secret 并发保存等问题。
+
+### Added
+
+* **Todo 管理控制台页面**（PR #623）：前端接入受保护的 Todo 管理 API，新增 Todo 页面；目标发现接口保留分页元数据，创建 / 筛选目标共用分页器（超过 100 个目标可继续选择），筛选重置、删除末项回退与编辑初始化失败展示边界补齐。
+* **背景模式服务端权威**（PR #623）：新增 `background_mode` 服务端字段（`default` / `special`）与 `console_user_data_background_mode_v2` SQLite migration，通过 `ALTER TABLE` 为旧库补齐列（默认 `default`）；旧 Cookie 一次性迁移解锁状态与旧背景模式，写入成功后才清理，不再作为持久化状态。
+* **语义化主题 token 预设**（PR #625）：控制台主题由三色预设（night-shift / ember-grid / tide-signal，v1）重构为完整语义 token 预设（console-dark / night-green / light，v2），覆盖背景、面板、卡片、输入、边框、文字、强调、成功、警告与错误等语义 token；旧 v1 主题自动迁移到 v2。
+* **控制台开关内存优化**（PR #623）：`WEB_CONSOLE_ENABLED=false` 时不注册控制台路由、不初始化控制台专属服务（用户偏好 / Todo 管理 / 工具元数据），也不生成 bootstrap token，进程不加载 web 前端，节省常驻内存。
+
+### Changed
+
+* **背景资源精简**（PR #623）：九宫格由 9 张独立图（约 12.7 MB）合并为单张 3×3 `special.webp` 拼图（约 484 KB），前端用 CSS `background-position` 切片渲染；favicon 压缩为 64×64；嵌入背景资源合计约 14.4 MB → 0.5 MB。
+* **静态资源缓存策略**（PR #623）：固定名 JS / CSS / 图片不再返回一年 immutable，统一 `public, max-age=0, must-revalidate`；`index.html` 保持 `no-cache`；CSP `img-src` 放行 `blob:` 以支持自定义背景。
+* **控制台导航状态机**（PR #623）：默认入口激活总览并标记 `aria-current`；动画期间连续导航合并为最后一次请求；`pushState` + `hashchange` 支持前进 / 后退；`finally` 释放转换锁并完整同步 `prefers-reduced-motion`。
+* **控制台默认无背景**（PR #623）：未选择任何背景时只显示主题底色，不再显示内置默认图；设置页“普通背景”改为“无背景”，导航过渡在默认模式下不显示中心背景图。
+* **清理 demo 实验代码**（PR #625）：删除 `src/demo`、dist-demo、build-demo 脚本与 `tsconfig.demo.json`，移除 package.json 中对应脚本及相关文档引用。
+
+### Fixed
+
+* **Secret 并发自动保存**（PR #623）：脏状态、changes 与 expected_revision 改为保存队列真正执行时按前一次保存完成后的最新 snapshot 与 secret revision 重新计算，连续失焦两个 Secret 只提交第二个、不再出现 `config_conflict`；重新登录 / 刷新时清空跨会话残留的保存状态。
+* **自动保存丢输入**（PR #623）：重建配置 DOM 前完整收集并恢复所有 input / select 值，保存队列保持 revision 顺序串行执行，避免覆盖其他字段未保存的输入。
+* **自定义背景激活回滚**（PR #623）：激活前记录原 `active_background_file_id` 与 `background_mode`；本地 object URL 应用失败时恢复原服务端状态（原背景恢复原背景、原 special 恢复 special），不再统一清空为 null；回滚失败如实显示错误，浏览器始终保留原背景。
+* **kuliantnt 解锁持久化**（PR #623）：解锁与切换特殊背景一次提交 `kuliantnt: true`、`background_mode: special`、`active_background_file_id: null`，刷新后仍为特殊背景且原自定义背景不再出现；持久化失败自动回滚本地状态。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.23.2`；本次同步提升内部 crate 版本：`qq-maid-common` 0.1.4、`qq-maid-llm` 0.1.9、`qq-maid-core` 0.1.18、`qq-maid-gateway-rs` 0.1.13。
+* 新增 `console_user_data_background_mode_v2` SQLite migration：为已有 `APP_DB_FILE` 的 `console_user_preferences` 表补齐 `background_mode` 列（默认 `default`），历史偏好行升级后不丢数据，重复启动不重复执行；无必需手工配置迁移。
+* 服务端偏好（`background_file_ids` / `active_background_file_id` / `background_mode` / `kuliantnt`）成为背景唯一权威来源；`kuliantnt` 仅表示是否解锁，不表达当前是否选择特殊背景。
+* 控制台默认不再展示内置背景图，固定名静态资源改为可重新验证缓存；这些变化只影响 `/console/` 前端行为，聊天、Todo、记忆、RSS 与既有配置接口语义保持不变。
+
+## [v0.23.1] - 2026-07-31
+
+### Release Focus
+
+* **Tool Loop 上下文收敛与联网搜索韧性**：为 Tool / Agent Loop 增加分阶段上下文尺寸与内存诊断，收敛确定性 Todo 操作携带的完整聊天上下文并约束多轮输入；联网搜索保留上游状态、支持有限重试，避免不可重试的确定性失败重复请求。
+
+### Added
+
+* **上下文尺寸与内存诊断**（PR #621）：新增 `/proc` 内存采样（VmSize / VmRSS 始终可采样，PSS / PrivateDirty 仅 `QQ_MAID_MEMORY_DIAGNOSTICS=1` 时采样）与 `RequestSizeStats` 分项字符统计，按阶段输出上下文尺寸、计数与内存读数；明细默认 DEBUG 门控，日志不输出聊天、知识、搜索正文或凭据。
+* **大上下文告警**（PR #621）：预算层与请求完成日志在估算字符或 input tokens 超过阈值时输出带分项定位字段的告警。
+
+### Changed
+
+* **确定性 Todo 短路**（PR #621）：仅明确解析为 Private / ServiceAccount 的会话，且文本为单一确认动作（完成 / 恢复）+ 严格可解析的显式编号 + 请求级可见快照新鲜且编号全部落在范围内时，直接从快照解析真实 todo_id 执行工具而不进入 LLM；歧义、缺快照、权限不足或需确认场景保持原 Tool Loop 流程。编号到真实 todo_id 的映射、去重、pending 与成功验真全部复用既有领域实现，不暴露内部 ID。
+* **Tool Loop 多轮输入有界**（PR #621）：预算层每轮将可发送输入压回 `window - reserve` 以内，并消除每轮 payload 全量 clone 与预算估算构造的中间副本。
+* **联网搜索失败诊断与有限重试**（PR #622）：为 Web Search 保留上游 HTTP 状态、Provider 与模型身份并归一化错误分类；仅对 429、502 / 503 / 504、超时和网络瞬断按固定预算补发一次；同一 Agent 请求内不再重复执行相同的不可重试只读失败；Agent Tool 与 Web Search 失败日志补齐调用 ID、尝试次数、耗时、错误类型、可重试性、后端、上游状态、Provider 和模型等结构化字段，不记录查询正文、凭据或上游错误正文。
+
+### Fixed
+
+* **DeepSeek 流式 Tool Call 参数合并**（PR #622）：修正流式 Tool Call 参数合并边界，并配套 HTTP 状态分类、重试预算、结果回填与日志脱敏测试。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.23.1`；内部 crate 版本不统一提升。
+* 内存诊断不改变请求 payload、Provider 路由与既有对话行为；PSS / PrivateDirty 与阶段明细需 DEBUG 日志和 `QQ_MAID_MEMORY_DIAGNOSTICS=1`。
+* 确定性 Todo 短路仅影响明确 Private / ServiceAccount 会话中的单一确认动作，群聊、slash 命令、pending 确认等路径与既有语义保持一致。
+* PR #621 的 19 MB 部署环境复现与对比数据仍需在真实部署环境按文档步骤验证（本地环境无法复现 2C2G + 知识库 / 联网组合的增长）；本次发布前的本地检查结果以最终发布报告为准。
+
+## [v0.23.0] - 2026-07-31
+
+### Release Focus
+
+* **控制台用户数据与 Provider 路由扩展**：为独立前端增加按部署管理员隔离的用户偏好和通用文件能力，同时统一自定义 Provider 的图片、模型候选和原生搜索路由，改善多 Provider 场景下的认证失败降级。
+
+### Added
+
+* **控制台用户偏好与通用文件 API**（PR #619）：新增偏好读取/部分更新，以及文件上传、列表、读取和删除接口；偏好支持自定义颜色、背景文件列表、当前背景和 `kuliantnt` 标记，所有请求只作用于当前部署管理员。
+* **安全的控制台文件存储**（PR #619）：文件 ID 和磁盘存储名由服务端生成，原始文件名只作为元数据保存；文件内容持久化到 `APP_DB_FILE` 父目录的 `console-files/`，并限制单文件大小为 10 MiB。
+* **自定义 Provider 图片与原生搜索能力**（PR #617）：`openai_compatible` 与 `openai_responses` 复用公共图片请求编码；`provider_native` 搜索可以按完整 Provider 身份选择内置 OpenAI、Gemini 或配置驱动的 Responses Provider。
+
+### Changed
+
+* **Provider 模型候选身份**（PR #617）：模型路线以完整的 `provider:model` 保存和路由，允许不同 Provider 使用同名模型而不互相覆盖；配置预检、Provider 构建、普通聊天、流式回复和 Agent Tool Loop 保持相同候选顺序。
+* **控制台文件备份边界**（PR #619）：备份与恢复同时处理数据库中的文件元数据和 `console-files/` 内容；文件删除先隔离磁盘文件，再与偏好背景引用和数据库记录在事务中一致清理。
+* **仓库文档导航与归档**（PR #611）：新增统一 `docs/` 导航和管理 API 文档入口，归档已完成或被替代的任务/设计文档，并修正仓库内过时的控制台与 Tool Loop 描述。
+* **前端协作鸣谢**（PR #613）：在贡献者列表中加入 `@nimkBob`，记录其对前端工作的支持。
+
+### Fixed
+
+* **自定义 Provider 图片输入一致性**（PR #617）：移除历史上的纯文本硬拦截，使普通、流式和 Agent Tool Loop 在 Provider 已支持图片时使用统一 payload；文件输入仍按既有边界拒绝，不额外引入视觉模型白名单或图片生成工具。
+* **Responses 认证失败的候选切换**（PR #617）：公共 Responses transport 将请求发出后的 HTTP 401/403 归类为当前 Provider 不可用，允许候选链切换到下一个 Provider；认证拒绝不会在同一 Provider 内触发 Responses 到 Chat Completions 的重试，本地缺少 API Key 等配置错误仍在预检阶段报告。
+* **自定义 Provider 原生搜索归属**（PR #617）：搜索请求、SSE、正文、引用和错误解析均按完整 Provider 身份选择对应连接，不再只允许固定的 OpenAI/Gemini 执行器；未实现的 `x_search` 继续保持未实现。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.23.0`；内部 crate 版本不统一提升。
+* 新增 `console_user_data_schema_v1` SQLite migration，为已有 `APP_DB_FILE` 创建控制台用户偏好和文件元数据表；无必需的手工配置迁移。升级时必须继续保留数据库父目录下的 `console-files/`，并按新版备份规则一并保护文件内容。
+* 用户数据 API 仅在启用控制台时注册，继续要求部署管理员 Session、同源 Origin 和 CSRF；接口不接受外部用户 ID，现有控制台配置接口和仓库内 `web-console` 前端行为保持不变。
+* 自定义 Provider 仍不接受文件输入，不实现 `x_search`；本版本未使用真实上游图片、搜索或认证凭据联调，实际部署仍需确认目标 Provider 的协议支持。
+* PR 已覆盖控制台用户数据隔离、偏好局部更新、文件生命周期与备份恢复、跨 Provider 同名模型、图片 payload、SSE、搜索引用和 401/403 fallback；本次发布前的本地检查结果以最终发布报告为准。
+
+## [v0.22.2] - 2026-07-30
+
+### Release Focus
+
+* **Todo 管理 API 与 QQ 引用可靠性**：为部署管理端提供基于真实平台归属的全局 Todo 管理能力，并修复 QQ 一级图文引用、Tool Loop 图片预算和被忽略群消息的引用恢复边界。
+
+### Added
+
+* **全局 Todo 管理 API**（PR #606）：在既有部署管理员 Session、同源 Origin、CSRF、限流和统一响应基础设施上新增 Todo 创建、列表、详情、更新、删除与真实目标发现接口；所有管理员操作 QQ 官方、OneBot 11、微信入口的同一批真实 Todo，不创建管理端专属 owner/scope。
+* **可信提醒目标发现**（PR #606）：创建请求使用服务端签发的不透明 `target_ref`，从已有 Todo 或 Session 恢复并复核平台、账号、成员和会话范围；Todo 与 Notification Outbox 在同一 SQLite 事务中提交，微信目标明确报告不支持主动提醒。
+
+### Changed
+
+* **依赖更新**（PR #605）：刷新根 `Cargo.lock`，将 Core、Gateway 与 LLM 的直接 `base64` 依赖提升到 `0.23`；上游仍要求的 `base64 0.22.1` 继续并存。
+* **QQ 群成员详情补全默认关闭**（PR #609）：默认不再请求额外成员详情，仍保留 `QQ_MAID_MEMBER_DETAIL_ENRICH_ENABLED=true` 显式开启能力；已有部署中的显式配置不会被覆盖。
+
+### Fixed
+
+* **Todo 历史提醒更新语义**（PR #606）：仅在本次显式设置新提醒时校验未来时间与平台能力；修改标题等字段可继承已过期的历史提醒而不重新排程，完成、恢复、清空提醒与 Outbox 取消保持原子语义。
+* **Tool Loop 图片上下文预算**（PR #608）：Responses 与 Chat Completions 只遮蔽结构化图片字段中的 Base64，并按独立媒体成本计入预算；真实发送 payload 不变，本地永久的容量错误不再轮询等价模型候选。
+* **QQ 一级图文引用边界**（PR #608）：只解析 `message_type=103` 的顶层直接引用媒体，保留多段文字和不同文件名图片顺序；嵌套历史引用不再恢复临时 URL、Base64 或媒体对象，同层同文件名图片按受控规则去重。
+* **被忽略群消息的引用恢复**（PR #609）：RefIndex 区分完整入站、被动观察与机器人出站记录；引用事件已下载的可读媒体不再被低质量索引媒体覆盖，事件独有媒体与图文顺序得到保留，临时 URL、rkey 和鉴权参数不会写入索引。
+* **RefIndex 容量与告警噪声**（PR #609）：容量超限时优先淘汰最旧的被动观察记录；索引 miss 但事件 payload 可安全降级时改记 DEBUG，仅在引用确实无法恢复时保留 WARN。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.22.2`；内部 crate 版本不统一提升。
+* 本版本无数据库 migration、无必需配置迁移。Todo 管理 API 为新增受保护接口，普通聊天 Tool、Slash 命令和 owner-scoped 查询语义保持不变。
+* QQ 群成员详情补全的新默认值只影响未显式配置的部署；已设置 `QQ_MAID_MEMBER_DETAIL_ENRICH_ENABLED=true` 的环境仍保持开启，若需关闭必须修改真实配置并重启。
+* 自动化测试覆盖 Todo 管理与提醒事务、QQ 引用解析和媒体恢复、两类 OpenAI Tool Loop 图片预算以及 RefIndex 容量边界；未使用真实 QQ、OneBot、微信或 Provider 凭据执行本版本目标环境联调。
+
+## [v0.22.1] - 2026-07-29
+
+### Release Focus
+
+* **主动推送成员提醒**：让群聊中的个人 Todo 提醒能够准确 @ 实际归属成员，并在 QQ 官方与 OneBot 11 入口使用各自平台支持的成员提醒协议。
+
+### Added
+
+* **跨平台主动推送成员提醒**（PR #603）：Core 新增平台无关的结构化 `PushMention`，按成员 ID 稳定去重并保留顺序；群聊个人 Todo 使用实际 `TodoOwner.user_id` 生成提醒对象，私聊和无明确归属的群共享 Todo 不附加成员提醒。
+* **OneBot 11 原生群成员提醒**（PR #603）：主动群推送使用标准 `at` segment，多个成员后继续发送正文；无效成员 ID 只跳过对应 segment，不阻断提醒正文。
+* **QQ 官方群成员提醒**（PR #603）：主动推送复用被动群回复的 `<@user_id>` 内容协议，支持单成员、多成员以及 Markdown 失败后的纯文本 fallback。
+
+### Fixed
+
+* **主动推送成员身份与发送账号隔离**（PR #603）：成员 `user_id` 只用于生成成员提醒，机器人 `account_id` 只用于选择发送账号；RefIndex 记录实际可见正文，不持久化或回显协议标记中的原始成员 ID。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.22.1`；内部 crate 版本不统一提升。
+* 本版本无数据库 migration、无必需配置迁移。历史 Notification Outbox payload 缺少 `mentions` 字段时按空列表读取，已有部署可直接升级。
+* 私聊主动推送不会附加群成员提醒；无明确归属的群共享 Todo 不猜测创建者。普通回复的既有平台能力边界保持不变。
+* 成员提醒传递、QQ 官方协议 payload、OneBot segment、Markdown fallback、RefIndex 脱敏和 Todo owner 隔离已通过本地测试覆盖；本次未使用真实 QQ / OneBot 凭证重新执行目标环境到期提醒复测。
+
+## [v0.22.0] - 2026-07-29
+
+### Release Focus
+
+* **QQ 语音回复与模型接入扩展**：在现有多入口文本机器人基础上增加 QQ 官方最终回复 TTS，并补齐 Web 全局配置体验；同时扩展 OpenCode Zen / Go 模型接入，收紧命令和本地 embedding 的运行边界。
+
+### Added
+
+* **QQ 官方语音回复与会话开关**（PR #600）：新增 `/语音`、`/语音 开启`、`/语音 关闭`，按平台、机器人账号和私聊/群聊目标隔离持久化偏好；开启时使用千问非流式 TTS 生成 WAV URL，再通过 QQ `/files` 与 `msg_type=7` 投递，失败时只回退一次原始文字。
+* **TTS Web 配置卡片**：Web 控制台新增独立“语音回复”分组、Provider 下拉框、千问配置中文标签、超时与朗读字符范围，并继续通过安全配置中心保存、替换或显式清除 API Key；关闭 Provider 只弱化显示，不删除已保存的千问配置。
+* **OpenCode Zen 与 Go Provider**（PR #598）：新增配置驱动的 `openai_responses` 能力和 Zen Responses、Zen Chat、Go 三个固定 Web 预设，共用受管 `OPENCODE_API_KEY`，支持模型路线模板、revision 冲突保护和官方匿名模型目录探测。
+* **社区反馈入口**（PR #594）：README 增加社区交流、问题反馈和功能建议入口。
+
+### Changed
+
+* **未知 Slash 命令确定性收口**（PR #595）：所有已注册命令均未匹配时不再进入 LLM、Tool Loop 或创建 Session；私聊返回统一提示，群聊仅在消息明确指向机器人时回复。
+* **知识库 embedding 内存限制**（PR #597）：缺失向量固定按 8 条分批读取、推理和事务写入，避免初次索引大型 Markdown 时同时持有全部文本与向量；已完成批次可在失败后断点续跑。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.22.0`；`qq-maid-common`、`qq-maid-llm`、`qq-maid-core`、`qq-maid-gateway-rs` 分别提升到 `0.1.3`、`0.1.8`、`0.1.17`、`0.1.12`。
+* 本版本无数据库 migration、无必需配置迁移。TTS 默认 `disabled`；已有部署升级后仍保持文字回复，只有配置可用的千问 Key 并在具体私聊或群聊执行 `/语音 开启` 后才使用语音。
+* Web 控制台只管理全局 TTS 能力，不新增会话 scope 管理、试听、连接测试或音色在线枚举；会话开关、群管理员权限和已有保存语义保持不变。
+* QQ TTS、OpenCode 和配置中心已通过本地 mock / 单元测试覆盖；未使用真实 QQ AppID/AppSecret、千问 API Key 或 OpenCode 凭证进行生产环境联调，签名 WAV URL 的 QQ 拉取与真实模型调用仍需在目标部署环境确认。
+
+## [v0.21.6] - 2026-07-25
+
+### Changed
+
+* **Todo 每日摘要帮助**（PR #589）：在公开 Todo 帮助中补充 `/todo daily status`，让用户可以直接发现每日摘要状态查询入口。
+* **联网搜索结果聚合**（PR #590）：收紧长结果、嵌套多实体调研和多目标搜索的证据投影与来源压缩，保留可信模型摘要，避免空的顶层字段覆盖有效子项结果。
+
+### Fixed
+
+* **联网搜索空结果与失败语义**（PR #590）：区分“执行成功但没有公开证据”和真实执行失败；空结果只展示一次明确提示，不触发无意义重试，也不把失败误报为可用结果。
+* **群聊全体成员 mention 误触发**：识别 `scope=all` 的 @全体成员事件时不再接受兼容字段中的 `is_you` 或机器人 ID，避免普通群消息误判为单独 @ 当前机器人。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 版本号提升到 `0.21.6`，其他内部 crate 版本不统一提升。
+* 本版本无数据库 migration、无必需配置迁移。联网搜索仍沿用现有 Provider / Tavily 配置；Todo 每日摘要、群聊触发模式和 OneBot / 微信入口行为保持不变。
+* 联网搜索结果聚合、空结果和重试语义通过本地 Core / LLM 测试覆盖；群聊全体 mention 通过本地 Gateway 事件测试覆盖，未进行真实 QQ 或真实 Provider 环境联调。
+
+## [v0.21.5] - 2026-07-25
+
+### Fixed
+
+* **QQ 群消息触发与 mention 归一化**（PR #587）：将 `GROUP_AT_MESSAGE_CREATE` 直接视为当前机器人被 @，并结合 READY 阶段学习的稳定机器人身份与兼容 ID 判定普通群消息中的目标，避免其它机器人或普通成员 mention 误触发。
+* **群聊 mention 文本污染**（PR #587）：归一化 QQ Markdown mention 时只移除当前机器人的寻址前缀，保留其它成员 mention 和正文，避免模型上下文丢失原始消息或重复出现机器人称呼。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 版本号提升到 `0.21.5`，其他内部 crate 版本不统一提升。
+* 本版本无数据库 migration、无必需配置迁移。群聊 `off`、`command`、`mention`、`active` 模式仍由现有配置控制，OneBot / 微信入口行为不变。
+* 群聊触发修复通过本地 Gateway 事件、mention 归一化、回复引用和冷却行为测试覆盖；未进行真实 QQ 环境联调。
+
+## [v0.21.4] - 2026-07-25
+
+### Changed
+
+* **QQ 引用消息解析重构**（PR #582）：按 QQ 最新 `message_type=103` 结构递归保留引用元素，分离引用正文与当前正文，支持嵌套引用和缺失 `ref_msg_idx` 的 payload 保留；引用索引缺失或正文混合污染时 fail-closed，避免引用文字重复进入模型上下文。
+* **QQ API v2 富媒体上传**（PR #584）：URL 图片继续走场景对应的 `/files` 接口；本地文件和 Base64 图片改为 `upload_prepare -> PUT 分片 -> upload_part_finish -> merge`，支持 C2C 与群聊端点，并校验分片索引、块范围和文件格式。
+* **QQ 入站消息归一化**（PR #584）：支持 0、3、101、102 消息内容类型；ARK 仅保留白名单文本摘要并掩码 URL，平行消息递归处理且限制深度、节点、文本和媒体数量，103 继续沿用已有引用正文路径。
+* **群聊 @ 与消息去重**（PR #584）：`GROUP_AT_MESSAGE_CREATE` 直接视为 @ 机器人；普通群消息优先匹配 READY 学到的稳定 ID，并在 `msg_idx` 存在时使用场景、会话、消息和分片序号组成的复合去重键。
+* **非流式被动回复规划**（PR #584）：发送前统一规划可见分段，C2C 最多 4 条、群聊最多 5 条；超限时合并分段并降级为同序文本，追加可见截断提示。
+
+### Fixed
+
+* **上传错误敏感信息脱敏**（PR #584）：不缓存 `file_info` 之外的临时上传信息，不把预签名 URL、`raw_url` 或 `auth_token` 写入模型上下文、日志或错误正文。
+* **QQ 消息协议兼容**（PR #584）：兼容缺失 `msg_idx` 的旧事件，并保留 C2C 聚合 `event_id` 去重；不再依赖普通群事件的 `is_you` 作为唯一 @ 判断依据。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 版本号提升到 `0.21.4`，QQ Gateway crate 版本号提升到 `0.1.11`；其他内部 crate 版本不统一提升。
+* 本版本无数据库 migration、无必需配置迁移。现有 Todo、Memory、RSS、Session 和 Agent 配置格式保持不变。
+* 保持现有图片发送能力；本版本不新增视频、语音、普通文件或 `msg_type=3` 出站能力。OneBot / 微信入口的业务行为不变。
+* 未进行真实 QQ 环境联调；上传协议通过本地模拟 HTTP 服务覆盖 URL、本地文件、Base64、分片各阶段失败及敏感错误脱敏。
+
+## [v0.21.3] - 2026-07-24
+
+### Changed
+
+* **工具领域边界收敛**（PR #576）：将 Todo 工具注册、结果投影、状态提示和成功校验收敛到 Todo 领域 facade；为 RSS、Knowledge、Memory、Search、Train、Weather 增加各自状态 adapter，通用 Tool Loop 只保留跨领域的结果顺序、重试覆盖和回退。
+* **领域存储导出收紧**（PR #576）：Todo、Memory、RSS 的存储导出改为显式 facade；维护文档同步明确二开时的领域边界，避免公共状态模块继续承载具体领域名称和意图判断。
+
+### Fixed
+
+* **QQ 引用图文消息超时**（PR #580）：按 QQ 官方 `message_type=103` 正确解析引用正文与附件，下载引用图片并在失败、超时或文件过大时降级为媒体摘要，避免不可达临时 URL 拖垮多模态链路；下载后清除临时远端 URL，防止鉴权参数进入 Core / LLM / 普通日志。
+* **`/ping` 应用版本注入**（PR #579）：QQ 官方 Dispatcher 复用已注入主包版本的命令服务，私聊与群聊 `/ping` 与根程序 `--version` 使用同一版本来源，不再回退到 Gateway 子 crate 版本。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 版本号提升到 `0.21.3`，内部 crate 版本不统一提升。
+* 本版本无数据库 migration、无必需配置迁移。Todo 工具名称、参数、返回语义，以及 `/todo` 可见编号与跨轮编号语义保持不变。
+* 引用图文修复仅影响 QQ 官方入口的引用媒体解析与下载降级路径；OneBot / 微信入口行为不变。
+
+## [v0.21.2] - 2026-07-23
+
+### Added
+
+* **`/ping` 显示主包版本**（PR #572）：`/ping` 展示根包 `qq-maid-bot` 的版本号，由主程序入口注入 Gateway，避免误用 Gateway 子 crate 版本。
+
+### Changed
+
+* **工具状态语义收紧**（PR #572）：自然语言状态分类只生成用户提示和 diagnostics，不再参与 Tool 暴露或执行；Search / RSS 等弱关键词与技术讨论更不易被误判成正在调用工具。
+* **Web Search 结果投影收敛**（PR #572）：同轮重复只读搜索只展示首次真实结果，缓存命中仍保留在 Agent 原始轨迹；不再为缓存命中发送额外 Started / Finished / Failed 进度事件。
+* **Todo 成功验真覆盖省略式请求**（PR #572）：当模型声称已新增、已记录、已修改、已完成或已删除 Todo 时，要求本轮存在真实成功的 Todo 写工具结果；“明天开会”“下午整理一下”等省略式任务声明同样进入验真。
+
+### Fixed
+
+* **后置 Todo 创建声明拦截**（PR #572）：模型未调用写工具却声称“已记录”时返回 `todo_success_not_verified`，不再把伪造成功文案展示给用户；普通创作、解释和分析中的“已完成”不会被误拦截。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 版本号提升到 `0.21.2`，内部 crate 版本不统一提升。
+* 本版本无数据库 migration、无必需配置迁移。Todo pending、用户编号快照、权限与持久化语义不变。
+* 状态提示继续保持严格，不影响模型调用已注册白名单 Tool；重复只读搜索的 `tool_results` / `tool_attempts` / `deduplicated` 与模型可见原始轨迹保持完整。
+
+## [v0.21.1] - 2026-07-23
+
+### Added
+
+* **群管理员管理 Todo**（PR #568）：群主或管理员可在群聊使用 `/todo group` 查看当前群未完成 Todo / 提醒，并用 `/todo group delete <编号>` 删除；列表编号绑定操作者、平台、机器人账号与完整群 scope，删除时再次校验目标记录所属群，避免跨群或个人快照误删。
+* **Agent 配置示例模板**（PR #568）：仓库与 Release 包中的默认策略文件改为 `agent.example.toml`；首次启动从二进制内嵌的同版模板生成未跟踪的 `config/agent.toml`，修改外部示例不会改变首次生成内容。只读 `config check` 在默认路径缺失时直接校验内嵌模板而不落盘。
+
+### Fixed
+
+* **Todo 提醒并发取消**（PR #568）：取消或删除带提醒的 Todo 时更可靠地终止已租约的提醒通知，降低重复推送风险。
+* **容器发布门禁竞态**（PR #567）：收紧 GHCR 正式 Release 门禁对 tag / digest 就绪状态的判定，降低并发构建误判失败的概率。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 版本号提升到 `0.21.1`，内部 crate 版本不统一提升。
+* 本版本无数据库 migration、无必需配置迁移。已有 `config/agent.toml` 不会被覆盖；新实例首次启动才生成活动配置。
+* 群 Todo 管理仅限当前群、且操作者为群主或管理员；普通成员和个人 `/todo` 查询语义不变。编号来自最近一次 `/todo group` 列表快照，过期或跨会话后需重新列出。
+* Release / Docker 中的 `agent.example.toml` 仅供参考与升级迁移；活动策略仍为本地 `config/agent.toml`。
+
+## [v0.21.0] - 2026-07-22
+
+### Release Focus
+
+* **多平台部署与统一运维版本**：在 20.x 配置中心与多入口业务能力之上，收口 Docker / GHCR 容器发布、配置迁移备份恢复和可选 Web 安装，让 QQ 官方、OneBot、微信以及 Linux / Windows / 容器部署共用同一套二进制与运维边界。
+
+### Added
+
+* **Docker Compose 与 GHCR 发布**（PR #562）：新增 `Dockerfile`、基础 `compose.yaml` 以及控制台 / OneBot / 微信端口 override；Container workflow 在 `linux/amd64` 与 `linux/arm64` 原生 runner 构建并推送 GHCR 多架构镜像，正式 Release 门禁与测试环境自动部署解耦。
+* **测试环境自动部署文档与脚本**（PR #562）：补充 `scripts/docker-deploy.sh`、`scripts/docker-host-init.sh` 与 [Docker 与 Compose 部署](./docs/deployment/docker.md)、[测试服务器 Docker 部署教程](./docs/deployment/test_server.md)；部署只接受受信仓库 digest，失败时按上一 digest 回滚镜像。
+* **配置迁移、备份恢复 CLI**（PR #565）：统一二进制新增 `migration status`、`config check`、`config sources`、`config migrate` 与 `backup create/verify/restore`；默认 dry-run，使用 SQLite Online Backup 与 manifest SHA-256，恢复只写入干净目标目录。
+* **可选 Web 控制台安装**（PR #565）：`qbot install --web true|false` 与 `QBOT_INSTALL_WEB_CONSOLE` 支持新装时选择是否启用 `/console/`；关闭后继续使用 CLI 与文件配置，重复安装默认不改写已有选择。
+* **配置迁移与备份文档**（PR #565）：新增 [配置迁移、备份恢复与安全升级](./docs/deployment/migration-backup.md)，说明旧 dotenv 保守导入、含/不含 secret 的恢复包边界，以及 Docker 升级前自动备份与 schema 回滚边界。
+
+### Changed
+
+* **部署路径并列收口**：Release 包、源码与 Docker 共用同一配置注册表、SQLite migration 和备份格式；Web 控制台只是另一种交互入口，不是独立运行方式。
+* **容器运行模型**：镜像以非 root 用户、只读根文件系统运行，默认不映射管理端口；按需叠加 console / OneBot / 微信 compose override，并把容器内监听改为 `0.0.0.0`。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 版本号提升到 `0.21.0`，内部 crate 版本不统一提升。
+* 本版本无新增业务数据库 migration 门槛，也无必需配置迁移。已有 `.env` / `runtime.toml` / `agent.toml` 与 20.x 配置中心部署可直接升级；旧 dotenv 可先 `config migrate` dry-run，再显式 `--apply` 填补空缺，不覆盖已有受管值。
+* Docker 升级前默认生成 `data/backups/pre-upgrade-*` 恢复包；镜像回滚与 schema 恢复不是同一动作——旧二进制读不懂新 schema 时必须恢复同期备份到干净目录。
+* `WEB_CONSOLE_ENABLED` 仍可由安装选项或部署侧环境关闭；显式关闭时登录页、认证和配置 API 均不注册，也不会生成 Bootstrap token。
+* 真实 GHCR 拉取、跨架构镜像、微信/OneBot 公网回调和含 secret 的灾备演练仍需在目标部署环境验证。
+
+## [v0.20.7] - 2026-07-21
+
+### Release Focus
+
+* **20.x 版本线收尾版本**：收敛 Session Dream 的触发、续批和失败恢复边界，保持默认关闭的可选记忆整理能力稳定运行。
+
+### Changed
+
+* **Session Dream 触发条件**（PR #561）：首次批次支持新增 Session、活跃日期和距上次成功检查点间隔三条触发路径，并分别设置消息数量门槛；触发诊断记录未满足的门槛，便于排查默认关闭的后台任务。
+* **Session Dream 续批处理**（PR #561）：字符或 Session 数量截断后的成功批次保存待续状态，后续调度直接继续处理尾部消息，不重新累计首次触发门槛；最终批次完成后清除续批状态。
+
+### Fixed
+
+* **Session Dream 失败恢复**（PR #561）：模型调用失败、数据库提交失败或并发调度时保留可重试检查点，避免丢失未处理消息或重复执行同一续批；日期门槛统一按项目时区计算。
+
+### Compatibility
+
+* 本版本无数据库 migration、无必需配置迁移。现有记忆、Session 和 Agent 配置格式保持兼容。
+* `MEMORY_DREAM_ENABLED` 默认仍为 `false`；启用后，首次触发默认需要 5 个新增 Session 且至少 30 条用户消息，或 3 个活跃日期且至少 50 条消息，或距上次成功 Dream 至少 7 天且至少 60 条消息。字符 / Session 截断后的续批不重新累计这些首次门槛。
+* 根包 `qq-maid-bot` 版本号提升到 `0.20.7`，内部 crate 版本不统一提升。
+
+## [v0.20.6] - 2026-07-21
+
+### Changed
+
+* **自然语言待办查询统一进入 Tool Loop**（PR #555）：保留 `/todo` 查询命令的确定性路径，普通自然语言查询改由受控 Todo Tool 处理，并支持周期类型、日期范围、状态和关键词组合筛选；查询结果恢复时继续使用用户可见快照。
+* **Prompt Cache 会话前缀稳定**（PR #559）：整理会话历史和请求上下文的拼接边界，保持稳定前缀并补充缓存诊断，降低无关变动对缓存命中的影响。
+
+### Fixed
+
+* **知识工具上下文预算保护**（PR #557）：工具结果超过输入预算时先压缩可压缩输出、关闭后续工具调用并进入最终回答；只有必要协议内容本身超限时才返回上下文预算错误，避免工具循环继续消耗已不足的上下文。
+
+### Compatibility
+
+* 本版本无数据库 migration、无必需配置迁移。现有 Todo、Session、知识库和 Agent 配置格式保持兼容。
+* 自然语言待办查询需要当前场景允许 Agent Tool Loop 且启用 `list_todos`；`/todo`、`/todo all`、`/todo search`、`/todo done`、`/todo undo` 等 slash 查询仍保留确定性路径。
+* 根包 `qq-maid-bot` 版本号提升到 `0.20.6`，内部 crate 版本不统一提升。
+
+## [v0.20.5] - 2026-07-20
+
+### Added
+
+* **Tavily 可选联网搜索后端**（PR #551）：`/查` 和自然语言 `web_search` 共用统一搜索后端配置，支持 Provider 原生搜索、Tavily Search 和关闭搜索；Tavily API Key 可通过配置中心的受管密钥或兼容环境变量 `TAVILY_API_KEY` 注入，不会写入 `agent.toml`。
+
+### Changed
+
+* **联网搜索配置统一**（PR #551）：将搜索后端、结果数量、搜索深度、主题、时间范围和超时收敛到 `agent.toml` 的 `[tools.web_search]`，WebUI 可维护搜索后端与参数，并保留原生 Provider 搜索 route。
+* **响应链路收口**（PR #548）：移除 Core、Gateway 和多入口发送链路中的冗余响应包装，统一响应状态与测试支持，保持现有平台发送语义。
+
+### Fixed
+
+* **多目标联网查询可信结果卡片**（PR #552）：多目标搜索逐项展示模型事实摘要和来源链接，保留最终综合回答；部分失败时显示成功/失败数量，不再把已有有效结果误报为“没查到明确结果”。
+* **Agent 工具重试结果聚合**（PR #554）：同一轮中工具失败后模型重试时只展示最终结果，避免重复显示失败卡片；跨 Provider 候选回退时将重试关系转为累计全局下标，不再误隐藏前一个候选的有效结果。
+* **未闭合 Markdown 反引号兼容**（PR #549）：消息中的未闭合代码标记不再破坏 Markdown 处理和后续回复链路。
+
+### Compatibility
+
+* 本版本无数据库 migration。默认联网搜索后端仍为 `provider_native`，不配置 Tavily 时原有 OpenAI / Gemini 原生搜索行为保持不变。
+* 旧版 `agent.toml` 中的顶层 `[search_routes.*]` 会由 Unix / Windows 更新脚本迁移到 `[tools.web_search.routes.*]`，并在迁移前生成备份；直接替换二进制而不经过更新脚本的部署需要手工完成该配置迁移。
+* Tavily 为可选能力；将 `[tools.web_search].backend` 设置为 `tavily` 时必须配置 `tools.web_search.tavily.api_key` 或 `TAVILY_API_KEY`，否则实际搜索会明确报告配置错误。
+* 根包 `qq-maid-bot` 版本号提升到 `0.20.5`，内部 crate 版本不统一提升。
+
+## [v0.20.4] - 2026-07-20
+
+### Fixed
+
+* **管理员完整令牌输入**（PR #547）：管理员初始化和密码重置接口支持裸 token，以及项目生成的 `qq-maid-bootstrap-v1:<时间>:<token>` 和 `qq-maid-password-reset-v1:<时间>:<token>` 完整令牌字符串；严格校验前缀、字段与用途，并区分输入格式错误和 token 无效或过期。
+* **群聊 Markdown 输出保留**（PR #546）：Provider 同时返回 Text part 与 Markdown 通道时优先保留 Markdown，避免群聊非流式回复被降级为纯文本。
+
+### Compatibility
+
+* 本版本无数据库 migration、配置项变更或令牌有效期调整；原有裸 token 输入保持兼容，Bootstrap token 与密码重置 token 仍不可跨用途使用。
+* 根包 `qq-maid-bot` 版本号提升到 `0.20.4`，内部 crate 版本不统一提升。
+
+## [v0.20.3] - 2026-07-19
+
+### Added
+
+* **Luna 图片生成与多平台发送**（PR #542）：将图片生成结果接入统一输出链路，支持 QQ 官方与 OneBot 11 图片发送，并兼容 Windows 本地图片的 `file://` URI。
+
+### Fixed
+
+* **Windows 启动示例提示**（PR #543）：启动失败时保留非零退出码，启动成功后保留控制台窗口并输出本地 Web 控制台地址，便于从 Windows 启动文件夹确认服务状态。
+
+### Compatibility
+
+* 旧环境变量 `QQ_MAID_ENABLE_IMAGE` 不再作为运行时图片开关读取；升级脚本会在迁移旧配置时将其归入废弃变量清理范围。
+
 ## [v0.20.2] - 2026-07-19
 
 ### Release Focus

@@ -3,7 +3,7 @@
 //! 该入口一次性完成 dotenv / tracing 初始化，组装 CoreHandle、Gateway 和主动推送
 //! sink。Core 与 Gateway 之间只走进程内强类型调用，不再通过 localhost HTTP 探活或通信。
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, process::ExitCode, sync::Arc, time::Duration};
 
 use anyhow::anyhow;
 use qq_maid_core::{
@@ -27,15 +27,48 @@ use qq_maid_gateway_rs::{
 use time::{UtcOffset, macros::format_description};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
+mod cli;
+mod config_diagnostics;
+
 const OPS_HTTP_SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
+const BUILD_COMMIT: &str = match option_env!("QQ_MAID_BUILD_COMMIT") {
+    Some(value) => value,
+    None => "unknown",
+};
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> ExitCode {
     qq_maid_core::app::load_dotenv_files();
-    init_tracing()?;
+    if let Err(error) = init_tracing() {
+        eprintln!("tracing 初始化失败: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => exit_for_error(error),
+    }
+}
+
+/// 顶层失败只在这里记录一次；`{error:#}` 是 Display 的 alternate 格式，会展开
+/// anyhow 的完整 `caused by:` 错误链，且不包含 backtrace，避免记录无关调用栈或泄露敏感上下文。
+fn exit_for_error(error: anyhow::Error) -> ExitCode {
+    tracing::error!(error = %format_args!("{error:#}"), "qq-maid-bot 执行失败");
+    ExitCode::FAILURE
+}
+
+async fn run() -> anyhow::Result<()> {
+    if cli::dispatch(std::env::args_os().skip(1).collect())? {
+        return Ok(());
+    }
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        commit = BUILD_COMMIT,
+        "正在启动 qq-maid-bot"
+    );
 
     let external_environment = std::env::vars().collect::<HashMap<_, _>>();
     let (database_file, database_pool_size) =
@@ -65,27 +98,35 @@ async fn main() -> anyhow::Result<()> {
         config_center = config_center.with_running_agent_config(config.agent_config.clone())?;
     }
     let gateway_config = GatewayConfig::from_map(&resolved_environment);
-    let runtime_ready = core_config.is_ok()
-        && gateway_config
-            .as_ref()
-            .is_ok_and(GatewayConfig::has_enabled_channel)
-        && preflight_candidate_startup(&resolved_environment, None).is_ok();
+    let gateway_channel_enabled = gateway_config
+        .as_ref()
+        .is_ok_and(GatewayConfig::has_enabled_channel);
+    let provider_preflight = CoreConfig::preflight_environment(&resolved_environment, None);
+    let runtime_ready =
+        core_config.is_ok() && gateway_channel_enabled && provider_preflight.is_ok();
     if !runtime_ready {
-        warn!(
+        info!(
             state = "setup_required",
             core_config_valid = core_config.is_ok(),
             gateway_config_valid = gateway_config.is_ok(),
+            gateway_channel_enabled,
+            provider_preflight_valid = provider_preflight.is_ok(),
             "业务配置尚未完成，仅启动受保护管理入口"
+        );
+        log_startup_config_diagnostics(
+            &resolved_environment,
+            &core_config,
+            &gateway_config,
+            &provider_preflight,
         );
         return ManagementRuntime::new(
             management_bootstrap,
+            database,
             config_center.with_incomplete_setup_writes(),
             admin_auth,
             env!("CARGO_PKG_VERSION"),
         )?
-        .serve_with_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .serve_with_shutdown(shutdown_signal())
         .await;
     }
     let core_config = core_config.expect("runtime readiness checked Core configuration");
@@ -139,19 +180,20 @@ async fn main() -> anyhow::Result<()> {
     let shutdown_token = CancellationToken::new();
     let gateway_shutdown = shutdown_token.clone();
     let mut gateway_handle = tokio::spawn(async move {
-        qq_maid_gateway_rs::app::run_with_config_with_shutdown_and_status(
+        qq_maid_gateway_rs::app::run_with_config_with_shutdown_and_status_and_application_version(
             gateway_config,
             respond,
             push_sink,
             gateway_runtime,
             gateway_shutdown,
+            env!("CARGO_PKG_VERSION"),
         )
         .await
     });
 
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("收到 Ctrl+C，准备停止统一进程");
+        _ = shutdown_signal() => {
+            info!("收到退出信号，准备停止统一进程");
             shutdown_token.cancel();
             let _ = core_shutdown_tx.send(());
             let _ = tokio::time::timeout(OPS_HTTP_SHUTDOWN_WAIT, &mut gateway_handle).await;
@@ -169,6 +211,75 @@ async fn main() -> anyhow::Result<()> {
             let _ = tokio::time::timeout(OPS_HTTP_SHUTDOWN_WAIT, &mut core_http_handle).await;
             Err(task_exit_error("qq-maid-gateway-rs", result))
         }
+    }
+}
+
+/// setup_required 仍需告诉部署者应检查哪个文件；secret 值和可能携带值的通用错误正文
+/// 不进入日志。Agent/Ops 文件诊断已在专用 helper 中截断 TOML 源码片段。
+fn log_startup_config_diagnostics(
+    environment: &HashMap<String, String>,
+    core_config: &Result<CoreConfig, qq_maid_llm::LlmError>,
+    gateway_config: &Result<GatewayConfig, qq_maid_gateway_rs::config::ConfigError>,
+    provider_preflight: &Result<(), qq_maid_llm::LlmError>,
+) {
+    let file_issues = config_diagnostics::collect_config_file_issues(environment);
+    for issue in &file_issues {
+        info!(
+            component = issue.component,
+            config_file = %issue.path,
+            reason = %issue.reason,
+            "启动配置文件预检失败"
+        );
+    }
+    if core_config.is_err() && file_issues.is_empty() {
+        info!(
+            component = "core",
+            config_source = "config/.env|config/runtime.toml|encrypted_secret_store",
+            reason = "invalid_core_configuration",
+            "Core 配置解析失败；请运行 `qq-maid-bot config check` 查看分项结果"
+        );
+    } else if core_config.is_ok() && provider_preflight.is_err() {
+        info!(
+            component = "provider",
+            config_source =
+                "config/agent.toml|config/.env|config/runtime.toml|encrypted_secret_store",
+            reason = "invalid_provider_route_or_credential",
+            "Provider 启动预检失败；请检查模型路线与对应凭证"
+        );
+    }
+    match gateway_config {
+        Err(_) => info!(
+            component = "gateway",
+            config_source = "config/.env|config/runtime.toml|encrypted_secret_store",
+            reason = "invalid_gateway_configuration",
+            "Gateway 配置解析失败；请运行 `qq-maid-bot config check` 查看分项结果"
+        ),
+        Ok(config) if !config.has_enabled_channel() => info!(
+            component = "gateway",
+            config_source = "config/.env|config/runtime.toml|encrypted_secret_store",
+            reason = "no_enabled_channel",
+            "Gateway 没有启用且凭证完整的入口"
+        ),
+        Ok(_) => {}
+    }
+}
+
+/// Docker 与 systemd 使用 SIGTERM，交互式终端使用 SIGINT；两者必须进入同一收尾链路。
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 
@@ -203,6 +314,9 @@ fn init_tracing() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(
             fmt::layer()
+                // 日志写入 stderr，避免污染 config check 等机器可读 stdout。
+                .with_writer(std::io::stderr)
+                .with_ansi(false)
                 .with_target(false)
                 .with_timer(shanghai_log_timer()),
         )
@@ -226,8 +340,63 @@ mod tests {
     use qq_maid_core::config::center::{
         ManagedConfigChange, SECRET_MISSING_REVISION, SecretConfigChange,
     };
-    use std::path::{Path, PathBuf};
+    use std::{
+        io::Write,
+        path::{Path, PathBuf},
+        sync::{Arc, Mutex},
+    };
     use toml::Value;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    /// 捕获 tracing fmt 输出到内存，用于验证顶层错误日志的完整错误链。
+    #[derive(Clone)]
+    struct RecordingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl MakeWriter<'_> for RecordingWriter {
+        type Writer = RecordingWriterGuard;
+
+        fn make_writer(&self) -> Self::Writer {
+            RecordingWriterGuard(self.0.clone())
+        }
+    }
+
+    struct RecordingWriterGuard(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for RecordingWriterGuard {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn top_level_error_logs_full_anyhow_chain_once() {
+        // 构造带 Context 的嵌套错误：外层上下文包裹底层根因。
+        let error =
+            anyhow::anyhow!("底层根因：备份目标目录不可写").context("外层上下文：创建备份失败");
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(RecordingWriter(recorded.clone()))
+                .with_ansi(false),
+        );
+        let code = tracing::subscriber::with_default(subscriber, || exit_for_error(error));
+
+        assert_ne!(code, ExitCode::SUCCESS);
+        let recorded = recorded.lock().unwrap();
+        let stderr = String::from_utf8_lossy(&recorded);
+        assert!(stderr.contains("外层上下文：创建备份失败"), "{stderr}");
+        assert!(stderr.contains("底层根因：备份目标目录不可写"), "{stderr}");
+        assert_eq!(
+            stderr.matches("qq-maid-bot 执行失败").count(),
+            1,
+            "{stderr}"
+        );
+    }
 
     struct TestDirectory(PathBuf);
 
@@ -270,7 +439,7 @@ mod tests {
             (
                 "AGENT_CONFIG_FILE".to_owned(),
                 Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("runtime/config/agent.toml")
+                    .join("runtime/config/agent.example.toml")
                     .to_string_lossy()
                     .into_owned(),
             ),
@@ -304,7 +473,24 @@ mod tests {
                 .unwrap();
         let agent_path = directory.path().join("config/agent.toml");
         std::fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
-        std::fs::write(&agent_path, include_str!("../runtime/config/agent.toml")).unwrap();
+        std::fs::write(
+            &agent_path,
+            include_str!("../runtime/config/agent.example.toml"),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // 配置中心会拒绝组或其他用户可写的 agent 配置。测试不能依赖宿主机
+            // umask，否则 umask 0002 会把夹具创建成 0775/0664 并提前触发安全拒绝。
+            std::fs::set_permissions(
+                agent_path.parent().unwrap(),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+            std::fs::set_permissions(&agent_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let external = HashMap::from([
             (
                 "AGENT_CONFIG_FILE".to_owned(),

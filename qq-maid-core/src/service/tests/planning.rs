@@ -57,13 +57,37 @@ fn core_plan_routes_private_weather_message_to_agent_runtime_when_tools_availabl
 }
 
 #[test]
-fn core_plan_routes_simple_todo_queries_to_immediate() {
+fn core_plan_routes_simple_todo_queries_to_agent_runtime() {
     let provider =
         TestProvider::replying("工具回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider, 5, true);
     let service = CoreHandle::new(state).respond_service();
 
-    for input in ["看一下待办", "看一下代办", "看看已完成"] {
+    for input in ["看一下待办", "看一下代办", "看看已完成", "查看周期性待办"]
+    {
+        let req: RespondRequest = private_request(input).into();
+        assert_eq!(
+            service.plan_core_respond(&req).unwrap(),
+            RespondPlan::AgentRuntime,
+            "{input}"
+        );
+    }
+}
+
+#[test]
+fn core_plan_keeps_explicit_todo_commands_immediate() {
+    let provider =
+        TestProvider::replying("工具回复").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider, 5, true);
+    let service = CoreHandle::new(state).respond_service();
+
+    for input in [
+        "/todo",
+        "/todo list",
+        "/todo all",
+        "/todo done",
+        "查看完整结果",
+    ] {
         let req: RespondRequest = private_request(input).into();
         assert_eq!(
             service.plan_core_respond(&req).unwrap(),

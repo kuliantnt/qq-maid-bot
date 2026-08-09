@@ -56,6 +56,17 @@ pub fn parse_sse_frame(frame: &[u8]) -> Result<Option<SseFrame>, LlmError> {
     Ok(Some(SseFrame { event, data }))
 }
 
+/// 判断 HTTP 正常 EOF 后的 SSE 残留字节是否只有可安全忽略的内容。
+///
+/// 未经空行分隔的 `event:` / `data:` 即使能被宽松解析，也仍是未完成 frame；
+/// 这里只接受 ASCII 空白行，以及首字节为 `:` 的 SSE 注释/keep-alive 行。
+pub fn is_ignorable_sse_eof_tail(tail: &[u8]) -> bool {
+    tail.split(|byte| *byte == b'\n').all(|line| {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        line.iter().all(u8::is_ascii_whitespace) || line.first() == Some(&b':')
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +102,24 @@ mod tests {
         let parsed = parse_sse_frame(b"data: [DONE]").unwrap().unwrap();
 
         assert_eq!(parsed.data, "[DONE]");
+    }
+
+    #[test]
+    fn accepts_only_whitespace_and_comment_lines_as_ignorable_eof_tail() {
+        assert!(is_ignorable_sse_eof_tail(b"\n"));
+        assert!(is_ignorable_sse_eof_tail(b" \t\r\n\r\n"));
+        assert!(is_ignorable_sse_eof_tail(
+            b": keep-alive\n: another comment\r\n"
+        ));
+    }
+
+    #[test]
+    fn rejects_effective_content_as_ignorable_eof_tail() {
+        assert!(!is_ignorable_sse_eof_tail(
+            b"event: response.output_text.delta"
+        ));
+        assert!(!is_ignorable_sse_eof_tail(b"data: {\"delta\":\"x\"}"));
+        assert!(!is_ignorable_sse_eof_tail(b"{\"delta\":\"x\"}"));
+        assert!(!is_ignorable_sse_eof_tail(b" : not-an-sse-comment"));
     }
 }

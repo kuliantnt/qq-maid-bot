@@ -30,6 +30,23 @@ export interface AdminSession {
   expiresAt: number;
 }
 
+export interface UserPreferences {
+  readonly customColors: readonly string[];
+  readonly backgroundFileIds: readonly string[];
+  readonly activeBackgroundFileId: string | null;
+  readonly backgroundMode: "default" | "special";
+  readonly kuliantnt: boolean;
+}
+
+export interface UserFile {
+  readonly fileId: string;
+  readonly filename: string;
+  readonly contentType: string;
+  readonly size: number;
+  readonly createdAt: string;
+  readonly url: string;
+}
+
 export interface BootstrapStatus {
   initialized: boolean;
   setupRequired: boolean;
@@ -160,4 +177,109 @@ export interface ConsoleStatus {
   platforms: PlatformStatus[];
   storage: StorageStatus[];
   configuration: ConfigurationStatus;
+}
+
+export type TodoStatus = "pending" | "completed";
+
+export interface TodoTarget {
+  targetRef: string | null;
+  platform: string;
+  scopeType: string;
+  userId: string | null;
+  groupId: string | null;
+  accountId: string | null;
+  reminderSupported: boolean;
+  diagnostic: string | null;
+}
+
+export interface TodoItem {
+  id: string;
+  title: string;
+  detail: string | null;
+  dueDate: string | null;
+  dueAt: string | null;
+  reminderAt: string | null;
+  timePrecision: string;
+  recurrenceKind: string;
+  recurrenceIntervalDays: number;
+  recurrenceInterval: number;
+  recurrenceUnit: string;
+  status: TodoStatus;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  target: TodoTarget;
+}
+
+export interface TodoPage {
+  items: TodoItem[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface TodoTargetOption {
+  targetRef: string;
+  platform: string;
+  accountId: string | null;
+  scopeType: string;
+  userId: string | null;
+  groupId: string | null;
+  reminderSupported: boolean;
+}
+
+export interface TodoTargetPage {
+  items: TodoTargetOption[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+export type KnowledgeFileStatus = "pending" | "processing" | "ready" | "failed";
+
+export type KnowledgeFileSource = "managed" | "directory";
+
+export interface KnowledgeFileItem {
+  readonly file_id: string | null;
+  readonly filename: string;
+  readonly content_type: string;
+  readonly size: number | null;
+  readonly source: KnowledgeFileSource;
+  readonly source_label: string;
+  readonly status: KnowledgeFileStatus;
+  readonly uploaded_at: string | null;
+  readonly processing_started_at: string | null;
+  readonly processed_at: string | null;
+  readonly updated_at: string;
+  readonly error_code: string | null;
+  readonly error_summary: string | null;
+  readonly chunk_count: number | null;
+  readonly embedding_count: number | null;
+  readonly downloadable: boolean;
+  readonly download_url: string | null;
+}
+
+export interface KnowledgeFilePage {
+  items: KnowledgeFileItem[];
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+}
+
+export interface KnowledgeFileCapabilities {
+  supported_extensions: string[];
+  max_file_bytes: number;
+  max_filename_chars: number;
+}
+
+export interface KnowledgeFileListParams {
+  page: number;
+  page_size: number;
+  search: string;
+  status: KnowledgeFileStatus | "all";
+  sort: "uploaded_at" | "updated_at";
+  order: "asc" | "desc";
 }

@@ -3,10 +3,8 @@
 use serde_json::{Value, json};
 
 use crate::{
-    context_budget::{
-        BudgetItemKind, ContextBudgetConfig, ensure_required_budget, estimated_json_chars,
-        log_budget_report,
-    },
+    agent_loop::AgentInputSizeEstimate,
+    context_budget::{ContextBudgetConfig, estimated_json_chars_counting, fit_tool_loop_payload},
     error::LlmError,
     provider::types::{ChatMessage, ReasoningEffort},
     tool::ToolMetadata,
@@ -14,29 +12,18 @@ use crate::{
 
 use crate::provider::openai::payload::{openai_model_supports_reasoning, openai_responses_message};
 
+/// 对 Tool Loop payload 应用上下文预算。
+///
+/// 直接按值接收 payload 并在预算校验时原地裁剪，避免 `fit_tool_loop_payload`
+/// 之外再保留一份完整 payload 副本（Issue #361 请求期内存放大点）。
 pub(super) fn enforce_tool_loop_budget(
     context_budget: Option<ContextBudgetConfig>,
-    payload: &Value,
-) -> Result<(), LlmError> {
+    payload: Value,
+) -> Result<(Value, bool), LlmError> {
     let Some(config) = context_budget else {
-        return Ok(());
+        return Ok((payload, false));
     };
-    // Responses Tool Loop 首期不拆分、不淘汰已进入循环的结构化轮次；
-    // 工具结果增长依靠单项结果上限和 max_rounds 控制，超预算时显式失败。
-    // 只估算模型实际可见的 input 与 tools；model、stream、输出上限等 HTTP
-    // 传输字段不占模型上下文，计入它们会在预算边界产生几十字符的误判。
-    let model_context = json!({
-        "input": payload.get("input"),
-        "tools": payload.get("tools"),
-    });
-    let report = ensure_required_budget(
-        config,
-        BudgetItemKind::ToolLoopAtomicTurn,
-        estimated_json_chars(&model_context, "tool_loop")?,
-        "tool_loop",
-    )?;
-    log_budget_report("responses_tool_loop", &report);
-    Ok(())
+    fit_tool_loop_payload(config, payload, "tool_loop")
 }
 
 pub(super) fn openai_tool_loop_input(
@@ -56,6 +43,33 @@ pub(super) fn openai_tool_loop_input(
         ));
     }
     Ok(input)
+}
+
+/// 估算 Responses 会话 `input` 的尺寸；只用于 Issue #361 诊断，不参与预算。
+///
+/// `estimated_chars` 只在 DEBUG 级别开启时计算，避免每轮为诊断额外序列化
+/// 整个上下文；序列化估算走不保留正文的 counting writer，不会在堆上生成
+/// 完整 String 副本。`tool_result_chars` 只统计 `function_call_output` 的输出字符数。
+pub(super) fn responses_input_size_estimate(input: &[Value]) -> AgentInputSizeEstimate {
+    let mut estimate = AgentInputSizeEstimate {
+        item_count: input.len(),
+        ..Default::default()
+    };
+    for item in input {
+        if item.get("type").and_then(Value::as_str) == Some("function_call_output")
+            && let Some(output) = item.get("output").and_then(Value::as_str)
+        {
+            estimate.tool_result_chars = estimate
+                .tool_result_chars
+                .saturating_add(output.chars().count());
+        }
+    }
+    if tracing::enabled!(tracing::Level::DEBUG)
+        && let Ok(chars) = estimated_json_chars_counting(input, "tool_loop_diagnostics")
+    {
+        estimate.estimated_chars = chars;
+    }
+    estimate
 }
 
 pub(super) fn openai_tool_defs(metadata: Vec<ToolMetadata>) -> Vec<Value> {
@@ -86,15 +100,14 @@ pub(super) fn openai_tool_loop_payload(
         "model": model,
         "input": input,
         "max_output_tokens": max_output_tokens,
-        "tools": tools,
-        // 首期只支持串行工具循环；后续多工具并行需要结果聚合和更细的权限审计。
-        "parallel_tool_calls": false,
     });
+    if allow_tool_calls {
+        payload["tools"] = json!(tools);
+        // 首期只支持串行工具循环；后续多工具并行需要结果聚合和更细的权限审计。
+        payload["parallel_tool_calls"] = json!(false);
+    }
     if let Some(effort) = reasoning_effort.filter(|_| openai_model_supports_reasoning(model)) {
         payload["reasoning"] = json!({ "effort": effort.as_str() });
-    }
-    if !allow_tool_calls {
-        payload["tool_choice"] = json!("none");
     }
     if stream {
         payload["stream"] = json!(true);

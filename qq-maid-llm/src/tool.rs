@@ -66,6 +66,10 @@ pub struct ToolContext {
     pub conversation: ExecutionConversationContext,
     /// 当前工具调用的稳定标识；由上游 Tool Loop 生成，用于幂等去重与审计关联。
     pub tool_call_id: Option<String>,
+    /// 当前 Tool Loop 轮次；非 Agent 兼容入口为 None，仅用于低敏诊断关联。
+    pub tool_round: Option<usize>,
+    /// 当前调用重试所替代的结果下标；非重试或非 Agent 兼容入口为 None。
+    pub retry_of: Option<usize>,
     /// 只读工具本次允许执行到的最晚时刻；由 Agent Runtime 从请求 deadline
     /// 扣除最终回答预留后注入，模型参数不能覆盖。非 Agent 兼容入口为 None。
     pub execution_deadline: Option<Instant>,
@@ -138,6 +142,17 @@ pub trait Tool: Send + Sync {
             .then(|| serde_json::to_string(arguments).ok())
             .flatten()
     }
+    /// 是否允许在同一 Agent 请求内缓存相同参数的不可重试失败。
+    ///
+    /// 默认关闭：普通只读查询也可能因前序写操作或外部状态变化而由失败转为成功。
+    /// 只有能保证该失败在本次请求内保持确定性的工具才应显式开启。
+    fn cache_terminal_failures(&self) -> bool {
+        false
+    }
+    /// 同一 Agent 请求内允许真实执行的最大次数；只读缓存命中不消耗该额度，默认不限制。
+    fn max_calls_per_request(&self) -> Option<usize> {
+        None
+    }
     /// 执行前的本地预处理。
     ///
     /// 默认直接沿用模型参数；有状态工具可在这里把用户可见编号预绑定成稳定内部 ID，
@@ -171,6 +186,10 @@ pub struct PreparedToolCall {
     pub effect: ToolEffect,
     /// 同一 Agent 请求内的只读调用去重键。
     pub deduplication_key: Option<String>,
+    /// 是否允许缓存相同参数的不可重试失败。
+    pub cache_terminal_failures: bool,
+    /// 请求级真实执行上限，供统一 Tool Loop 执行器计数；缓存命中不计入。
+    pub max_calls_per_request: Option<usize>,
     /// 与同轮前一项调用的依赖关系。
     pub dependency: ToolCallDependency,
 }
@@ -272,10 +291,46 @@ impl ToolRegistry {
         let mut items = self
             .tools
             .values()
-            .map(|tool| tool.metadata())
+            .map(|tool| {
+                let mut metadata = tool.metadata();
+                metadata.parameters = canonical_json(metadata.parameters);
+                metadata
+            })
             .collect::<Vec<_>>();
         items.sort_by(|left, right| left.name.cmp(&right.name));
         items
+    }
+
+    /// 返回工具是否显式声明其不可重试失败可在本次请求内缓存。
+    ///
+    /// 该查询需要覆盖 JSON 解析和 Tool prepare 之前的失败，因此不能只依赖
+    /// [`PreparedToolCall`] 上的字段。
+    pub(crate) fn caches_terminal_failures(&self, name: &str) -> bool {
+        self.tools.get(name).is_some_and(|tool| {
+            tool.effect() == ToolEffect::ReadOnly && tool.cache_terminal_failures()
+        })
+    }
+
+    /// 返回与注册顺序和 JSON 对象插入顺序无关的工具 schema 字节。
+    pub fn stable_schema_json(&self) -> Result<String, LlmError> {
+        let schema = self
+            .metadata()
+            .into_iter()
+            .map(|item| {
+                json!({
+                    "name": item.name,
+                    "description": item.description,
+                    "parameters": item.parameters,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string(&schema).map_err(|err| {
+            LlmError::new(
+                "tool_schema_serialize_failed",
+                format!("failed to serialize tool schema: {err}"),
+                "tool",
+            )
+        })
     }
 
     pub async fn execute_json(
@@ -314,6 +369,8 @@ impl ToolRegistry {
         Ok(PreparedToolCall {
             effect,
             deduplication_key,
+            cache_terminal_failures: tool.cache_terminal_failures(),
+            max_calls_per_request: tool.max_calls_per_request(),
             tool,
             name: name.to_owned(),
             context: context.clone(),
@@ -340,6 +397,23 @@ impl ToolRegistry {
             )
         })?;
         Ok(truncate_tool_output(&serialized, self.output_max_chars))
+    }
+}
+
+fn canonical_json(value: Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut entries = object.into_iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonical_json(value)))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(canonical_json).collect()),
+        value => value,
     }
 }
 
@@ -469,6 +543,8 @@ mod tests {
                 interaction_scope_id: "private:u1".to_owned(),
             },
             tool_call_id: None,
+            tool_round: None,
+            retry_of: None,
             execution_deadline: None,
         }
     }
@@ -513,6 +589,32 @@ mod tests {
         };
 
         assert_eq!(err.code, "config");
+    }
+
+    #[test]
+    fn stable_tool_schema_ignores_registration_order() {
+        let first = ToolRegistry::new()
+            .register(TaggedEcho {
+                name: "beta".to_owned(),
+                tag: "b",
+            })
+            .unwrap()
+            .register(EchoTool)
+            .unwrap();
+        let second = ToolRegistry::new()
+            .register(EchoTool)
+            .unwrap()
+            .register(TaggedEcho {
+                name: "beta".to_owned(),
+                tag: "b",
+            })
+            .unwrap();
+
+        assert_eq!(
+            first.stable_schema_json().unwrap(),
+            second.stable_schema_json().unwrap()
+        );
+        assert_eq!(first.metadata()[0].name, "beta");
     }
 
     struct BigTool;

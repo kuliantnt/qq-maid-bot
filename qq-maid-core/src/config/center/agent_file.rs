@@ -4,13 +4,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use toml::Value;
 
 use crate::config::agent::{
-    AgentConfigDocument, AgentConfigSource, AgentProfileConfig, AgentRuntimeConfig,
-    AgentSceneConfig, ChatScene, KnowledgeEmbeddingConfig, KnowledgeRetrievalMode, RouteFile,
-    SearchRouteFile,
+    AgentConfigDocument, AgentConfigSource, AgentProfileConfig, AgentProviderKind,
+    AgentRuntimeConfig, AgentSceneConfig, ChatScene, KnowledgeEmbeddingConfig,
+    KnowledgeRetrievalMode, ProviderFile, RouteFile, SearchRouteFile,
 };
 
 use super::{
@@ -22,6 +22,13 @@ use super::{
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentConfigChange {
+    SetProvider {
+        id: String,
+        provider: AgentProviderUpdate,
+    },
+    RemoveProvider {
+        id: String,
+    },
     SetKnowledge {
         mode: KnowledgeRetrievalMode,
         embedding: KnowledgeEmbeddingConfig,
@@ -37,6 +44,16 @@ pub enum AgentConfigChange {
         name: String,
         model: String,
     },
+    SetWebSearch {
+        backend: String,
+        max_results: u8,
+        search_depth: String,
+        topic: String,
+        time_range: Option<String>,
+        connect_timeout_seconds: u64,
+        first_response_timeout_seconds: u64,
+        total_timeout_seconds: u64,
+    },
     RemoveSearchRoute {
         name: String,
     },
@@ -51,6 +68,24 @@ pub enum AgentConfigChange {
         scene: ChatScene,
         config: AgentSceneConfig,
     },
+}
+
+/// Web 配置中心可写入的 Provider 连接元数据；API key 只通过 `api_key_env` 引用，
+/// 不允许出现在 agent.toml 变更结构中。
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentProviderUpdate {
+    pub kind: AgentProviderKind,
+    pub base_url: String,
+    pub api_key_env: String,
+    #[serde(default = "default_provider_auth_header")]
+    pub auth_header: String,
+    #[serde(default = "default_provider_auth_scheme")]
+    pub auth_scheme: Option<String>,
+    #[serde(default)]
+    pub request_timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub chat_fallback: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -215,6 +250,24 @@ fn apply_change(
     change: &AgentConfigChange,
 ) -> Result<(), ConfigCenterError> {
     match change {
+        AgentConfigChange::SetProvider { id, provider } => {
+            let id = provider_entry_name(id)?;
+            document.providers.insert(
+                id,
+                ProviderFile {
+                    kind: provider.kind,
+                    base_url: provider.base_url.clone(),
+                    api_key_env: provider.api_key_env.clone(),
+                    auth_header: provider.auth_header.clone(),
+                    auth_scheme: provider.auth_scheme.clone(),
+                    request_timeout_seconds: provider.request_timeout_seconds,
+                    chat_fallback: provider.chat_fallback,
+                },
+            );
+        }
+        AgentConfigChange::RemoveProvider { id } => {
+            document.providers.remove(provider_entry_name(id)?.as_str());
+        }
         AgentConfigChange::SetKnowledge { mode, embedding } => {
             document.knowledge.mode = *mode;
             document.knowledge.embedding = embedding.clone();
@@ -233,15 +286,36 @@ fn apply_change(
         }
         AgentConfigChange::SetSearchRoute { name, model } => {
             let name = entry_name(name)?;
-            document.search_routes.insert(
+            document.tools.web_search.routes.insert(
                 name,
                 SearchRouteFile {
                     model: model.clone(),
                 },
             );
         }
+        AgentConfigChange::SetWebSearch {
+            backend,
+            max_results,
+            search_depth,
+            topic,
+            time_range,
+            connect_timeout_seconds,
+            first_response_timeout_seconds,
+            total_timeout_seconds,
+        } => {
+            let web_search = &mut document.tools.web_search;
+            web_search.backend = backend.clone();
+            web_search.max_results = *max_results;
+            web_search.search_depth = search_depth.clone();
+            web_search.topic = topic.clone();
+            web_search.time_range = time_range.clone();
+            web_search.connect_timeout_seconds = *connect_timeout_seconds;
+            web_search.first_response_timeout_seconds = *first_response_timeout_seconds;
+            web_search.total_timeout_seconds = *total_timeout_seconds;
+        }
         AgentConfigChange::RemoveSearchRoute { name } => {
-            document.search_routes.remove(entry_name(name)?.as_str());
+            let name = entry_name(name)?;
+            document.tools.web_search.routes.remove(name.as_str());
         }
         AgentConfigChange::SetProfile { name, profile } => {
             document.profiles.insert(entry_name(name)?, profile.clone());
@@ -255,6 +329,26 @@ fn apply_change(
         },
     }
     Ok(())
+}
+
+fn provider_entry_name(name: &str) -> Result<String, ConfigCenterError> {
+    let name = entry_name(name)?;
+    let id = qq_maid_llm::provider::types::ModelProvider::parse_prefix(&name)
+        .map_err(|error| ConfigCenterError::invalid(error.message))?;
+    if !matches!(id, qq_maid_llm::provider::types::ModelProvider::Custom(_)) {
+        return Err(ConfigCenterError::invalid(format!(
+            "provider `{name}` cannot override a built-in provider"
+        )));
+    }
+    Ok(name)
+}
+
+fn default_provider_auth_header() -> String {
+    "Authorization".to_owned()
+}
+
+fn default_provider_auth_scheme() -> Option<String> {
+    Some("Bearer".to_owned())
 }
 
 fn entry_name(name: &str) -> Result<String, ConfigCenterError> {

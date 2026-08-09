@@ -9,9 +9,10 @@ use serde_json::Value;
 
 use crate::{
     agent_loop::{
-        AgentStep, AgentStepSession, AgentStreamingDiagnostics, AgentTextDeltaSink, AgentToolCall,
-        AgentToolResult,
+        AgentInputSizeEstimate, AgentStep, AgentStepSession, AgentStreamingDiagnostics,
+        AgentTextDeltaSink, AgentToolCall, AgentToolResult, log_input_size_after_append,
     },
+    config::HttpAuthConfig,
     context_budget::ContextBudgetConfig,
     error::LlmError,
     provider::types::{ChatMessage, ReasoningEffort},
@@ -22,13 +23,17 @@ use super::{
     diagnostics::{classify_responses_stream_failure, replace_streaming_diagnostics},
     payload::{
         enforce_tool_loop_budget, openai_tool_defs, openai_tool_loop_input,
-        openai_tool_loop_payload,
+        openai_tool_loop_payload, responses_input_size_estimate,
     },
     response::{append_response_output_items, append_tool_results, extract_function_calls},
     streaming::collect_responses_tool_loop_stream,
 };
 use crate::provider::openai::{
-    extract::{extract_response_output_text, extract_response_usage},
+    ResponsesTransportContext,
+    extract::{
+        extract_response_output_parts, extract_response_output_text, extract_response_usage,
+    },
+    tool_calls_disabled_error,
     transport::send_openai_responses_request,
 };
 
@@ -41,6 +46,7 @@ pub(crate) struct ResponsesAgentSession {
     client: reqwest::Client,
     api_key: String,
     base_url: Option<String>,
+    auth: Option<HttpAuthConfig>,
     provider: String,
     model: String,
     max_output_tokens: u64,
@@ -53,6 +59,7 @@ pub(crate) struct ResponsesAgentSession {
 }
 
 impl ResponsesAgentSession {
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         client: reqwest::Client,
@@ -67,12 +74,82 @@ impl ResponsesAgentSession {
         tools: &ToolRegistry,
         context_budget: Option<ContextBudgetConfig>,
     ) -> Result<Self, LlmError> {
+        Self::new_with_image_generation(
+            client,
+            api_key,
+            base_url,
+            provider,
+            model,
+            media_max_bytes,
+            max_output_tokens,
+            reasoning_effort,
+            messages,
+            tools,
+            context_budget,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_image_generation(
+        client: reqwest::Client,
+        api_key: String,
+        base_url: Option<String>,
+        provider: &str,
+        model: String,
+        media_max_bytes: u64,
+        max_output_tokens: u64,
+        reasoning_effort: Option<ReasoningEffort>,
+        messages: &[ChatMessage],
+        tools: &ToolRegistry,
+        context_budget: Option<ContextBudgetConfig>,
+        image_generation_enabled: bool,
+    ) -> Result<Self, LlmError> {
+        Self::new_configured(
+            client,
+            api_key,
+            base_url,
+            None,
+            provider,
+            model,
+            media_max_bytes,
+            max_output_tokens,
+            reasoning_effort,
+            messages,
+            tools,
+            context_budget,
+            image_generation_enabled,
+        )
+    }
+
+    /// 为配置驱动的 Responses provider 创建会话；只替换连接与认证元数据，
+    /// Function Tool Calling 的 payload、解析和轮次语义仍与内置 OpenAI 共用。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_configured(
+        client: reqwest::Client,
+        api_key: String,
+        base_url: Option<String>,
+        auth: Option<HttpAuthConfig>,
+        provider: &str,
+        model: String,
+        media_max_bytes: u64,
+        max_output_tokens: u64,
+        reasoning_effort: Option<ReasoningEffort>,
+        messages: &[ChatMessage],
+        tools: &ToolRegistry,
+        context_budget: Option<ContextBudgetConfig>,
+        image_generation_enabled: bool,
+    ) -> Result<Self, LlmError> {
         let input = openai_tool_loop_input(messages, media_max_bytes)?;
-        let tool_defs = openai_tool_defs(tools.metadata());
+        let mut tool_defs = openai_tool_defs(tools.metadata());
+        if image_generation_enabled {
+            tool_defs.push(serde_json::json!({"type": "image_generation"}));
+        }
         Ok(Self {
             client,
             api_key,
             base_url,
+            auth,
             provider: provider.to_owned(),
             model,
             max_output_tokens,
@@ -107,6 +184,10 @@ impl AgentStepSession for ResponsesAgentSession {
         Some(self.streaming_activity_counter.clone())
     }
 
+    fn input_size_estimate(&self) -> AgentInputSizeEstimate {
+        responses_input_size_estimate(&self.input)
+    }
+
     async fn advance(
         &mut self,
         results: &[AgentToolResult],
@@ -114,6 +195,10 @@ impl AgentStepSession for ResponsesAgentSession {
     ) -> Result<AgentStep, LlmError> {
         // 回填上一轮工具执行结果（首轮 results 为空，跳过）。
         append_tool_results(&mut self.input, results);
+        // Issue #361 诊断：append 后、payload 构造前的真实输入尺寸；DEBUG 门控。
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            log_input_size_after_append(self.provider(), self.model(), self.input_size_estimate());
+        }
 
         let payload = openai_tool_loop_payload(
             &self.input,
@@ -124,29 +209,40 @@ impl AgentStepSession for ResponsesAgentSession {
             allow_tool_calls,
             false,
         );
-        enforce_tool_loop_budget(self.context_budget, &payload)?;
+        let (payload, tools_disabled) = enforce_tool_loop_budget(self.context_budget, payload)?;
         let response = send_openai_responses_request(
             &self.client,
             &self.api_key,
             self.base_url.as_deref(),
+            self.auth.as_ref(),
             &payload,
-            false,
+            ResponsesTransportContext {
+                provider: &self.provider,
+                model: &self.model,
+                stream: false,
+            },
         )
         .await?;
         let body: Value = response.json().await.map_err(|err| {
-            LlmError::provider(format!("invalid OpenAI tool loop JSON: {err}"), "json")
+            LlmError::from_response_source(&err, "failed to read OpenAI tool loop JSON")
         })?;
         let step_usage = extract_response_usage(&body);
         let calls = extract_function_calls(&body)?;
+        if !calls.is_empty() && (!allow_tool_calls || tools_disabled) {
+            return Err(tool_calls_disabled_error());
+        }
         if calls.is_empty() {
-            let reply = extract_response_output_text(&body).ok_or_else(|| {
-                LlmError::provider(
-                    "OpenAI tool loop returned empty final text output",
+            let output_parts = extract_response_output_parts(&body);
+            let reply = extract_response_output_text(&body).unwrap_or_default();
+            if reply.trim().is_empty() && output_parts.is_empty() {
+                return Err(LlmError::provider(
+                    "OpenAI tool loop returned empty final output",
                     "provider",
-                )
-            })?;
+                ));
+            }
             Ok(AgentStep::FinalAnswer {
                 reply,
+                output_parts,
                 usage: step_usage,
             })
         } else {
@@ -180,6 +276,15 @@ impl AgentStepSession for ResponsesAgentSession {
         self.streaming_activity_counter.store(0, Ordering::SeqCst);
         let mut input = self.input.clone();
         append_tool_results(&mut input, results);
+        // 流式路径的 payload 从克隆的 input 构造；此处记录克隆后（即实际发送前）
+        // 的输入尺寸，避免把“未追加本轮结果”的会话状态误报为发送尺寸。
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            log_input_size_after_append(
+                self.provider(),
+                self.model(),
+                responses_input_size_estimate(&input),
+            );
+        }
         let payload = openai_tool_loop_payload(
             &input,
             &self.tool_defs,
@@ -189,19 +294,24 @@ impl AgentStepSession for ResponsesAgentSession {
             allow_tool_calls,
             true,
         );
-        enforce_tool_loop_budget(self.context_budget, &payload)?;
+        let (payload, tools_disabled) = enforce_tool_loop_budget(self.context_budget, payload)?;
         let response = send_openai_responses_request(
             &self.client,
             &self.api_key,
             self.base_url.as_deref(),
+            self.auth.as_ref(),
             &payload,
-            true,
+            ResponsesTransportContext {
+                provider: &self.provider,
+                model: &self.model,
+                stream: true,
+            },
         )
         .await?;
         let step = collect_responses_tool_loop_stream(
             response,
             &mut input,
-            allow_tool_calls,
+            allow_tool_calls && !tools_disabled,
             text_delta_sink,
             self.streaming_diagnostics.clone(),
             self.streaming_activity_counter.clone(),

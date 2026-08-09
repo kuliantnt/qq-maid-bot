@@ -55,6 +55,7 @@ impl LlmProvider for MockTranslationProvider {
         let reply = self.replies.lock().unwrap().remove(0)?;
         Ok(ChatOutcome {
             reply,
+            output_parts: Vec::new(),
             metrics: LlmMetrics {
                 provider: "mock".to_owned(),
                 model: req

@@ -335,10 +335,7 @@ async fn natural_language_undo_restores_most_recently_completed_todo() {
         let owner = private_todo_owner();
         let todo = create_private_todo(&service, "买牛奶");
 
-        service
-            .respond(private_message("看一下待办"))
-            .await
-            .unwrap();
+        service.respond(private_message("/todo")).await.unwrap();
         service
             .respond(private_message("完成第一条"))
             .await
@@ -552,17 +549,14 @@ async fn group_tool_loop_todo_visible_snapshot_uses_actor_interaction_session() 
 }
 
 #[tokio::test]
-async fn deterministic_pending_query_then_tool_loop_complete_first_uses_latest_snapshot() {
+async fn explicit_pending_query_then_tool_loop_complete_first_uses_latest_snapshot() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = private_todo_owner();
     let first = create_private_todo(&service, "测试代办");
     let second = create_private_todo(&service, "明天晚上搬到16栋");
 
-    let listed = service
-        .respond(private_message("看一下待办"))
-        .await
-        .unwrap();
+    let listed = service.respond(private_message("/todo")).await.unwrap();
     assert_eq!(listed.command.as_deref(), Some("todo_list"));
     let listed_text = listed.text.unwrap();
     assert!(listed_text.contains("1. 测试代办"));
@@ -608,7 +602,7 @@ async fn deterministic_pending_query_then_tool_loop_complete_first_uses_latest_s
 }
 
 #[tokio::test]
-async fn deterministic_date_query_then_tool_loop_complete_first_uses_date_snapshot() {
+async fn explicit_date_query_then_tool_loop_complete_first_uses_date_snapshot() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = private_todo_owner();
@@ -617,10 +611,10 @@ async fn deterministic_date_query_then_tool_loop_complete_first_uses_date_snapsh
     let no_time = create_private_todo(&service, "无时间待办");
 
     let listed = service
-        .respond(private_message("查看2099-07-15待办"))
+        .respond(private_message("/todo list 2099-07-15"))
         .await
         .unwrap();
-    assert_eq!(listed.command.as_deref(), Some("todo_due_date"));
+    assert_eq!(listed.command.as_deref(), Some("todo_list"));
     let listed_text = listed.text.unwrap();
     assert!(listed_text.contains("1. 指定日期要完成"));
     assert!(!listed_text.contains("无时间待办"));
@@ -660,17 +654,14 @@ async fn deterministic_date_query_then_tool_loop_complete_first_uses_date_snapsh
 }
 
 #[tokio::test]
-async fn deterministic_todo_query_alias_then_tool_loop_complete_first_uses_latest_snapshot() {
+async fn explicit_todo_query_then_tool_loop_complete_first_uses_latest_snapshot() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = private_todo_owner();
     let first = create_private_todo(&service, "代办 A");
     create_private_todo(&service, "代办 B");
 
-    let listed = service
-        .respond(private_message("看一下代办"))
-        .await
-        .unwrap();
+    let listed = service.respond(private_message("/todo")).await.unwrap();
     assert_eq!(listed.command.as_deref(), Some("todo_list"));
     assert!(listed.text.as_deref().unwrap().contains("1. 代办 A"));
 
@@ -694,7 +685,7 @@ async fn deterministic_todo_query_alias_then_tool_loop_complete_first_uses_lates
 }
 
 #[tokio::test]
-async fn deterministic_completed_query_then_tool_loop_restore_first_uses_latest_snapshot() {
+async fn explicit_completed_query_then_tool_loop_restore_first_uses_latest_snapshot() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = private_todo_owner();
@@ -704,7 +695,7 @@ async fn deterministic_completed_query_then_tool_loop_restore_first_uses_latest_
     service.task_store.complete(&owner, &second.id).unwrap();
 
     let listed = service
-        .respond(private_message("看看已完成"))
+        .respond(private_message("/todo done"))
         .await
         .unwrap();
     assert_eq!(listed.command.as_deref(), Some("todo_done"));
@@ -738,22 +729,16 @@ async fn deterministic_completed_query_then_tool_loop_restore_first_uses_latest_
 }
 
 #[tokio::test]
-async fn deterministic_empty_query_clears_old_snapshot_before_number_mutation() {
+async fn explicit_empty_query_clears_old_snapshot_before_number_mutation() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = private_todo_owner();
     let todo = create_private_todo(&service, "旧快照条目");
 
-    service
-        .respond(private_message("看一下待办"))
-        .await
-        .unwrap();
+    service.respond(private_message("/todo")).await.unwrap();
     service.task_store.complete(&owner, &todo.id).unwrap();
 
-    let empty_list = service
-        .respond(private_message("看一下待办"))
-        .await
-        .unwrap();
+    let empty_list = service.respond(private_message("/todo")).await.unwrap();
     assert!(
         empty_list
             .text
@@ -776,16 +761,13 @@ async fn deterministic_empty_query_clears_old_snapshot_before_number_mutation() 
 }
 
 #[tokio::test]
-async fn deterministic_query_then_status_changes_returns_precise_missing_error() {
+async fn explicit_query_then_status_changes_returns_precise_missing_error() {
     let inspector = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = private_todo_owner();
     let todo = create_private_todo(&service, "状态先被改掉");
 
-    service
-        .respond(private_message("看一下待办"))
-        .await
-        .unwrap();
+    service.respond(private_message("/todo")).await.unwrap();
     // 模拟用户看到列表后，条目已被其他操作提前完成。
     service.task_store.complete(&owner, &todo.id).unwrap();
 

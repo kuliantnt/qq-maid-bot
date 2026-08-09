@@ -10,7 +10,7 @@ use chrono::NaiveDate;
 use crate::error::LlmError;
 use crate::runtime::tools::todo::{
     TodoQuery, TodoQueryStatus, TodoQueryTimeFilter, resolve_todo_list_date_filter,
-    storage::validate_todo_query,
+    storage::validate_todo_query, todo_query_type,
 };
 
 use super::common::{
@@ -41,7 +41,7 @@ impl Tool for ListTodoTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
             name: LIST_TODOS_TOOL_NAME.to_owned(),
-            description: "查询当前私聊用户的待办列表。不会返回数据库内部 ID；visible_number 只供本轮 Tool Loop 内部推理和后续工具调用使用，不会覆盖用户跨轮次真正看到的列表编号。status=pending 查询未完成，completed 查询已完成，all 查询全部。查询今天、昨天、本周、上周、本月、最近 N 天等时间范围时，把用户原始中文范围传给 date_range_text；Rust 会按请求时间和时区归一化，模型不要自行换算绝对日期。".to_owned(),
+            description: "查询当前私聊用户的待办列表。不会返回数据库内部 ID；visible_number 只供本轮 Tool Loop 内部推理和后续工具调用使用，不会覆盖用户跨轮次真正看到的列表编号。status=pending 查询未完成，completed 查询已完成，all 查询全部。查询今天、昨天、本周、上周、本月、最近 N 天等时间范围时，把用户原始中文范围传给 date_range_text；Rust 会按请求时间和时区归一化，模型不要自行换算绝对日期。用户说“周期性/重复待办”时传 recurring=true；说“一次性/非周期待办”时传 recurring=false；不限周期类型时传 null。状态、日期、关键词和周期类型可组合使用。".to_owned(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -66,9 +66,13 @@ impl Tool for ListTodoTool {
                     "keyword": {
                         "type": ["string", "null"],
                         "description": "在待办标题、详情和原文中模糊搜索；多个空格分隔词使用 AND 匹配。项目名称当前也按关键词搜索。"
+                    },
+                    "recurring": {
+                        "type": ["boolean", "null"],
+                        "description": "周期类型筛选：true 只查询周期性待办，false 只查询非周期性、一次性待办，null 不限制周期类型。"
                     }
                 },
-                "required": ["status", "due_date", "date_range_text", "time_filter", "keyword"],
+                "required": ["status", "due_date", "date_range_text", "time_filter", "keyword", "recurring"],
                 "additionalProperties": false
             }),
         }
@@ -151,6 +155,7 @@ impl Tool for ListTodoTool {
             },
             time,
             keyword: optional_text(&arguments, "keyword")?,
+            recurring: optional_recurring(&arguments)?,
             ..TodoQuery::default()
         };
         validate_todo_query(&query).map_err(todo_tool_error)?;
@@ -179,12 +184,19 @@ impl Tool for ListTodoTool {
         if let Some(value) = query.keyword.as_deref() {
             conditions.push(format!("关键词“{value}”"));
         }
+        if let Some(recurring) = query.recurring {
+            conditions.push(if recurring {
+                "周期性待办".to_owned()
+            } else {
+                "一次性待办".to_owned()
+            });
+        }
         let condition = if conditions.is_empty() {
             status.condition().to_owned()
         } else {
             conditions.join("、")
         };
-        scope.remember_internal_query("list-query", &condition, &page.items)?;
+        scope.remember_internal_query(todo_query_type(&query), &condition, &query, &page.items)?;
 
         Ok(ToolOutput::json(json!({
             "status": status.as_str(),
@@ -203,8 +215,17 @@ impl Tool for ListTodoTool {
             "displayed_count": page.items.len(),
             "truncated": page.offset + page.items.len() < page.total_count,
             "keyword": query.keyword,
+            "recurring": query.recurring,
             "numbering": "visible_number 是本轮工具查询编号，仅在当前 Tool Loop 内有效；用户跨轮次的第 N 条仍以最近实际展示给用户的 /todo 列表为准；未暴露数据库内部 ID。"
         })))
+    }
+}
+
+fn optional_recurring(arguments: &serde_json::Value) -> Result<Option<bool>, LlmError> {
+    match arguments.get("recurring") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(bad_tool_arguments("recurring must be true/false/null")),
     }
 }
 

@@ -12,7 +12,7 @@ use futures_util::future::join_all;
 use qq_maid_common::input_part::{MediaStatus, MessageInputPart, MessageMedia};
 use tracing::{debug, warn};
 
-use super::event::Attachment;
+use super::event::{Attachment, MessageReply};
 
 mod local_cache;
 
@@ -47,6 +47,7 @@ pub(crate) async fn fetch_qq_official_image_attachments(
 ) {
     if attachments.is_empty() {
         mark_unreadable_image_parts(input_parts);
+        clear_remote_image_urls(input_parts);
         return;
     }
 
@@ -89,6 +90,7 @@ pub(crate) async fn fetch_qq_official_image_attachments(
 
     if fetches.is_empty() {
         mark_unreadable_image_parts(input_parts);
+        clear_remote_image_urls(input_parts);
         return;
     }
 
@@ -115,7 +117,7 @@ pub(crate) async fn fetch_qq_official_image_attachments(
                     platform = context.platform,
                     media_status = "available",
                     image_url_scheme = url_scheme,
-                    "QQ official image attachment downloaded"
+                    "QQ 官方图片附件已下载"
                 );
             }
             AttachmentFetchResult::Failed { error, url_scheme } => {
@@ -128,13 +130,85 @@ pub(crate) async fn fetch_qq_official_image_attachments(
                     media_status = error.media_status_label(),
                     image_url_scheme = url_scheme,
                     error = %error.safe_summary(),
-                    "QQ official image attachment download failed"
+                    "QQ 官方图片附件下载失败"
                 );
             }
         }
     }
 
     mark_unreadable_image_parts(input_parts);
+    clear_remote_image_urls(input_parts);
+}
+
+/// 引用附件不位于当前消息顶层 attachments，需要直接从已经归一化的 quote parts
+/// 中取回。下载失败只更新媒体可读状态，Core 随后会把它转换成摘要文本继续回复。
+pub(crate) async fn fetch_qq_official_quoted_images(
+    client: &reqwest::Client,
+    context: &MediaFetchContext,
+    message_id: &str,
+    reply: Option<&mut MessageReply>,
+) {
+    let Some(reply) = reply else {
+        return;
+    };
+    // `reply.input_parts` 只承载当前消息的这一条直接引用 payload；在这里创建并销毁
+    // filename 集合，可保证去重不跨当前附件、其他引用、其他消息或 RefIndex 历史。
+    deduplicate_quoted_images_by_filename(&mut reply.input_parts);
+    let attachments = reply
+        .input_parts
+        .iter()
+        .filter_map(|part| {
+            let MessageInputPart::Image { media } = part else {
+                return None;
+            };
+            Some(Attachment {
+                content_type: media.mime_type.clone(),
+                filename: media.filename.clone(),
+                url: media.url.clone(),
+                size_bytes: media.size_bytes,
+                media_id: media.media_id.clone(),
+                file_id: media.file_id.clone(),
+                attachment_id: media.attachment_id.clone(),
+                asr_refer_text: None,
+                voice_wav_url: None,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    fetch_qq_official_image_attachments(
+        client,
+        context,
+        message_id,
+        &mut reply.input_parts,
+        &attachments,
+    )
+    .await;
+    reply.media_summaries = reply
+        .input_parts
+        .iter()
+        .filter_map(qq_maid_common::input_part::QuotedMediaSummary::from_input_part)
+        .collect();
+}
+
+fn deduplicate_quoted_images_by_filename(input_parts: &mut Vec<MessageInputPart>) {
+    let mut seen = std::collections::HashSet::new();
+    input_parts.retain(|part| {
+        let MessageInputPart::Image { media } = part else {
+            return true;
+        };
+        let Some(filename) = media
+            .filename
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            // filename 缺失时没有经真实事件验证的稳定证据，不做推测性去重。
+            return true;
+        };
+        // #578 的真实 QQ 事件表明，同一直接引用中同图重复记录的临时 URL/file_id
+        // 可能不同，但规范化 filename 相同；只保留第一次出现的位置。
+        seen.insert(filename.to_ascii_lowercase())
+    });
 }
 
 pub(crate) fn normalize_download_url(value: &str) -> Option<String> {
@@ -326,16 +400,34 @@ fn update_matching_image_part(
 }
 
 fn media_matches_attachment(media: &MessageMedia, attachment: &Attachment) -> bool {
-    attachment
-        .url
-        .as_deref()
-        .zip(media.url.as_deref())
-        .is_some_and(|(left, right)| left.trim() == right.trim())
-        || attachment
-            .filename
-            .as_deref()
-            .zip(media.filename.as_deref())
-            .is_some_and(|(left, right)| left.trim() == right.trim())
+    if let Some(matches) =
+        exact_optional_field_match(attachment.url.as_deref(), media.url.as_deref())
+    {
+        return matches;
+    }
+    for (attachment_id, media_id) in [
+        (attachment.file_id.as_deref(), media.file_id.as_deref()),
+        (attachment.media_id.as_deref(), media.media_id.as_deref()),
+        (
+            attachment.attachment_id.as_deref(),
+            media.attachment_id.as_deref(),
+        ),
+    ] {
+        if let Some(matches) = exact_optional_field_match(attachment_id, media_id) {
+            return matches;
+        }
+    }
+    exact_optional_field_match(attachment.filename.as_deref(), media.filename.as_deref())
+        .unwrap_or(false)
+}
+
+fn exact_optional_field_match(left: Option<&str>, right: Option<&str>) -> Option<bool> {
+    let left = left.map(str::trim).filter(|value| !value.is_empty());
+    let right = right.map(str::trim).filter(|value| !value.is_empty());
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left == right),
+        _ => None,
+    }
 }
 
 fn mark_unreadable_image_parts(parts: &mut [MessageInputPart]) {
@@ -348,6 +440,18 @@ fn mark_unreadable_image_parts(parts: &mut [MessageInputPart]) {
             MediaStatus::Available | MediaStatus::MissingReadableUrl
         ) {
             media.status = media.inferred_readability_status();
+        }
+    }
+}
+
+fn clear_remote_image_urls(parts: &mut [MessageInputPart]) {
+    for part in parts {
+        if let MessageInputPart::Image { media } = part {
+            // QQ 图片 URL 可能携带短期鉴权参数；下载结果落盘或降级后不再向 Core 透传。
+            media.url = None;
+            if media.local_path.is_none() && media.status == MediaStatus::Available {
+                media.status = MediaStatus::MissingReadableUrl;
+            }
         }
     }
 }
@@ -368,6 +472,8 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use tokio::net::TcpListener;
+
+    mod quoted;
 
     fn media_file_count(root: &std::path::Path) -> usize {
         if !root.exists() {
@@ -517,6 +623,7 @@ mod tests {
         };
         let local_path = media.local_path.as_deref().unwrap();
         assert_eq!(media.status, MediaStatus::Available);
+        assert_eq!(media.url, None);
         assert_eq!(std::fs::read(local_path).unwrap(), b"fake-jpeg");
     }
 
@@ -728,6 +835,7 @@ mod tests {
             panic!("expected image part");
         };
         assert_eq!(media.status, MediaStatus::SizeExceeded);
+        assert_eq!(media.url, None);
         assert!(media.local_path.is_none());
         assert_eq!(media_file_count(&root_dir), 0);
     }

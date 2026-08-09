@@ -17,6 +17,13 @@ fn provider_errors_are_fallback_eligible() {
         "bad local request",
         "request"
     )));
+    for status in [404, 422] {
+        assert!(should_try_next_model(&LlmError::from_upstream_status(
+            status,
+            "Responses API is incompatible",
+            "http"
+        )));
+    }
 }
 
 #[tokio::test]
@@ -164,6 +171,41 @@ async fn model_route_tool_calling_falls_back_after_eligible_candidate_error() {
 }
 
 #[tokio::test]
+async fn model_route_tool_calling_stops_after_local_budget_error() {
+    let openai = Arc::new(
+        MockProvider::new("openai", Vec::new())
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+            .with_tool_results(vec![Err(LlmError::new(
+                "context_budget_exceeded",
+                "local payload exceeds context budget",
+                "tool_loop",
+            ))]),
+    );
+    let deepseek = Arc::new(
+        MockProvider::new("deepseek", Vec::new())
+            .with_tool_protocol(ToolCallingProtocol::ChatCompletionsToolCalls)
+            .with_tool_results(vec![Ok(outcome("must not run"))]),
+    );
+    let provider = ModelRouteProvider::new(
+        "auto",
+        ModelProvider::OpenAi,
+        ModelRoute::parse_config("openai:gpt-a,deepseek:deepseek-chat", "LLM_MODEL").unwrap(),
+        vec![
+            (ModelProvider::OpenAi, openai.clone()),
+            (ModelProvider::DeepSeek, deepseek.clone()),
+        ],
+    )
+    .unwrap();
+
+    let err = provider.chat_with_tools(tool_request()).await.unwrap_err();
+
+    assert_eq!(err.code, "context_budget_exceeded");
+    assert_eq!(err.stage, "tool_loop");
+    assert_eq!(openai.tool_calls(), 1);
+    assert_eq!(deepseek.tool_calls(), 0);
+}
+
+#[tokio::test]
 async fn tool_candidate_failure_then_timeout_uses_latest_terminal_reason() {
     let (provider, first, second) =
         handle_route_provider(HandleBehavior::Failed, HandleBehavior::Timeout);
@@ -216,6 +258,62 @@ async fn tool_candidate_failure_then_success_keeps_request_counters() {
 }
 
 #[tokio::test]
+async fn tool_candidate_step_timeout_does_not_terminate_model_route() {
+    let (provider, first, second) =
+        handle_route_provider(HandleBehavior::CandidateTimeout, HandleBehavior::Success);
+    let mut req = tool_request();
+    req.run_handle = Some(AgentRunHandle::with_timeout(
+        std::time::Duration::from_secs(2),
+    ));
+
+    let outcome = provider.chat_with_tools(req).await.unwrap();
+
+    assert_eq!(outcome.reply, "fallback success");
+    assert!(outcome.fallback_used);
+    assert_eq!(outcome.agent.model_rounds, 2);
+    assert_eq!(first.calls(), 1);
+    assert_eq!(second.calls(), 1);
+}
+
+#[tokio::test]
+async fn expired_agent_deadline_stops_model_route_before_second_candidate() {
+    let (provider, first, second) =
+        handle_route_provider(HandleBehavior::SlowFailed, HandleBehavior::Success);
+    let mut req = tool_request();
+    req.run_handle = Some(AgentRunHandle::with_timeout(
+        std::time::Duration::from_millis(10),
+    ));
+
+    let err = provider.chat_with_tools(req).await.unwrap_err();
+
+    assert_eq!(err.code, "timeout");
+    assert_eq!(err.stage, "agent_loop");
+    assert_eq!(first.calls(), 1);
+    assert_eq!(second.calls(), 0);
+    assert_eq!(
+        err.agent.unwrap().stop_reason,
+        Some(AgentStopReason::Timeout)
+    );
+}
+
+#[tokio::test]
+async fn tool_candidate_fallback_is_skipped_when_remaining_budget_is_insufficient() {
+    let (provider, first, second) =
+        handle_route_provider(HandleBehavior::Failed, HandleBehavior::Success);
+    let mut req = tool_request();
+    req.run_handle = Some(AgentRunHandle::with_timeout(
+        std::time::Duration::from_millis(20),
+    ));
+
+    let err = provider.chat_with_tools(req).await.unwrap_err();
+
+    assert_eq!(err.code, "timeout");
+    assert_eq!(err.stage, "agent_loop");
+    assert_eq!(first.calls(), 1);
+    assert_eq!(second.calls(), 0);
+}
+
+#[tokio::test]
 async fn tool_candidate_does_not_fallback_after_tool_side_effect_started() {
     let (provider, first, second) = handle_route_provider(
         HandleBehavior::FailedAfterToolStart,
@@ -240,9 +338,10 @@ async fn model_route_tool_calling_error_after_final_delta_does_not_fallback() {
             .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
             .with_tool_deltas(vec!["partial"])
             .with_tool_results(vec![Err(LlmError::provider(
-                "stream failed after visible delta",
-                "stream_after_delta",
-            ))]),
+                "OpenAI chat stream response incomplete",
+                "sse",
+            )
+            .with_incomplete_reason("max_output_tokens"))]),
     );
     let deepseek = Arc::new(
         MockProvider::new("deepseek", Vec::new())
@@ -266,16 +365,74 @@ async fn model_route_tool_calling_error_after_final_delta_does_not_fallback() {
         let collected = collected.clone();
         Box::pin(async move {
             collected.lock().unwrap().push(delta);
-            Ok(())
+            Ok(crate::agent_loop::AgentTextDeltaDelivery::Visible)
         }) as crate::agent_loop::AgentTextDeltaFuture
     }) as crate::agent_loop::AgentTextDeltaSink);
 
     let err = provider.chat_with_tools(req).await.unwrap_err();
 
-    assert_eq!(err.stage, "stream_after_delta");
+    assert_eq!(err.stage, "sse");
+    assert_eq!(err.incomplete_reason(), Some("max_output_tokens"));
     assert_eq!(deltas.lock().unwrap().as_slice(), ["partial"]);
     assert_eq!(openai.tool_calls(), 1);
     assert_eq!(deepseek.tool_calls(), 0);
+}
+
+#[tokio::test]
+async fn model_route_tool_calling_falls_back_after_buffered_incomplete() {
+    let openai = Arc::new(
+        MockProvider::new("openai", Vec::new())
+            .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+            .with_tool_deltas(vec!["internal tool-round draft"])
+            .with_tool_results(vec![Err(LlmError::provider(
+                "OpenAI chat stream response incomplete",
+                "sse",
+            )
+            .with_incomplete_reason("max_output_tokens"))]),
+    );
+    let deepseek = Arc::new(
+        MockProvider::new("deepseek", Vec::new())
+            .with_tool_protocol(ToolCallingProtocol::ChatCompletionsToolCalls)
+            .with_tool_results(vec![Ok(outcome("clean fallback answer"))]),
+    );
+    let provider = ModelRouteProvider::new(
+        "auto",
+        ModelProvider::OpenAi,
+        ModelRoute::parse_config("openai:gpt-a,deepseek:deepseek-chat", "LLM_MODEL").unwrap(),
+        vec![
+            (ModelProvider::OpenAi, openai.clone()),
+            (ModelProvider::DeepSeek, deepseek.clone()),
+        ],
+    )
+    .unwrap();
+    let buffered = Arc::new(Mutex::new(Vec::new()));
+    let collected = buffered.clone();
+    let handle = AgentRunHandle::default();
+    handle.update(|diagnostics| {
+        diagnostics.tool_execution_attempted = true;
+        diagnostics.executed_tools.push("web_search".to_owned());
+    });
+    let mut req = tool_request();
+    req.run_handle = Some(handle);
+    req.final_delta_sink = Some(Arc::new(move |delta| {
+        let collected = collected.clone();
+        Box::pin(async move {
+            collected.lock().unwrap().push(delta);
+            Ok(crate::agent_loop::AgentTextDeltaDelivery::Buffered)
+        }) as crate::agent_loop::AgentTextDeltaFuture
+    }) as crate::agent_loop::AgentTextDeltaSink);
+
+    let outcome = provider.chat_with_tools(req).await.unwrap();
+
+    assert_eq!(outcome.reply, "clean fallback answer");
+    assert!(outcome.fallback_used);
+    assert_eq!(
+        buffered.lock().unwrap().as_slice(),
+        ["internal tool-round draft"]
+    );
+    assert_eq!(outcome.agent.executed_tools, ["web_search"]);
+    assert_eq!(openai.tool_calls(), 1);
+    assert_eq!(deepseek.tool_calls(), 1);
 }
 
 #[tokio::test]
@@ -446,6 +603,28 @@ async fn model_route_provider_falls_back_on_eligible_error() {
 }
 
 #[tokio::test]
+async fn model_route_provider_tries_next_candidate_after_responses_incompatible_status() {
+    for status in [404, 422] {
+        let (provider, openai, deepseek) = route_provider(
+            "openai:gpt-a,deepseek:deepseek-chat",
+            vec![Err(LlmError::from_upstream_status(
+                status,
+                "Responses API is incompatible",
+                "http",
+            ))],
+            vec![Ok(outcome("fallback"))],
+        );
+
+        let result = provider.chat(request()).await.unwrap();
+
+        assert_eq!(result.reply, "fallback", "status={status}");
+        assert!(result.fallback_used, "status={status}");
+        assert_eq!(openai.calls(), 1, "status={status}");
+        assert_eq!(deepseek.calls(), 1, "status={status}");
+    }
+}
+
+#[tokio::test]
 async fn model_route_provider_falls_back_after_mimo_rate_limit() {
     let mimo_id = ModelProvider::Custom("mimo".to_owned());
     let mimo = Arc::new(MockProvider::new(
@@ -599,11 +778,36 @@ async fn model_route_provider_aggregates_all_candidate_failures() {
     let err = provider.chat(request()).await.unwrap_err();
 
     assert_eq!(err.code, "provider_error");
-    assert_eq!(err.stage, "provider_route");
+    assert_eq!(err.stage, "provider");
     assert!(err.message.contains("#0 openai:gpt-a -> timeout@provider"));
     assert!(
         err.message
             .contains("#1 deepseek:deepseek-chat -> provider_error@provider")
+    );
+    assert_eq!(openai.calls(), 1);
+    assert_eq!(deepseek.calls(), 1);
+}
+
+#[tokio::test]
+async fn model_route_timeout_exhaustion_keeps_terminal_timeout() {
+    let (provider, openai, deepseek) = route_provider(
+        "openai:gpt-a,deepseek:deepseek-chat",
+        vec![Err(LlmError::timeout("http_request_timeout"))],
+        vec![Err(LlmError::timeout("stream_read"))],
+    );
+
+    let err = provider.chat(request()).await.unwrap_err();
+
+    assert_eq!(err.code, "timeout");
+    assert_eq!(err.kind(), crate::error::LlmErrorKind::Timeout);
+    assert_eq!(err.stage, "stream_read");
+    assert!(
+        err.message
+            .contains("#0 openai:gpt-a -> timeout@http_request_timeout")
+    );
+    assert!(
+        err.message
+            .contains("#1 deepseek:deepseek-chat -> timeout@stream_read")
     );
     assert_eq!(openai.calls(), 1);
     assert_eq!(deepseek.calls(), 1);
@@ -624,4 +828,26 @@ async fn model_route_provider_uses_request_route_override() {
     assert_eq!(result.reply, "deepseek");
     assert_eq!(openai.calls(), 0);
     assert_eq!(deepseek.calls(), 1);
+}
+
+#[test]
+fn model_route_provider_rejects_duplicate_provider_registration() {
+    let routera = ModelProvider::Custom("routera".to_owned());
+    let first = Arc::new(MockProvider::new("routera", Vec::new()));
+    let second = Arc::new(MockProvider::new("routera", Vec::new()));
+
+    let error = ModelRouteProvider::new(
+        "auto",
+        ModelProvider::OpenAi,
+        ModelRoute::parse_config("routera:gpt-5.6-luna", "LLM_MODEL").unwrap(),
+        vec![(routera.clone(), first), (routera, second)],
+    )
+    .err()
+    .expect("duplicate provider registration should fail");
+
+    assert!(
+        error
+            .message
+            .contains("provider `routera` is registered more than once")
+    );
 }

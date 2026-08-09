@@ -1,0 +1,310 @@
+import { deleteTodo, getTodo, listTodoTargets, listTodos, updateTodo } from "../../api.js";
+import { TARGET_PAGE_SIZE, appendTargetPage, hasMoreTargetPages, initialRefreshPage, initialTargetPager, pageAfterDelete } from "./todo-paging.js";
+import { todoCard } from "./todo-card.js";
+import { submitTodo, todoDeadlineFields } from "./todo-form.js";
+export { todoRecurrenceKind } from "./todo-form.js";
+import type { TargetPager, TodoRefreshTrigger } from "./todo-paging.js";
+import type { TodoItem, TodoStatus, TodoTargetOption } from "../../types.js";
+
+let todos: TodoItem[] = [];
+let page = 1;
+let pager: TargetPager = initialTargetPager();
+let targetLoading = false;
+let createLoadMore: HTMLButtonElement | null = null;
+let filterLoadMore: HTMLButtonElement | null = null;
+
+export function filterResetDefaults(): Readonly<Record<string, string>> {
+  return {
+    "todo-status-filter": "all",
+    "todo-keyword-filter": "",
+    "todo-time-filter": "all",
+    "todo-recurring-filter": "all",
+    "todo-target-filter": "",
+    "todo-platform-filter": "",
+    "todo-account-filter": "",
+    "todo-user-filter": "",
+    "todo-scope-filter": "",
+    "todo-date-start": "",
+    "todo-date-end": "",
+  };
+}
+
+export async function initializeTodo(): Promise<void> {
+  bindTodoControls();
+  await loadMoreTargets();
+  await refreshTodos("refresh");
+}
+
+function bindTodoControls(): void {
+  const refresh = document.getElementById("todo-refresh");
+  const filter = document.getElementById("todo-filter-submit");
+  const reset = document.getElementById("todo-filter-reset");
+  const advancedToggle = document.getElementById("todo-advanced-toggle");
+  const advancedPanel = document.getElementById("todo-advanced-filter");
+  const createOpen = document.getElementById("todo-create-open");
+  const createClose = document.getElementById("todo-create-close");
+  const dialog = document.getElementById("todo-create-dialog");
+  const form = document.getElementById("todo-create-form");
+  if (!(refresh instanceof HTMLButtonElement) || !(filter instanceof HTMLButtonElement) || !(reset instanceof HTMLButtonElement)
+    || !(advancedToggle instanceof HTMLButtonElement) || !(advancedPanel instanceof HTMLElement)
+    || !(createOpen instanceof HTMLButtonElement) || !(createClose instanceof HTMLButtonElement)
+    || !(dialog instanceof HTMLDialogElement) || !(form instanceof HTMLFormElement)) {
+    throw new Error("Todo 页面缺少必要控件");
+  }
+  refresh.onclick = () => void refreshTodos("refresh");
+  filter.onclick = () => {
+    syncAdvancedFilterState();
+    void refreshTodos("filter");
+  };
+  reset.onclick = () => {
+    for (const [id, value] of Object.entries(filterResetDefaults())) {
+      const field = document.getElementById(id);
+      if (field instanceof HTMLInputElement || field instanceof HTMLSelectElement) field.value = value;
+    }
+    syncAdvancedFilterState();
+    void refreshTodos("filter");
+  };
+  advancedToggle.onclick = () => {
+    advancedPanel.hidden = !advancedPanel.hidden;
+    advancedToggle.setAttribute("aria-expanded", String(!advancedPanel.hidden));
+    syncAdvancedFilterState();
+  };
+  createOpen.onclick = () => {
+    document.getElementById("todo-create-error")!.textContent = "";
+    dialog.showModal();
+  };
+  createClose.onclick = () => dialog.close();
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) dialog.close();
+  });
+  form.onsubmit = (event) => {
+    event.preventDefault();
+    void submitTodo(form, dialog);
+  };
+  syncAdvancedFilterState();
+}
+
+function syncAdvancedFilterState(): void {
+  const toggle = document.getElementById("todo-advanced-toggle");
+  if (!(toggle instanceof HTMLButtonElement)) return;
+  const active = ["todo-time-filter", "todo-recurring-filter", "todo-target-filter", "todo-platform-filter",
+    "todo-account-filter", "todo-user-filter", "todo-scope-filter", "todo-date-start", "todo-date-end"]
+    .some((id) => {
+      const value = valueOf(id).trim();
+      return value !== "" && value !== "all";
+    });
+  toggle.classList.toggle("todo-advanced-toggle--active", active);
+  toggle.textContent = active ? "高级筛选 · 已启用" : "高级筛选";
+}
+
+export async function refreshTodos(trigger: TodoRefreshTrigger = "refresh"): Promise<void> {
+  page = initialRefreshPage(trigger, page);
+  try {
+    const status = valueOf("todo-status-filter");
+    const keyword = valueOf("todo-keyword-filter").trim();
+    const timeFilter = valueOf("todo-time-filter");
+    const recurring = valueOf("todo-recurring-filter");
+    const targetRef = valueOf("todo-target-filter");
+    const platform = valueOf("todo-platform-filter").trim();
+    const accountId = valueOf("todo-account-filter").trim();
+    const userId = valueOf("todo-user-filter").trim();
+    const scopeType = valueOf("todo-scope-filter");
+    const dateStart = valueOf("todo-date-start");
+    const dateEnd = valueOf("todo-date-end");
+    const result = await listTodos({
+      page,
+      ...(status === "all" ? {} : { status }),
+      ...(keyword ? { keyword } : {}),
+      ...(timeFilter === "all" ? {} : { time_filter: timeFilter }),
+      ...(recurring === "all" ? {} : { recurring: recurring === "true" }),
+      ...(targetRef ? { target_ref: targetRef } : {}),
+      ...(platform ? { platform } : {}),
+      ...(accountId ? { account_id: accountId } : {}),
+      ...(userId ? { user_id: userId } : {}),
+      ...(scopeType ? { scope_type: scopeType } : {}),
+      ...(dateStart && dateEnd ? { date_start: dateStart, date_end: dateEnd } : {}),
+    });
+    if (page > result.totalPages && page > 1) {
+      page = pageAfterDelete(page, result.totalPages);
+      return refreshTodos("refresh");
+    }
+    todos = result.items;
+    renderTodos();
+    renderPagination(result.page, result.totalPages);
+    showResult(`${result.total} 项 Todo`, false);
+  } catch (cause) {
+    showResult(cause instanceof Error ? cause.message : "Todo 刷新失败", true);
+  }
+}
+
+async function loadMoreTargets(): Promise<void> {
+  if (targetLoading || (pager.page > 0 && !hasMoreTargetPages(pager))) return;
+  targetLoading = true;
+  try {
+    pager = appendTargetPage(pager, await listTodoTargets(pager.page + 1, TARGET_PAGE_SIZE));
+    renderTargets();
+  } catch (cause) {
+    showResult(cause instanceof Error ? cause.message : "目标加载失败", true);
+  } finally {
+    targetLoading = false;
+  }
+}
+
+function renderTargets(): void {
+  const select = document.getElementById("todo-create-target");
+  if (select instanceof HTMLSelectElement) {
+    select.replaceChildren();
+    if (pager.items.length === 0) {
+      select.append(new Option("没有可用目标", ""));
+      select.disabled = true;
+    } else {
+      select.disabled = false;
+      select.append(new Option("选择目标…", ""));
+      for (const target of pager.items) select.append(new Option(targetLabel(target), target.targetRef));
+    }
+    ensureLoadMoreButton(select);
+  }
+  const filter = document.getElementById("todo-target-filter");
+  if (filter instanceof HTMLSelectElement) {
+    filter.replaceChildren(new Option("全部目标", ""));
+    for (const target of pager.items) filter.append(new Option(targetLabel(target), target.targetRef));
+    ensureLoadMoreButton(filter);
+  }
+}
+
+function ensureLoadMoreButton(select: HTMLSelectElement): void {
+  const button = select.id === "todo-create-target"
+    ? createLoadMore ??= loadMoreTargetsButton()
+    : filterLoadMore ??= loadMoreTargetsButton();
+  const container = select.parentElement;
+  if (container && button.parentElement !== container.parentElement) container.after(button);
+  button.hidden = !hasMoreTargetPages(pager);
+}
+
+function loadMoreTargetsButton(): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary";
+  button.textContent = "加载更多目标…";
+  button.onclick = () => void loadMoreTargets();
+  return button;
+}
+
+function targetLabel(target: TodoTargetOption): string {
+  return `${target.platform} · ${target.scopeType} · ${target.userId ?? target.groupId ?? target.targetRef}`;
+}
+
+export function renderTodos(): void {
+  const list = document.getElementById("todo-list");
+  if (!(list instanceof HTMLElement)) return;
+  list.replaceChildren();
+  if (todos.length === 0) {
+    list.append(Object.assign(document.createElement("p"), { className: "hint", textContent: "当前筛选没有 Todo。" }));
+    return;
+  }
+  for (const todo of todos) list.append(todoCard(todo));
+}
+
+export async function changeTodoStatus(todo: TodoItem, status: TodoStatus): Promise<void> {
+  try {
+    await updateTodo(todo.id, { status });
+    await refreshTodos("refresh");
+  } catch (cause) {
+    showResult(cause instanceof Error ? cause.message : "Todo 更新失败", true);
+  }
+}
+
+export async function loadTodoForEdit(
+  id: string,
+  get: (targetId: string) => Promise<TodoItem> = getTodo,
+  onError: (message: string) => void = (message) => showResult(message, true),
+): Promise<TodoItem | null> {
+  try {
+    return await get(id);
+  } catch (cause) {
+    onError(cause instanceof Error ? cause.message : "Todo 加载失败");
+    return null;
+  }
+}
+
+export async function openEditor(todo: TodoItem): Promise<void> {
+  const latest = await loadTodoForEdit(todo.id);
+  if (latest === null) return;
+  const title = window.prompt("Todo 标题", latest.title);
+  if (title === null || !title.trim()) return;
+  const detail = window.prompt("Todo 详情（留空清除）", latest.detail ?? "");
+  if (detail === null) return;
+  const deadlineValue = window.prompt(
+    "截止日期时间 YYYY-MM-DD HH:MM（留空清除）",
+    latest.dueAt ?? latest.dueDate ?? "",
+  );
+  if (deadlineValue === null) return;
+  const deadline = todoDeadlineFields(deadlineValue);
+  const reminderAt = window.prompt("提醒时间 RFC3339/本地时间（留空清除）", latest.reminderAt ?? "");
+  if (reminderAt === null) return;
+  const recurrenceKind = window.prompt(
+    "重复类型：none/daily/every_n_days/weekly/every_n_weeks/monthly/every_n_months/yearly/every_n_years/every_n_minutes/every_n_hours",
+    latest.recurrenceKind,
+  );
+  if (recurrenceKind === null) return;
+  const recurrenceInterval = window.prompt("重复间隔", String(latest.recurrenceInterval || ""));
+  if (recurrenceInterval === null) return;
+  const recurrenceUnit = window.prompt("重复单位：day/week/month", latest.recurrenceUnit);
+  if (recurrenceUnit === null) return;
+  try {
+    await updateTodo(latest.id, {
+      title: title.trim(), detail: detail.trim() || null, due_date: deadline.dueDate, due_at: deadline.dueAt,
+      reminder_at: reminderAt.trim() || null, time_precision: deadline.timePrecision, recurrence_kind: recurrenceKind,
+      recurrence_interval: recurrenceInterval.trim() ? Number(recurrenceInterval) : null, recurrence_unit: recurrenceUnit,
+    });
+    await refreshTodos("refresh");
+  } catch (cause) {
+    showResult(cause instanceof Error ? cause.message : "Todo 更新失败", true);
+  }
+}
+
+function renderPagination(current: number, totalPages: number): void {
+  const list = document.getElementById("todo-pagination");
+  if (!(list instanceof HTMLElement)) return;
+  list.replaceChildren();
+  if (totalPages <= 1) return;
+  list.append(actionButton("上一页", () => { if (page > 1) { page -= 1; void refreshTodos("refresh"); } }));
+  const label = document.createElement("span"); label.textContent = `${current} / ${totalPages}`; list.append(label);
+  list.append(actionButton("下一页", () => { if (page < totalPages) { page += 1; void refreshTodos("refresh"); } }));
+}
+
+export async function removeTodo(todo: TodoItem): Promise<void> {
+  if (!window.confirm(`确定删除 Todo「${todo.title}」吗？`)) return;
+  try {
+    await deleteTodo(todo.id);
+    await refreshTodos("refresh");
+  } catch (cause) {
+    showResult(cause instanceof Error ? cause.message : "Todo 删除失败", true);
+  }
+}
+
+export function actionButton(label: string, action: () => void, variant = "secondary"): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = variant;
+  button.textContent = label;
+  button.onclick = action;
+  return button;
+}
+
+export function valueOf(id: string): string {
+  const element = document.getElementById(id);
+  return element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement ? element.value : "";
+}
+
+export function numberValue(id: string): number | null {
+  const value = valueOf(id).trim();
+  return value ? Number(value) : null;
+}
+
+export function showResult(message: string, error: boolean): void {
+  const result = document.getElementById("todo-result");
+  if (!(result instanceof HTMLElement)) return;
+  result.className = `status-message ${error ? "error" : "success"}`;
+  result.textContent = message;
+}

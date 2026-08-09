@@ -41,7 +41,7 @@ async fn todo_delete_completed_item_accepts_delete_tool_pending_result() {
     service.task_store.complete(&owner, &todo.id).unwrap();
 
     service
-        .respond(private_message("看看已完成"))
+        .respond(private_message("/todo done"))
         .await
         .unwrap();
     let response = service
@@ -98,7 +98,7 @@ async fn todo_delete_completed_pending_confirmation_is_verified_by_real_tool_res
         .unwrap();
     service.task_store.complete(&owner, &todo.id).unwrap();
     service
-        .respond(private_message("查看已完成待办"))
+        .respond(private_message("/todo done"))
         .await
         .unwrap();
 

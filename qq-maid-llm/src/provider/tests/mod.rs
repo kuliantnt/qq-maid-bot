@@ -1,7 +1,8 @@
 use super::*;
 use crate::{
     config::{
-        HttpAuthConfig, LlmConfig, OpenAiApiMode, OpenAiCompatibleProviderConfig, ProviderMode,
+        HttpAuthConfig, LlmConfig, OpenAiApiMode, OpenAiCompatibleProviderConfig,
+        OpenAiResponsesProviderConfig, ProviderMode,
     },
     metrics::LlmMetrics,
     provider::types::{ChatMessage, ChatRequest, ModelId},
@@ -31,6 +32,8 @@ struct MockProvider {
 #[derive(Clone, Copy)]
 enum HandleBehavior {
     Failed,
+    CandidateTimeout,
+    SlowFailed,
     Timeout,
     Cancelled,
     Success,
@@ -157,6 +160,17 @@ impl LlmProvider for HandleAwareProvider {
                 });
                 handle.set_stop_reason(AgentStopReason::Failed);
                 Err(LlmError::new("provider_error", "failed", "provider")
+                    .with_agent(handle.snapshot()))
+            }
+            HandleBehavior::CandidateTimeout => {
+                // 模拟 runner 的单请求 timeout：记录当前候选结果，但不取消整次 Agent。
+                handle.set_stop_reason(AgentStopReason::Timeout);
+                Err(LlmError::timeout("agent_step").with_agent(handle.snapshot()))
+            }
+            HandleBehavior::SlowFailed => {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                handle.set_stop_reason(AgentStopReason::Failed);
+                Err(LlmError::provider("slow candidate failed", "provider")
                     .with_agent(handle.snapshot()))
             }
             HandleBehavior::Timeout => {
@@ -357,6 +371,8 @@ fn tool_request() -> ToolChatRequest {
                 interaction_scope_id: "private:u1".to_owned(),
             },
             tool_call_id: None,
+            tool_round: None,
+            retry_of: None,
             execution_deadline: None,
         },
         max_rounds: 3,
@@ -369,6 +385,7 @@ fn tool_request() -> ToolChatRequest {
 fn outcome(reply: &str) -> ChatOutcome {
     ChatOutcome {
         reply: reply.to_owned(),
+        output_parts: Vec::new(),
         metrics: LlmMetrics {
             provider: "mock".to_owned(),
             model: "mock-model".to_owned(),
@@ -393,7 +410,11 @@ fn app_config(provider: ProviderMode, model: &str) -> LlmConfig {
         provider,
         model_route: model_route.clone(),
         configured_model_routes: vec![("LLM_MODEL".to_owned(), model_route)],
-        openai_search_model: "gpt-5.5".to_owned(),
+        web_search: crate::web_search::WebSearchConfig {
+            default_model: "gpt-5.5".to_owned(),
+            ..crate::web_search::WebSearchConfig::default()
+        },
+        tavily_api_key: None,
         openai_api_key: Some("test-openai-key".to_owned()),
         openai_base_url: None,
         openai_api_mode: OpenAiApiMode::Auto,
@@ -407,6 +428,7 @@ fn app_config(provider: ProviderMode, model: &str) -> LlmConfig {
         gemini_base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_owned(),
         gemini_model: "gemini:gemini-2.5-flash".to_owned(),
         openai_compatible_providers: Vec::new(),
+        openai_responses_providers: Vec::new(),
         stream: true,
         request_timeout_seconds: 90,
         media_max_bytes: 10 * 1024 * 1024,

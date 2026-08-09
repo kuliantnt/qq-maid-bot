@@ -10,12 +10,15 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream;
 
 use crate::{
-    agent_loop::{AgentStopReason, AgentTextDeltaFuture, AgentTextDeltaSink},
+    agent_loop::{
+        AgentStopReason, AgentTextDeltaDelivery, AgentTextDeltaFuture, AgentTextDeltaSink,
+    },
     error::LlmError,
     provider::{
         DynLlmProvider,
@@ -31,6 +34,8 @@ use super::stream_state::{RouteStreamState, next_route_stream_event};
 use super::{
     ChatOutcome, LlmProvider, LlmStream, ToolCallingProtocol, ToolChatRequest, finish_agent_error,
 };
+
+const MIN_FALLBACK_CANDIDATE_START_BUDGET: Duration = Duration::from_secs(1);
 
 /// 通用模型候选链提供商。
 ///
@@ -55,6 +60,15 @@ impl ModelRouteProvider {
             return Err(LlmError::config(
                 "no LLM provider is available for model route",
             ));
+        }
+        let mut provider_ids = std::collections::HashSet::with_capacity(providers.len());
+        for (provider_id, _) in &providers {
+            if !provider_ids.insert(provider_id) {
+                return Err(LlmError::config(format!(
+                    "provider `{}` is registered more than once",
+                    provider_id.as_str()
+                )));
+            }
         }
         let model_display = default_route.display();
         Ok(Self {
@@ -84,11 +98,13 @@ fn track_visible_final_delta_sink(
             let sink = sink.clone();
             let visible_delta_sent = visible_delta_sent.clone();
             Box::pin(async move {
-                if !delta.is_empty() {
-                    // 候选链共用用户可见流；一旦外发最终回答 delta，就不能再切到后续候选。
+                let has_visible_text = !delta.is_empty();
+                let delivery = sink(delta).await?;
+                if has_visible_text && delivery == AgentTextDeltaDelivery::Visible {
+                    // 候选链共用用户可见流；只有下游确认正文已外发，才禁止切换候选。
                     visible_delta_sent.store(true, Ordering::SeqCst);
                 }
-                sink(delta).await
+                Ok(delivery)
             }) as AgentTextDeltaFuture
         }) as AgentTextDeltaSink
     })
@@ -122,7 +138,7 @@ impl LlmProvider for ModelRouteProvider {
                     error_stage = err.stage.as_str(),
                     error_kind = model_error_kind(&err),
                     fallback,
-                    "model candidate provider is not available"
+                    "模型候选的 Provider 不可用"
                 );
                 if !fallback {
                     if route.len() == 1 {
@@ -155,7 +171,7 @@ impl LlmProvider for ModelRouteProvider {
                         provider = provider_kind.as_str(),
                         model = %candidate.name,
                         result = "success",
-                        "model candidate succeeded"
+                        "模型候选请求成功"
                     );
                     // provider 内部兼容 fallback 与跨模型候选降级语义不同；这里只在
                     // 真正使用后续模型候选时标记，保持原有候选链行为不变。
@@ -174,7 +190,7 @@ impl LlmProvider for ModelRouteProvider {
                         error_stage = err.stage.as_str(),
                         error_kind = model_error_kind(&err),
                         fallback,
-                        "model candidate failed"
+                        "模型候选请求失败"
                     );
                     if !fallback {
                         if route.len() == 1 || !should_try_next_model(&err) {
@@ -232,6 +248,33 @@ impl LlmProvider for ModelRouteProvider {
         let mut failures = Vec::new();
         let visible_final_delta_sent = Arc::new(AtomicBool::new(false));
         for (index, candidate) in candidates.iter().enumerate() {
+            if index > 0
+                && run_handle
+                    .remaining_budget()
+                    .is_some_and(|remaining| remaining < MIN_FALLBACK_CANDIDATE_START_BUDGET)
+            {
+                let remaining_budget = run_handle.remaining_budget();
+                run_handle.cancel(AgentStopReason::Timeout);
+                tracing::warn!(
+                    task,
+                    candidate_index = index,
+                    provider = candidate
+                        .provider
+                        .as_ref()
+                        .unwrap_or(&self.default_provider)
+                        .as_str(),
+                    model = %candidate.name,
+                    candidate_remaining_budget_ms = remaining_budget
+                        .map(|value| value.as_millis()),
+                    fallback_skipped_reason = "insufficient_remaining_budget",
+                    "已跳过工具模型降级候选"
+                );
+                return Err(finish_agent_error(
+                    LlmError::timeout("agent_loop"),
+                    &run_handle,
+                    AgentStopReason::Timeout,
+                ));
+            }
             run_handle.begin_candidate_attempt()?;
             let provider_kind = candidate
                 .provider
@@ -250,7 +293,7 @@ impl LlmProvider for ModelRouteProvider {
                     error_stage = err.stage.as_str(),
                     error_kind = model_error_kind(&err),
                     fallback,
-                    "tool model candidate provider is not available"
+                    "工具模型候选的 Provider 不可用"
                 );
                 if !fallback {
                     failures.push(ModelAttemptFailure::new(
@@ -282,7 +325,7 @@ impl LlmProvider for ModelRouteProvider {
                     task,
                     provider = provider_kind.as_str(),
                     model = %candidate.name,
-                    "tool model candidate selected"
+                    "已选择工具模型候选"
                 );
                 provider
                     .chat_with_tools(ToolChatRequest {
@@ -327,15 +370,33 @@ impl LlmProvider for ModelRouteProvider {
                 Err(err) => {
                     run_handle.set_stop_reason_if_unset(AgentStopReason::Failed);
                     let visible_delta_sent = visible_final_delta_sent.load(Ordering::SeqCst);
+                    let agent_diagnostics = run_handle.snapshot();
                     let tool_side_effect_started = {
-                        let diagnostics = run_handle.snapshot();
+                        let diagnostics = &agent_diagnostics;
                         !diagnostics.side_effecting_tools_started.is_empty()
                             || !diagnostics.tools_with_unknown_result.is_empty()
                     };
-                    let fallback = index + 1 < candidates.len()
-                        && should_try_next_model(&err)
+                    // 只有可恢复的上游错误才切换候选。本地预算/请求构造错误对等价
+                    // payload 必然重复失败，必须原样返回，不能误报为候选 Provider 不可用。
+                    let has_next_candidate = index + 1 < candidates.len();
+                    let retryable_for_candidate = should_try_next_model(&err);
+                    let fallback = has_next_candidate
+                        && retryable_for_candidate
                         && !visible_delta_sent
                         && !tool_side_effect_started;
+                    let fallback_blocked_reason = if fallback {
+                        "none"
+                    } else if !has_next_candidate {
+                        "no_next_candidate"
+                    } else if !retryable_for_candidate {
+                        "error_not_fallback_eligible"
+                    } else if visible_delta_sent {
+                        "visible_answer_sent"
+                    } else if tool_side_effect_started {
+                        "side_effect_tool_started"
+                    } else {
+                        "unknown"
+                    };
                     tracing::warn!(
                         task,
                         candidate_index = index,
@@ -345,10 +406,14 @@ impl LlmProvider for ModelRouteProvider {
                         error_code = err.code.as_str(),
                         error_stage = err.stage.as_str(),
                         error_kind = model_error_kind(&err),
+                        incomplete_reason = err.incomplete_reason().unwrap_or("none"),
+                        tool_execution_attempted = agent_diagnostics.tool_execution_attempted,
+                        tool_executed = !agent_diagnostics.executed_tools.is_empty(),
                         visible_delta_sent,
                         tool_side_effect_started,
                         fallback,
-                        "tool model candidate failed"
+                        fallback_blocked_reason,
+                        "工具模型候选请求失败"
                     );
                     if visible_delta_sent {
                         return Err(finish_agent_error(

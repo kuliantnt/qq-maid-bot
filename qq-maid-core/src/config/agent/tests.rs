@@ -1,4 +1,54 @@
 use super::*;
+use qq_maid_llm::web_search::{WebSearchDepth, WebSearchTopic};
+
+struct TestDirectory(std::path::PathBuf);
+
+impl TestDirectory {
+    fn new(name: &str) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "qq-maid-agent-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn first_start_agent_config_matches_embedded_template() {
+    let directory = TestDirectory::new("first-start-content");
+    let path = directory.0.join("config/agent.toml");
+
+    ensure_default_agent_config_at(&HashMap::new(), &path).unwrap();
+
+    assert_eq!(std::fs::read_to_string(path).unwrap(), DEFAULT_AGENT_CONFIG);
+}
+
+#[cfg(unix)]
+#[test]
+fn first_start_agent_config_uses_mode_0600() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = TestDirectory::new("first-start-mode");
+    let path = directory.0.join("config/agent.toml");
+
+    ensure_default_agent_config_at(&HashMap::new(), &path).unwrap();
+
+    assert_eq!(
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
 
 #[test]
 fn toml_config_overrides_routes_profiles_and_scenes() {
@@ -21,7 +71,7 @@ candidates = ["openai:gpt-fast"]
 [model_routes.aux]
 candidates = ["openai:gpt-aux"]
 
-[search_routes.search]
+[tools.web_search.routes.search]
 model = "gpt-search"
 
 [profiles.fast]
@@ -92,7 +142,7 @@ version = 1
 [model_routes.main]
 candidates = ["openai:gpt-main"]
 
-[search_routes.search]
+[tools.web_search.routes.search]
 model = "gpt-search"
 
 [profiles.balanced]
@@ -134,7 +184,7 @@ request_timeout_seconds = 45
 [model_routes.private_main]
 candidates = ["mimo:mimo-v2.5-pro", "deepseek:deepseek-chat"]
 
-[search_routes.search]
+[tools.web_search.routes.search]
 model = "gpt-search"
 
 [profiles.fast]
@@ -202,10 +252,10 @@ candidates = ["openai:gpt-private"]
 [model_routes.group_main]
 candidates = ["openai:gpt-group"]
 
-[search_routes.search]
+[tools.web_search.routes.search]
 model = "gpt-search"
 
-[search_routes.private_search]
+[tools.web_search.routes.private_search]
 model = "gemini:gemini-2.5-flash"
 
 [profiles.fast]
@@ -242,6 +292,230 @@ enabled_tools = ["save_memory"]
 
     let private = config.resolve(ChatScene::Private).unwrap();
     assert_eq!(private.search_model, "gemini:gemini-2.5-flash");
+}
+
+#[test]
+fn provider_native_accepts_configured_responses_search_with_full_identity() {
+    let text = DEFAULT_AGENT_CONFIG.replace("model = \"gpt-5.6-luna\"", "model = \"xai:grok-4\"")
+        + r#"
+
+[providers.xai]
+kind = "openai_responses"
+base_url = "https://api.x.ai/v1"
+api_key_env = "XAI_API_KEY"
+"#;
+
+    let config = AgentRuntimeConfig::from_toml(
+        &text,
+        AgentConfigSource::File("config/agent.toml".to_owned()),
+    )
+    .unwrap();
+
+    assert_eq!(
+        config.resolve(ChatScene::Private).unwrap().search_model,
+        "xai:grok-4"
+    );
+}
+
+#[test]
+fn provider_native_rejects_undeclared_custom_search_provider_prefix() {
+    let text =
+        DEFAULT_AGENT_CONFIG.replace("model = \"gpt-5.6-luna\"", "model = \"xai_typo:grok-4\"");
+
+    let error = AgentRuntimeConfig::from_toml(
+        &text,
+        AgentConfigSource::File("config/agent.toml".to_owned()),
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .message
+            .contains("providers.xai_typo is not configured")
+    );
+}
+
+#[test]
+fn provider_native_rejects_compatible_provider_but_tavily_can_ignore_route() {
+    let provider_native =
+        DEFAULT_AGENT_CONFIG.replace("model = \"gpt-5.6-luna\"", "model = \"mimo:mimo-v2.5\"");
+    let error = AgentRuntimeConfig::from_toml(
+        &provider_native,
+        AgentConfigSource::File("config/agent.toml".to_owned()),
+    )
+    .unwrap_err();
+    assert!(error.message.contains("openai_compatible"));
+    assert!(error.message.contains("Tavily"));
+
+    let tavily = provider_native.replace("backend = \"provider_native\"", "backend = \"tavily\"");
+    let config = AgentRuntimeConfig::from_toml(
+        &tavily,
+        AgentConfigSource::File("config/agent.toml".to_owned()),
+    )
+    .unwrap();
+    assert_eq!(
+        config.resolve(ChatScene::Private).unwrap().search_backend,
+        WebSearchBackend::Tavily
+    );
+}
+
+#[test]
+fn provider_native_search_route_keeps_bare_model_as_openai_compatibility_default() {
+    let config = AgentRuntimeConfig::from_toml(
+        DEFAULT_AGENT_CONFIG,
+        AgentConfigSource::File("config/agent.toml".to_owned()),
+    )
+    .unwrap();
+    assert_eq!(
+        config.resolve(ChatScene::Private).unwrap().search_model,
+        "gpt-5.6-luna"
+    );
+}
+
+mod opencode;
+mod provider_startup;
+
+#[test]
+fn toml_config_rejects_legacy_search_routes_section() {
+    let text = r#"
+version = 1
+
+[model_routes.main]
+candidates = ["openai:gpt-main"]
+
+[search_routes.search]
+model = "gpt-search"
+
+[profiles.balanced]
+main_route = "main"
+
+[scenes.private]
+profile = "balanced"
+
+[scenes.group]
+profile = "balanced"
+"#;
+
+    let error = AgentRuntimeConfig::from_toml(
+        text,
+        AgentConfigSource::File("config/agent.toml".to_owned()),
+    )
+    .unwrap_err();
+
+    assert!(error.message.contains("unknown field `search_routes`"));
+}
+
+#[test]
+fn toml_config_unifies_web_search_backend_routes_and_tavily_options() {
+    let text = r#"
+version = 1
+
+[tools.web_search]
+backend = "tavily"
+max_results = 8
+search_depth = "advanced"
+topic = "news"
+time_range = "week"
+connect_timeout_seconds = 5
+first_response_timeout_seconds = 15
+total_timeout_seconds = 45
+
+[model_routes.main]
+candidates = ["openai:gpt-main"]
+
+[profiles.balanced]
+main_route = "main"
+
+[scenes.private]
+profile = "balanced"
+
+[scenes.group]
+profile = "balanced"
+"#;
+
+    let config = AgentRuntimeConfig::from_toml(
+        text,
+        AgentConfigSource::File("config/agent.toml".to_owned()),
+    )
+    .unwrap();
+    let private = config.resolve(ChatScene::Private).unwrap();
+
+    assert_eq!(private.search_backend, WebSearchBackend::Tavily);
+    assert!(private.search_model.is_empty());
+    assert_eq!(config.web_search().max_results, 8);
+    assert_eq!(config.web_search().search_depth, WebSearchDepth::Advanced);
+    assert_eq!(config.web_search().topic, WebSearchTopic::News);
+    assert_eq!(
+        config.web_search().time_range,
+        Some(WebSearchTimeRange::Week)
+    );
+}
+
+#[test]
+fn toml_config_rejects_invalid_web_search_timeout_order() {
+    let text = r#"
+version = 1
+
+[tools.web_search]
+connect_timeout_seconds = 20
+first_response_timeout_seconds = 10
+total_timeout_seconds = 30
+
+[tools.web_search.routes.search]
+model = "gpt-search"
+
+[model_routes.main]
+candidates = ["openai:gpt-main"]
+
+[profiles.balanced]
+main_route = "main"
+
+[scenes.private]
+profile = "balanced"
+
+[scenes.group]
+profile = "balanced"
+"#;
+
+    let error = AgentRuntimeConfig::from_toml(
+        text,
+        AgentConfigSource::File("config/agent.toml".to_owned()),
+    )
+    .unwrap_err();
+
+    assert!(error.message.contains("connect_timeout_seconds"));
+}
+
+#[test]
+fn toml_config_rejects_invalid_web_search_backend_and_tavily_options() {
+    let template = include_str!("../../../../runtime/config/agent.example.toml");
+    for (current, invalid, field) in [
+        (
+            "backend = \"provider_native\"",
+            "backend = \"unknown\"",
+            "backend",
+        ),
+        ("max_results = 5", "max_results = 11", "max_results"),
+        (
+            "search_depth = \"basic\"",
+            "search_depth = \"exhaustive\"",
+            "search_depth",
+        ),
+        ("topic = \"general\"", "topic = \"sports\"", "topic"),
+        (
+            "# time_range = \"week\"",
+            "time_range = \"forever\"",
+            "time_range",
+        ),
+    ] {
+        let text = template.replacen(current, invalid, 1);
+        let error = AgentRuntimeConfig::from_toml(
+            &text,
+            AgentConfigSource::File("config/agent.toml".to_owned()),
+        )
+        .unwrap_err();
+        assert!(error.message.contains(field), "{field}: {}", error.message);
+    }
 }
 
 #[test]
@@ -288,7 +562,7 @@ profile = "fast"
 
 #[test]
 fn default_agent_toml_prefers_luna_and_keeps_provider_fallbacks() {
-    let text = include_str!("../../../../runtime/config/agent.toml");
+    let text = include_str!("../../../../runtime/config/agent.example.toml");
     let config = AgentRuntimeConfig::from_toml(
         text,
         AgentConfigSource::File("config/agent.toml".to_owned()),
@@ -306,6 +580,7 @@ fn default_agent_toml_prefers_luna_and_keeps_provider_fallbacks() {
         Some("openai:gpt-5.6-luna,gemini:gemini-2.5-flash,mimo:mimo-v2.5,deepseek:deepseek-chat")
     );
     assert_eq!(private.search_model, "gpt-5.6-luna");
+    assert_eq!(private.search_backend, WebSearchBackend::ProviderNative);
     assert_eq!(
         group.main_model,
         "openai:gpt-5.6-luna,gemini:gemini-2.5-flash,mimo:mimo-v2.5,deepseek:deepseek-chat"
@@ -323,7 +598,7 @@ fn default_agent_toml_prefers_luna_and_keeps_provider_fallbacks() {
 
 #[test]
 fn default_agent_toml_declares_luna_first_without_embedding_secrets() {
-    let text = include_str!("../../../../runtime/config/agent.toml");
+    let text = include_str!("../../../../runtime/config/agent.example.toml");
     let active_config = text
         .lines()
         .map(str::trim)
@@ -338,8 +613,9 @@ fn default_agent_toml_declares_luna_first_without_embedding_secrets() {
     assert!(active_config.contains("gemini:gemini-2.5-pro"));
     assert!(active_config.contains("mimo:mimo-v2.5-pro"));
     assert!(active_config.contains("deepseek:deepseek-chat"));
-    assert!(active_config.contains("[search_routes.private_search]"));
-    assert!(active_config.contains("[search_routes.group_search]"));
+    assert!(active_config.contains("[tools.web_search.routes.private_search]"));
+    assert!(active_config.contains("[tools.web_search.routes.group_search]"));
+    assert!(active_config.contains("backend = \"provider_native\""));
     assert!(!active_config.contains("bigmodel:"));
     assert!(!active_config.contains("glm-"));
     assert!(!active_config.contains("sk-"));
@@ -349,7 +625,7 @@ fn default_agent_toml_declares_luna_first_without_embedding_secrets() {
 
 #[test]
 fn default_agent_toml_preserves_private_and_group_scene_routes() {
-    let text = include_str!("../../../../runtime/config/agent.toml");
+    let text = include_str!("../../../../runtime/config/agent.example.toml");
     let config = AgentRuntimeConfig::from_toml(
         text,
         AgentConfigSource::File("config/agent.toml".to_owned()),
@@ -370,6 +646,12 @@ fn default_agent_toml_preserves_private_and_group_scene_routes() {
     assert_eq!(private.reasoning_effort, Some(ReasoningEffort::Medium));
     assert_eq!(private.max_tool_rounds, 5);
     assert!(private.tool_calling_enabled);
+    assert!(
+        private
+            .enabled_tools
+            .iter()
+            .any(|tool| tool == "image_generation")
+    );
 
     assert_eq!(group.profile, "fast");
     assert!(group.main_model.starts_with("openai:gpt-5.6-luna,"));
@@ -387,12 +669,18 @@ fn default_agent_toml_preserves_private_and_group_scene_routes() {
             "save_memory"
         ]
     );
+    assert!(
+        !group
+            .enabled_tools
+            .iter()
+            .any(|tool| tool == "image_generation")
+    );
     assert!(!group.group_tool_calling_enabled);
 }
 
 #[test]
 fn default_agent_toml_exposes_expected_luna_first_route_displays() {
-    let text = include_str!("../../../../runtime/config/agent.toml");
+    let text = include_str!("../../../../runtime/config/agent.example.toml");
     let config = AgentRuntimeConfig::from_toml(
         text,
         AgentConfigSource::File("config/agent.toml".to_owned()),
@@ -430,7 +718,7 @@ fn default_agent_toml_exposes_expected_luna_first_route_displays() {
 
 #[test]
 fn toml_config_rejects_unknown_profile() {
-    let text = include_str!("../../../../runtime/config/agent.toml").replacen(
+    let text = include_str!("../../../../runtime/config/agent.example.toml").replacen(
         "profile = \"balanced\"",
         "profile = \"missing\"",
         1,
@@ -448,7 +736,7 @@ fn toml_config_rejects_unknown_profile() {
 
 #[test]
 fn toml_config_rejects_unknown_search_route() {
-    let text = include_str!("../../../../runtime/config/agent.toml").replacen(
+    let text = include_str!("../../../../runtime/config/agent.example.toml").replacen(
         "search_route = \"private_search\"",
         "search_route = \"missing\"",
         1,
@@ -466,7 +754,7 @@ fn toml_config_rejects_unknown_search_route() {
 
 #[test]
 fn toml_config_rejects_unknown_enabled_tool() {
-    let text = include_str!("../../../../runtime/config/agent.toml").replacen(
+    let text = include_str!("../../../../runtime/config/agent.example.toml").replacen(
         "enabled_tools = [\"get_weather\", \"get_train_schedule\"",
         "enabled_tools = [\"run_shell\", \"get_train_schedule\"",
         1,

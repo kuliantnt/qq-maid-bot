@@ -22,6 +22,7 @@ pub(crate) fn openai_responses_payload(
     max_output_tokens: u64,
     reasoning_effort: Option<ReasoningEffort>,
     stream: bool,
+    image_generation_enabled: bool,
 ) -> Result<Value, LlmError> {
     let mut payload = json!({
         "model": model,
@@ -33,6 +34,10 @@ pub(crate) fn openai_responses_payload(
     }
     if stream {
         payload["stream"] = json!(true);
+    }
+    if image_generation_enabled {
+        // 只有服务端场景策略开启时才向 Provider 暴露原生图片工具。
+        payload["tools"] = json!([{ "type": "image_generation" }]);
     }
     Ok(payload)
 }
@@ -174,6 +179,64 @@ mod tests {
     use crate::provider::types::ChatMessage;
     use qq_maid_common::input_part::{MessageInputPart, MessageMedia};
 
+    fn common_prefix_len(left: &[u8], right: &[u8]) -> usize {
+        left.iter()
+            .zip(right)
+            .take_while(|(left, right)| left == right)
+            .count()
+    }
+
+    #[test]
+    fn responses_payload_keeps_byte_prefix_stable_between_compactions() {
+        let stable = vec![
+            ChatMessage::system("固定 system"),
+            ChatMessage::system("摘要 revision 3"),
+            ChatMessage::user("历史用户"),
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: "历史助手".to_owned(),
+                content_parts: Vec::new(),
+            },
+        ];
+        let mut first_messages = stable.clone();
+        first_messages.extend([
+            ChatMessage::system("动态时间一"),
+            ChatMessage::user("本轮一"),
+        ]);
+        let mut second_messages = stable;
+        second_messages.extend([
+            ChatMessage::user("本轮一"),
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: "回复一".to_owned(),
+                content_parts: Vec::new(),
+            },
+            ChatMessage::system("动态时间二"),
+            ChatMessage::user("本轮二"),
+        ]);
+
+        let first =
+            openai_responses_payload(&first_messages, "gpt-5.5", 1024, 1200, None, false, false)
+                .unwrap();
+        let second =
+            openai_responses_payload(&second_messages, "gpt-5.5", 1024, 1200, None, false, false)
+                .unwrap();
+        let first_bytes = serde_json::to_vec(&first).unwrap();
+        let second_bytes = serde_json::to_vec(&second).unwrap();
+        let history_end = first_bytes
+            .windows("历史助手".len())
+            .position(|window| window == "历史助手".as_bytes())
+            .unwrap()
+            + "历史助手".len();
+
+        assert!(common_prefix_len(&first_bytes, &second_bytes) >= history_end);
+
+        let streaming =
+            openai_responses_payload(&first_messages, "gpt-5.5", 1024, 1200, None, true, false)
+                .unwrap();
+        assert_eq!(first["input"], streaming["input"]);
+    }
+
     #[test]
     fn openai_responses_payload_replays_assistant_history_as_output_text() {
         let messages = vec![
@@ -194,6 +257,7 @@ mod tests {
             1200,
             Some(ReasoningEffort::Medium),
             true,
+            false,
         )
         .unwrap();
         let input = payload["input"].as_array().unwrap();
@@ -221,10 +285,38 @@ mod tests {
             1200,
             Some(ReasoningEffort::Medium),
             false,
+            false,
         )
         .unwrap();
 
         assert!(payload.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn image_generation_tool_is_only_exposed_when_enabled() {
+        let disabled = openai_responses_payload(
+            &[ChatMessage::user("画一张图")],
+            "gpt-5.6-luna",
+            10 * 1024 * 1024,
+            1200,
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        let enabled = openai_responses_payload(
+            &[ChatMessage::user("画一张图")],
+            "gpt-5.6-luna",
+            10 * 1024 * 1024,
+            1200,
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+
+        assert!(disabled.get("tools").is_none());
+        assert_eq!(enabled["tools"], json!([{"type": "image_generation"}]));
     }
 
     #[test]
@@ -237,8 +329,9 @@ mod tests {
 
     #[test]
     fn openai_responses_payload_rejects_empty_messages() {
-        let err = openai_responses_payload(&[], "gpt-5.5", 10 * 1024 * 1024, 1200, None, false)
-            .unwrap_err();
+        let err =
+            openai_responses_payload(&[], "gpt-5.5", 10 * 1024 * 1024, 1200, None, false, false)
+                .unwrap_err();
         assert_eq!(err.code, "bad_request");
 
         let err = openai_responses_payload(
@@ -247,6 +340,7 @@ mod tests {
             10 * 1024 * 1024,
             1200,
             None,
+            false,
             false,
         )
         .unwrap_err();
@@ -272,6 +366,7 @@ mod tests {
             10 * 1024 * 1024,
             1200,
             None,
+            false,
             false,
         )
         .unwrap();
@@ -305,6 +400,7 @@ mod tests {
             1200,
             None,
             false,
+            false,
         )
         .unwrap_err();
 
@@ -335,6 +431,7 @@ mod tests {
             10 * 1024 * 1024,
             1200,
             None,
+            false,
             false,
         )
         .unwrap();
@@ -369,6 +466,7 @@ mod tests {
             1200,
             None,
             false,
+            false,
         )
         .unwrap_err();
 
@@ -400,6 +498,7 @@ mod tests {
             1200,
             None,
             false,
+            false,
         )
         .unwrap();
 
@@ -430,6 +529,7 @@ mod tests {
             1200,
             None,
             false,
+            false,
         )
         .unwrap();
         let content = payload["input"][0]["content"].as_array().unwrap();
@@ -443,5 +543,38 @@ mod tests {
         assert_eq!(content[1]["text"], "看图");
         assert_eq!(content[2]["type"], "input_image");
         assert_eq!(content[2]["image_url"], "https://example.test/a.jpg");
+    }
+
+    #[test]
+    fn openai_responses_payload_keeps_quote_and_current_text_once() {
+        // Core 已将引用正文和当前正文分别组装为可信有序 parts；Provider 只能原样序列化。
+        let payload = openai_responses_payload(
+            &[ChatMessage::user_with_parts(
+                "引用内容查看",
+                vec![
+                    MessageInputPart::text("引用元数据：reference=REFIDX_quoted"),
+                    MessageInputPart::text("引用文本：测试"),
+                    MessageInputPart::text("引用内容查看"),
+                ],
+            )],
+            "gpt-5.5",
+            10 * 1024 * 1024,
+            1200,
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        let payload_text = payload["input"][0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(payload_text.matches("测试").count(), 1);
+        assert_eq!(payload_text.matches("引用内容查看").count(), 1);
+        assert!(!payload_text.contains("测试引用内容查看"));
     }
 }

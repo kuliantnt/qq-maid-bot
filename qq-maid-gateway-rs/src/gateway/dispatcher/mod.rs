@@ -56,21 +56,22 @@ use tracing::warn;
 use super::{
     BotOutboundCache,
     bot_identity::SharedBotIdentity,
+    command::GatewayCommandService,
     dedupe::MessageDedupe,
     event::{C2cMessage, GroupMessage},
     group_filter::GroupCooldowns,
     ping::GatewayRuntimeStatus,
+    qq_official::group::GroupIngressPreprocessor,
     ref_index::SharedRefIndex,
 };
-use crate::{
-    api::QqApiClient, auth::AccessTokenManager, config::AppConfig, respond::RespondClient,
-};
+use crate::{api::QqApiClient, config::AppConfig, respond::RespondClient};
 
 #[derive(Clone)]
 pub(super) struct MessageDispatcherHandle {
     command_tx: mpsc::Sender<DispatcherCommand>,
     reject_tx: mpsc::Sender<RejectNotification>,
     respond: RespondClient,
+    group_ingress: Arc<GroupIngressPreprocessor>,
 }
 
 impl MessageDispatcherHandle {
@@ -113,19 +114,40 @@ impl MessageDispatcherHandle {
     }
 
     pub(super) async fn enqueue_group(&self, message: GroupMessage) -> DispatcherEnqueueResult {
-        let scope_key = self.respond.scope_key_from_group_message(&message);
-        let target = RejectTarget::Group {
-            group_openid: message.group_openid.clone(),
-            message_id: message.message_id.clone(),
+        let Some(mut message) = self.group_ingress.preprocess(message) else {
+            return Ok(());
         };
-        self.enqueue(
-            InboundEnvelope::Group(message),
-            scope_key,
-            target,
-            None,
-            true,
-        )
-        .await
+        // reservation 不进入 worker，只覆盖“预处理完成 -> Dispatcher 确认接收”的窗口。
+        let reservation = message.dedupe_reservation.take();
+        let scope_key = self.respond.scope_key_from_group_message(&message.message);
+        let target = RejectTarget::Group {
+            group_openid: message.message.group_openid.clone(),
+            message_id: message.message.message_id.clone(),
+        };
+        let result = self
+            .enqueue(
+                InboundEnvelope::Group(message),
+                scope_key,
+                target,
+                None,
+                true,
+            )
+            .await;
+        match result {
+            Ok(()) => {
+                if let Some(reservation) = reservation {
+                    reservation.commit();
+                }
+                Ok(())
+            }
+            Err(error) => {
+                // 失败时显式回滚；Drop 仍作为异常退出时的兜底，避免提前留下 committed 记录。
+                if let Some(reservation) = reservation {
+                    reservation.rollback();
+                }
+                Err(error)
+            }
+        }
     }
 
     async fn enqueue(
@@ -190,10 +212,12 @@ pub(super) struct MessageDispatcher {
 }
 
 impl MessageDispatcher {
+    /// 统一 Gateway 启动链路传入同一个命令服务，确保 QQ 官方入口的 `/ping`
+    /// 与 OneBot、微信入口使用相同的应用版本和诊断配置。
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         config: AppConfig,
-        auth: AccessTokenManager,
+        commands: GatewayCommandService,
         respond: RespondClient,
         api: QqApiClient,
         dedupe: Arc<MessageDedupe>,
@@ -214,16 +238,23 @@ impl MessageDispatcher {
         let handle_reject_tx = reject_tx.clone();
         let reject_metrics = Arc::new(RejectMetrics::default());
         let handle_respond = respond.clone();
+        let group_ingress = Arc::new(GroupIngressPreprocessor::new(
+            config.clone(),
+            respond.clone(),
+            dedupe.clone(),
+            group_outbound_cache.clone(),
+            bot_identity.clone(),
+            ref_index.clone(),
+        ));
         let handler = RealMessageHandler::new(
             config.clone(),
-            auth,
+            commands,
             respond,
             api.clone(),
             dedupe,
             ref_index,
             group_outbound_cache,
             group_cooldowns,
-            bot_identity,
             runtime.clone(),
         );
         let actor = DispatcherActor::new(
@@ -244,6 +275,7 @@ impl MessageDispatcher {
                 command_tx,
                 reject_tx: handle_reject_tx,
                 respond: handle_respond,
+                group_ingress,
             },
             join_handle,
             shutdown_token,
@@ -263,8 +295,8 @@ impl MessageDispatcher {
         .await
         {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => warn!(error = %error, "dispatcher task ended unexpectedly"),
-            Err(_) => warn!("dispatcher shutdown timed out"),
+            Ok(Err(error)) => warn!(error = %error, "dispatcher 任务意外结束"),
+            Err(_) => warn!("dispatcher 关闭超时"),
         }
     }
 }

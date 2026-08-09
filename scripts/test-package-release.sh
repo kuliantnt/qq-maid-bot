@@ -16,7 +16,9 @@ DIST_DIR="${DIST_DIR}" BUILD_TARGET="${BUILD_TARGET}" TARGET_TRIPLE="linux-x86_6
     ARCHIVE_FORMAT="tar.gz" bash "${REPO_DIR}/scripts/package-release.sh" test
 unix_listing="$(tar -tzf "${DIST_DIR}/qq-maid-bot-test-linux-x86_64.tar.gz")"
 printf '%s\n' "${unix_listing}" | grep -Fx 'qq-maid-bot-test-linux-x86_64/botctl.sh' >/dev/null
+printf '%s\n' "${unix_listing}" | grep -Fx 'qq-maid-bot-test-linux-x86_64/lib/agent-config.sh' >/dev/null
 printf '%s\n' "${unix_listing}" | grep -Fx 'qq-maid-bot-test-linux-x86_64/config/.env.example' >/dev/null
+printf '%s\n' "${unix_listing}" | grep -Fx 'qq-maid-bot-test-linux-x86_64/config/agent.example.toml' >/dev/null
 printf '%s\n' "${unix_listing}" | grep -Fx 'qq-maid-bot-test-linux-x86_64/config/ops.example.toml' >/dev/null
 printf '%s\n' "${unix_listing}" | grep -Fx 'qq-maid-bot-test-linux-x86_64/config/runtime.example.toml' >/dev/null
 if printf '%s\n' "${unix_listing}" | grep -E 'config/runtime\.toml$|config/secrets/|master\.key$' >/dev/null; then
@@ -32,8 +34,11 @@ DIST_DIR="${DIST_DIR}" BUILD_TARGET="${BUILD_TARGET}" TARGET_TRIPLE="windows-x86
     ARCHIVE_FORMAT="zip" bash "${REPO_DIR}/scripts/package-release.sh" test
 windows_listing="$(unzip -Z1 "${DIST_DIR}/qq-maid-bot-test-windows-x86_64.zip")"
 printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/botctl.cmd' >/dev/null
+printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/qbot.ps1' >/dev/null
 printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/qbot.cmd' >/dev/null
+printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/lib/agent-config.ps1' >/dev/null
 printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/config/.env.example' >/dev/null
+printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/config/agent.example.toml' >/dev/null
 printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/config/ops.example.toml' >/dev/null
 printf '%s\n' "${windows_listing}" | grep -Fx 'qq-maid-bot-test-windows-x86_64/config/runtime.example.toml' >/dev/null
 if printf '%s\n' "${windows_listing}" | grep -E 'config/runtime\.toml$|config/secrets/|master\.key$' >/dev/null; then

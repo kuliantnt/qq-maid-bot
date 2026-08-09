@@ -6,27 +6,43 @@ use std::{collections::HashMap, env, fs, fs::OpenOptions, io::Write, path::Path}
 
 use serde::{Deserialize, Serialize};
 
-use qq_maid_llm::provider::types::{ModelProvider, ModelRoute, ReasoningEffort};
+use qq_maid_llm::{
+    provider::types::{ModelId, ModelProvider, ModelRoute, ReasoningEffort},
+    web_search::{WebSearchBackend, WebSearchConfig, WebSearchTimeRange},
+};
 
 use crate::error::LlmError;
 
+mod provider_config;
+mod web_search_config;
+
+use provider_config::{default_auth_header, default_auth_scheme, provider_from_file};
+pub(in crate::config) use web_search_config::ToolsConfigFile;
+use web_search_config::web_search_from_file;
+
 pub const DEFAULT_AGENT_CONFIG_PATH: &str = "config/agent.toml";
 pub const AGENT_CONFIG_FILE_ENV: &str = "AGENT_CONFIG_FILE";
-const DEFAULT_AGENT_CONFIG: &str = include_str!("../../../../runtime/config/agent.toml");
+const DEFAULT_AGENT_CONFIG: &str = include_str!("../../../../runtime/config/agent.example.toml");
 
 /// 空配置目录首次启动时安装公开的默认 Agent 策略。
 ///
 /// 显式 `AGENT_CONFIG_FILE` 永远不自动创建，避免把拼错的高级部署路径静默纠正；仅默认
 /// 路径缺失时使用 `create_new`，不会覆盖人工文件或并发创建结果。
 pub fn ensure_default_agent_config(environment: &HashMap<String, String>) -> Result<(), LlmError> {
+    ensure_default_agent_config_at(environment, Path::new(DEFAULT_AGENT_CONFIG_PATH))
+}
+
+fn ensure_default_agent_config_at(
+    environment: &HashMap<String, String>,
+    path: &Path,
+) -> Result<(), LlmError> {
     if environment
         .get(AGENT_CONFIG_FILE_ENV)
         .is_some_and(|value| !value.trim().is_empty())
-        || Path::new(DEFAULT_AGENT_CONFIG_PATH).exists()
+        || path.exists()
     {
         return Ok(());
     }
-    let path = Path::new(DEFAULT_AGENT_CONFIG_PATH);
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).map_err(|error| {
         LlmError::config(format!(
@@ -65,6 +81,7 @@ pub fn ensure_default_agent_config(environment: &HashMap<String, String>) -> Res
 }
 
 const ALL_ENABLED_TOOL_NAMES: &[&str] = &[
+    "image_generation",
     "get_weather",
     "get_train_schedule",
     "get_rss_recent_items",
@@ -105,11 +122,12 @@ pub struct AgentRuntimeConfig {
     document: Option<AgentConfigDocument>,
     providers: HashMap<String, AgentProviderConfig>,
     routes: HashMap<String, ModelRoute>,
-    search_routes: HashMap<String, String>,
+    web_search_routes: HashMap<String, String>,
     profiles: HashMap<String, AgentProfile>,
     scenes: AgentScenes,
     knowledge_mode: KnowledgeRetrievalMode,
     knowledge_embedding: KnowledgeEmbeddingConfig,
+    web_search: WebSearchConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +172,7 @@ pub struct AgentProviderConfig {
     pub auth_header: String,
     pub auth_scheme: Option<String>,
     pub request_timeout_seconds: Option<u64>,
+    pub chat_fallback: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -161,6 +180,8 @@ pub struct AgentProviderConfig {
 pub enum AgentProviderKind {
     #[serde(rename = "openai_compatible")]
     OpenAiCompatible,
+    #[serde(rename = "openai_responses")]
+    OpenAiResponses,
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +192,7 @@ pub struct ResolvedAgentPolicy {
     pub main_model: String,
     pub main_route: ModelRoute,
     pub aux_model: Option<String>,
+    pub search_backend: WebSearchBackend,
     pub search_model: String,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub max_tool_rounds: usize,
@@ -231,11 +253,11 @@ pub(in crate::config) struct AgentConfigDocument {
     #[serde(default)]
     pub(in crate::config) knowledge: KnowledgeConfigFile,
     #[serde(default)]
-    providers: HashMap<String, ProviderFile>,
+    pub(in crate::config) tools: ToolsConfigFile,
+    #[serde(default)]
+    pub(in crate::config) providers: HashMap<String, ProviderFile>,
     #[serde(default)]
     pub(in crate::config) model_routes: HashMap<String, RouteFile>,
-    #[serde(default)]
-    pub(in crate::config) search_routes: HashMap<String, SearchRouteFile>,
     #[serde(default)]
     pub(in crate::config) profiles: HashMap<String, AgentProfileConfig>,
     pub(in crate::config) scenes: ScenesFile,
@@ -258,16 +280,19 @@ pub(in crate::config) struct RouteFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct ProviderFile {
-    kind: AgentProviderKind,
-    base_url: String,
-    api_key_env: String,
+pub(in crate::config) struct ProviderFile {
+    pub(in crate::config) kind: AgentProviderKind,
+    pub(in crate::config) base_url: String,
+    pub(in crate::config) api_key_env: String,
     #[serde(default = "default_auth_header")]
-    auth_header: String,
+    pub(in crate::config) auth_header: String,
     #[serde(default = "default_auth_scheme")]
-    auth_scheme: Option<String>,
+    pub(in crate::config) auth_scheme: Option<String>,
     #[serde(default)]
-    request_timeout_seconds: Option<u64>,
+    pub(in crate::config) request_timeout_seconds: Option<u64>,
+    /// 字段是否出现需要保留；Chat Provider 出现该 Responses 专属字段时必须拒绝。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(in crate::config) chat_fallback: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -338,7 +363,7 @@ impl AgentRuntimeConfig {
         #[cfg(test)]
         let path = if override_path.is_none() && !Path::new(&path).exists() {
             format!(
-                "{}/../runtime/config/agent.toml",
+                "{}/../runtime/config/agent.example.toml",
                 env!("CARGO_MANIFEST_DIR")
             )
         } else {
@@ -355,6 +380,29 @@ impl AgentRuntimeConfig {
             ))
         })?;
         Self::from_toml(&text, AgentConfigSource::File(path))
+    }
+
+    /// 为只读 `config check` 校验 Agent 策略，不触发首次启动的文件安装。
+    ///
+    /// 未显式覆盖路径且默认活动文件尚不存在时，校验与当前二进制同版的内嵌模板；其他
+    /// 情况仍交给正式加载器，以保证已有活动文件和显式路径继续采用严格文件语义。
+    pub fn validate_for_read_only_check(
+        environment: &HashMap<String, String>,
+    ) -> Result<(), LlmError> {
+        let has_explicit_path = environment
+            .get(AGENT_CONFIG_FILE_ENV)
+            .is_some_and(|value| !value.trim().is_empty());
+        let default_exists = Path::new(DEFAULT_AGENT_CONFIG_PATH)
+            .try_exists()
+            .unwrap_or(true);
+        if !has_explicit_path && !default_exists {
+            return Self::from_toml(
+                DEFAULT_AGENT_CONFIG,
+                AgentConfigSource::File(DEFAULT_AGENT_CONFIG_PATH.to_owned()),
+            )
+            .map(drop);
+        }
+        Self::load_from_environment(environment).map(drop)
     }
 
     pub(in crate::config) fn from_toml(
@@ -378,6 +426,7 @@ impl AgentRuntimeConfig {
         }
 
         let document = file.clone();
+        let web_search = web_search_from_file(&file.tools.web_search)?;
         let mut providers = HashMap::new();
         for (name, provider) in file.providers {
             let provider = provider_from_file(&name, provider)?;
@@ -393,10 +442,12 @@ impl AgentRuntimeConfig {
             let joined = route.candidates.join(",");
             routes.insert(name.clone(), ModelRoute::parse_config(&joined, &name)?);
         }
-        let mut search_routes = HashMap::new();
-        for (name, route) in file.search_routes {
-            let model = super::openai_model_name(&route.model, &format!("search_routes.{name}"))?;
-            search_routes.insert(name, model);
+        let mut web_search_routes = HashMap::new();
+        for (name, route) in file.tools.web_search.routes {
+            let field_name = format!("tools.web_search.routes.{name}");
+            let model = ModelId::parse_config(&route.model, &field_name)?;
+            let model = model.to_request_model();
+            web_search_routes.insert(name, model);
         }
         let mut profiles = HashMap::new();
         for (name, profile) in file.profiles {
@@ -420,10 +471,11 @@ impl AgentRuntimeConfig {
             document: Some(document),
             providers,
             routes,
-            search_routes,
+            web_search_routes,
             profiles,
             knowledge_mode: file.knowledge.mode,
             knowledge_embedding: file.knowledge.embedding,
+            web_search,
             scenes: AgentScenes {
                 private: scene_from_file(file.scenes.private),
                 group: scene_from_file(file.scenes.group),
@@ -480,16 +532,24 @@ impl AgentRuntimeConfig {
             None => None,
         };
         let search_route_name = scene_policy.search_route.as_deref().unwrap_or("search");
-        let search_model = self
-            .search_routes
-            .get(search_route_name)
-            .cloned()
-            .ok_or_else(|| {
-                LlmError::config(format!(
-                    "agent scene `{}` references unknown search route `{search_route_name}`",
-                    scene.as_str()
-                ))
-            })?;
+        let search_model = match self.web_search.default_backend {
+            WebSearchBackend::ProviderNative => self
+                .web_search_routes
+                .get(search_route_name)
+                .cloned()
+                .ok_or_else(|| {
+                    LlmError::config(format!(
+                        "agent scene `{}` references unknown search route `{search_route_name}`",
+                        scene.as_str()
+                    ))
+                })?,
+            // Tavily 和 disabled 不调用模型原生搜索，允许配置中完全移除旧 search route。
+            WebSearchBackend::Tavily | WebSearchBackend::Disabled => self
+                .web_search_routes
+                .get(search_route_name)
+                .cloned()
+                .unwrap_or_default(),
+        };
         let max_tool_rounds = scene_policy
             .max_tool_rounds
             .unwrap_or(profile.max_tool_rounds)
@@ -502,6 +562,7 @@ impl AgentRuntimeConfig {
             main_model: main_route.display(),
             main_route: main_route.clone(),
             aux_model,
+            search_backend: self.web_search.default_backend,
             search_model,
             reasoning_effort: scene_policy.reasoning_effort.or(profile.reasoning_effort),
             max_tool_rounds,
@@ -525,6 +586,18 @@ impl AgentRuntimeConfig {
                 "embedding": {
                     "enabled": self.knowledge_embedding.enabled,
                     "cache_dir": &self.knowledge_embedding.cache_dir,
+                },
+            },
+            "tools": {
+                "web_search": {
+                    "backend": self.web_search.default_backend.as_str(),
+                    "max_results": self.web_search.max_results,
+                    "search_depth": self.web_search.search_depth.as_str(),
+                    "topic": self.web_search.topic.as_str(),
+                    "time_range": self.web_search.time_range.map(WebSearchTimeRange::as_str),
+                    "connect_timeout_seconds": self.web_search.connect_timeout_seconds,
+                    "first_response_timeout_seconds": self.web_search.first_response_timeout_seconds,
+                    "total_timeout_seconds": self.web_search.total_timeout_seconds,
                 },
             },
             "private": private.diagnostic_summary(),
@@ -551,6 +624,10 @@ impl AgentRuntimeConfig {
 
     pub fn knowledge_embedding(&self) -> &KnowledgeEmbeddingConfig {
         &self.knowledge_embedding
+    }
+
+    pub fn web_search(&self) -> &WebSearchConfig {
+        &self.web_search
     }
 
     fn validate(&self) -> Result<(), LlmError> {
@@ -584,11 +661,43 @@ impl AgentRuntimeConfig {
                 )));
             }
         }
+        if self.web_search.default_backend == WebSearchBackend::ProviderNative {
+            for (name, model) in &self.web_search_routes {
+                self.validate_provider_native_search_model(name, model)?;
+            }
+        }
         validate_scene_enabled_tools("private", &self.scenes.private.enabled_tools)?;
         validate_scene_enabled_tools("group", &self.scenes.group.enabled_tools)?;
         self.resolve(ChatScene::Private)?;
         self.resolve(ChatScene::Group)?;
         Ok(())
+    }
+
+    fn validate_provider_native_search_model(
+        &self,
+        route_name: &str,
+        value: &str,
+    ) -> Result<(), LlmError> {
+        let field_name = format!("tools.web_search.routes.{route_name}");
+        let model = ModelId::parse_config(value, &field_name)?;
+        // 裸搜索模型只作为历史格式兼容为内置 OpenAI；显式前缀始终严格校验。
+        let provider = model.provider.unwrap_or(ModelProvider::OpenAi);
+        match provider {
+            ModelProvider::OpenAi | ModelProvider::Gemini => Ok(()),
+            ModelProvider::Custom(name) => match self.providers.get(&name) {
+                Some(provider) if provider.kind == AgentProviderKind::OpenAiResponses => Ok(()),
+                Some(_) => Err(LlmError::config(format!(
+                    "{field_name} references provider `{name}`, but openai_compatible does not support provider_native search; configure an openai_responses provider or Tavily"
+                ))),
+                None => Err(LlmError::config(format!(
+                    "{field_name} references custom provider `{name}`, but providers.{name} is not configured"
+                ))),
+            },
+            ModelProvider::DeepSeek | ModelProvider::BigModel => Err(LlmError::config(format!(
+                "{field_name} references provider `{}`, which does not support provider_native search; configure Tavily instead",
+                provider.as_str()
+            ))),
+        }
     }
 }
 
@@ -649,10 +758,11 @@ impl AgentRuntimeConfig {
             document: None,
             providers: HashMap::new(),
             routes,
-            search_routes: HashMap::from([("search".to_owned(), search_model.to_owned())]),
+            web_search_routes: HashMap::from([("search".to_owned(), search_model.to_owned())]),
             profiles,
             knowledge_mode: KnowledgeRetrievalMode::Preflight,
             knowledge_embedding: KnowledgeEmbeddingConfig::default(),
+            web_search: WebSearchConfig::default(),
             scenes: AgentScenes {
                 private: AgentScenePolicy {
                     enabled: true,
@@ -759,6 +869,7 @@ impl ResolvedAgentPolicy {
             "main_route": self.main_model,
             "aux_route": self.aux_model,
             "search_model": self.search_model,
+            "search_backend": self.search_backend.as_str(),
             "reasoning_effort": self.reasoning_effort.map(ReasoningEffort::as_str),
             "max_tool_rounds": self.max_tool_rounds,
             "max_output_tokens": self.max_output_tokens,
@@ -822,58 +933,6 @@ fn default_true() -> bool {
 
 fn default_max_tool_rounds() -> usize {
     5
-}
-
-fn default_auth_header() -> String {
-    "Authorization".to_owned()
-}
-
-fn default_auth_scheme() -> Option<String> {
-    Some("Bearer".to_owned())
-}
-
-fn provider_from_file(name: &str, provider: ProviderFile) -> Result<AgentProviderConfig, LlmError> {
-    let id = ModelProvider::parse_prefix(name)
-        .map_err(|err| LlmError::config(format!("invalid providers.{name}: {}", err.message)))?;
-    if !matches!(id, ModelProvider::Custom(_)) {
-        return Err(LlmError::config(format!(
-            "providers.{name} cannot override built-in provider `{}`",
-            id.as_str()
-        )));
-    }
-    let base_url = provider.base_url.trim();
-    if base_url.is_empty() {
-        return Err(LlmError::config(format!(
-            "providers.{name}.base_url must not be empty"
-        )));
-    }
-    let api_key_env = provider.api_key_env.trim();
-    if api_key_env.is_empty() {
-        return Err(LlmError::config(format!(
-            "providers.{name}.api_key_env must not be empty"
-        )));
-    }
-    let auth_header = provider.auth_header.trim();
-    if auth_header.is_empty() {
-        return Err(LlmError::config(format!(
-            "providers.{name}.auth_header must not be empty"
-        )));
-    }
-    if let Some(seconds) = provider.request_timeout_seconds {
-        validate_positive("request_timeout_seconds", seconds as usize)?;
-    }
-    Ok(AgentProviderConfig {
-        id,
-        kind: provider.kind,
-        base_url: base_url.to_owned(),
-        api_key_env: api_key_env.to_owned(),
-        auth_header: auth_header.to_owned(),
-        auth_scheme: provider
-            .auth_scheme
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty()),
-        request_timeout_seconds: provider.request_timeout_seconds,
-    })
 }
 
 #[cfg(test)]

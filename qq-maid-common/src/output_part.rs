@@ -12,7 +12,9 @@
 //! 的默认文案（如"当前平台暂不支持发送图片"）由调用方作为参数传入**，common
 //! 不绑定任何具体平台文案。
 
-use crate::markdown::to_chat_text;
+use std::fmt;
+
+use crate::markdown::{normalize_speakable_plain_text, to_chat_text, to_speakable_text};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssistantOutput {
@@ -33,7 +35,7 @@ pub enum OutputPart {
 ///
 /// 作为结构化输出契约存在，平台能力判断和发送由 Gateway render 层负责，
 /// 本结构不要求 Gateway 立即接入发送。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct OutputMedia {
     pub mime_type: Option<String>,
     pub filename: Option<String>,
@@ -41,8 +43,31 @@ pub struct OutputMedia {
     pub url: Option<String>,
     pub media_id: Option<String>,
     pub file_id: Option<String>,
+    /// 仅供支持本地文件协议的平台 sender 使用；QQ 官方发送不会消费该字段。
+    pub local_path: Option<String>,
+    /// Provider 返回的 base64 图片数据。只在结构化输出内传递，禁止写入日志。
+    pub data_base64: Option<String>,
     pub platform: Option<String>,
     pub fallback_text: Option<String>,
+}
+
+impl fmt::Debug for OutputMedia {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OutputMedia")
+            .field("mime_type", &self.mime_type)
+            .field("filename", &self.filename)
+            .field("size_bytes", &self.size_bytes)
+            // URL 和 base64 可能携带签名或大段二进制，只暴露是否存在。
+            .field("has_url", &self.url.is_some())
+            .field("has_media_id", &self.media_id.is_some())
+            .field("has_file_id", &self.file_id.is_some())
+            .field("has_local_path", &self.local_path.is_some())
+            .field("has_data_base64", &self.data_base64.is_some())
+            .field("platform", &self.platform)
+            .field("fallback_text", &self.fallback_text)
+            .finish()
+    }
 }
 
 impl AssistantOutput {
@@ -150,6 +175,22 @@ impl AssistantOutput {
         } else {
             (!self.text_fallback.trim().is_empty()).then(|| self.text_fallback.clone())
         }
+    }
+
+    /// 生成适合 TTS 的朗读文本，不修改任何原始输出字段。
+    ///
+    /// Markdown 非空时必须以原始 Markdown 为唯一来源，避免把为平台展示准备的
+    /// `text_fallback` 误当成朗读正文；没有 Markdown 时才最小整理纯文本 fallback。
+    /// 返回 `None` 表示跳过代码块、链接目标等内容后没有可朗读文字。
+    pub fn speakable_text(&self) -> Option<String> {
+        let text = self
+            .markdown
+            .as_deref()
+            .map(str::trim)
+            .filter(|markdown| !markdown.is_empty())
+            .map(to_speakable_text)
+            .unwrap_or_else(|| normalize_speakable_plain_text(&self.text_fallback));
+        (!text.trim().is_empty()).then_some(text)
     }
 }
 
@@ -370,5 +411,82 @@ mod tests {
             parts: Vec::new(),
         };
         assert_eq!(output.preferred_text(true), None);
+    }
+
+    #[test]
+    fn speakable_text_prefers_original_markdown_without_mutating_output() {
+        let output = AssistantOutput::markdown(
+            "这是平台文字 fallback",
+            "# 朗读标题\n\n这是 **Markdown** 正文。",
+        );
+        let original = output.clone();
+
+        assert_eq!(
+            output.speakable_text(),
+            Some("朗读标题\n\n这是 Markdown 正文。".to_owned())
+        );
+        assert_eq!(output, original);
+    }
+
+    #[test]
+    fn speakable_text_minimally_normalizes_plain_fallback() {
+        let output = AssistantOutput::text(
+            "  第一段   保留强调符号 **原样** https://example.test/a\n\n\n 第二段  ",
+        );
+
+        assert_eq!(
+            output.speakable_text(),
+            Some("第一段 保留强调符号 **原样**\n\n第二段".to_owned())
+        );
+
+        let adjacent = AssistantOutput::text("前文 https://example.test/a?x=1。后文");
+        assert_eq!(adjacent.speakable_text(), Some("前文。后文".to_owned()));
+    }
+
+    #[test]
+    fn speakable_text_skips_fenced_code_but_keeps_inline_code() {
+        let output = AssistantOutput::markdown(
+            "unused",
+            "正文 `cargo test`\n\n```rust\nlet secret = 1;\n```\n\n~~~sh\necho hidden\n~~~\n\n结尾",
+        );
+
+        assert_eq!(
+            output.speakable_text(),
+            Some("正文 cargo test\n\n结尾".to_owned())
+        );
+    }
+
+    #[test]
+    fn speakable_text_keeps_link_label_and_list_semantics_without_urls_or_images() {
+        let output = AssistantOutput::markdown(
+            "unused",
+            "> 请查看 [项目主页](https://example.test/repo)\n\n- 第一项\n1. 第二项\n\n![截图](https://img.example.test/a.png)",
+        );
+
+        assert_eq!(
+            output.speakable_text(),
+            Some("请查看 项目主页\n\n· 第一项\n· 第二项".to_owned())
+        );
+    }
+
+    #[test]
+    fn speakable_text_flattens_markdown_tables() {
+        let output =
+            AssistantOutput::markdown("unused", "| 名称 | 状态 |\n| --- | --- |\n| 构建 | 通过 |");
+
+        assert_eq!(
+            output.speakable_text(),
+            Some("名称 / 状态\n构建 / 通过".to_owned())
+        );
+    }
+
+    #[test]
+    fn speakable_text_returns_none_when_cleaning_removes_everything() {
+        let output = AssistantOutput::markdown(
+            "这段 fallback 不应被采用",
+            "```text\nonly code\n```\n\n![图](https://img.example.test/a.png)\nhttps://example.test",
+        );
+
+        assert_eq!(output.speakable_text(), None);
     }
 }

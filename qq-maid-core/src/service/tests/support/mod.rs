@@ -1,0 +1,909 @@
+use std::{
+    fs,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+
+use qq_maid_common::identity_context::IdentitySource;
+use qq_maid_llm::{
+    agent_loop::{
+        AgentRunDiagnostics, AgentStep, AgentStepSession, AgentStopReason, AgentTextDeltaDelivery,
+        AgentToolCall, AgentToolResult, ToolExecutionResult, ToolLoopProgressEvent,
+        run_agent_loop_with_handle,
+    },
+    provider::{
+        ChatOutcome, DynLlmProvider, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol,
+        ToolChatRequest,
+        status::{UpstreamStatus, observe_provider},
+        types::{ChatRequest, TokenUsage},
+    },
+    web_search::{WebSearchExecutor, WebSearchOutcome, WebSearchRequest},
+};
+use serde_json::{Value, json};
+
+use crate::{
+    app::{CoreExecutors, CoreRuntimeState, CoreStores},
+    config::{
+        AppConfig, DEFAULT_BIGMODEL_BASE_URL, DEFAULT_DEEPSEEK_BASE_URL,
+        DEFAULT_RSS_SUMMARY_MAX_CHARS, DailyReminderTime, OpenAiApiMode,
+    },
+    error::LlmError,
+    runtime::{
+        prompt::PromptConfig,
+        session::SessionStore,
+        tools::{
+            RadarExecutor, RadarSnapshot, RadarTarget,
+            knowledge::{KnowledgeIndex, KnowledgeStore},
+            rss::{RssFetchConfig, RssFetcher, RssStore},
+            train::{TrainExecutor, TrainSchedule, TrainScheduleRequest},
+            weather::{WeatherExecutor, WeatherOutcome, WeatherRequest},
+        },
+    },
+    service::{
+        CoreActor, CoreConversation, CoreError, CoreRequest, CoreRespondFailure, CoreRespondOutput,
+        CoreResponse, CoreResponseEvent, CoreResponseStream, Platform,
+    },
+    storage::{APP_MIGRATIONS, database::SqliteDatabase},
+    util::metrics::LlmMetrics,
+};
+
+pub(super) async fn collect_stream_failure(
+    output: Result<CoreRespondOutput, CoreError>,
+) -> CoreRespondFailure {
+    let CoreRespondOutput::Stream(mut stream) = output.unwrap() else {
+        panic!("expected stream output");
+    };
+    collect_failure_without_text_delta(&mut stream).await
+}
+
+pub(super) async fn collect_failure_without_text_delta(
+    stream: &mut CoreResponseStream,
+) -> CoreRespondFailure {
+    while let Some(event) = stream.recv().await {
+        match event {
+            CoreResponseEvent::Status(_) => {}
+            CoreResponseEvent::Failed(failure) => return failure,
+            CoreResponseEvent::TextDelta(delta) => {
+                panic!("unexpected text delta before failure: {delta}");
+            }
+            CoreResponseEvent::Completed(response) => {
+                panic!("unexpected completed response before failure: {response:?}");
+            }
+        }
+    }
+    panic!("stream ended without failure");
+}
+
+pub(super) async fn collect_stream_completed(
+    output: Result<CoreRespondOutput, CoreError>,
+) -> CoreResponse {
+    let mut stream = expect_stream(output.unwrap());
+    while let Some(event) = stream.recv().await {
+        if let CoreResponseEvent::Completed(response) = event {
+            return *response;
+        }
+    }
+    panic!("stream ended without completed response");
+}
+
+pub(super) async fn collect_completed_without_text_delta(
+    stream: &mut CoreResponseStream,
+) -> CoreResponse {
+    while let Some(event) = stream.recv().await {
+        match event {
+            CoreResponseEvent::Status(_) => {}
+            CoreResponseEvent::Completed(response) => return *response,
+            CoreResponseEvent::TextDelta(delta) => {
+                panic!("unexpected text delta before completed response: {delta}");
+            }
+            CoreResponseEvent::Failed(failure) => panic!("unexpected failure: {failure:?}"),
+        }
+    }
+    panic!("stream ended without completed response");
+}
+
+pub(super) fn expect_stream(output: CoreRespondOutput) -> CoreResponseStream {
+    let CoreRespondOutput::Stream(stream) = output else {
+        panic!("expected stream output");
+    };
+    stream
+}
+
+#[derive(Clone)]
+pub(super) enum ProviderBehavior {
+    Reply(String),
+    Stream(Vec<Result<LlmStreamEvent, LlmError>>),
+    Error(LlmError),
+    Delayed {
+        reply: String,
+        delay: Duration,
+    },
+    PartialThenDelayed {
+        delta: String,
+        delay: Duration,
+    },
+    AgentWeatherThenFinal,
+    AgentWebSearchInvalidArguments,
+    /// 候选 1：执行只读 `web_search` 成功后，把模型文本作为未验真草稿交给
+    /// `final_delta_sink`（工具活动已开始，Core 必须缓冲为 `Buffered`），随后
+    /// 以 `response.incomplete` 失败结束，触发候选链降级。
+    AgentWebSearchIncomplete {
+        draft: String,
+    },
+}
+
+struct WeatherAgentSession {
+    round: usize,
+}
+
+#[async_trait::async_trait]
+impl AgentStepSession for WeatherAgentSession {
+    fn provider(&self) -> &str {
+        "test-provider"
+    }
+
+    fn model(&self) -> &str {
+        "test-model"
+    }
+
+    async fn advance(
+        &mut self,
+        _results: &[AgentToolResult],
+        _allow_tool_calls: bool,
+    ) -> Result<AgentStep, LlmError> {
+        self.round += 1;
+        if self.round == 1 {
+            return Ok(AgentStep::ToolCalls {
+                calls: vec![AgentToolCall {
+                    name: "get_weather".to_owned(),
+                    call_id: "weather-1".to_owned(),
+                    arguments: r#"{"city":"杭州","forecast_days":1}"#.to_owned(),
+                }],
+                usage: None,
+            });
+        }
+        Ok(AgentStep::FinalAnswer {
+            reply: "must not start after timeout".to_owned(),
+            output_parts: Vec::new(),
+            usage: None,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct TestProvider {
+    behavior: ProviderBehavior,
+    requests: Arc<Mutex<Vec<ChatRequest>>>,
+    pub(super) calls: Arc<AtomicUsize>,
+    pub(super) tool_calls: Arc<AtomicUsize>,
+    tool_protocol: Option<ToolCallingProtocol>,
+    stream_enabled: bool,
+    emit_tool_progress: bool,
+    progress_tool_name: String,
+}
+
+impl TestProvider {
+    pub(super) fn replying(reply: &str) -> Self {
+        Self::new(ProviderBehavior::Reply(reply.to_owned()))
+    }
+
+    pub(super) fn failing(error: LlmError) -> Self {
+        Self::new(ProviderBehavior::Error(error))
+    }
+
+    pub(super) fn streaming(events: Vec<Result<LlmStreamEvent, LlmError>>) -> Self {
+        Self::new(ProviderBehavior::Stream(events)).with_stream_enabled(true)
+    }
+
+    pub(super) fn delayed(reply: &str, delay: Duration) -> Self {
+        Self::new(ProviderBehavior::Delayed {
+            reply: reply.to_owned(),
+            delay,
+        })
+    }
+
+    pub(super) fn partial_then_delayed(delta: &str, delay: Duration) -> Self {
+        Self::new(ProviderBehavior::PartialThenDelayed {
+            delta: delta.to_owned(),
+            delay,
+        })
+        .with_stream_enabled(true)
+    }
+
+    pub(super) fn agent_weather_then_final() -> Self {
+        Self::new(ProviderBehavior::AgentWeatherThenFinal)
+    }
+
+    pub(super) fn agent_web_search_invalid_arguments() -> Self {
+        Self::new(ProviderBehavior::AgentWebSearchInvalidArguments)
+    }
+
+    pub(super) fn new(behavior: ProviderBehavior) -> Self {
+        Self {
+            behavior,
+            requests: Arc::new(Mutex::new(Vec::new())),
+            calls: Arc::new(AtomicUsize::new(0)),
+            tool_calls: Arc::new(AtomicUsize::new(0)),
+            tool_protocol: None,
+            stream_enabled: false,
+            emit_tool_progress: true,
+            progress_tool_name: "mock_tool".to_owned(),
+        }
+    }
+
+    pub(super) fn with_stream_enabled(mut self, enabled: bool) -> Self {
+        self.stream_enabled = enabled;
+        self
+    }
+
+    pub(super) fn with_tool_protocol(mut self, protocol: ToolCallingProtocol) -> Self {
+        self.tool_protocol = Some(protocol);
+        self
+    }
+
+    pub(super) fn without_tool_progress(mut self) -> Self {
+        self.emit_tool_progress = false;
+        self
+    }
+
+    pub(super) fn with_progress_tool_name(mut self, tool_name: &str) -> Self {
+        self.progress_tool_name = tool_name.to_owned();
+        self
+    }
+
+    pub(super) fn requests(&self) -> Vec<ChatRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for TestProvider {
+    async fn chat(&self, req: ChatRequest) -> Result<ChatOutcome, LlmError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.requests.lock().unwrap().push(req);
+        match &self.behavior {
+            ProviderBehavior::Reply(reply) => Ok(chat_outcome(reply)),
+            ProviderBehavior::Stream(events) => {
+                let reply = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        Ok(LlmStreamEvent::TextDelta(delta)) => Some(delta.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>();
+                Ok(chat_outcome(&reply))
+            }
+            ProviderBehavior::Error(error) => Err(error.clone()),
+            ProviderBehavior::Delayed { reply, delay } => {
+                tokio::time::sleep(*delay).await;
+                Ok(chat_outcome(reply))
+            }
+            ProviderBehavior::PartialThenDelayed { delta, delay } => {
+                tokio::time::sleep(*delay).await;
+                Ok(chat_outcome(delta))
+            }
+            ProviderBehavior::AgentWeatherThenFinal => {
+                unreachable!("agent behavior uses chat_with_tools")
+            }
+            ProviderBehavior::AgentWebSearchInvalidArguments => {
+                unreachable!("agent behavior uses chat_with_tools")
+            }
+            ProviderBehavior::AgentWebSearchIncomplete { .. } => {
+                unreachable!("agent behavior uses chat_with_tools")
+            }
+        }
+    }
+
+    async fn stream_chat(&self, req: ChatRequest) -> Result<LlmStream, LlmError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.requests.lock().unwrap().push(req);
+        match &self.behavior {
+            ProviderBehavior::Reply(reply) => Ok(Box::pin(futures::stream::iter(vec![
+                Ok(LlmStreamEvent::TextDelta(reply.clone())),
+                Ok(LlmStreamEvent::Completed {
+                    usage: None,
+                    finish_reason: None,
+                    fallback_used: false,
+                }),
+            ]))),
+            ProviderBehavior::Stream(events) => {
+                Ok(Box::pin(futures::stream::iter(events.to_vec())))
+            }
+            ProviderBehavior::Error(error) => Err(error.clone()),
+            ProviderBehavior::Delayed { reply, delay } => {
+                let reply = reply.clone();
+                let delay = *delay;
+                Ok(Box::pin(futures::stream::unfold(
+                    (0_u8, reply, delay),
+                    |(state, reply, delay)| async move {
+                        if state == 0 {
+                            tokio::time::sleep(delay).await;
+                            return Some((
+                                Ok(LlmStreamEvent::TextDelta(reply)),
+                                (1, String::new(), delay),
+                            ));
+                        }
+                        if state == 1 {
+                            return Some((
+                                Ok(LlmStreamEvent::Completed {
+                                    usage: None,
+                                    finish_reason: None,
+                                    fallback_used: false,
+                                }),
+                                (2, String::new(), delay),
+                            ));
+                        }
+                        None
+                    },
+                )))
+            }
+            ProviderBehavior::PartialThenDelayed { delta, delay } => {
+                let delta = delta.clone();
+                let delay = *delay;
+                Ok(Box::pin(futures::stream::unfold(
+                    (0_u8, delta, delay),
+                    |(state, delta, delay)| async move {
+                        if state == 0 {
+                            return Some((
+                                Ok(LlmStreamEvent::TextDelta(delta)),
+                                (1, String::new(), delay),
+                            ));
+                        }
+                        if state == 1 {
+                            tokio::time::sleep(delay).await;
+                        }
+                        None
+                    },
+                )))
+            }
+            ProviderBehavior::AgentWeatherThenFinal => {
+                unreachable!("agent behavior uses chat_with_tools")
+            }
+            ProviderBehavior::AgentWebSearchInvalidArguments => {
+                unreachable!("agent behavior uses chat_with_tools")
+            }
+            ProviderBehavior::AgentWebSearchIncomplete { .. } => {
+                unreachable!("agent behavior uses chat_with_tools")
+            }
+        }
+    }
+
+    fn tool_calling_protocol(&self, _model: Option<&str>) -> Option<ToolCallingProtocol> {
+        self.tool_protocol
+    }
+
+    async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+        self.tool_calls.fetch_add(1, Ordering::SeqCst);
+        if matches!(self.behavior, ProviderBehavior::AgentWeatherThenFinal) {
+            return run_agent_loop_with_handle(
+                Box::new(WeatherAgentSession { round: 0 }),
+                req.tools,
+                req.tool_context,
+                req.max_rounds,
+                req.progress_sink,
+                req.final_delta_sink,
+                req.run_handle,
+            )
+            .await;
+        }
+        let progress_sink = req.progress_sink.clone();
+        self.requests.lock().unwrap().push(req.chat);
+        if self.emit_tool_progress
+            && let Some(sink) = progress_sink
+        {
+            sink(ToolLoopProgressEvent::ToolCallStarted {
+                tool_name: self.progress_tool_name.clone(),
+            })
+            .await?;
+            sink(ToolLoopProgressEvent::ToolCallFinished {
+                tool_name: self.progress_tool_name.clone(),
+            })
+            .await?;
+        }
+        match &self.behavior {
+            ProviderBehavior::Reply(reply) => Ok(chat_outcome(reply)),
+            ProviderBehavior::Stream(events) => {
+                let mut reply = String::new();
+                for event in events {
+                    match event {
+                        Ok(LlmStreamEvent::TextDelta(delta)) => {
+                            reply.push_str(delta);
+                            if let Some(sink) = req.final_delta_sink.as_ref() {
+                                sink(delta.clone()).await?;
+                            }
+                        }
+                        Ok(LlmStreamEvent::OutputPart(_)) => {}
+                        Ok(LlmStreamEvent::Completed { .. }) => {}
+                        Err(error) => return Err(error.clone()),
+                    }
+                }
+                Ok(chat_outcome(&reply))
+            }
+            ProviderBehavior::Error(error) => Err(error.clone()),
+            ProviderBehavior::Delayed { reply, delay } => {
+                tokio::time::sleep(*delay).await;
+                Ok(chat_outcome(reply))
+            }
+            ProviderBehavior::PartialThenDelayed { delta, delay } => {
+                if let Some(sink) = req.final_delta_sink.as_ref() {
+                    sink(delta.clone()).await?;
+                }
+                tokio::time::sleep(*delay).await;
+                Ok(chat_outcome(delta))
+            }
+            ProviderBehavior::AgentWeatherThenFinal => {
+                unreachable!("agent behavior returned before mock progress")
+            }
+            ProviderBehavior::AgentWebSearchInvalidArguments => {
+                let serialized = match req
+                    .tools
+                    .execute_json(
+                        &req.tool_context,
+                        "web_search",
+                        r#"{"query":"公开项目","time_range":"not-a-valid-range"}"#,
+                    )
+                    .await
+                {
+                    Ok(output) => output,
+                    // Agent Loop 会把参数校验 Err 转换为结构化 tool_result；夹具在
+                    // Provider 内模拟同一条边界，继续让 Core 运行领域投影。
+                    Err(error) => json!({
+                        "ok": false,
+                        "execution_succeeded": false,
+                        "error": {
+                            "code": error.code,
+                            "stage": error.stage,
+                        },
+                    })
+                    .to_string(),
+                };
+                let output = serde_json::from_str::<Value>(&serialized)
+                    .unwrap_or_else(|_| json!({"raw": serialized}));
+                let succeeded = output.get("ok").and_then(Value::as_bool) != Some(false);
+                let tool_result = ToolExecutionResult {
+                    name: "web_search".to_owned(),
+                    output,
+                    succeeded,
+                };
+                let draft = "模型草稿：联网查询已经成功完成，不应直接发送。";
+                if let Some(sink) = req.final_delta_sink.as_ref() {
+                    sink(draft.to_owned()).await?;
+                }
+                let mut outcome = chat_outcome(draft);
+                outcome.agent = AgentRunDiagnostics {
+                    model_rounds: 2,
+                    emitted_tools: vec!["web_search".to_owned()],
+                    tool_execution_attempted: true,
+                    executed_tools: vec!["web_search".to_owned()],
+                    side_effecting_tools_started: Vec::new(),
+                    tool_results: vec![tool_result],
+                    tool_attempts: Vec::new(),
+                    tools_with_unknown_result: Vec::new(),
+                    streaming_fallback_used: false,
+                    stop_reason: Some(AgentStopReason::ToolUsed),
+                };
+                Ok(outcome)
+            }
+            ProviderBehavior::AgentWebSearchIncomplete { draft } => {
+                // 候选 1：真实执行只读 web_search（ToolRegistry 白名单路径），
+                // 成功后再把模型文本作为未验真草稿交给 final_delta_sink。
+                let serialized = req
+                    .tools
+                    .execute_json(&req.tool_context, "web_search", r#"{"query":"公开项目"}"#)
+                    .await
+                    .map_err(|error| {
+                        LlmError::new(
+                            "internal_error",
+                            format!("web_search execution failed: {error}"),
+                            "tool",
+                        )
+                    })?;
+                let output = serde_json::from_str::<Value>(&serialized)
+                    .unwrap_or_else(|_| json!({"raw": serialized}));
+                let succeeded = output.get("ok").and_then(Value::as_bool) != Some(false);
+                let tool_result = ToolExecutionResult {
+                    name: "web_search".to_owned(),
+                    output,
+                    succeeded,
+                };
+                // 工具活动已开始，Core 的 final_delta_sink 必须缓冲草稿（Buffered），
+                // 不能进入用户可见发送链路；候选路由据此才允许降级到第二候选。
+                if let Some(sink) = req.final_delta_sink.as_ref() {
+                    let delivery = sink(draft.to_owned()).await?;
+                    if delivery != AgentTextDeltaDelivery::Buffered {
+                        return Err(LlmError::new(
+                            "internal_error",
+                            "tool-round draft must stay buffered after tool activity",
+                            "stream",
+                        ));
+                    }
+                }
+                let diagnostics = AgentRunDiagnostics {
+                    model_rounds: 2,
+                    emitted_tools: vec!["web_search".to_owned()],
+                    tool_execution_attempted: true,
+                    executed_tools: vec!["web_search".to_owned()],
+                    side_effecting_tools_started: Vec::new(),
+                    tool_results: vec![tool_result],
+                    tool_attempts: Vec::new(),
+                    tools_with_unknown_result: Vec::new(),
+                    streaming_fallback_used: false,
+                    stop_reason: Some(AgentStopReason::ToolUsed),
+                };
+                Err(
+                    LlmError::provider("OpenAI chat stream response incomplete", "sse")
+                        .with_incomplete_reason("max_output_tokens")
+                        .with_agent(diagnostics),
+                )
+            }
+        }
+    }
+
+    fn name(&self) -> &str {
+        "test-provider"
+    }
+
+    fn model(&self) -> &str {
+        "test-model"
+    }
+
+    fn stream_enabled(&self) -> bool {
+        self.stream_enabled
+    }
+}
+
+/// 最小候选链测试替身：镜像 `ModelRouteProvider` 在工具轮上的降级契约。
+///
+/// 候选 1 执行只读 `web_search`、把模型文本作为 `Buffered` 草稿投递后以
+/// `response.incomplete` 失败；候选 2 成功返回最终正文。由于 `ModelRouteProvider`
+/// 是 `qq-maid-llm` 的 crate 私有类型，这里在 Provider 边界复刻它的判定输入
+/// （可恢复协议错误、无用户可见正文、无副作用工具），让 Core 流层能观测到
+/// 完整降级链路；真实候选链判定由 `qq-maid-llm` routing 单测覆盖。
+#[derive(Clone)]
+pub(super) struct RouteFallbackTestProvider {
+    first: TestProvider,
+    second: TestProvider,
+    first_tool_calls: Arc<AtomicUsize>,
+    second_tool_calls: Arc<AtomicUsize>,
+    fallback_taken: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl RouteFallbackTestProvider {
+    pub(super) fn new(draft: &str, final_reply: &str) -> Self {
+        let first = TestProvider::new(ProviderBehavior::AgentWebSearchIncomplete {
+            draft: draft.to_owned(),
+        })
+        .with_stream_enabled(true)
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_progress_tool_name("web_search");
+        let second = TestProvider::streaming(vec![
+            Ok(LlmStreamEvent::TextDelta(final_reply.to_owned())),
+            Ok(LlmStreamEvent::Completed {
+                usage: None,
+                finish_reason: None,
+                fallback_used: false,
+            }),
+        ])
+        .with_tool_protocol(ToolCallingProtocol::ChatCompletionsToolCalls)
+        .without_tool_progress();
+        Self {
+            first,
+            second,
+            first_tool_calls: Arc::new(AtomicUsize::new(0)),
+            second_tool_calls: Arc::new(AtomicUsize::new(0)),
+            fallback_taken: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    pub(super) fn first_tool_calls(&self) -> usize {
+        self.first_tool_calls.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn second_tool_calls(&self) -> usize {
+        self.second_tool_calls.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn fallback_taken(&self) -> bool {
+        self.fallback_taken.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for RouteFallbackTestProvider {
+    async fn chat(&self, _req: ChatRequest) -> Result<ChatOutcome, LlmError> {
+        unreachable!("route fallback provider only serves tool calling tests")
+    }
+
+    fn tool_calling_protocol(&self, model: Option<&str>) -> Option<ToolCallingProtocol> {
+        self.first.tool_calling_protocol(model)
+    }
+
+    async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+        // 候选 1：只读 web_search + Buffered 草稿 + response.incomplete。
+        self.first_tool_calls.fetch_add(1, Ordering::SeqCst);
+        let first_err = match self.first.chat_with_tools(req.clone()).await {
+            Err(err) => err,
+            Ok(outcome) => {
+                panic!("first candidate must fail with response.incomplete: {outcome:?}")
+            }
+        };
+        // 镜像 ModelRouteProvider 的降级判定输入：可恢复协议错误 + 没有用户可见
+        // 正文 + 只读工具未启动副作用。草稿的 Buffered 投递由候选 1 内部断言。
+        assert_eq!(first_err.code, "provider_error");
+        assert_eq!(first_err.stage, "sse");
+        assert_eq!(first_err.incomplete_reason(), Some("max_output_tokens"));
+        let diagnostics = first_err
+            .agent
+            .as_deref()
+            .expect("first candidate must attach agent diagnostics");
+        assert!(
+            diagnostics.side_effecting_tools_started.is_empty(),
+            "read-only web_search must not be treated as a side-effect tool"
+        );
+        assert!(
+            diagnostics.tools_with_unknown_result.is_empty(),
+            "web_search result is trusted, not unknown"
+        );
+        assert_eq!(diagnostics.executed_tools, ["web_search"]);
+
+        self.fallback_taken.store(true, Ordering::SeqCst);
+        // 候选 2：成功返回最终正文；共享 handle 语义下仍携带候选 1 的只读轨迹。
+        self.second_tool_calls.fetch_add(1, Ordering::SeqCst);
+        let mut outcome = self.second.chat_with_tools(req).await?;
+        outcome.fallback_used = true;
+        outcome.agent = first_err.agent.map(|agent| *agent).unwrap_or_default();
+        Ok(outcome)
+    }
+
+    fn name(&self) -> &str {
+        "route-fallback-test"
+    }
+
+    fn model(&self) -> &str {
+        "route-fallback-test-model"
+    }
+
+    fn stream_enabled(&self) -> bool {
+        true
+    }
+}
+
+mod executors;
+
+pub(super) use executors::{
+    EmptyRadarExecutor, EmptyTrainExecutor, EmptyWeatherExecutor, EmptyWebSearchExecutor,
+    MockWebSearchExecutor, group_request, private_request, private_scope, wechat_service_request,
+};
+
+fn chat_outcome(reply: &str) -> ChatOutcome {
+    ChatOutcome {
+        reply: reply.to_owned(),
+        output_parts: Vec::new(),
+        metrics: LlmMetrics {
+            provider: "test-provider".to_owned(),
+            model: "test-model".to_owned(),
+            stream: false,
+            ttfe_ms: None,
+            ttft_ms: None,
+            total_latency_ms: 1,
+        },
+        usage: Some(TokenUsage {
+            input_tokens: None,
+            cached_input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+        }),
+        fallback_used: false,
+        agent: Default::default(),
+    }
+}
+
+pub(super) fn test_state(provider: TestProvider, request_timeout_seconds: u64) -> CoreRuntimeState {
+    test_state_with_tool_calling(provider, request_timeout_seconds, false)
+}
+
+pub(super) fn test_state_with_tool_calling(
+    provider: TestProvider,
+    request_timeout_seconds: u64,
+    tool_calling_enabled: bool,
+) -> CoreRuntimeState {
+    test_state_with_group_tool_calling(
+        provider,
+        request_timeout_seconds,
+        tool_calling_enabled,
+        false,
+    )
+}
+
+pub(super) fn test_state_with_group_tool_calling(
+    provider: TestProvider,
+    request_timeout_seconds: u64,
+    tool_calling_enabled: bool,
+    tool_calling_group_enabled: bool,
+) -> CoreRuntimeState {
+    test_state_with_group_tool_calling_and_query_executor(
+        Arc::new(provider),
+        request_timeout_seconds,
+        tool_calling_enabled,
+        tool_calling_group_enabled,
+        Arc::new(EmptyWebSearchExecutor),
+    )
+}
+
+pub(super) fn test_state_with_query_executor(
+    provider: TestProvider,
+    request_timeout_seconds: u64,
+    query_executor: Arc<dyn WebSearchExecutor>,
+) -> CoreRuntimeState {
+    test_state_with_group_tool_calling_and_query_executor(
+        Arc::new(provider),
+        request_timeout_seconds,
+        false,
+        false,
+        query_executor,
+    )
+}
+
+/// 带候选链测试替身的状态：私聊启用工具调用，并使用可成功的只读 web_search。
+pub(super) fn test_state_with_route_fallback_and_query_executor(
+    provider: RouteFallbackTestProvider,
+    request_timeout_seconds: u64,
+    query_executor: Arc<dyn WebSearchExecutor>,
+) -> CoreRuntimeState {
+    test_state_with_group_tool_calling_and_query_executor(
+        Arc::new(provider),
+        request_timeout_seconds,
+        true,
+        false,
+        query_executor,
+    )
+}
+
+fn test_state_with_group_tool_calling_and_query_executor(
+    provider: DynLlmProvider,
+    request_timeout_seconds: u64,
+    tool_calling_enabled: bool,
+    tool_calling_group_enabled: bool,
+    query_executor: Arc<dyn WebSearchExecutor>,
+) -> CoreRuntimeState {
+    let (database, base_dir) =
+        SqliteDatabase::open_temp_directory("qq-maid-core-service-test", APP_MIGRATIONS).unwrap();
+    let app_db_file = database.path().to_path_buf();
+    let prompt_dir = base_dir.join("prompts");
+    fs::create_dir_all(&prompt_dir).unwrap();
+    for file_name in crate::runtime::prompt::PROMPT_FILES {
+        fs::write(prompt_dir.join(file_name), format!("{file_name} content")).unwrap();
+    }
+    let knowledge_dir = base_dir.join("knowledge");
+    let knowledge_index =
+        KnowledgeIndex::new(KnowledgeStore::new(database.clone()), &knowledge_dir);
+    knowledge_index.sync().unwrap();
+    let upstream_status = UpstreamStatus::default();
+
+    CoreRuntimeState {
+        config: AppConfig {
+            agent_config: crate::config::AgentRuntimeConfig::for_test(
+                "test-model",
+                "test-search",
+                tool_calling_enabled,
+                tool_calling_group_enabled,
+                3,
+            ),
+            ops_config: crate::runtime::tools::ops::OpsConfig::default(),
+            command_prefix: Default::default(),
+            voice: crate::config::VoiceFeatureConfig::default(),
+            openai_api_key: Some("test".to_owned()),
+            openai_base_url: None,
+            openai_api_mode: OpenAiApiMode::Auto,
+            deepseek_api_key: None,
+            deepseek_base_url: DEFAULT_DEEPSEEK_BASE_URL.to_owned(),
+            bigmodel_api_key: None,
+            bigmodel_base_url: DEFAULT_BIGMODEL_BASE_URL.to_owned(),
+            gemini_api_key: None,
+            gemini_base_url: crate::config::DEFAULT_GEMINI_BASE_URL.to_owned(),
+            stream: false,
+            request_timeout_seconds,
+            agent_finalization_reserve_seconds:
+                crate::config::DEFAULT_AGENT_FINALIZATION_RESERVE_SECONDS,
+            web_search_first_activity_timeout_seconds:
+                crate::config::DEFAULT_WEB_SEARCH_FIRST_ACTIVITY_TIMEOUT_SECONDS,
+            web_search_idle_timeout_seconds: crate::config::DEFAULT_WEB_SEARCH_IDLE_TIMEOUT_SECONDS,
+            web_search_absolute_timeout_seconds:
+                crate::config::DEFAULT_WEB_SEARCH_ABSOLUTE_TIMEOUT_SECONDS,
+            ttft_warn_seconds: 30,
+            media_max_bytes: crate::config::DEFAULT_MEDIA_MAX_BYTES,
+            max_concurrent_responses: 4,
+            context_budget: qq_maid_llm::context_budget::ContextBudgetConfig {
+                context_window_chars: crate::config::DEFAULT_AGENT_CONTEXT_CHAR_LIMIT as usize,
+                output_reserve_chars: crate::config::DEFAULT_AGENT_CONTEXT_OUTPUT_RESERVE_CHARS
+                    as usize,
+                protected_recent_turns: crate::config::DEFAULT_AGENT_CONTEXT_PROTECTED_RECENT_TURNS
+                    as usize,
+            },
+            tool_result_max_chars: crate::config::DEFAULT_AGENT_TOOL_RESULT_CHAR_LIMIT as usize,
+            bot_display_name: crate::config::DEFAULT_BOT_DISPLAY_NAME.to_owned(),
+            server_host: "127.0.0.1".to_owned(),
+            server_port: 8787,
+            app_db_file: app_db_file.to_string_lossy().into_owned(),
+            sqlite_pool_size: crate::storage::database::DEFAULT_SQLITE_POOL_SIZE,
+            memory_consolidation_enabled: false,
+            memory_dream_enabled: false,
+            memory_consolidation_check_interval_seconds:
+                crate::config::DEFAULT_MEMORY_CONSOLIDATION_CHECK_INTERVAL_SECONDS,
+            memory_consolidation_min_interval_seconds:
+                crate::config::DEFAULT_MEMORY_CONSOLIDATION_MIN_INTERVAL_SECONDS,
+            memory_consolidation_min_new_records:
+                crate::config::DEFAULT_MEMORY_CONSOLIDATION_MIN_NEW_RECORDS,
+            memory_consolidation_min_distinct_sources:
+                crate::config::DEFAULT_MEMORY_CONSOLIDATION_MIN_DISTINCT_SOURCES,
+            memory_consolidation_max_records:
+                crate::config::DEFAULT_MEMORY_CONSOLIDATION_MAX_RECORDS,
+            memory_consolidation_max_input_chars:
+                crate::config::DEFAULT_MEMORY_CONSOLIDATION_MAX_INPUT_CHARS,
+            memory_dream_min_interval_seconds:
+                crate::config::DEFAULT_MEMORY_DREAM_MIN_INTERVAL_SECONDS,
+            memory_dream_min_new_sessions: crate::config::DEFAULT_MEMORY_DREAM_MIN_NEW_SESSIONS,
+            memory_dream_max_sessions: crate::config::DEFAULT_MEMORY_DREAM_MAX_SESSIONS,
+            memory_dream_max_input_chars: crate::config::DEFAULT_MEMORY_DREAM_MAX_INPUT_CHARS,
+            memory_dream_max_output_memories:
+                crate::config::DEFAULT_MEMORY_DREAM_MAX_OUTPUT_MEMORIES,
+            rss_enabled: false,
+            rss_translation_enabled: false,
+            rss_poll_interval_seconds: 300,
+            rss_http_timeout_seconds: 15,
+            rss_max_body_bytes: 2 * 1024 * 1024,
+            rss_max_push_per_feed: 3,
+            rss_summary_max_chars: DEFAULT_RSS_SUMMARY_MAX_CHARS,
+            rss_seen_retention: 500,
+            rss_push_max_failures: 3,
+            rss_push_message_type: "markdown".to_owned(),
+            todo_daily_reminder_enabled: false,
+            todo_daily_reminder_time: DailyReminderTime { hour: 9, minute: 0 },
+            rss_allow_private_urls: true,
+            prompt_dir: prompt_dir.to_string_lossy().into_owned(),
+            prompt_dir_uses_builtin_defaults: false,
+            knowledge_dir: knowledge_dir.to_string_lossy().into_owned(),
+            knowledge_max_file_bytes: crate::config::DEFAULT_KNOWLEDGE_MAX_FILE_BYTES,
+            qweather_api_key: "test".to_owned(),
+            qweather_api_host: "https://api.qweather.com".to_owned(),
+            qweather_geo_host: "https://geoapi.qweather.com".to_owned(),
+            web_console_enabled: false,
+            web_console_allowed_origins: Vec::new(),
+            web_console_trusted_proxy_ips: Vec::new(),
+            web_console_secure_cookies: false,
+        },
+        provider: observe_provider(provider, upstream_status.clone()),
+        upstream_status,
+        executors: CoreExecutors {
+            query_executor,
+            weather_executor: Arc::new(EmptyWeatherExecutor),
+            train_executor: Arc::new(EmptyTrainExecutor),
+            radar_executor: Arc::new(EmptyRadarExecutor),
+        },
+        stores: CoreStores {
+            memory_store: crate::runtime::tools::memory::MemoryStore::new(database.clone()),
+            session_store: SessionStore::new(database.clone()),
+            todo_store: crate::runtime::tools::todo::TodoStore::new(database.clone()),
+            voice_store: crate::runtime::tools::voice::VoicePreferenceStore::new(database.clone()),
+            notification_store: crate::storage::notification::NotificationOutboxStore::new(
+                database.clone(),
+            ),
+            ops_execution_store: crate::runtime::tools::ops::OpsExecutionStore::new(
+                database.clone(),
+            ),
+            ops_task_registry: crate::runtime::tools::ops::OpsTaskRegistry::default(),
+            rss_store: RssStore::new(database.clone()),
+            display_name_store: crate::runtime::display_name::DisplayNameStore::new(database),
+        },
+        rss_fetcher: RssFetcher::new(RssFetchConfig {
+            allow_private_networks: true,
+            ..RssFetchConfig::default()
+        })
+        .unwrap(),
+        knowledge_index,
+        prompt_config: PromptConfig::new(prompt_dir),
+    }
+}

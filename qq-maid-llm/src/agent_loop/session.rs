@@ -21,12 +21,35 @@ use super::types::{AgentStep, AgentTextDeltaSink, AgentToolResult};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentStreamingDiagnostics {
     pub fallback_reason: Option<String>,
+    pub http_status: Option<u16>,
+    pub stream_end_kind: Option<String>,
+    pub last_sse_event_type: Option<String>,
     pub chunk_count: usize,
     pub sse_event_count: usize,
     pub saw_done: bool,
     pub saw_completed: bool,
+    pub normal_eof: bool,
+    pub connection_reset: bool,
+    pub parse_error: bool,
+    pub explicit_failure_event: bool,
+    /// `response.incomplete.response.incomplete_details.reason` 的低敏稳定值。
+    pub incomplete_reason: Option<String>,
+    pub saw_text_delta: bool,
     pub buffered_delta_count: usize,
+    pub buffered_text_chars: usize,
+    pub visible_text_chars: usize,
     pub active_function_call_count: usize,
+}
+
+/// 会话持有的协议形态上下文的尺寸估算；只用于 Issue #361 诊断，不参与预算。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AgentInputSizeEstimate {
+    /// 协议形态条目数（Responses `input` / Chat Completions `messages` 条数）。
+    pub item_count: usize,
+    /// 条目 JSON 序列化估算字符数；DEBUG 未开启时可为 0，避免诊断成本。
+    pub estimated_chars: usize,
+    /// 已追加的工具结果输出字符数。
+    pub tool_result_chars: usize,
 }
 
 /// Provider 侧单步会话：把各自协议的一次模型请求转换为统一 `AgentStep`。
@@ -45,12 +68,16 @@ pub trait AgentStepSession: Send {
     fn streaming_activity_counter(&self) -> Option<Arc<AtomicUsize>> {
         None
     }
+    /// 返回当前会话上下文的尺寸估算；只用于诊断日志，默认实现返回空值。
+    fn input_size_estimate(&self) -> AgentInputSizeEstimate {
+        AgentInputSizeEstimate::default()
+    }
     /// 用上一轮工具执行结果推进一步。
     ///
     /// - `results`：上一轮工具执行结果；首轮为空切片。
     /// - `allow_tool_calls`：是否允许本轮产生工具调用。当为 `false` 时，协议层
-    ///   必须显式设置等价于 `tool_choice=none` 的禁用选项；Provider 违反约束仍
-    ///   返回工具调用时，由 `run_agent_loop` 受控终止。
+    ///   必须使用该 Provider 兼容的禁用方式（可移除工具字段，或使用等价于
+    ///   `tool_choice=none` 的选项）；Provider 违反约束仍由 `run_agent_loop` 受控终止。
     async fn advance(
         &mut self,
         results: &[AgentToolResult],
@@ -68,8 +95,9 @@ pub trait AgentStepSession: Send {
     ///   可以边接收真实 provider delta 边转发。
     /// - 如果本轮产生 tool call，不得向 `text_delta_sink` 发送任何模型草稿。
     /// - 一旦已经发送用户可见 delta，后续错误必须原样返回，不能改走非流式重放。
-    /// - 流式推进失败或超时时，会话状态必须仍可用同一批 `results` 执行一次
-    ///   `advance`；Provider 不得在流式响应完整结束前提交本轮协议状态。
+    /// - 流式推进在尚无有效文本/工具调用且剩余预算充足时，会话状态必须仍可用
+    ///   同一批 `results` 执行一次 `advance`；已有有效文本后不得同 Provider 重生成。
+    ///   Provider 不得在流式响应完整结束前提交本轮协议状态。
     async fn advance_streaming(
         &mut self,
         _results: &[AgentToolResult],

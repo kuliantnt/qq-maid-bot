@@ -12,7 +12,7 @@ use chrono::{Duration, NaiveDate};
 use qq_maid_llm::{
     provider::{
         AgentRunDiagnostics, AgentStopReason, ChatOutcome, LlmProvider, ToolCallingProtocol,
-        ToolChatRequest, ToolExecutionResult,
+        ToolChatRequest, ToolExecutionAttempt, ToolExecutionResult,
         types::{ChatRequest, ChatRole, TokenUsage},
     },
     web_search::{WebSearchExecutor, WebSearchOutcome, WebSearchRequest, WebSearchSource},

@@ -1,11 +1,11 @@
 use tokio::time::Instant;
-use tracing::info;
+use tracing::debug;
 
 use super::types::{FlushReason, PendingAggregation};
 use crate::{
     config::MessageAggregationConfig,
     gateway::{
-        dedupe::{MessageReservation, dedupe_event_key, dedupe_message_key},
+        dedupe::{MessageReservation, dedupe_event_key, dedupe_qq_composite_key},
         event::C2cMessage,
         logging::mask_scope_key,
     },
@@ -63,15 +63,22 @@ pub(super) fn event_id_values(message: &C2cMessage) -> Vec<String> {
 }
 
 pub(super) fn dedupe_keys(message: &C2cMessage) -> Vec<String> {
-    message_id_values(message)
+    // 优先使用 QQ 复合去重键（platform + scene + peer_id + message_id + msg_idx）。
+    let composite = message_id_values(message)
         .into_iter()
-        .map(|id| dedupe_message_key(&id))
-        .chain(
-            event_id_values(message)
-                .into_iter()
-                .map(|id| dedupe_event_key(&id)),
-        )
-        .collect()
+        .map(|id| {
+            dedupe_qq_composite_key(
+                "c2c",
+                &message.user_openid,
+                &id,
+                message.current_msg_idx.as_deref(),
+            )
+        })
+        .filter(|key| !key.is_empty());
+    let event_keys = event_id_values(message)
+        .into_iter()
+        .map(|id| dedupe_event_key(&id));
+    composite.chain(event_keys).collect()
 }
 
 pub(super) fn commit_reservations(reservations: Vec<MessageReservation>) {
@@ -121,13 +128,13 @@ pub(super) fn merge_batch(batch: &PendingAggregation, reason: FlushReason) -> C2
             .or_else(|| message.timestamp.clone())
     });
     merged.timestamp = merged.last_message_timestamp.clone();
-    info!(
+    debug!(
         scope_key = %mask_scope_key(&scope_key_from_c2c_message(&merged)),
         aggregation_batch_size = all_messages.len(),
         aggregation_total_chars = batch.total_chars,
         aggregation_wait_ms = batch.first_received_at.elapsed().as_millis() as u64,
         aggregation_flush_reason = reason.as_str(),
-        "message aggregation flushed batch"
+        "消息聚合批次已刷新"
     );
     merged
 }
