@@ -213,7 +213,7 @@ impl MemoryStore {
         for id in &duplicate_ids {
             tx.execute(
                 "UPDATE memories
-                    SET status = 'archived', updated_at = ?1
+                    SET status = 'archived', updated_at = ?1, revision = revision + 1
                   WHERE id = ?2 AND status = 'active'
                     AND scope_type = ?3 AND scope_id = ?4 AND memory_kind = ?5
                     AND subject_id IS ?6",

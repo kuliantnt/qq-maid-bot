@@ -358,7 +358,7 @@ impl MemoryStore {
             }
             let record = build_v3_record(PersistMemoryRequest {
                 target: target.clone(),
-                created_by_user_id: context.actor_scope_id.clone(),
+                created_by_user_id: Some(context.actor_scope_id.clone()),
                 content: normalized.to_owned(),
                 source_text: String::new(),
                 category: candidate.category,

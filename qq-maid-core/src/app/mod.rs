@@ -189,6 +189,11 @@ impl LlmRuntime {
                     core_state.stores.todo_store.clone(),
                     core_state.stores.notification_store.clone(),
                 ))
+                .with_memory_management(
+                    crate::runtime::tools::memory::MemoryManagementService::new(
+                        core_state.stores.memory_store.clone(),
+                    ),
+                )
                 .with_console_user_data(user_data)
                 .with_knowledge_files(
                     knowledge_file_service

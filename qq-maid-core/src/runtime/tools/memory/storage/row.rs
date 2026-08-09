@@ -37,6 +37,16 @@ pub(super) fn memory_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memor
         status: row.get(20)?,
         pinned: row.get(21)?,
         attribute_key: row.get(22)?,
+        revision: u64::try_from(row.get::<_, i64>(23)?).map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                23,
+                rusqlite::types::Type::Integer,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "memory revision must be positive",
+                )),
+            )
+        })?,
     })
 }
 
@@ -51,7 +61,7 @@ pub(super) fn get_by_id_unlocked(
                 user_id, group_id, content, source_text,
                 memory_kind, subject_id, relation_subject_id, relation_object_id,
                 visibility, source_type, source_ref, last_confirmed_at,
-                status, pinned, attribute_key
+                status, pinned, attribute_key, revision
          FROM memories
          WHERE id = ?1",
         params![id],
@@ -75,7 +85,7 @@ pub(super) fn get_by_id_scoped_unlocked(
                 user_id, group_id, content, source_text,
                 memory_kind, subject_id, relation_subject_id, relation_object_id,
                 visibility, source_type, source_ref, last_confirmed_at,
-                status, pinned, attribute_key
+                status, pinned, attribute_key, revision
          FROM memories
          WHERE id = ?1 AND scope_type = ?2 AND scope_id = ?3
            AND memory_kind = ?4 AND status = 'active'",

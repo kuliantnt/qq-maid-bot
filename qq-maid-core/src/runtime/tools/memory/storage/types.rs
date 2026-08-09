@@ -64,6 +64,12 @@ pub enum MemorySourceType {
 pub struct MemoryRecord {
     #[serde(default)]
     pub id: String,
+    /// 服务端维护的单调版本；管理 API 通过安全 DTO 暴露为 `version`。
+    ///
+    /// 该字段不进入现有聊天侧 JSON，避免把管理并发细节扩散到模型上下文；
+    /// PreparedAction 的旧快照仍可通过其他持久化字段完成兼容校验。
+    #[serde(default = "initial_memory_revision", skip_serializing)]
+    pub revision: u64,
     #[serde(default)]
     pub ts: String,
     #[serde(rename = "createdAt", default)]
@@ -335,7 +341,8 @@ impl MemoryQuery {
 #[derive(Debug, Clone)]
 pub(crate) struct PersistMemoryRequest {
     pub target: MemoryTarget,
-    pub created_by_user_id: String,
+    /// 管理员人工导入没有 Memory owner；`None` 不能替换成管理员 ID。
+    pub created_by_user_id: Option<String>,
     pub content: String,
     pub source_text: String,
     pub category: MemoryCategory,
@@ -354,6 +361,8 @@ pub(crate) struct PersistMemoryRequest {
 pub(crate) struct PersistMemoryResult {
     pub record: MemoryRecord,
     pub archived_ids: Vec<String>,
+    /// 写事务内验证过的画像开关；管理 DTO 不需要在提交后重新读取偏好。
+    pub profile_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -476,4 +485,8 @@ fn legacy_memory_source_type() -> MemorySourceType {
 
 fn archived_memory_status() -> MemoryStatus {
     MemoryStatus::Archived
+}
+
+fn initial_memory_revision() -> u64 {
+    1
 }
