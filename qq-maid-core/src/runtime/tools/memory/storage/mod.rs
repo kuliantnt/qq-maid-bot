@@ -5,7 +5,7 @@
 //! 领域层负责，storage 仅提供精确查询、持久化和事务能力。
 
 use qq_maid_common::{redaction::redact_sensitive_text, time_context::now_iso_cn};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -449,6 +449,22 @@ impl MemoryStore {
             .map_err(MemoryError::from_database)
     }
 
+    /// 在 Memory 管理领域需要附加写入（例如管理审计）时，统一复用同一个事务。
+    ///
+    /// 回调失败或提交失败都会让 SQLite 自动回滚，调用方不能看到只完成一半的操作。
+    pub(crate) fn with_immediate_transaction<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, MemoryError>,
+    ) -> Result<T, MemoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(MemoryError::from_sql)?;
+        let value = operation(&transaction)?;
+        transaction.commit().map_err(MemoryError::from_sql)?;
+        Ok(value)
+    }
+
     #[cfg(test)]
     pub fn drop_schema_for_test(&self) -> Result<(), MemoryError> {
         self.connection()?
@@ -578,6 +594,13 @@ impl MemoryError {
     pub(crate) fn forbidden(message: impl Into<String>) -> Self {
         Self {
             code: "forbidden",
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn audit_failed(message: impl Into<String>) -> Self {
+        Self {
+            code: "management_audit_error",
             message: message.into(),
         }
     }

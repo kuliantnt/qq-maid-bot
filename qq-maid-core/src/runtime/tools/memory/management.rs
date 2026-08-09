@@ -11,8 +11,10 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+use rusqlite::Transaction;
+
 use super::{
-    MemoryCategory, MemoryRecord, MemorySourceType, MemoryStatus, MemoryStore,
+    MemoryCategory, MemoryError, MemoryRecord, MemorySourceType, MemoryStatus, MemoryStore,
     ops::validate_visibility,
     storage::{ManagementListQuery, PersistMemoryRequest},
 };
@@ -101,36 +103,55 @@ impl MemoryManagementService {
         self.present(&target, record)
     }
 
+    #[cfg(test)]
     pub(crate) fn create(
         &self,
         input: MemoryCreateInput,
     ) -> Result<MemoryManagementMutationResult, MemoryManagementError> {
+        self.create_with_audit(input, |_, _| Ok(()))
+    }
+
+    pub(crate) fn create_with_audit<F>(
+        &self,
+        input: MemoryCreateInput,
+        audit: F,
+    ) -> Result<MemoryManagementMutationResult, MemoryManagementError>
+    where
+        F: Fn(&Transaction<'_>, Option<u64>) -> Result<(), MemoryManagementError>,
+    {
         let target = self.resolve_target_ref(&input.target_ref)?;
         validate_content(&input.content)?;
         validate_visibility(&target.target, input.visibility)
             .map_err(MemoryManagementError::from)?;
         let result = self
             .store
-            .persist_v3(PersistMemoryRequest {
-                target: target.target.clone(),
-                created_by_user_id: None,
-                content: input.content,
-                source_text: String::new(),
-                category: input.category,
-                legacy_scope: input.category.as_str().to_owned(),
-                visibility: input.visibility,
-                source_type: MemorySourceType::ManualImport,
-                source_ref: None,
-                confirmed_at: None,
-                pinned: input.pinned,
-                attribute_key: input.attribute_key,
-                relation_subject_id: None,
-                relation_object_id: None,
-            })
+            .persist_v3_with_audit(
+                PersistMemoryRequest {
+                    target: target.target.clone(),
+                    created_by_user_id: None,
+                    content: input.content,
+                    source_text: String::new(),
+                    category: input.category,
+                    legacy_scope: input.category.as_str().to_owned(),
+                    visibility: input.visibility,
+                    source_type: MemorySourceType::ManualImport,
+                    source_ref: None,
+                    confirmed_at: None,
+                    pinned: input.pinned,
+                    attribute_key: input.attribute_key,
+                    relation_subject_id: None,
+                    relation_object_id: None,
+                },
+                |tx, result| {
+                    audit(tx, Some(result.record.revision))
+                        .map_err(|error| MemoryError::audit_failed(error.message()))
+                },
+            )
             .map_err(MemoryManagementError::from)?;
         self.present_mutation(&target, result)
     }
 
+    #[cfg(test)]
     pub(crate) fn update(
         &self,
         target_ref: &str,
@@ -138,6 +159,22 @@ impl MemoryManagementService {
         expected_version: u64,
         patch: MemoryUpdatePatch,
     ) -> Result<MemoryManagementMutationResult, MemoryManagementError> {
+        self.update_with_audit(target_ref, memory_ref, expected_version, patch, |_, _| {
+            Ok(())
+        })
+    }
+
+    pub(crate) fn update_with_audit<F>(
+        &self,
+        target_ref: &str,
+        memory_ref: &str,
+        expected_version: u64,
+        patch: MemoryUpdatePatch,
+        audit: F,
+    ) -> Result<MemoryManagementMutationResult, MemoryManagementError>
+    where
+        F: Fn(&Transaction<'_>, Option<u64>) -> Result<(), MemoryManagementError>,
+    {
         if patch.is_empty() {
             return Err(MemoryManagementError::Validation(
                 "update patch must not be empty".to_owned(),
@@ -171,7 +208,7 @@ impl MemoryManagementService {
         }
         let result = self
             .store
-            .replace_v3_if_unchanged(
+            .replace_v3_if_unchanged_with_audit(
                 &target.target,
                 &current.id,
                 &current,
@@ -193,23 +230,43 @@ impl MemoryManagementService {
                     relation_subject_id: current.relation_subject_id.clone(),
                     relation_object_id: current.relation_object_id.clone(),
                 },
+                |tx, result| {
+                    audit(tx, Some(result.record.revision))
+                        .map_err(|error| MemoryError::audit_failed(error.message()))
+                },
             )
             .map_err(MemoryManagementError::from)?;
         self.present_mutation(&target, result)
     }
 
+    #[cfg(test)]
     pub(crate) fn archive(
         &self,
         target_ref: &str,
         memory_ref: &str,
         expected_version: u64,
     ) -> Result<MemoryManagementMutationResult, MemoryManagementError> {
+        self.archive_with_audit(target_ref, memory_ref, expected_version, |_, _| Ok(()))
+    }
+
+    pub(crate) fn archive_with_audit<F>(
+        &self,
+        target_ref: &str,
+        memory_ref: &str,
+        expected_version: u64,
+        audit: F,
+    ) -> Result<MemoryManagementMutationResult, MemoryManagementError>
+    where
+        F: Fn(&Transaction<'_>, Option<u64>) -> Result<(), MemoryManagementError>,
+    {
         let target = self.resolve_target_ref(target_ref)?;
         let current = self.resolve_memory_ref(&target, memory_ref)?;
         ensure_expected_version(&current, expected_version)?;
         let archived = self
             .store
-            .management_archive_if_unchanged(&target.target, &current)
+            .management_archive_if_unchanged_with_audit(&target.target, &current, |tx, version| {
+                audit(tx, version).map_err(|error| MemoryError::audit_failed(error.message()))
+            })
             .map_err(MemoryManagementError::from)?;
         Ok(MemoryManagementMutationResult {
             memory: self.present(&target, archived)?,
@@ -217,18 +274,34 @@ impl MemoryManagementService {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn restore(
         &self,
         target_ref: &str,
         memory_ref: &str,
         expected_version: u64,
     ) -> Result<MemoryManagementMutationResult, MemoryManagementError> {
+        self.restore_with_audit(target_ref, memory_ref, expected_version, |_, _| Ok(()))
+    }
+
+    pub(crate) fn restore_with_audit<F>(
+        &self,
+        target_ref: &str,
+        memory_ref: &str,
+        expected_version: u64,
+        audit: F,
+    ) -> Result<MemoryManagementMutationResult, MemoryManagementError>
+    where
+        F: Fn(&Transaction<'_>, Option<u64>) -> Result<(), MemoryManagementError>,
+    {
         let target = self.resolve_target_ref(target_ref)?;
         let current = self.resolve_memory_ref(&target, memory_ref)?;
         ensure_expected_version(&current, expected_version)?;
         let restored = self
             .store
-            .management_restore_if_unchanged(&target.target, &current)
+            .management_restore_if_unchanged_with_audit(&target.target, &current, |tx, version| {
+                audit(tx, version).map_err(|error| MemoryError::audit_failed(error.message()))
+            })
             .map_err(MemoryManagementError::from)?;
         Ok(MemoryManagementMutationResult {
             memory: self.present(&target, restored)?,
@@ -245,6 +318,7 @@ impl MemoryManagementService {
         prepare_confirmation(self, actor, operation, target_ref)
     }
 
+    #[cfg(test)]
     pub(crate) fn commit(
         &self,
         actor: ManagementActor,
@@ -252,7 +326,30 @@ impl MemoryManagementService {
         target_ref: &str,
         confirmation_token: &str,
     ) -> Result<types::MemoryOperationResult, MemoryManagementError> {
-        commit_confirmation(self, actor, operation, target_ref, confirmation_token)
+        self.commit_with_audit(actor, operation, target_ref, confirmation_token, |_, _| {
+            Ok(())
+        })
+    }
+
+    pub(crate) fn commit_with_audit<F>(
+        &self,
+        actor: ManagementActor,
+        operation: &str,
+        target_ref: &str,
+        confirmation_token: &str,
+        audit: F,
+    ) -> Result<types::MemoryOperationResult, MemoryManagementError>
+    where
+        F: Fn(&Transaction<'_>, Option<u64>) -> Result<(), MemoryManagementError>,
+    {
+        commit_confirmation(
+            self,
+            actor,
+            operation,
+            target_ref,
+            confirmation_token,
+            audit,
+        )
     }
 
     fn visible_targets(&self) -> Result<Vec<ResolvedTarget>, MemoryManagementError> {
@@ -287,6 +384,7 @@ impl MemoryManagementService {
             .map_err(MemoryManagementError::from)?
             .into_iter()
             .find(|record| memory_ref_for(&target.summary.target_ref, &record.id) == memory_ref)
+            .filter(|record| record.memory_type.parse::<MemoryCategory>().is_ok())
             .ok_or(MemoryManagementError::NotFound)
     }
 
@@ -295,26 +393,30 @@ impl MemoryManagementService {
         filter: &MemoryListFilter,
     ) -> Result<Vec<ResolvedTarget>, MemoryManagementError> {
         let targets = self.visible_targets()?;
-        if let Some(target_ref) = filter.target_ref.as_deref() {
-            let target = targets
-                .into_iter()
-                .find(|target| target.summary.target_ref == target_ref)
-                .ok_or(MemoryManagementError::NotFound)?;
-            return Ok(vec![target]);
+        if let Some(target_ref) = filter.target_ref.as_deref()
+            && !targets
+                .iter()
+                .any(|target| target.summary.target_ref == target_ref)
+        {
+            return Err(MemoryManagementError::NotFound);
         }
         Ok(targets
             .into_iter()
             .filter(|target| {
-                target_matches_filter(
-                    target,
-                    &MemoryTargetFilter {
-                        scope: filter.scope,
-                        platform: filter.platform.clone(),
-                        account_ref: filter.account_ref.clone(),
-                        group_ref: filter.group_ref.clone(),
-                        subject_ref: filter.subject_ref.clone(),
-                    },
-                )
+                filter
+                    .target_ref
+                    .as_deref()
+                    .is_none_or(|target_ref| target.summary.target_ref == target_ref)
+                    && target_matches_filter(
+                        target,
+                        &MemoryTargetFilter {
+                            scope: filter.scope,
+                            platform: filter.platform.clone(),
+                            account_ref: filter.account_ref.clone(),
+                            group_ref: filter.group_ref.clone(),
+                            subject_ref: filter.subject_ref.clone(),
+                        },
+                    )
             })
             .collect())
     }
@@ -342,7 +444,7 @@ impl MemoryManagementService {
             .map_err(MemoryManagementError::from)?
             .profile_enabled
             .unwrap_or(true);
-        Ok(memory_item(target, record, profile_enabled))
+        memory_item(target, record, profile_enabled)
     }
 
     fn present_page(

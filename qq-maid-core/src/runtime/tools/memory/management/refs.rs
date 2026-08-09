@@ -222,21 +222,22 @@ pub(super) fn memory_item(
     target: &ResolvedTarget,
     record: MemoryRecord,
     profile_enabled: bool,
-) -> MemoryManagementItem {
+) -> Result<MemoryManagementItem, MemoryManagementError> {
+    let category = record
+        .memory_type
+        .parse::<MemoryCategory>()
+        .map(MemoryCategory::as_str)
+        .map(str::to_owned)
+        .map_err(|_| MemoryManagementError::NotFound)?;
     let active = record.status == MemoryStatus::Active;
     let profile_allowed = record.memory_kind != MemoryKind::GroupProfile || profile_enabled;
-    MemoryManagementItem {
+    Ok(MemoryManagementItem {
         memory_ref: memory_ref_for(&target.summary.target_ref, &record.id),
         version: record.revision,
         target: target.summary.clone(),
         content: record.content,
         kind: record.memory_kind.as_str().to_owned(),
-        category: record
-            .memory_type
-            .parse::<MemoryCategory>()
-            .map(MemoryCategory::as_str)
-            .unwrap_or(MemoryCategory::Note.as_str())
-            .to_owned(),
+        category,
         visibility: record.visibility.as_str().to_owned(),
         status: record.status.as_str().to_owned(),
         pinned: record.pinned,
@@ -249,7 +250,7 @@ pub(super) fn memory_item(
             can_archive: active,
             can_restore: !active && profile_allowed,
         },
-    }
+    })
 }
 
 pub(super) fn operation_capabilities(

@@ -52,18 +52,29 @@ impl MemoryStore {
         &self,
         req: PersistMemoryRequest,
     ) -> Result<PersistMemoryResult, MemoryError> {
+        self.persist_v3_with_audit(req, |_, _| Ok(()))
+    }
+
+    /// 与附加写入（例如管理审计）共享 Memory 的 IMMEDIATE 事务。
+    pub(crate) fn persist_v3_with_audit<F>(
+        &self,
+        req: PersistMemoryRequest,
+        audit: F,
+    ) -> Result<PersistMemoryResult, MemoryError>
+    where
+        F: FnOnce(&Transaction<'_>, &PersistMemoryResult) -> Result<(), MemoryError>,
+    {
         let record = build_v3_record(req)?;
-        let mut conn = self.connection()?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(MemoryError::from_sql)?;
-        ensure_profile_enabled_unlocked(&tx, &record)?;
-        let archived_ids = archive_conflicts_unlocked(&tx, &record, None)?;
-        insert_record_unlocked(&tx, &record)?;
-        tx.commit().map_err(MemoryError::from_sql)?;
-        Ok(PersistMemoryResult {
-            record,
-            archived_ids,
+        self.with_immediate_transaction(|tx| {
+            ensure_profile_enabled_unlocked(tx, &record)?;
+            let archived_ids = archive_conflicts_unlocked(tx, &record, None)?;
+            insert_record_unlocked(tx, &record)?;
+            let result = PersistMemoryResult {
+                record,
+                archived_ids,
+            };
+            audit(tx, &result)?;
+            Ok(result)
         })
     }
 
@@ -110,35 +121,48 @@ impl MemoryStore {
         expected: &MemoryRecord,
         req: PersistMemoryRequest,
     ) -> Result<PersistMemoryResult, MemoryError> {
+        self.replace_v3_if_unchanged_with_audit(target, id, expected, req, |_, _| Ok(()))
+    }
+
+    pub(crate) fn replace_v3_if_unchanged_with_audit<F>(
+        &self,
+        target: &MemoryTarget,
+        id: &str,
+        expected: &MemoryRecord,
+        req: PersistMemoryRequest,
+        audit: F,
+    ) -> Result<PersistMemoryResult, MemoryError>
+    where
+        F: FnOnce(&Transaction<'_>, &PersistMemoryResult) -> Result<(), MemoryError>,
+    {
         let target = target.clean()?;
         let mut record = build_v3_record(req)?;
         if record_target(&record) != target {
             return Err(MemoryError::bad_request("replacement target mismatch"));
         }
-        let mut conn = self.connection()?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(MemoryError::from_sql)?;
-        ensure_record_unchanged_unlocked(&tx, &target, id, expected)?;
-        ensure_profile_enabled_unlocked(&tx, &record)?;
-        record.revision = expected
-            .revision
-            .checked_add(1)
-            .ok_or_else(|| MemoryError::io("memory revision overflow"))?;
-        let mut archived_ids = archive_conflicts_unlocked(&tx, &record, Some(id))?;
-        if archive_id_for_target_unlocked(&tx, &target, id)? == 0 {
-            return Err(MemoryError::changed(
-                "memory changed after confirmation was prepared",
-            ));
-        }
-        if !archived_ids.iter().any(|archived| archived == id) {
-            archived_ids.push(id.to_owned());
-        }
-        insert_record_unlocked(&tx, &record)?;
-        tx.commit().map_err(MemoryError::from_sql)?;
-        Ok(PersistMemoryResult {
-            record,
-            archived_ids,
+        self.with_immediate_transaction(|tx| {
+            ensure_record_unchanged_unlocked(tx, &target, id, expected)?;
+            ensure_profile_enabled_unlocked(tx, &record)?;
+            record.revision = expected
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| MemoryError::io("memory revision overflow"))?;
+            let mut archived_ids = archive_conflicts_unlocked(tx, &record, Some(id))?;
+            if archive_id_for_target_unlocked(tx, &target, id)? == 0 {
+                return Err(MemoryError::changed(
+                    "memory changed after confirmation was prepared",
+                ));
+            }
+            if !archived_ids.iter().any(|archived| archived == id) {
+                archived_ids.push(id.to_owned());
+            }
+            insert_record_unlocked(tx, &record)?;
+            let result = PersistMemoryResult {
+                record,
+                archived_ids,
+            };
+            audit(tx, &result)?;
+            Ok(result)
         })
     }
 

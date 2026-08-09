@@ -168,6 +168,7 @@ pub(crate) enum MemoryManagementError {
     Conflict(String),
     PermissionDenied,
     ProfileDisabled,
+    AuditUnavailable,
     Internal,
 }
 
@@ -179,6 +180,7 @@ impl MemoryManagementError {
             Self::Conflict(_) => "conflict",
             Self::PermissionDenied => "permission_denied",
             Self::ProfileDisabled => "profile_disabled",
+            Self::AuditUnavailable => "audit_unavailable",
             Self::Internal => "internal_error",
         }
     }
@@ -189,6 +191,7 @@ impl MemoryManagementError {
             Self::NotFound => "memory not found",
             Self::PermissionDenied => "memory management is not permitted",
             Self::ProfileDisabled => "group profile is disabled",
+            Self::AuditUnavailable => "management audit is unavailable",
             Self::Internal => "memory management failed",
         }
     }
@@ -202,6 +205,7 @@ impl From<MemoryError> for MemoryManagementError {
             "memory_changed" => Self::Conflict("memory changed; refresh and retry".to_owned()),
             "forbidden" => Self::PermissionDenied,
             "profile_opted_out" => Self::ProfileDisabled,
+            "management_audit_error" => Self::AuditUnavailable,
             _ => Self::Internal,
         }
     }

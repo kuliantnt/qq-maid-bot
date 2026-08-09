@@ -6,6 +6,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
 use subtle::ConstantTimeEq;
@@ -147,6 +150,8 @@ pub struct AdminAuth {
     argon2_limiter: Arc<Argon2ConcurrencyLimiter>,
     bootstrap_lock: Arc<Mutex<()>>,
     bootstrap_token_output: Option<BootstrapTokenOutput>,
+    #[cfg(test)]
+    management_audit_failure: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -311,6 +316,8 @@ impl AdminAuth {
             argon2_limiter: Arc::new(Argon2ConcurrencyLimiter::new(MAX_ARGON2_VERIFICATIONS)),
             bootstrap_lock: Arc::new(Mutex::new(())),
             bootstrap_token_output,
+            #[cfg(test)]
+            management_audit_failure: Arc::new(AtomicBool::new(false)),
         };
         auth.ensure_bootstrap_state()?;
         Ok(auth)
@@ -809,62 +816,41 @@ impl AdminAuth {
 
     /// 复用现有管理审计表记录资源操作的安全摘要。
     pub fn audit_management(&self, event: ManagementAudit<'_>) -> Result<(), AdminAuthError> {
-        let ManagementAudit {
-            actor_admin_id,
-            request_id,
-            action,
-            result,
-            target_digest,
-            before_version,
-            after_version,
-            safe_error_code,
-        } = event;
-        if request_id.is_empty()
-            || request_id.len() > 128
-            || !request_id.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
-            })
-            || !safe_audit_value(action)
-            || !safe_audit_value(result)
-            || target_digest.is_some_and(|value| {
-                value.len() != 64
-                    || !value
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            })
-            || safe_error_code.is_some_and(|value| !safe_audit_value(value))
-        {
-            return Err(AdminAuthError::storage("invalid management audit metadata"));
-        }
-        let before_version = before_version
-            .map(|value| i64::try_from(value).map_err(|_| ()))
-            .transpose()
-            .map_err(|_| AdminAuthError::storage("management audit version is too large"))?;
-        let after_version = after_version
-            .map(|value| i64::try_from(value).map_err(|_| ()))
-            .transpose()
-            .map_err(|_| AdminAuthError::storage("management audit version is too large"))?;
+        let event = validate_management_audit(event)?;
+        #[cfg(test)]
+        self.ensure_management_audit_available()?;
         let connection = self.database.connection().map_err(database_error)?;
-        connection
-            .execute(
-                "INSERT INTO console_audit_events
-                 (created_at, actor_admin_id, event_type, outcome, request_id,
-                  target_digest, before_version, after_version, safe_error_code)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    unix_seconds(),
-                    actor_admin_id,
-                    action,
-                    result,
-                    request_id,
-                    target_digest,
-                    before_version,
-                    after_version,
-                    safe_error_code,
-                ],
-            )
-            .map_err(database_error)?;
-        Ok(())
+        insert_management_audit(&connection, &event)
+    }
+
+    /// 在 Memory 领域事务所在的同一个 SQLite transaction 中写管理审计。
+    ///
+    /// Memory 的成功写入必须和该审计记录一起提交；任何一个步骤失败都会由调用方回滚，
+    /// 避免客户端看到 500 时数据库里已经存在未审计的业务变更。
+    pub(crate) fn audit_management_in_transaction(
+        &self,
+        connection: &rusqlite::Transaction<'_>,
+        event: ManagementAudit<'_>,
+    ) -> Result<(), AdminAuthError> {
+        let event = validate_management_audit(event)?;
+        #[cfg(test)]
+        self.ensure_management_audit_available()?;
+        insert_management_audit(connection, &event)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_management_audit_failure_for_tests(&self, enabled: bool) {
+        self.management_audit_failure
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn ensure_management_audit_available(&self) -> Result<(), AdminAuthError> {
+        if self.management_audit_failure.load(Ordering::Relaxed) {
+            Err(AdminAuthError::storage("injected management audit failure"))
+        } else {
+            Ok(())
+        }
     }
 
     fn issue_admin_session(
@@ -973,10 +959,12 @@ fn safe_audit_value(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte == b'.' || byte == b'_')
 }
 
+mod audit;
 mod bootstrap;
 mod credentials;
 mod session;
 
+use audit::{insert_management_audit, validate_management_audit};
 use bootstrap::*;
 use credentials::*;
 use session::*;

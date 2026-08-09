@@ -1,5 +1,6 @@
 //! Memory 高影响操作的 session-bound prepare/commit 协议。
 
+use rusqlite::Transaction;
 use uuid::Uuid;
 
 use super::super::MemoryKind;
@@ -73,6 +74,7 @@ pub(super) fn commit(
     operation: &str,
     target_ref: &str,
     confirmation_token: &str,
+    audit: impl Fn(&Transaction<'_>, Option<u64>) -> Result<(), MemoryManagementError>,
 ) -> Result<MemoryOperationResult, MemoryManagementError> {
     let operation = ManagementOperation::parse(operation)?;
     validate_confirmation_token(confirmation_token)?;
@@ -107,15 +109,26 @@ pub(super) fn commit(
     let affected_count = match operation {
         ManagementOperation::ClearTarget => service
             .store
-            .management_clear_if_unchanged(&target.target, &entry.snapshot.active)
+            .management_clear_if_unchanged_with_audit(
+                &target.target,
+                &entry.snapshot.active,
+                |tx, version| {
+                    audit(tx, version)
+                        .map_err(|error| super::super::MemoryError::audit_failed(error.message()))
+                },
+            )
             .map_err(MemoryManagementError::from)?
             .len(),
         ManagementOperation::DisableGroupProfile => service
             .store
-            .management_disable_group_profile_if_unchanged(
+            .management_disable_group_profile_if_unchanged_with_audit(
                 &target.target,
                 entry.snapshot.profile_enabled.unwrap_or(true),
                 &entry.snapshot.active,
+                |tx, version| {
+                    audit(tx, version)
+                        .map_err(|error| super::super::MemoryError::audit_failed(error.message()))
+                },
             )
             .map_err(MemoryManagementError::from)?
             .len(),

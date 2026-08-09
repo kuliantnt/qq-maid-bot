@@ -9,6 +9,7 @@ use axum::{
     http::HeaderMap,
     response::Response,
 };
+use rusqlite::Transaction;
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -112,17 +113,26 @@ pub(super) async fn create(
         let request = json_payload(payload, &context)?;
         let target_ref = request.target_ref.trim().to_owned();
         let input = request.into_parts()?;
-        let result = service(&state)?.create(input).map_err(map_memory_error);
-        audit_action(
+        let service_result = service(&state)?.create_with_audit(input, |transaction, version| {
+            audit_success_in_transaction(
+                &state,
+                &context,
+                transaction,
+                "memory.create",
+                Some(&target_ref),
+                None,
+                version,
+            )
+        });
+        finish_mutation(
             &state,
             &context,
             "memory.create",
             Some(&target_ref),
             None,
-            result.as_ref().ok().map(|value| value.memory.version),
-            &result,
-        )?;
-        result
+            service_result,
+            |value| Some(value.memory.version),
+        )
     })();
     respond(&state, &headers, &context, result)
 }
@@ -139,19 +149,32 @@ pub(super) async fn update(
     let result = (|| {
         let request = json_payload(payload, &context)?;
         let (target_ref, memory_ref, expected_version, patch) = request.into_parts()?;
-        let result = service(&state)?
-            .update(&target_ref, &memory_ref, expected_version, patch)
-            .map_err(map_memory_error);
-        audit_action(
+        let service_result = service(&state)?.update_with_audit(
+            &target_ref,
+            &memory_ref,
+            expected_version,
+            patch,
+            |transaction, version| {
+                audit_success_in_transaction(
+                    &state,
+                    &context,
+                    transaction,
+                    "memory.update",
+                    Some(&target_ref),
+                    Some(expected_version),
+                    version,
+                )
+            },
+        );
+        finish_mutation(
             &state,
             &context,
             "memory.update",
             Some(&target_ref),
             Some(expected_version),
-            result.as_ref().ok().map(|value| value.memory.version),
-            &result,
-        )?;
-        result
+            service_result,
+            |value| Some(value.memory.version),
+        )
     })();
     respond(&state, &headers, &context, result)
 }
@@ -168,19 +191,31 @@ pub(super) async fn archive(
     let result = (|| {
         let request = json_payload(payload, &context)?;
         let (target_ref, memory_ref, expected_version) = request.into_parts()?;
-        let result = service(&state)?
-            .archive(&target_ref, &memory_ref, expected_version)
-            .map_err(map_memory_error);
-        audit_action(
+        let service_result = service(&state)?.archive_with_audit(
+            &target_ref,
+            &memory_ref,
+            expected_version,
+            |transaction, version| {
+                audit_success_in_transaction(
+                    &state,
+                    &context,
+                    transaction,
+                    "memory.archive",
+                    Some(&target_ref),
+                    Some(expected_version),
+                    version,
+                )
+            },
+        );
+        finish_mutation(
             &state,
             &context,
             "memory.archive",
             Some(&target_ref),
             Some(expected_version),
-            result.as_ref().ok().map(|value| value.memory.version),
-            &result,
-        )?;
-        result
+            service_result,
+            |value| Some(value.memory.version),
+        )
     })();
     respond(&state, &headers, &context, result)
 }
@@ -197,19 +232,31 @@ pub(super) async fn restore(
     let result = (|| {
         let request = json_payload(payload, &context)?;
         let (target_ref, memory_ref, expected_version) = request.into_parts()?;
-        let result = service(&state)?
-            .restore(&target_ref, &memory_ref, expected_version)
-            .map_err(map_memory_error);
-        audit_action(
+        let service_result = service(&state)?.restore_with_audit(
+            &target_ref,
+            &memory_ref,
+            expected_version,
+            |transaction, version| {
+                audit_success_in_transaction(
+                    &state,
+                    &context,
+                    transaction,
+                    "memory.restore",
+                    Some(&target_ref),
+                    Some(expected_version),
+                    version,
+                )
+            },
+        );
+        finish_mutation(
             &state,
             &context,
             "memory.restore",
             Some(&target_ref),
             Some(expected_version),
-            result.as_ref().ok().map(|value| value.memory.version),
-            &result,
-        )?;
-        result
+            service_result,
+            |value| Some(value.memory.version),
+        )
     })();
     respond(&state, &headers, &context, result)
 }
@@ -257,19 +304,32 @@ pub(super) async fn commit_operation(
         let request = json_payload(payload, &context)?;
         let (operation, target_ref, confirmation_token) = request.into_parts()?;
         let actor = management_actor(&context);
-        let result = service(&state)?
-            .commit(actor, &operation, &target_ref, &confirmation_token)
-            .map_err(map_memory_error);
-        audit_action(
+        let service_result = service(&state)?.commit_with_audit(
+            actor,
+            &operation,
+            &target_ref,
+            &confirmation_token,
+            |transaction, version| {
+                audit_success_in_transaction(
+                    &state,
+                    &context,
+                    transaction,
+                    "memory.operation_commit",
+                    Some(&target_ref),
+                    None,
+                    version,
+                )
+            },
+        );
+        finish_mutation(
             &state,
             &context,
             "memory.operation_commit",
             Some(&target_ref),
             None,
-            None,
-            &result,
-        )?;
-        result
+            service_result,
+            |_| None,
+        )
     })();
     respond(&state, &headers, &context, result)
 }
@@ -297,11 +357,74 @@ fn map_memory_error(error: MemoryManagementError) -> ApiError {
         "conflict" => ApiError::conflict(error.message()),
         "permission_denied" => ApiError::forbidden("permission_denied", error.message()),
         "profile_disabled" => ApiError::forbidden("profile_disabled", error.message()),
+        "audit_unavailable" => ApiError::internal("management audit is unavailable"),
         _ => {
             tracing::error!(code = error.code(), "Memory 管理服务失败");
             ApiError::internal("memory service failed")
         }
     }
+}
+
+fn audit_success_in_transaction(
+    state: &OpsHttpState,
+    context: &ApiRequestContext,
+    transaction: &Transaction<'_>,
+    action: &str,
+    target_ref: Option<&str>,
+    before_version: Option<u64>,
+    after_version: Option<u64>,
+) -> Result<(), MemoryManagementError> {
+    let Some(auth) = state.admin_auth.as_ref() else {
+        tracing::error!(action, "Memory 管理审计写入失败：管理员认证不可用");
+        return Err(MemoryManagementError::AuditUnavailable);
+    };
+    let target_digest = target_ref.and_then(safe_target_digest);
+    auth.audit_management_in_transaction(
+        transaction,
+        ManagementAudit {
+            actor_admin_id: context.actor.admin_id(),
+            request_id: context.request_id.as_str(),
+            action,
+            result: "success",
+            target_digest: target_digest.as_deref(),
+            before_version,
+            after_version,
+            safe_error_code: None,
+        },
+    )
+    .map_err(|error| {
+        tracing::error!(code = error.code(), action, "Memory 管理审计写入失败");
+        MemoryManagementError::AuditUnavailable
+    })
+}
+
+fn finish_mutation<T>(
+    state: &OpsHttpState,
+    context: &ApiRequestContext,
+    action: &str,
+    target_ref: Option<&str>,
+    before_version: Option<u64>,
+    service_result: Result<T, MemoryManagementError>,
+    after_version: impl FnOnce(&T) -> Option<u64>,
+) -> Result<T, ApiError> {
+    let audit_needed = !matches!(
+        &service_result,
+        Err(MemoryManagementError::AuditUnavailable)
+    );
+    let result = service_result.map_err(map_memory_error);
+    if audit_needed {
+        let after_version = result.as_ref().ok().and_then(after_version);
+        audit_action(
+            state,
+            context,
+            action,
+            target_ref,
+            before_version,
+            after_version,
+            &result,
+        )?;
+    }
+    result
 }
 
 fn audit_action<T>(

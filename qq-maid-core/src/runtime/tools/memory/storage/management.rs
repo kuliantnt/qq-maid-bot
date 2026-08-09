@@ -5,7 +5,7 @@
 //! `MemoryTarget`，并保证列表条件、revision CAS 和高影响操作的事务一致性。
 
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter};
+use rusqlite::{OptionalExtension, Transaction, params, params_from_iter};
 
 use super::{
     MemoryCategory, MemoryError, MemoryKind, MemoryRecord, MemoryScopeType, MemoryStatus,
@@ -16,6 +16,8 @@ const MANAGEMENT_COLUMNS: &str = "id, created_at, updated_at, memory_type, scope
     scope_type, scope_id, created_by_user_id, user_id, group_id, content, source_text,
     memory_kind, subject_id, relation_subject_id, relation_object_id, visibility,
     source_type, source_ref, last_confirmed_at, status, pinned, attribute_key, revision";
+const SUPPORTED_MEMORY_CATEGORIES: &str =
+    "('note', 'preference', 'identity', 'relation', 'instruction')";
 
 /// 管理列表的服务端 SQL 条件。所有字段均来自领域层已经验证的枚举或 target。
 #[derive(Debug, Clone, Default)]
@@ -258,34 +260,40 @@ impl MemoryStore {
     }
 
     /// 清空的领域语义是 active → archived；ID 与 revision 快照不完全相同则整笔事务失败。
-    pub(crate) fn management_clear_if_unchanged(
+    pub(crate) fn management_clear_if_unchanged_with_audit<F>(
         &self,
         target: &MemoryTarget,
         expected: &[(String, u64)],
-    ) -> Result<Vec<String>, MemoryError> {
+        audit: F,
+    ) -> Result<Vec<String>, MemoryError>
+    where
+        F: FnOnce(&Transaction<'_>, Option<u64>) -> Result<(), MemoryError>,
+    {
         let target = target.clean()?;
-        let mut conn = self.connection()?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(MemoryError::from_sql)?;
-        let current = active_versions_unlocked(&tx, &target)?;
-        if current != expected {
-            return Err(MemoryError::changed(
-                "memory target changed after confirmation was prepared",
-            ));
-        }
-        super::v3::archive_target_unlocked_for_management(&tx, &target)?;
-        tx.commit().map_err(MemoryError::from_sql)?;
-        Ok(expected.iter().map(|(id, _)| id.clone()).collect())
+        self.with_immediate_transaction(|tx| {
+            let current = active_versions_unlocked(tx, &target)?;
+            if current != expected {
+                return Err(MemoryError::changed(
+                    "memory target changed after confirmation was prepared",
+                ));
+            }
+            super::v3::archive_target_unlocked_for_management(tx, &target)?;
+            audit(tx, None)?;
+            Ok(expected.iter().map(|(id, _)| id.clone()).collect())
+        })
     }
 
     /// 停用群画像沿用现有 profile preference + 归档语义，并把偏好与记录状态放在同一事务。
-    pub(crate) fn management_disable_group_profile_if_unchanged(
+    pub(crate) fn management_disable_group_profile_if_unchanged_with_audit<F>(
         &self,
         target: &MemoryTarget,
         expected_enabled: bool,
         expected: &[(String, u64)],
-    ) -> Result<Vec<String>, MemoryError> {
+        audit: F,
+    ) -> Result<Vec<String>, MemoryError>
+    where
+        F: FnOnce(&Transaction<'_>, Option<u64>) -> Result<(), MemoryError>,
+    {
         let target = target.clean()?;
         if target.memory_kind != MemoryKind::GroupProfile {
             return Err(MemoryError::bad_request(
@@ -296,111 +304,124 @@ impl MemoryStore {
             .subject_id
             .as_deref()
             .ok_or_else(|| MemoryError::bad_request("subject_id is required"))?;
-        let mut conn = self.connection()?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        self.with_immediate_transaction(|tx| {
+            let enabled = profile_enabled_in_transaction(tx, &target)?;
+            let current = active_versions_unlocked(tx, &target)?;
+            if enabled != expected_enabled || current != expected {
+                return Err(MemoryError::changed(
+                    "memory target changed after confirmation was prepared",
+                ));
+            }
+            let now = super::now_iso_cn();
+            tx.execute(
+                "INSERT INTO memory_profile_preferences (
+                     group_scope_id, subject_id, profile_enabled, created_at, updated_at
+                 ) VALUES (?1, ?2, 0, ?3, ?3)
+                 ON CONFLICT(group_scope_id, subject_id) DO UPDATE SET
+                     profile_enabled = 0, updated_at = excluded.updated_at",
+                params![target.scope_id, subject_id, now],
+            )
             .map_err(MemoryError::from_sql)?;
-        let enabled = profile_enabled_in_transaction(&tx, &target)?;
-        let current = active_versions_unlocked(&tx, &target)?;
-        if enabled != expected_enabled || current != expected {
-            return Err(MemoryError::changed(
-                "memory target changed after confirmation was prepared",
-            ));
-        }
-        let now = super::now_iso_cn();
-        tx.execute(
-            "INSERT INTO memory_profile_preferences (
-                 group_scope_id, subject_id, profile_enabled, created_at, updated_at
-             ) VALUES (?1, ?2, 0, ?3, ?3)
-             ON CONFLICT(group_scope_id, subject_id) DO UPDATE SET
-                 profile_enabled = 0, updated_at = excluded.updated_at",
-            params![target.scope_id, subject_id, now],
-        )
-        .map_err(MemoryError::from_sql)?;
-        super::v3::archive_target_unlocked_for_management(&tx, &target)?;
-        tx.commit().map_err(MemoryError::from_sql)?;
-        Ok(expected.iter().map(|(id, _)| id.clone()).collect())
+            super::v3::archive_target_unlocked_for_management(tx, &target)?;
+            audit(tx, None)?;
+            Ok(expected.iter().map(|(id, _)| id.clone()).collect())
+        })
     }
 
     /// 管理更新/归档之外的恢复动作仍然必须在领域 storage 事务内比较完整快照。
-    pub(crate) fn management_restore_if_unchanged(
+    pub(crate) fn management_restore_if_unchanged_with_audit<F>(
         &self,
         target: &MemoryTarget,
         expected: &MemoryRecord,
-    ) -> Result<MemoryRecord, MemoryError> {
+        audit: F,
+    ) -> Result<MemoryRecord, MemoryError>
+    where
+        F: FnOnce(&Transaction<'_>, Option<u64>) -> Result<(), MemoryError>,
+    {
         let target = target.clean()?;
         if expected.status != MemoryStatus::Archived {
             return Err(MemoryError::changed(
                 "memory is no longer in the prepared archived state",
             ));
         }
-        let mut conn = self.connection()?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(MemoryError::from_sql)?;
-        super::v3::ensure_record_unchanged_for_management(&tx, &target, &expected.id, expected)?;
-        if expected.memory_kind == MemoryKind::GroupProfile
-            && !profile_enabled_in_transaction(&tx, &target)?
-        {
-            return Err(MemoryError::profile_opted_out());
-        }
-        if let Some(attribute_key) = expected.attribute_key.as_deref()
-            && active_attribute_conflict_exists(&tx, expected, attribute_key)?
-        {
-            return Err(MemoryError::changed(
-                "an active memory already uses this attribute",
-            ));
-        }
-        let changed = tx
-            .execute(
-                "UPDATE memories SET status = 'active', updated_at = ?1, revision = revision + 1
-                 WHERE id = ?2 AND scope_type = ?3 AND scope_id = ?4 AND memory_kind = ?5
-                   AND subject_id IS ?6 AND status = 'archived' AND revision = ?7",
-                params![
-                    super::now_iso_cn(),
-                    expected.id,
-                    target.scope_type.as_str(),
-                    target.scope_id,
-                    target.memory_kind.as_str(),
-                    target.subject_id,
-                    sqlite_revision(expected.revision)?,
-                ],
-            )
-            .map_err(MemoryError::from_sql)?;
-        if changed != 1 {
-            return Err(MemoryError::changed(
-                "memory changed after confirmation was prepared",
-            ));
-        }
-        tx.commit().map_err(MemoryError::from_sql)?;
+        let after_version = expected
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| MemoryError::io("memory revision overflow"))?;
+        self.with_immediate_transaction(|tx| {
+            super::v3::ensure_record_unchanged_for_management(tx, &target, &expected.id, expected)?;
+            if expected.memory_kind == MemoryKind::GroupProfile
+                && !profile_enabled_in_transaction(tx, &target)?
+            {
+                return Err(MemoryError::profile_opted_out());
+            }
+            if let Some(attribute_key) = expected.attribute_key.as_deref()
+                && active_attribute_conflict_exists(tx, expected, attribute_key)?
+            {
+                return Err(MemoryError::changed(
+                    "an active memory already uses this attribute",
+                ));
+            }
+            let changed = tx
+                .execute(
+                    "UPDATE memories SET status = 'active', updated_at = ?1, revision = revision + 1
+                     WHERE id = ?2 AND scope_type = ?3 AND scope_id = ?4 AND memory_kind = ?5
+                       AND subject_id IS ?6 AND status = 'archived' AND revision = ?7",
+                    params![
+                        super::now_iso_cn(),
+                        expected.id,
+                        target.scope_type.as_str(),
+                        target.scope_id,
+                        target.memory_kind.as_str(),
+                        target.subject_id,
+                        sqlite_revision(expected.revision)?,
+                    ],
+                )
+                .map_err(MemoryError::from_sql)?;
+            if changed != 1 {
+                return Err(MemoryError::changed(
+                    "memory changed after confirmation was prepared",
+                ));
+            }
+            audit(tx, Some(after_version))
+        })?;
         self.management_get(&target, &expected.id)?
             .ok_or_else(|| MemoryError::io("memory disappeared after restore"))
     }
 
-    pub(crate) fn management_archive_if_unchanged(
+    pub(crate) fn management_archive_if_unchanged_with_audit<F>(
         &self,
         target: &MemoryTarget,
         expected: &MemoryRecord,
-    ) -> Result<MemoryRecord, MemoryError> {
+        audit: F,
+    ) -> Result<MemoryRecord, MemoryError>
+    where
+        F: FnOnce(&Transaction<'_>, Option<u64>) -> Result<(), MemoryError>,
+    {
         let target = target.clean()?;
         if expected.status != MemoryStatus::Active {
             return Err(MemoryError::changed(
                 "memory is no longer in the prepared active state",
             ));
         }
-        let mut conn = self.connection()?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(MemoryError::from_sql)?;
-        super::v3::ensure_record_unchanged_for_management(&tx, &target, &expected.id, expected)?;
-        let changed =
-            super::v3::archive_id_for_target_unlocked_for_management(&tx, &target, &expected.id)?;
-        if changed != 1 {
-            return Err(MemoryError::changed(
-                "memory changed after confirmation was prepared",
-            ));
-        }
-        tx.commit().map_err(MemoryError::from_sql)?;
+        let after_version = expected
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| MemoryError::io("memory revision overflow"))?;
+        self.with_immediate_transaction(|tx| {
+            super::v3::ensure_record_unchanged_for_management(tx, &target, &expected.id, expected)?;
+            let changed = super::v3::archive_id_for_target_unlocked_for_management(
+                tx,
+                &target,
+                &expected.id,
+            )?;
+            if changed != 1 {
+                return Err(MemoryError::changed(
+                    "memory changed after confirmation was prepared",
+                ));
+            }
+            audit(tx, Some(after_version))
+        })?;
         self.management_get(&target, &expected.id)?
             .ok_or_else(|| MemoryError::io("memory disappeared after archive"))
     }
@@ -430,6 +451,10 @@ fn management_where(query: &ManagementListQuery) -> (String, Vec<SqlValue>) {
         );
     }
     sql.push(')');
+    // 历史 schema 允许自由 TEXT；管理 API 对未知 category 采取 fail-closed，避免把它
+    // 伪装成当前枚举中的任何一个类别。
+    sql.push_str(" AND memory_type IN ");
+    sql.push_str(SUPPORTED_MEMORY_CATEGORIES);
     if let Some(status) = query.status {
         sql.push_str(" AND status = ?");
         values.push(SqlValue::Text(status.as_str().to_owned()));

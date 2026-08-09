@@ -384,6 +384,81 @@ fn target_discovery_isolates_platform_account_group_and_subject() {
 }
 
 #[test]
+fn invalid_historical_memory_category_is_not_manageable() {
+    let database =
+        SqliteDatabase::open_temp("memory-management-invalid-category", APP_MIGRATIONS).unwrap();
+    let store = MemoryStore::new(database.clone());
+    let target = MemoryTarget::personal(personal_scope("invalid-category-user"));
+    let record = seed(&store, target.clone(), "历史非法类别");
+    database
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE memories SET memory_type = 'legacy_custom_type' WHERE id = ?1",
+            [&record.id],
+        )
+        .unwrap();
+    let service = MemoryManagementService::new(store);
+    let target_ref = service
+        .targets(MemoryTargetFilter::default(), 20, 0)
+        .unwrap()
+        .items
+        .into_iter()
+        .next()
+        .unwrap()
+        .target_ref;
+    let memory_ref = memory_ref_for(&target_ref, &record.id);
+
+    let page = service
+        .list(
+            MemoryListFilter {
+                target_ref: Some(target_ref.clone()),
+                ..MemoryListFilter::default()
+            },
+            20,
+            0,
+        )
+        .unwrap();
+    assert_eq!(page.total_count, 0);
+    assert!(page.items.is_empty());
+    assert!(matches!(
+        service.get(&target_ref, &memory_ref),
+        Err(MemoryManagementError::NotFound)
+    ));
+    assert!(matches!(
+        service.update(
+            &target_ref,
+            &memory_ref,
+            1,
+            MemoryUpdatePatch {
+                content: Some("不应更新".to_owned()),
+                ..MemoryUpdatePatch::default()
+            }
+        ),
+        Err(MemoryManagementError::NotFound)
+    ));
+    let stored = database
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT memory_type, status, revision FROM memories WHERE id = ?1",
+            [&record.id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        stored,
+        ("legacy_custom_type".to_owned(), "active".to_owned(), 1)
+    );
+}
+
+#[test]
 fn same_version_concurrent_updates_have_one_winner() {
     let (service, store) = test_service();
     let record = seed(

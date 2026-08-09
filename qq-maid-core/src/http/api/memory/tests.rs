@@ -241,6 +241,14 @@ impl TestApi {
             .unwrap()
             .target_ref
     }
+
+    fn set_audit_failure(&self, enabled: bool) {
+        self.state
+            .admin_auth
+            .as_ref()
+            .unwrap()
+            .set_management_audit_failure_for_tests(enabled);
+    }
 }
 
 fn personal_scope(user: &str) -> String {
@@ -356,6 +364,28 @@ async fn memory_api_targets_and_like_search_are_opaque_and_scoped() {
         .await;
     assert_eq!(status, StatusCode::OK, "{source_search}");
     assert_eq!(source_search["data"]["total"], 0);
+
+    let zero_digest = "0000000000000000000000000000000000000000000000000000000000000000";
+    let (status, conflicting_filters) = api
+        .post(
+            "/api/v1/console/memories/list",
+            json!({
+                "target_ref": api.target_ref,
+                "platform": "onebot",
+                "account_ref": format!("memory_account:v1:{zero_digest}"),
+                "group_ref": format!("memory_group:v1:{zero_digest}"),
+                "subject_ref": format!("memory_subject:v1:{zero_digest}")
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{conflicting_filters}");
+    assert_eq!(conflicting_filters["data"]["total"], 0);
+    assert!(
+        conflicting_filters["data"]["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 
     let (status, beyond) = api
         .post(
@@ -491,6 +521,116 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(empty_patch["error"]["code"], "validation_error");
+}
+
+#[tokio::test]
+async fn memory_api_audit_failure_rolls_back_mutations_and_consumes_commit_token() {
+    let api = TestApi::new();
+    let (status, initial) = api
+        .post(
+            "/api/v1/console/memories/list",
+            json!({"target_ref": api.target_ref, "status": "active"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{initial}");
+    let initial_memory_ref = initial["data"]["items"][0]["memory_ref"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    api.set_audit_failure(true);
+    let (status, create_failed) = api
+        .post(
+            "/api/v1/console/memories/create",
+            json!({
+                "target_ref": api.target_ref,
+                "content": "审计失败创建不应落库",
+                "category": "note",
+                "visibility": "private"
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{create_failed}");
+    api.set_audit_failure(false);
+    let (status, after_create) = api
+        .post(
+            "/api/v1/console/memories/list",
+            json!({"target_ref": api.target_ref, "keyword": "审计失败创建不应落库"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{after_create}");
+    assert_eq!(after_create["data"]["total"], 0);
+
+    api.set_audit_failure(true);
+    let (status, update_failed) = api
+        .post(
+            "/api/v1/console/memories/update",
+            json!({
+                "target_ref": api.target_ref,
+                "memory_ref": initial_memory_ref,
+                "expected_version": 1,
+                "patch": {"content": "审计失败更新不应落库"}
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{update_failed}");
+    api.set_audit_failure(false);
+    let (status, after_update) = api
+        .post(
+            "/api/v1/console/memories/list",
+            json!({"target_ref": api.target_ref, "keyword": "审计失败更新不应落库"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{after_update}");
+    assert_eq!(after_update["data"]["total"], 0);
+    let (status, unchanged) = api
+        .post(
+            "/api/v1/console/memories/get",
+            json!({"target_ref": api.target_ref, "memory_ref": initial_memory_ref}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{unchanged}");
+    assert_eq!(unchanged["data"]["version"], 1);
+    assert_eq!(unchanged["data"]["content"], "初始 % 内容");
+
+    let (status, prepared) = api
+        .post(
+            "/api/v1/console/memories/operations/prepare",
+            json!({"operation": "clear_target", "target_ref": api.target_ref}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let token = prepared["data"]["confirmation_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let commit_body = json!({
+        "operation": "clear_target",
+        "target_ref": api.target_ref,
+        "confirmation_token": token
+    });
+    api.set_audit_failure(true);
+    let (status, commit_failed) = api
+        .post(
+            "/api/v1/console/memories/operations/commit",
+            commit_body.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{commit_failed}");
+    api.set_audit_failure(false);
+    let (status, after_commit) = api
+        .post(
+            "/api/v1/console/memories/list",
+            json!({"target_ref": api.target_ref, "status": "active"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{after_commit}");
+    assert_eq!(after_commit["data"]["total"], 1);
+
+    let (status, replay) = api
+        .post("/api/v1/console/memories/operations/commit", commit_body)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{replay}");
 }
 
 #[tokio::test]
