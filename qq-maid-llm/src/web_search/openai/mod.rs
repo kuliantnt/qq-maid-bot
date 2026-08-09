@@ -392,14 +392,14 @@ fn trace_responses_query_payload(req: &WebSearchRequest, url: &str, payload: &Va
         include = %include,
         input_chars = input.chars().count(),
         query_chars = req.query.trim().chars().count(),
-        "Responses web search request payload summary"
+        "Responses 联网搜索请求载荷摘要"
     );
 
     if trace_query_input_enabled() {
         tracing::trace!(
             upstream_url = url,
             input = %input,
-            "Responses web search request input"
+            "Responses 联网搜索请求输入"
         );
     }
 }

@@ -319,7 +319,7 @@ impl OneBotInboundDispatcher {
                     return Ok(sent);
                 }
                 Err(error) => {
-                    warn!(error = %error, "OneBot 11 image send failed; falling back to text");
+                    warn!(error = %error, "OneBot 11 图片发送失败，将降级为文本发送");
                 }
             }
         }
@@ -373,14 +373,14 @@ impl OneBotInboundDispatcher {
 
     pub(super) fn log_result(result: Result<OneBotDispatchOutcome, OneBotDispatchError>) {
         match result {
-            Ok(OneBotDispatchOutcome::Sent) => debug!("OneBot 11 reply dispatch completed"),
+            Ok(OneBotDispatchOutcome::Sent) => debug!("OneBot 11 回复分发完成"),
             Ok(OneBotDispatchOutcome::IgnoredNonBotReply) => {
-                debug!("ignored OneBot 11 group reply not addressed to current bot")
+                debug!("OneBot 11 群聊回复未指向当前机器人，已忽略")
             }
             Ok(OneBotDispatchOutcome::SuppressedByCore) => {
-                debug!("OneBot 11 reply suppressed by Core")
+                debug!("OneBot 11 回复已被 Core 抑制")
             }
-            Err(error) => warn!(error = %error, "OneBot 11 reply dispatch failed"),
+            Err(error) => warn!(error = %error, "OneBot 11 回复分发失败"),
         }
     }
 }

@@ -44,6 +44,25 @@ pub struct TodoEditPatch {
     pub recurrence_unit: Option<TodoRecurrenceUnit>,
 }
 
+impl TodoEditPatch {
+    /// 判断本次编辑是否没有任何字段补丁。
+    ///
+    /// 提醒场景会在调用方先转成可恢复澄清；孤立时间短句则结合本结果拒绝执行，
+    /// 避免误刷新 Todo。其他空补丁仍保留历史上的 `raw_text` 刷新兼容行为。
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none()
+            && self.detail.is_none()
+            && self.due_date.is_none()
+            && self.due_at.is_none()
+            && self.reminder_at.is_none()
+            && self.time_precision.is_none()
+            && self.recurrence_kind.is_none()
+            && self.recurrence_interval_days.is_none()
+            && self.recurrence_interval.is_none()
+            && self.recurrence_unit.is_none()
+    }
+}
+
 /// 将编辑补丁应用到现有草稿，返回更新后的草稿。
 ///
 /// 应用规则（与历史两侧一致）：

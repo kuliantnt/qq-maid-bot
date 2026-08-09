@@ -137,7 +137,7 @@ impl RustRespondService {
                             tracing::debug!(
                                 error = %err,
                                 session_id = %session.session_id,
-                                "session title generation failed"
+                                "生成 Session 标题失败"
                             );
                             return Ok(command_response(
                                 "当前内容还不够生成标题，先保持原标题。",

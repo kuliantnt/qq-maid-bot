@@ -12,7 +12,7 @@ use qq_maid_common::{
 };
 use sha2::{Digest, Sha256};
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::{
     config::ChatScene,
@@ -71,7 +71,7 @@ impl RssScheduler {
 
     pub fn spawn(self) {
         if !self.config.enabled {
-            info!("RSS scheduler disabled");
+            info!("RSS 调度器已停用");
             return;
         }
         tokio::spawn(async move {
@@ -88,17 +88,14 @@ impl RssScheduler {
         loop {
             ticker.tick().await;
             if let Err(err) = self.run_once().await {
-                warn!(error = %err, "RSS scheduler cycle failed");
+                warn!(error = %err, "RSS 调度器单轮处理失败");
             }
         }
     }
 
     pub async fn run_once(&self) -> Result<(), String> {
         let subscriptions = self.store.all_enabled().map_err(|err| err.to_string())?;
-        debug!(
-            count = subscriptions.len(),
-            "RSS scheduler loaded subscriptions"
-        );
+        trace!(count = subscriptions.len(), "RSS 调度器已加载订阅");
         for (index, subscription) in subscriptions.into_iter().enumerate() {
             let delay_ms = ((index % 10) as u64) * 300;
             if delay_ms > 0 {
@@ -110,10 +107,10 @@ impl RssScheduler {
     }
 
     async fn process_subscription(&self, subscription: RssSubscription) {
-        debug!(
+        trace!(
             subscription_id = %short_id(&subscription.id),
             scope_key = %subscription.scope_key,
-            "checking RSS subscription"
+            "正在检查 RSS 订阅"
         );
         let parsed = match self
             .fetcher
@@ -125,7 +122,7 @@ impl RssScheduler {
                 warn!(
                     subscription_id = %short_id(&subscription.id),
                     error = %safe_feed_error(&err),
-                    "RSS feed fetch or parse failed"
+                    "RSS Feed 获取或解析失败"
                 );
                 if let Err(store_err) = self
                     .store
@@ -134,7 +131,7 @@ impl RssScheduler {
                     warn!(
                         subscription_id = %short_id(&subscription.id),
                         error = %store_err,
-                        "failed to persist RSS check failure"
+                        "持久化 RSS 检查失败状态失败"
                     );
                 }
                 return;
@@ -151,7 +148,7 @@ impl RssScheduler {
                 warn!(
                     subscription_id = %short_id(&subscription.id),
                     error = %err,
-                    "failed to enqueue RSS items"
+                    "RSS 条目入队失败"
                 );
                 return;
             }
@@ -163,7 +160,7 @@ impl RssScheduler {
             warn!(
                 subscription_id = %short_id(&subscription.id),
                 error = %err,
-                "failed to persist RSS check success"
+                "持久化 RSS 检查成功状态失败"
             );
             return;
         }
@@ -171,7 +168,7 @@ impl RssScheduler {
             info!(
                 subscription_id = %short_id(&subscription.id),
                 new_count,
-                "RSS new items detected"
+                "检测到新的 RSS 条目"
             );
         }
 
@@ -185,7 +182,7 @@ impl RssScheduler {
                 warn!(
                     subscription_id = %short_id(&subscription.id),
                     error = %err,
-                    "failed to load pending RSS items"
+                    "加载待处理 RSS 条目失败"
                 );
                 return;
             }
@@ -241,14 +238,14 @@ impl RssScheduler {
                         subscription_id = %short_id(&subscription.id),
                         item = %short_id(&item.item_key),
                         error = %err,
-                        "failed to mark RSS item notification queued"
+                        "标记 RSS 条目通知已入队失败"
                     );
                     return;
                 }
                 info!(
                     subscription_id = %short_id(&subscription.id),
                     item = %short_id(&item.item_key),
-                    "RSS notification queued"
+                    "RSS 通知已入队"
                 );
             }
             Err(err) => {
@@ -257,7 +254,7 @@ impl RssScheduler {
                     subscription_id = %short_id(&subscription.id),
                     item = %short_id(&item.item_key),
                     error = %error,
-                    "RSS notification enqueue failed"
+                    "RSS 通知入队失败"
                 );
                 // 入队失败不是渠道发送失败；保留 RSS pending 状态，下一轮扫描继续尝试创建通知。
             }
@@ -307,7 +304,7 @@ impl RssScheduler {
                     field = "summary",
                     error_code = "translation_links_changed",
                     error_stage = "translation",
-                    "RSS translation changed Markdown links, falling back to original text"
+                    "RSS 翻译改变了 Markdown 链接，改用原文"
                 );
                 summary
             };
@@ -342,7 +339,7 @@ impl RssScheduler {
                 error_code = "translation_input_too_long",
                 error_stage = "translation",
                 source_chars,
-                "RSS translation failed, falling back to original text"
+                "RSS 翻译失败，改用原文"
             );
             return source_text.to_owned();
         }
@@ -378,7 +375,7 @@ impl RssScheduler {
                     field,
                     error_code = err.code,
                     error_stage = err.stage,
-                    "RSS translation model resolution failed, falling back to original text"
+                    "解析 RSS 翻译模型失败，改用原文"
                 );
                 return source_text.to_owned();
             }
@@ -399,7 +396,7 @@ impl RssScheduler {
                     field,
                     translation_provider = %outcome.provider,
                     translation_model = %outcome.model,
-                    "RSS translation succeeded"
+                    "RSS 翻译成功"
                 );
                 outcome.translated_text
             }
@@ -412,7 +409,7 @@ impl RssScheduler {
                     translation_model = %translation_model_for_log,
                     error_code = err.code,
                     error_stage = err.stage,
-                    "RSS translation failed, falling back to original text"
+                    "RSS 翻译失败，改用原文"
                 );
                 source_text.to_owned()
             }

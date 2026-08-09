@@ -132,7 +132,7 @@ impl MemoryDreamWorker {
         tokio::spawn(async move {
             if let Err(error) = worker.run_once(context).await {
                 // 不记录模型输出、Session/Memory 正文或任何原始身份字段。
-                warn!(error_code = error, "memory Dream batch failed");
+                warn!(error_code = error, "Memory Dream 批次处理失败");
             }
         });
     }
@@ -261,7 +261,7 @@ impl MemoryDreamWorker {
             filtered_count,
             no_reply,
             truncated = prepared.truncated,
-            "memory Dream batch completed"
+            "Memory Dream 批次处理完成"
         );
         Ok(Some(MemoryDreamRunStats {
             input_sessions: prepared.input_sessions,

@@ -60,6 +60,34 @@ async fn web_search_tool_reuses_query_executor() {
 }
 
 #[tokio::test]
+async fn web_search_tool_clamps_model_max_results_to_server_limit() {
+    let executor = MockWebSearchExecutor {
+        max_results_limit: Some(5),
+        ..Default::default()
+    };
+    let requests = executor.requests.clone();
+    let tool = WebSearchTool::new(Arc::new(executor))
+        .with_backend_override(WebSearchBackend::ProviderNative);
+
+    tool.execute(
+        test_context(),
+        json!({
+            "query": "今日 AI 新闻",
+            "raw_question": null,
+            "max_results": 10,
+            "context_size": null,
+            "topic": null,
+            "time_range": null,
+            "research_targets": null,
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(requests.lock().unwrap()[0].max_results, Some(5));
+}
+
+#[tokio::test]
 async fn tavily_empty_outcome_is_completed_without_tool_execution_failure() {
     let tool = WebSearchTool::new(Arc::new(EmptyWebSearchExecutor))
         .with_backend_override(WebSearchBackend::Tavily);
@@ -240,6 +268,10 @@ async fn web_search_failure_log_is_classified_and_secret_free() {
         "provider",
         "model",
         "failure_layer",
+        "requested_max_results",
+        "effective_max_results",
+        "elapsed_ms",
+        "timeout_stage",
     ] {
         assert!(logs.contains(field), "missing log field {field}: {logs}");
     }
@@ -287,6 +319,10 @@ async fn web_search_success_log_keeps_attempt_chain_without_content() {
         "provider",
         "model",
         "failure_layer",
+        "requested_max_results",
+        "effective_max_results",
+        "elapsed_ms",
+        "timeout_stage",
     ] {
         assert!(logs.contains(field), "missing log field {field}: {logs}");
     }
@@ -412,7 +448,7 @@ fn web_search_tool_is_read_only_and_deduplicates_normalized_query() {
         tool.deduplication_key(&json!({
             "query": "rust news",
             "raw_question": "RUST NEWS",
-            "max_results": DEFAULT_MAX_RESULTS,
+            "max_results": qq_maid_llm::web_search::DEFAULT_MAX_RESULTS,
             "context_size": "low"
         }))
         .unwrap()
@@ -464,6 +500,18 @@ fn web_search_tool_requires_context_complete_query() {
     assert!(description.contains("补全省略的搜索主体"));
     assert!(description.contains("脱离聊天上下文后仍可独立理解"));
     assert!(description.contains("不要先搜索泛化问题"));
+}
+
+#[test]
+fn web_search_schema_exposes_only_canonical_time_range_field() {
+    let parameters = WebSearchTool::new(Arc::new(MockWebSearchExecutor::default()))
+        .metadata()
+        .parameters;
+    let properties = parameters["properties"].as_object().unwrap();
+
+    assert!(properties.contains_key("time_range"));
+    assert!(!properties.contains_key("timerange"));
+    assert_eq!(parameters["additionalProperties"], false);
 }
 
 struct DelayedStreamExecutor {
@@ -584,8 +632,15 @@ async fn agent_web_search_rejects_idle_stream_after_first_activity() {
     assert_eq!(err.stage, "web_search_idle");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn explicit_search_stream_times_out_when_idle_after_first_delta() {
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(LogWriter(bytes.clone()))
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
     let tool = WebSearchTool::new(Arc::new(DelayedStreamExecutor {
         first_delta_delay: Duration::ZERO,
         completion_delay: Duration::from_millis(30),
@@ -624,6 +679,17 @@ async fn explicit_search_stream_times_out_when_idle_after_first_delta() {
     assert_eq!(*deltas.lock().unwrap(), ["首字"]);
     assert_eq!(err.code, "timeout");
     assert_eq!(err.stage, "web_search_idle");
+    let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+    for expected in [
+        "requested_max_results=None",
+        "effective_max_results=5",
+        "error_kind=\"timeout\"",
+        "timeout_stage=\"web_search_idle\"",
+        "elapsed_ms",
+    ] {
+        assert!(logs.contains(expected), "missing {expected}: {logs}");
+    }
+    assert!(!logs.contains("台风巴威"));
 }
 
 struct HeartbeatStreamExecutor;

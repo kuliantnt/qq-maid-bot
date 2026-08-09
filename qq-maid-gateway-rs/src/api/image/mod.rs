@@ -423,7 +423,7 @@ async fn upload_bytes_media(
             concurrency = config.concurrency.unwrap_or(1),
             retry_timeout_seconds = config.retry_timeout.unwrap_or_default(),
             retry_delay_seconds = config.retry_delay.unwrap_or_default(),
-            "QQ media upload prepared"
+            "QQ 媒体上传准备完成"
         );
     }
 
@@ -477,7 +477,7 @@ async fn post_upload_json<T: Serialize, R: for<'de> Deserialize<'de>>(
     let status = response.status();
     if !status.is_success() {
         let _ = response.text().await;
-        warn!(scene = scene.label(), status = %status, "QQ media upload API returned non-success status");
+        warn!(scene = scene.label(), status = %status, "QQ 媒体上传 API 返回非成功状态码");
         // 上传服务可能在错误体回显临时地址或预签名参数；错误继续向上传层传播时只保留状态码。
         return Err(ApiError::Status {
             status,
@@ -504,7 +504,7 @@ async fn put_upload_part(
     let status = response.status();
     let _ = response.text().await;
     // 预签名 URL 和响应体都可能带临时凭证，诊断只记录阶段和状态。
-    warn!(status = %status, "QQ media upload part PUT returned non-success status");
+    warn!(status = %status, "QQ 媒体分片 PUT 上传返回非成功状态码");
     Err(ApiError::Status {
         status,
         body: String::new(),
@@ -526,9 +526,9 @@ fn uploaded_image_payload(
         has_file_uuid = uploaded.file_uuid.is_some(),
         ttl_seconds = uploaded.ttl.unwrap_or_default(),
         has_raw_url = uploaded.raw_url.is_some(),
-        "QQ media upload completed"
+        "QQ 媒体上传完成"
     );
-    info!(scene = scene.label(), "QQ image upload succeeded");
+    info!(scene = scene.label(), "QQ 图片上传成功");
     Ok(ImagePayload::new(file_info))
 }
 

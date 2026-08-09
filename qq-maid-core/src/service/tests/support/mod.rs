@@ -10,16 +10,19 @@ use std::{
 use qq_maid_common::identity_context::IdentitySource;
 use qq_maid_llm::{
     agent_loop::{
-        AgentStep, AgentStepSession, AgentToolCall, AgentToolResult, ToolLoopProgressEvent,
+        AgentRunDiagnostics, AgentStep, AgentStepSession, AgentStopReason, AgentTextDeltaDelivery,
+        AgentToolCall, AgentToolResult, ToolExecutionResult, ToolLoopProgressEvent,
         run_agent_loop_with_handle,
     },
     provider::{
-        ChatOutcome, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol, ToolChatRequest,
+        ChatOutcome, DynLlmProvider, LlmProvider, LlmStream, LlmStreamEvent, ToolCallingProtocol,
+        ToolChatRequest,
         status::{UpstreamStatus, observe_provider},
         types::{ChatRequest, TokenUsage},
     },
     web_search::{WebSearchExecutor, WebSearchOutcome, WebSearchRequest},
 };
+use serde_json::{Value, json};
 
 use crate::{
     app::{CoreExecutors, CoreRuntimeState, CoreStores},
@@ -110,13 +113,26 @@ pub(super) fn expect_stream(output: CoreRespondOutput) -> CoreResponseStream {
 }
 
 #[derive(Clone)]
-enum ProviderBehavior {
+pub(super) enum ProviderBehavior {
     Reply(String),
     Stream(Vec<Result<LlmStreamEvent, LlmError>>),
     Error(LlmError),
-    Delayed { reply: String, delay: Duration },
-    PartialThenDelayed { delta: String, delay: Duration },
+    Delayed {
+        reply: String,
+        delay: Duration,
+    },
+    PartialThenDelayed {
+        delta: String,
+        delay: Duration,
+    },
     AgentWeatherThenFinal,
+    AgentWebSearchInvalidArguments,
+    /// 候选 1：执行只读 `web_search` 成功后，把模型文本作为未验真草稿交给
+    /// `final_delta_sink`（工具活动已开始，Core 必须缓冲为 `Buffered`），随后
+    /// 以 `response.incomplete` 失败结束，触发候选链降级。
+    AgentWebSearchIncomplete {
+        draft: String,
+    },
 }
 
 struct WeatherAgentSession {
@@ -201,7 +217,11 @@ impl TestProvider {
         Self::new(ProviderBehavior::AgentWeatherThenFinal)
     }
 
-    fn new(behavior: ProviderBehavior) -> Self {
+    pub(super) fn agent_web_search_invalid_arguments() -> Self {
+        Self::new(ProviderBehavior::AgentWebSearchInvalidArguments)
+    }
+
+    pub(super) fn new(behavior: ProviderBehavior) -> Self {
         Self {
             behavior,
             requests: Arc::new(Mutex::new(Vec::new())),
@@ -266,6 +286,12 @@ impl LlmProvider for TestProvider {
                 Ok(chat_outcome(delta))
             }
             ProviderBehavior::AgentWeatherThenFinal => {
+                unreachable!("agent behavior uses chat_with_tools")
+            }
+            ProviderBehavior::AgentWebSearchInvalidArguments => {
+                unreachable!("agent behavior uses chat_with_tools")
+            }
+            ProviderBehavior::AgentWebSearchIncomplete { .. } => {
                 unreachable!("agent behavior uses chat_with_tools")
             }
         }
@@ -334,6 +360,12 @@ impl LlmProvider for TestProvider {
                 )))
             }
             ProviderBehavior::AgentWeatherThenFinal => {
+                unreachable!("agent behavior uses chat_with_tools")
+            }
+            ProviderBehavior::AgentWebSearchInvalidArguments => {
+                unreachable!("agent behavior uses chat_with_tools")
+            }
+            ProviderBehavior::AgentWebSearchIncomplete { .. } => {
                 unreachable!("agent behavior uses chat_with_tools")
             }
         }
@@ -405,6 +437,108 @@ impl LlmProvider for TestProvider {
             ProviderBehavior::AgentWeatherThenFinal => {
                 unreachable!("agent behavior returned before mock progress")
             }
+            ProviderBehavior::AgentWebSearchInvalidArguments => {
+                let serialized = match req
+                    .tools
+                    .execute_json(
+                        &req.tool_context,
+                        "web_search",
+                        r#"{"query":"公开项目","time_range":"not-a-valid-range"}"#,
+                    )
+                    .await
+                {
+                    Ok(output) => output,
+                    // Agent Loop 会把参数校验 Err 转换为结构化 tool_result；夹具在
+                    // Provider 内模拟同一条边界，继续让 Core 运行领域投影。
+                    Err(error) => json!({
+                        "ok": false,
+                        "execution_succeeded": false,
+                        "error": {
+                            "code": error.code,
+                            "stage": error.stage,
+                        },
+                    })
+                    .to_string(),
+                };
+                let output = serde_json::from_str::<Value>(&serialized)
+                    .unwrap_or_else(|_| json!({"raw": serialized}));
+                let succeeded = output.get("ok").and_then(Value::as_bool) != Some(false);
+                let tool_result = ToolExecutionResult {
+                    name: "web_search".to_owned(),
+                    output,
+                    succeeded,
+                };
+                let draft = "模型草稿：联网查询已经成功完成，不应直接发送。";
+                if let Some(sink) = req.final_delta_sink.as_ref() {
+                    sink(draft.to_owned()).await?;
+                }
+                let mut outcome = chat_outcome(draft);
+                outcome.agent = AgentRunDiagnostics {
+                    model_rounds: 2,
+                    emitted_tools: vec!["web_search".to_owned()],
+                    tool_execution_attempted: true,
+                    executed_tools: vec!["web_search".to_owned()],
+                    side_effecting_tools_started: Vec::new(),
+                    tool_results: vec![tool_result],
+                    tool_attempts: Vec::new(),
+                    tools_with_unknown_result: Vec::new(),
+                    streaming_fallback_used: false,
+                    stop_reason: Some(AgentStopReason::ToolUsed),
+                };
+                Ok(outcome)
+            }
+            ProviderBehavior::AgentWebSearchIncomplete { draft } => {
+                // 候选 1：真实执行只读 web_search（ToolRegistry 白名单路径），
+                // 成功后再把模型文本作为未验真草稿交给 final_delta_sink。
+                let serialized = req
+                    .tools
+                    .execute_json(&req.tool_context, "web_search", r#"{"query":"公开项目"}"#)
+                    .await
+                    .map_err(|error| {
+                        LlmError::new(
+                            "internal_error",
+                            format!("web_search execution failed: {error}"),
+                            "tool",
+                        )
+                    })?;
+                let output = serde_json::from_str::<Value>(&serialized)
+                    .unwrap_or_else(|_| json!({"raw": serialized}));
+                let succeeded = output.get("ok").and_then(Value::as_bool) != Some(false);
+                let tool_result = ToolExecutionResult {
+                    name: "web_search".to_owned(),
+                    output,
+                    succeeded,
+                };
+                // 工具活动已开始，Core 的 final_delta_sink 必须缓冲草稿（Buffered），
+                // 不能进入用户可见发送链路；候选路由据此才允许降级到第二候选。
+                if let Some(sink) = req.final_delta_sink.as_ref() {
+                    let delivery = sink(draft.to_owned()).await?;
+                    if delivery != AgentTextDeltaDelivery::Buffered {
+                        return Err(LlmError::new(
+                            "internal_error",
+                            "tool-round draft must stay buffered after tool activity",
+                            "stream",
+                        ));
+                    }
+                }
+                let diagnostics = AgentRunDiagnostics {
+                    model_rounds: 2,
+                    emitted_tools: vec!["web_search".to_owned()],
+                    tool_execution_attempted: true,
+                    executed_tools: vec!["web_search".to_owned()],
+                    side_effecting_tools_started: Vec::new(),
+                    tool_results: vec![tool_result],
+                    tool_attempts: Vec::new(),
+                    tools_with_unknown_result: Vec::new(),
+                    streaming_fallback_used: false,
+                    stop_reason: Some(AgentStopReason::ToolUsed),
+                };
+                Err(
+                    LlmError::provider("OpenAI chat stream response incomplete", "sse")
+                        .with_incomplete_reason("max_output_tokens")
+                        .with_agent(diagnostics),
+                )
+            }
         }
     }
 
@@ -421,168 +555,128 @@ impl LlmProvider for TestProvider {
     }
 }
 
-struct EmptyWebSearchExecutor;
-
-#[async_trait::async_trait]
-impl WebSearchExecutor for EmptyWebSearchExecutor {
-    async fn query(&self, _req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
-        Err(LlmError::provider("query unused", "query"))
-    }
-
-    fn provider_name(&self) -> &'static str {
-        "empty-query"
-    }
+/// 最小候选链测试替身：镜像 `ModelRouteProvider` 在工具轮上的降级契约。
+///
+/// 候选 1 执行只读 `web_search`、把模型文本作为 `Buffered` 草稿投递后以
+/// `response.incomplete` 失败；候选 2 成功返回最终正文。由于 `ModelRouteProvider`
+/// 是 `qq-maid-llm` 的 crate 私有类型，这里在 Provider 边界复刻它的判定输入
+/// （可恢复协议错误、无用户可见正文、无副作用工具），让 Core 流层能观测到
+/// 完整降级链路；真实候选链判定由 `qq-maid-llm` routing 单测覆盖。
+#[derive(Clone)]
+pub(super) struct RouteFallbackTestProvider {
+    first: TestProvider,
+    second: TestProvider,
+    first_tool_calls: Arc<AtomicUsize>,
+    second_tool_calls: Arc<AtomicUsize>,
+    fallback_taken: Arc<std::sync::atomic::AtomicBool>,
 }
 
-#[derive(Clone, Default)]
-pub(super) struct MockWebSearchExecutor {
-    requests: Arc<Mutex<Vec<WebSearchRequest>>>,
-}
-
-impl MockWebSearchExecutor {
-    pub(super) fn requests(&self) -> Vec<WebSearchRequest> {
-        self.requests.lock().unwrap().clone()
-    }
-}
-
-#[async_trait::async_trait]
-impl WebSearchExecutor for MockWebSearchExecutor {
-    async fn query(&self, req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
-        self.requests.lock().unwrap().push(req.clone());
-        Ok(WebSearchOutcome {
-            answer: format!("web answer: {}", req.query),
-            sources: Vec::new(),
-            provider: "mock-query".to_owned(),
-            elapsed_ms: 1,
+impl RouteFallbackTestProvider {
+    pub(super) fn new(draft: &str, final_reply: &str) -> Self {
+        let first = TestProvider::new(ProviderBehavior::AgentWebSearchIncomplete {
+            draft: draft.to_owned(),
         })
+        .with_stream_enabled(true)
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_progress_tool_name("web_search");
+        let second = TestProvider::streaming(vec![
+            Ok(LlmStreamEvent::TextDelta(final_reply.to_owned())),
+            Ok(LlmStreamEvent::Completed {
+                usage: None,
+                finish_reason: None,
+                fallback_used: false,
+            }),
+        ])
+        .with_tool_protocol(ToolCallingProtocol::ChatCompletionsToolCalls)
+        .without_tool_progress();
+        Self {
+            first,
+            second,
+            first_tool_calls: Arc::new(AtomicUsize::new(0)),
+            second_tool_calls: Arc::new(AtomicUsize::new(0)),
+            fallback_taken: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
     }
 
-    fn provider_name(&self) -> &'static str {
-        "mock-query"
+    pub(super) fn first_tool_calls(&self) -> usize {
+        self.first_tool_calls.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn second_tool_calls(&self) -> usize {
+        self.second_tool_calls.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn fallback_taken(&self) -> bool {
+        self.fallback_taken.load(Ordering::SeqCst)
     }
 }
-
-struct EmptyWeatherExecutor;
 
 #[async_trait::async_trait]
-impl WeatherExecutor for EmptyWeatherExecutor {
-    async fn weather(&self, _req: WeatherRequest) -> Result<WeatherOutcome, LlmError> {
-        Err(LlmError::provider("weather unused", "weather"))
+impl LlmProvider for RouteFallbackTestProvider {
+    async fn chat(&self, _req: ChatRequest) -> Result<ChatOutcome, LlmError> {
+        unreachable!("route fallback provider only serves tool calling tests")
     }
 
-    fn provider_name(&self) -> &'static str {
-        "empty-weather"
-    }
-}
-
-struct EmptyTrainExecutor;
-
-#[async_trait::async_trait]
-impl TrainExecutor for EmptyTrainExecutor {
-    async fn query_train_schedule(
-        &self,
-        _req: TrainScheduleRequest,
-    ) -> Result<TrainSchedule, LlmError> {
-        Err(LlmError::provider("train unused", "train"))
+    fn tool_calling_protocol(&self, model: Option<&str>) -> Option<ToolCallingProtocol> {
+        self.first.tool_calling_protocol(model)
     }
 
-    fn provider_name(&self) -> &'static str {
-        "empty-train"
+    async fn chat_with_tools(&self, req: ToolChatRequest) -> Result<ChatOutcome, LlmError> {
+        // 候选 1：只读 web_search + Buffered 草稿 + response.incomplete。
+        self.first_tool_calls.fetch_add(1, Ordering::SeqCst);
+        let first_err = match self.first.chat_with_tools(req.clone()).await {
+            Err(err) => err,
+            Ok(outcome) => {
+                panic!("first candidate must fail with response.incomplete: {outcome:?}")
+            }
+        };
+        // 镜像 ModelRouteProvider 的降级判定输入：可恢复协议错误 + 没有用户可见
+        // 正文 + 只读工具未启动副作用。草稿的 Buffered 投递由候选 1 内部断言。
+        assert_eq!(first_err.code, "provider_error");
+        assert_eq!(first_err.stage, "sse");
+        assert_eq!(first_err.incomplete_reason(), Some("max_output_tokens"));
+        let diagnostics = first_err
+            .agent
+            .as_deref()
+            .expect("first candidate must attach agent diagnostics");
+        assert!(
+            diagnostics.side_effecting_tools_started.is_empty(),
+            "read-only web_search must not be treated as a side-effect tool"
+        );
+        assert!(
+            diagnostics.tools_with_unknown_result.is_empty(),
+            "web_search result is trusted, not unknown"
+        );
+        assert_eq!(diagnostics.executed_tools, ["web_search"]);
+
+        self.fallback_taken.store(true, Ordering::SeqCst);
+        // 候选 2：成功返回最终正文；共享 handle 语义下仍携带候选 1 的只读轨迹。
+        self.second_tool_calls.fetch_add(1, Ordering::SeqCst);
+        let mut outcome = self.second.chat_with_tools(req).await?;
+        outcome.fallback_used = true;
+        outcome.agent = first_err.agent.map(|agent| *agent).unwrap_or_default();
+        Ok(outcome)
     }
-}
 
-struct EmptyRadarExecutor;
-
-#[async_trait::async_trait]
-impl RadarExecutor for EmptyRadarExecutor {
-    async fn radar(&self, _target: RadarTarget) -> Result<RadarSnapshot, LlmError> {
-        Err(LlmError::provider("radar unused", "radar"))
+    fn name(&self) -> &str {
+        "route-fallback-test"
     }
 
-    fn provider_name(&self) -> &'static str {
-        "empty-radar"
+    fn model(&self) -> &str {
+        "route-fallback-test-model"
     }
-}
 
-pub(super) fn private_request(text: &str) -> CoreRequest {
-    CoreRequest {
-        text: text.to_owned(),
-        message_id: Some("test-private-message".to_owned()),
-        input_parts: Vec::new(),
-        quoted: None,
-        mentions: Vec::new(),
-        visible_entity_snapshot: None,
-        platform: Platform::QqOfficial,
-        account_id: Some("app-1".to_owned()),
-        actor: CoreActor {
-            user_id: Some("u1".to_owned()),
-            union_id: None,
-            display_name: None,
-            group_member_role: None,
-            is_bot: false,
-            identity_source: IdentitySource::Event,
-        },
-        addressed_to_bot: false,
-        conversation: CoreConversation::Private {
-            peer_id: "u1".to_owned(),
-        },
+    fn stream_enabled(&self) -> bool {
+        true
     }
 }
 
-pub(super) fn private_scope() -> &'static str {
-    "platform:qq_official:account:app-1:private:u1"
-}
+mod executors;
 
-pub(super) fn group_request(text: &str) -> CoreRequest {
-    CoreRequest {
-        text: text.to_owned(),
-        message_id: Some("test-group-message".to_owned()),
-        input_parts: Vec::new(),
-        quoted: None,
-        mentions: Vec::new(),
-        visible_entity_snapshot: None,
-        platform: Platform::QqOfficial,
-        account_id: Some("app-1".to_owned()),
-        actor: CoreActor {
-            user_id: Some("u1".to_owned()),
-            union_id: None,
-            display_name: None,
-            group_member_role: None,
-            is_bot: false,
-            identity_source: IdentitySource::Event,
-        },
-        addressed_to_bot: false,
-        conversation: CoreConversation::Group {
-            group_id: "g1".to_owned(),
-        },
-    }
-}
-
-pub(super) fn wechat_service_request(text: &str) -> CoreRequest {
-    CoreRequest {
-        text: text.to_owned(),
-        message_id: Some("test-wechat-message".to_owned()),
-        input_parts: Vec::new(),
-        quoted: None,
-        mentions: Vec::new(),
-        visible_entity_snapshot: None,
-        platform: Platform::WechatService,
-        account_id: Some("gh-service".to_owned()),
-        actor: CoreActor {
-            user_id: Some("openid-u1".to_owned()),
-            union_id: None,
-            display_name: None,
-            group_member_role: None,
-            is_bot: false,
-            identity_source: IdentitySource::Event,
-        },
-        addressed_to_bot: false,
-        conversation: CoreConversation::ServiceAccount {
-            account_id: Some("gh_test".to_owned()),
-            peer_id: "openid-u1".to_owned(),
-        },
-    }
-}
+pub(super) use executors::{
+    EmptyRadarExecutor, EmptyTrainExecutor, EmptyWeatherExecutor, EmptyWebSearchExecutor,
+    MockWebSearchExecutor, group_request, private_request, private_scope, wechat_service_request,
+};
 
 fn chat_outcome(reply: &str) -> ChatOutcome {
     ChatOutcome {
@@ -631,7 +725,7 @@ pub(super) fn test_state_with_group_tool_calling(
     tool_calling_group_enabled: bool,
 ) -> CoreRuntimeState {
     test_state_with_group_tool_calling_and_query_executor(
-        provider,
+        Arc::new(provider),
         request_timeout_seconds,
         tool_calling_enabled,
         tool_calling_group_enabled,
@@ -645,7 +739,7 @@ pub(super) fn test_state_with_query_executor(
     query_executor: Arc<dyn WebSearchExecutor>,
 ) -> CoreRuntimeState {
     test_state_with_group_tool_calling_and_query_executor(
-        provider,
+        Arc::new(provider),
         request_timeout_seconds,
         false,
         false,
@@ -653,8 +747,23 @@ pub(super) fn test_state_with_query_executor(
     )
 }
 
+/// 带候选链测试替身的状态：私聊启用工具调用，并使用可成功的只读 web_search。
+pub(super) fn test_state_with_route_fallback_and_query_executor(
+    provider: RouteFallbackTestProvider,
+    request_timeout_seconds: u64,
+    query_executor: Arc<dyn WebSearchExecutor>,
+) -> CoreRuntimeState {
+    test_state_with_group_tool_calling_and_query_executor(
+        Arc::new(provider),
+        request_timeout_seconds,
+        true,
+        false,
+        query_executor,
+    )
+}
+
 fn test_state_with_group_tool_calling_and_query_executor(
-    provider: TestProvider,
+    provider: DynLlmProvider,
     request_timeout_seconds: u64,
     tool_calling_enabled: bool,
     tool_calling_group_enabled: bool,
@@ -766,7 +875,7 @@ fn test_state_with_group_tool_calling_and_query_executor(
             web_console_trusted_proxy_ips: Vec::new(),
             web_console_secure_cookies: false,
         },
-        provider: observe_provider(Arc::new(provider), upstream_status.clone()),
+        provider: observe_provider(provider, upstream_status.clone()),
         upstream_status,
         executors: CoreExecutors {
             query_executor,

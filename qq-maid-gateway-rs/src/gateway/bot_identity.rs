@@ -52,7 +52,7 @@ impl BotIdentity {
             info!(
                 learned_bot_identity_count = added,
                 total_bot_identity_count = ids.len(),
-                "learned QQ bot identity candidates from READY"
+                "已从 READY 事件获取 QQ 机器人身份候选项"
             );
         }
     }

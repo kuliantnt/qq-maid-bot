@@ -618,6 +618,114 @@ async fn streaming_first_activity_timeout_and_fallback_timeout_keep_diagnostics(
 }
 
 #[tokio::test]
+async fn candidate_stream_and_non_stream_timeouts_allow_next_candidate_with_budget() {
+    let handle = AgentRunHandle::with_timeout(std::time::Duration::from_millis(200));
+    handle.begin_candidate_attempt().unwrap();
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: Arc::new(StdMutex::new(0)),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+
+    let first_err = super::runner::run_agent_loop_with_timeouts(
+        Box::new(HangingSession),
+        registry,
+        test_context(),
+        3,
+        None,
+        Some(delta_sink(Arc::new(StdMutex::new(Vec::new())))),
+        Some(handle.clone()),
+        std::time::Duration::from_millis(10),
+        std::time::Duration::from_millis(10),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(first_err.code, "timeout");
+    assert_eq!(first_err.stage, "agent_step");
+    assert!(
+        handle
+            .remaining_budget()
+            .is_some_and(|budget| !budget.is_zero())
+    );
+    assert_eq!(
+        handle.snapshot().stop_reason,
+        Some(AgentStopReason::Timeout)
+    );
+
+    // 候选 A 的 step timeout 不属于请求终止态，routing 可以开始候选 B。
+    handle.begin_candidate_attempt().unwrap();
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: Arc::new(StdMutex::new(0)),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+    let outcome = super::runner::run_agent_loop_with_timeouts(
+        Box::new(ScriptedSession::new(
+            "mock-b",
+            "m-b",
+            vec![final_reply("candidate B")],
+        )),
+        registry,
+        test_context(),
+        3,
+        None,
+        None,
+        Some(handle),
+        std::time::Duration::from_millis(10),
+        std::time::Duration::from_millis(10),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.reply, "candidate B");
+    assert_eq!(outcome.agent.model_rounds, 2);
+    assert!(outcome.agent.streaming_fallback_used);
+    assert_eq!(
+        outcome.agent.stop_reason,
+        Some(AgentStopReason::DirectAnswer)
+    );
+}
+
+#[tokio::test]
+async fn exhausted_agent_deadline_blocks_next_candidate() {
+    let handle = AgentRunHandle::with_timeout(std::time::Duration::from_millis(20));
+    handle.begin_candidate_attempt().unwrap();
+    let registry = registry_with(vec![Arc::new(CountingTool {
+        name: "echo",
+        calls: Arc::new(StdMutex::new(0)),
+        fail: false,
+        soft_fail: false,
+        dependency: ToolCallDependency::None,
+    }) as _]);
+
+    let err = super::runner::run_agent_loop_with_timeouts(
+        Box::new(HangingSession),
+        registry,
+        test_context(),
+        3,
+        None,
+        Some(delta_sink(Arc::new(StdMutex::new(Vec::new())))),
+        Some(handle.clone()),
+        std::time::Duration::from_millis(100),
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.code, "timeout");
+    assert_eq!(err.stage, "agent_loop");
+    let next = handle.begin_candidate_attempt().unwrap_err();
+    assert_eq!(next.code, "timeout");
+    assert!(next.message.contains("before model candidate"));
+    assert_eq!(handle.snapshot().model_rounds, 1);
+}
+
+#[tokio::test]
 async fn max_rounds_returns_tool_loop_limit_without_executing_last_batch() {
     let calls = Arc::new(StdMutex::new(0));
     let registry = registry_with(vec![Arc::new(CountingTool {

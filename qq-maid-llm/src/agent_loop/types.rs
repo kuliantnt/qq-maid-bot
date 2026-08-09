@@ -101,7 +101,8 @@ pub struct AgentRunDiagnostics {
     pub tools_with_unknown_result: Vec<String>,
     /// 本轮是否从 Agent 流式单步回退到非流式单步。
     pub streaming_fallback_used: bool,
-    /// Agent Runtime 的最终停止原因；运行中快照为 None。
+    /// 当前/最终 Agent 停止原因；候选链执行期间可暂存上一候选终止原因，下一候选开始时清理。
+    /// 请求级不可逆终止由 `AgentRunHandle` 内部独立维护；运行中快照为 None。
     pub stop_reason: Option<AgentStopReason>,
 }
 
@@ -116,6 +117,11 @@ pub struct AgentRunHandle {
 struct AgentRunState {
     diagnostics: AgentRunDiagnostics,
     pending_attempt: Option<AgentAttemptBaseline>,
+    /// 整次请求不可逆的终止态，与候选级 `diagnostics.stop_reason` 分离。
+    ///
+    /// 单个模型请求超时仍会把当前候选诊断记为 Timeout，但不能据此阻止后续候选；
+    /// 只有统一 deadline 到期或 Core 显式取消才写入这里。
+    request_termination: Option<AgentStopReason>,
     deadline: Option<Instant>,
     finalization_reserve: Duration,
 }
@@ -182,7 +188,7 @@ impl AgentRunHandle {
         }
         if matches!(
             state.diagnostics.stop_reason,
-            Some(AgentStopReason::Failed | AgentStopReason::MaxRounds)
+            Some(AgentStopReason::Failed | AgentStopReason::MaxRounds | AgentStopReason::Timeout)
         ) {
             state.diagnostics.stop_reason = None;
         }
@@ -207,7 +213,7 @@ impl AgentRunHandle {
         }
         if matches!(
             state.diagnostics.stop_reason,
-            Some(AgentStopReason::Failed | AgentStopReason::MaxRounds)
+            Some(AgentStopReason::Failed | AgentStopReason::MaxRounds | AgentStopReason::Timeout)
         ) {
             state.diagnostics.stop_reason = None;
         }
@@ -355,15 +361,16 @@ impl AgentRunHandle {
     }
 
     pub(crate) fn set_stop_reason(&self, reason: AgentStopReason) {
-        self.update(|diagnostics| {
-            // Core 的整次请求终止信号优先于候选内部失败，避免清理过程中被改回 failed。
-            if !matches!(
-                diagnostics.stop_reason,
-                Some(AgentStopReason::Timeout | AgentStopReason::Cancelled)
-            ) {
-                diagnostics.stop_reason = Some(reason);
-            }
-        });
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // 请求级终止信号优先于候选内部失败，避免清理过程中被改回 failed。
+        if let Some(request_reason) = state.request_termination {
+            state.diagnostics.stop_reason = Some(request_reason);
+        } else {
+            state.diagnostics.stop_reason = Some(reason);
+        }
     }
 
     pub(crate) fn set_stop_reason_if_unset(&self, reason: AgentStopReason) {
@@ -385,6 +392,7 @@ impl AgentRunHandle {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if refresh_termination_reason(&mut state).is_none() {
+            state.request_termination = Some(reason);
             state.diagnostics.stop_reason = Some(reason);
         }
         drop(state);
@@ -428,25 +436,17 @@ impl AgentAttemptBaseline {
     }
 }
 
-fn request_termination_reason(diagnostics: &AgentRunDiagnostics) -> Option<AgentStopReason> {
-    diagnostics.stop_reason.filter(|reason| {
-        matches!(
-            reason,
-            AgentStopReason::Timeout | AgentStopReason::Cancelled
-        )
-    })
-}
-
 /// 用 Tokio 单调时钟把 deadline 到期同步为请求级 Timeout，避免候选或内部
 /// fallback 在外层预算耗尽后再启动一次新的上游请求。
 fn refresh_termination_reason(state: &mut AgentRunState) -> Option<AgentStopReason> {
-    if let Some(reason) = request_termination_reason(&state.diagnostics) {
+    if let Some(reason) = state.request_termination {
         return Some(reason);
     }
     if state
         .deadline
         .is_some_and(|deadline| deadline <= Instant::now())
     {
+        state.request_termination = Some(AgentStopReason::Timeout);
         state.diagnostics.stop_reason = Some(AgentStopReason::Timeout);
         return Some(AgentStopReason::Timeout);
     }
@@ -538,8 +538,18 @@ pub type ToolLoopProgressFuture =
 pub type ToolLoopProgressSink =
     Arc<dyn Fn(ToolLoopProgressEvent) -> ToolLoopProgressFuture + Send + Sync + 'static>;
 
+/// 最终回答增量交给下游后的真实投递状态。
+///
+/// `Buffered` 表示正文仍停留在业务投影缓冲区，尚未进入用户可见发送链路；
+/// 候选路由不得据此禁止 fallback。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentTextDeltaDelivery {
+    Visible,
+    Buffered,
+}
+
 pub type AgentTextDeltaFuture =
-    Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send + 'static>>;
+    Pin<Box<dyn Future<Output = Result<AgentTextDeltaDelivery, LlmError>> + Send + 'static>>;
 
 /// Tool Loop 最终用户可见正文增量接收器。
 ///

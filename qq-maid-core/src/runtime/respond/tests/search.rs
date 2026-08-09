@@ -39,6 +39,8 @@ fn web_search_errors_have_actionable_user_replies() {
         ("rate_limited", "上游限流"),
         ("quota_exhausted", "额度已用尽"),
         ("empty_result", "没查到明确结果"),
+        ("invalid_arguments", "参数无效"),
+        ("bad_tool_arguments", "参数无效"),
     ];
 
     for (code, expected) in cases {

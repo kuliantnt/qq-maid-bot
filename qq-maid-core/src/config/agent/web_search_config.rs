@@ -22,6 +22,7 @@ pub(in crate::config) struct ToolsConfigFile {
 pub(in crate::config) struct WebSearchConfigFile {
     #[serde(default = "default_web_search_backend")]
     pub(in crate::config) backend: String,
+    /// 每个底层搜索子请求的结果数硬上限；多目标调研对每个目标分别应用。
     #[serde(default = "default_web_search_max_results")]
     pub(in crate::config) max_results: u8,
     #[serde(default = "default_web_search_depth")]

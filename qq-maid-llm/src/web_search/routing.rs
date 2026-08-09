@@ -46,9 +46,14 @@ impl RoutedWebSearchExecutor {
         mut req: WebSearchRequest,
     ) -> Result<(DynWebSearchExecutor, WebSearchRequest), LlmError> {
         let backend = req.backend_override.unwrap_or(self.default_backend);
-        if req.max_results.is_none() {
-            req.max_results = Some(self.default_max_results);
-        }
+        // tools.web_search.max_results 是每个底层搜索子请求的硬上限；多目标调研的
+        // 每个目标都会单独经过这里，不允许模型参数静默扩大单项成本。
+        req.max_results = Some(
+            req.max_results
+                .unwrap_or(self.default_max_results)
+                .min(self.default_max_results)
+                .clamp(1, super::MAX_RESULTS_LIMIT),
+        );
         let configured_model = req
             .model_override
             .as_deref()
@@ -110,6 +115,10 @@ impl WebSearchExecutor for RoutedWebSearchExecutor {
 
     fn provider_name(&self) -> &'static str {
         "auto"
+    }
+
+    fn max_results_limit(&self) -> u8 {
+        self.default_max_results.clamp(1, super::MAX_RESULTS_LIMIT)
     }
 }
 
@@ -175,6 +184,14 @@ mod tests {
         let (provider, routed_req) = executor.route_request(base_req.clone()).unwrap();
         assert_eq!(provider.provider_name(), "openai");
         assert_eq!(routed_req.model_override.as_deref(), Some("gpt-search"));
+        assert_eq!(routed_req.max_results, Some(8));
+
+        let (_, routed_req) = executor
+            .route_request(WebSearchRequest {
+                max_results: Some(10),
+                ..base_req.clone()
+            })
+            .unwrap();
         assert_eq!(routed_req.max_results, Some(8));
 
         let (provider, routed_req) = executor

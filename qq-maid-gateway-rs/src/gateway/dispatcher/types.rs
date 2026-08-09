@@ -9,7 +9,11 @@
 //! `gateway::dispatcher` 模块及其子模块可见；gateway 外部仍只能看到 `mod.rs`
 //! 暴露的 `MessageDispatcher` / `MessageDispatcherHandle` / `DispatcherEnqueueError`。
 
-use std::{collections::VecDeque, sync::atomic::AtomicU64};
+use std::{
+    collections::VecDeque,
+    sync::atomic::AtomicU64,
+    time::{Duration, Instant},
+};
 
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -17,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 // 平台消息类型来自 gateway::event，pub(super) 在 event 中对 gateway 可见，
 // dispatcher 作为 gateway 的后代可以引用。
-use super::super::event::{C2cMessage, GroupMessage};
+use super::super::{event::C2cMessage, qq_official::group::PreparedGroupMessage};
 
 // 这些常量直接服务于 dispatcher 的容量、提示文案与超时语义，集中在此处便于引用。
 // 改动它们会影响 QQ 入站消息串行化、队列容量提示和 shutdown 回收行为，需谨慎。
@@ -30,6 +34,8 @@ pub(super) const SHUTDOWN_DRAIN_TIMEOUT_SECS: u64 = 10;
 pub(super) const WORKER_CANCEL_TIMEOUT_SECS: u64 = 1;
 /// command channel 容量相对活跃 worker 上限的倍数，避免指令通道成为瓶颈。
 pub(super) const COMMAND_CHANNEL_MULTIPLIER: usize = 4;
+/// 同一群容量拒绝的用户可见提示冷却；固定值避免为保护性降噪再引入运行配置。
+pub(super) const GROUP_REJECT_NOTIFICATION_COOLDOWN: Duration = Duration::from_secs(10);
 
 pub(super) type DispatcherEnqueueResult = Result<(), DispatcherEnqueueError>;
 
@@ -37,9 +43,9 @@ pub(super) type DispatcherEnqueueResult = Result<(), DispatcherEnqueueError>;
 // （aggregator 等），因此这里需要比 `pub(super)` 更宽一点：可见到整个 gateway 模块。
 #[derive(Debug, Error)]
 pub(in crate::gateway) enum DispatcherEnqueueError {
-    /// Dispatcher 已经通过拒绝通道给用户发送过容量提示，上层不得重复发送服务不可用提示。
-    #[error("dispatcher rejected message and queued user notification: {reason}")]
-    RejectedAndNotified { reason: &'static str },
+    /// Dispatcher 已排队容量提示，或该群仍在提示冷却内；上层不得重复发送兜底提示。
+    #[error("dispatcher rejected message and handled user notification: {reason}")]
+    RejectedAndHandled { reason: &'static str },
     /// Dispatcher 已关闭或不可用且没有自行提示用户，上层需要决定是否给出兜底提示。
     #[error("dispatcher unavailable: {reason}")]
     Unavailable { reason: &'static str },
@@ -69,10 +75,11 @@ pub(super) enum DispatcherCommand {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) enum InboundEnvelope {
     C2c(C2cMessage),
-    Group(GroupMessage),
+    /// QQ 群消息只能由轻量入站阶段构造，worker 不再接收未过滤的原始群事件。
+    Group(PreparedGroupMessage),
 }
 
 #[derive(Debug)]
@@ -108,7 +115,14 @@ pub(super) struct RejectNotification {
 #[derive(Debug, Default)]
 pub(super) struct RejectMetrics {
     pub(super) total: AtomicU64,
+    pub(super) suppressed: AtomicU64,
     pub(super) dropped: AtomicU64,
+}
+
+#[derive(Debug)]
+pub(super) struct GroupRejectNoticeState {
+    pub(super) last_notified_at: Instant,
+    pub(super) suppressed: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]

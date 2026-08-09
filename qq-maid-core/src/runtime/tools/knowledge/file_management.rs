@@ -315,7 +315,7 @@ impl KnowledgeFileService {
                                 file_id = %short_id(&file_id),
                                 error_code = cleanup_error.code(),
                                 status = "processing",
-                                "知识库 mark_ready 失败后清理索引失败，将由后续周期恢复"
+                                "知识库 mark_ready 失败后清理索引失败，将由后续轮次恢复"
                             );
                         }
                         map_database_error(error)
@@ -336,7 +336,7 @@ impl KnowledgeFileService {
                             file_id = %short_id(&file_id),
                             error_code = cleanup_error.code(),
                             status = "cancelled",
-                            "知识库 mark_ready 未应用后清理索引失败，将由后续周期恢复"
+                            "知识库 mark_ready 未应用后清理索引失败，将由后续轮次恢复"
                         );
                         return Err(map_database_error(cleanup_error));
                     }
@@ -356,7 +356,7 @@ impl KnowledgeFileService {
                         file_id = %short_id(&file_id),
                         error_code = cleanup_error.code(),
                         status = "processing",
-                        "知识库处理失败后清理派生索引失败，将由后续周期恢复"
+                        "知识库处理失败后清理派生索引失败，将由后续轮次恢复"
                     );
                 }
                 let applied = self
@@ -431,7 +431,7 @@ impl KnowledgeFileWorker {
             loop {
                 ticker.tick().await;
                 if let Err(error) = self.run_once().await {
-                    warn!(error_code = error, "知识库托管文件 worker 周期失败");
+                    warn!(error_code = error, "知识库托管文件 worker 单轮处理失败");
                 }
             }
         });
@@ -454,7 +454,7 @@ impl KnowledgeFileWorker {
         if recovered > 0 {
             info!(
                 recovered,
-                "知识库托管文件 worker 周期恢复遗留 processing 任务"
+                "知识库托管文件 worker 本轮已恢复遗留 processing 任务"
             );
         }
         let Some(claimed) = self
@@ -463,7 +463,8 @@ impl KnowledgeFileWorker {
             .claim_next()
             .map_err(map_database_error)?
         else {
-            debug!("知识库托管文件 worker 没有待处理任务");
+            // 队列为空属于正常空闲状态，不输出逐轮日志，避免每 5 秒刷屏；
+            // 有任务时下方会输出领取、处理结果与耗时等日志。
             return Ok(KnowledgeWorkerStats::default());
         };
         let started = Instant::now();
@@ -518,7 +519,7 @@ impl KnowledgeFileWorker {
                 error_code = failure.0,
                 recovery_code = status_error.code(),
                 elapsed_ms = started.elapsed().as_millis(),
-                "知识库托管文件异常后失败状态回写失败，将由后续周期恢复"
+                "知识库托管文件异常后回写失败状态失败，将由后续轮次恢复"
             ),
         }
     }

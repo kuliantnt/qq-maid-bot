@@ -160,11 +160,11 @@ pub async fn run_with_application_version(
                         Ok(Ok(())) => {}
                         Ok(Err(cleanup_error)) => warn!(
                             error = %cleanup_error,
-                            "wechat service cleanup after OneBot startup failure returned an error"
+                            "OneBot 启动失败后清理微信服务号任务时返回错误"
                         ),
                         Err(join_error) => warn!(
                             error = %join_error,
-                            "wechat service cleanup after OneBot startup failure failed"
+                            "OneBot 启动失败后清理微信服务号任务失败"
                         ),
                     }
                 }
@@ -192,7 +192,7 @@ pub async fn run_with_application_version(
             info!(
                 channel = "qq_official",
                 state = "unbound",
-                "skipping channel initialization"
+                "已跳过通道初始化"
             );
             None
         }
@@ -201,7 +201,7 @@ pub async fn run_with_application_version(
             info!(
                 channel = "qq_official",
                 state = "disabled",
-                "skipping channel initialization"
+                "已跳过通道初始化"
             );
             None
         }
@@ -292,7 +292,7 @@ fn finish_channel_results(
 ) -> anyhow::Result<()> {
     match (primary, secondary) {
         (Err(primary), Err(secondary)) => {
-            warn!(error = %secondary, "secondary channel failed while gateway was stopping");
+            warn!(error = %secondary, "Gateway 停止期间辅助通道发生故障");
             Err(primary)
         }
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
@@ -365,7 +365,7 @@ async fn run_qq_official(
         if shutdown_token.is_cancelled() {
             break Ok(());
         }
-        info!(api_base = %config.api_base, "fetching QQ gateway url");
+        info!(api_base = %config.api_base, "正在获取 QQ Gateway URL");
         // 每次重连前重新获取网关地址，避免 IP/调度发生变化后仍连旧地址
         let gateway_url = match fetch_gateway_url_with_retry(
             &shutdown_token,
@@ -379,7 +379,7 @@ async fn run_qq_official(
             Ok(GatewayFetchOutcome::Shutdown) => break Ok(()),
             Err(error) => break Err(error).context("fetch QQ gateway url"),
         };
-        info!("fetched QQ gateway url");
+        info!("已获取 QQ Gateway URL");
 
         match protocol::run_gateway_once(
             &gateway_url,
@@ -394,9 +394,9 @@ async fn run_qq_official(
         .await
         {
             // 正常关闭不算错误，但需要重连
-            Ok(()) => warn!("QQ gateway connection closed; reconnecting"),
+            Ok(()) => warn!("QQ Gateway 连接已关闭，准备重连"),
             // 异常断开也要重连
-            Err(err) => warn!(error = %err, "QQ gateway connection failed; reconnecting"),
+            Err(err) => warn!(error = %err, "QQ Gateway 连接失败，准备重连"),
         }
         // run_gateway_once 返回即代表当前 WebSocket 生命周期已经结束；后续重连成功时
         // record_gateway_connected 会重新置为 true。

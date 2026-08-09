@@ -277,7 +277,7 @@ fn map_knowledge_error(error: KnowledgeFileError) -> ApiError {
             error.message(),
         ),
         _ => {
-            tracing::error!(error_code = error.code(), "knowledge file operation failed");
+            tracing::error!(error_code = error.code(), "知识库文件操作失败");
             ApiError::internal("knowledge file service failed")
         }
     }

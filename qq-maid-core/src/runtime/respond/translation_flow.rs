@@ -191,7 +191,7 @@ impl RustRespondService {
                     translation_provider = self.translation_service.provider_name(),
                     translation_model = %translation_model_for_log,
                     target_language = %command.target_language,
-                    "translation command failed"
+                    "翻译命令执行失败"
                 );
                 let reply = translation_error_reply(&err);
                 self.session_store

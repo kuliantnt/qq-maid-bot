@@ -433,7 +433,7 @@ impl RustRespondService {
                 tracing::warn!(
                     error_code = %err.code,
                     error_stage = %err.stage,
-                    "failed to resolve agent policy for todo notice"
+                    "解析 Todo 通知的 Agent 策略失败"
                 );
                 (scene, false, false)
             }

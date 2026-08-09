@@ -735,7 +735,7 @@ fn delta_sink(deltas: Arc<StdMutex<Vec<String>>>) -> AgentTextDeltaSink {
         let deltas = deltas.clone();
         Box::pin(async move {
             deltas.lock().unwrap().push(delta);
-            Ok(())
+            Ok(AgentTextDeltaDelivery::Visible)
         }) as AgentTextDeltaFuture
     })
 }

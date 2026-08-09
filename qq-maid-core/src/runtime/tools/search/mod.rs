@@ -18,10 +18,7 @@ use qq_maid_llm::{
         DEFAULT_TOOL_OUTPUT_MAX_CHARS, Tool, ToolContext, ToolEffect, ToolMetadata, ToolOutput,
         ToolTimeoutPolicy,
     },
-    web_search::{
-        DEFAULT_MAX_RESULTS, DynWebSearchExecutor, WebSearchBackend, WebSearchOutcome,
-        WebSearchRequest,
-    },
+    web_search::{DynWebSearchExecutor, WebSearchBackend, WebSearchOutcome, WebSearchRequest},
 };
 
 use crate::{
@@ -159,6 +156,30 @@ impl WebSearchTool {
             .unwrap_or("configured_default")
     }
 
+    fn normalize_max_results(
+        &self,
+        mut req: WebSearchToolRequest,
+    ) -> (WebSearchToolRequest, Option<u8>, u8) {
+        let requested = req.max_results;
+        let effective = self.effective_max_results(requested);
+        // None 仍交给路由器应用同一个配置上限；显式请求则在进入 executor 前完成 clamp。
+        if requested.is_some() {
+            req.max_results = Some(effective);
+        }
+        (req, requested, effective)
+    }
+
+    fn effective_max_results(&self, requested: Option<u8>) -> u8 {
+        let configured_limit = self
+            .executor
+            .max_results_limit()
+            .clamp(1, WEB_SEARCH_MAX_RESULTS_LIMIT);
+        requested
+            .unwrap_or(configured_limit)
+            .min(configured_limit)
+            .clamp(1, WEB_SEARCH_MAX_RESULTS_LIMIT)
+    }
+
     fn handle_argument_error(
         &self,
         context: &ToolContext,
@@ -172,7 +193,18 @@ impl WebSearchTool {
     }
 
     pub async fn query(&self, req: WebSearchToolRequest) -> Result<WebSearchOutcome, LlmError> {
-        self.executor.query(web_search_request(req)).await
+        let (req, requested_max_results, effective_max_results) = self.normalize_max_results(req);
+        let started = Instant::now();
+        let outcome = self.executor.query(web_search_request(req.clone())).await;
+        log_web_search_result(
+            self,
+            &req,
+            requested_max_results,
+            effective_max_results,
+            started.elapsed(),
+            &outcome,
+        );
+        outcome
     }
 
     pub async fn query_stream(
@@ -180,9 +212,21 @@ impl WebSearchTool {
         req: WebSearchToolRequest,
         delta_tx: mpsc::Sender<String>,
     ) -> Result<WebSearchOutcome, LlmError> {
-        self.executor
-            .query_stream(web_search_request(req), delta_tx)
-            .await
+        let (req, requested_max_results, effective_max_results) = self.normalize_max_results(req);
+        let started = Instant::now();
+        let outcome = self
+            .executor
+            .query_stream(web_search_request(req.clone()), delta_tx)
+            .await;
+        log_web_search_result(
+            self,
+            &req,
+            requested_max_results,
+            effective_max_results,
+            started.elapsed(),
+            &outcome,
+        );
+        outcome
     }
 
     pub async fn query_stream_with_handler(
@@ -238,10 +282,34 @@ impl WebSearchTool {
         &self,
         req: WebSearchToolRequest,
         execution_deadline: Option<Instant>,
+        on_delta: Option<WebSearchDeltaHandler<'_>>,
+    ) -> Result<WebSearchOutcome, LlmError> {
+        let (req, requested_max_results, effective_max_results) = self.normalize_max_results(req);
+        let started = Instant::now();
+        let outcome = self
+            .query_stream_with_timeouts_inner(req.clone(), execution_deadline, on_delta)
+            .await;
+        log_web_search_result(
+            self,
+            &req,
+            requested_max_results,
+            effective_max_results,
+            started.elapsed(),
+            &outcome,
+        );
+        outcome
+    }
+
+    async fn query_stream_with_timeouts_inner(
+        &self,
+        req: WebSearchToolRequest,
+        execution_deadline: Option<Instant>,
         mut on_delta: Option<WebSearchDeltaHandler<'_>>,
     ) -> Result<WebSearchOutcome, LlmError> {
         let (delta_tx, mut delta_rx) = mpsc::channel(16);
-        let query = self.query_stream(req, delta_tx);
+        let query = self
+            .executor
+            .query_stream(web_search_request(req), delta_tx);
         tokio::pin!(query);
         let now = Instant::now();
         let configured_deadline = now + self.absolute_timeout;
@@ -350,7 +418,7 @@ impl Tool for WebSearchTool {
                     },
                     "max_results": {
                         "type": ["integer", "null"],
-                        "description": "期望返回的搜索结果数量，1 到 10；不确定时传 null"
+                        "description": "每个底层搜索子请求期望返回的结果数量，1 到 10；多目标模式对每个 research_target 分别应用；不确定时传 null"
                     },
                     "context_size": {
                         "type": ["string", "null"],
@@ -431,7 +499,9 @@ impl Tool for WebSearchTool {
                 "comparison_dimensions": ops::parse_comparison_dimensions(
                     arguments.get("comparison_dimensions")
                 ).ok()?,
-                "max_results": parse_max_results(arguments.get("max_results")).ok()?,
+                "max_results": self.effective_max_results(
+                    parse_max_results(arguments.get("max_results")).ok()?
+                ),
                 "context_size": parse_context_size(arguments.get("context_size")).ok()?,
                 "topic": parse_topic(arguments.get("topic")).ok()?,
                 "time_range": parse_time_range(arguments.get("time_range")).ok()?,
@@ -452,7 +522,7 @@ impl Tool for WebSearchTool {
                 "raw_question": normalize_dedup_text(
                     raw_question.as_deref().unwrap_or(&query)
                 ),
-                "max_results": max_results.unwrap_or(DEFAULT_MAX_RESULTS),
+                "max_results": self.effective_max_results(max_results),
                 "context_size": context_size.as_deref().unwrap_or("low"),
                 // Tavily 会根据未传 topic/time_range 的时效新闻请求改用 news/day。
                 // 因此不能将缺省值与模型显式指定的 general 视为同一搜索。
@@ -498,6 +568,7 @@ impl Tool for WebSearchTool {
         if tracing::enabled!(tracing::Level::DEBUG) {
             let before_mem = qq_maid_common::process_mem::process_memory_sample();
             tracing::debug!(
+                event = "before_web_search",
                 tool = WEB_SEARCH_TOOL_NAME,
                 query_chars = request.query.chars().count(),
                 max_results = request.max_results,
@@ -505,7 +576,7 @@ impl Tool for WebSearchTool {
                 vm_size_kb = before_mem.vm_size_kb,
                 pss_kb = before_mem.pss_kb,
                 private_dirty_kb = before_mem.private_dirty_kb,
-                "before_web_search"
+                "执行联网搜索前的诊断"
             );
         }
         let (outcome, attempts) = self
@@ -571,7 +642,7 @@ fn log_web_search_attempt(
             provider = outcome.provider.as_str(),
             model = tool.model_override.as_deref().unwrap_or("configured_default"),
             failure_layer = "none",
-            "web search attempt succeeded"
+            "联网搜索尝试成功"
         ),
         Err(error) => tracing::warn!(
             tool_name = WEB_SEARCH_TOOL_NAME,
@@ -590,7 +661,57 @@ fn log_web_search_attempt(
                 .or(tool.model_override.as_deref())
                 .unwrap_or("configured_default"),
             failure_layer = error.stage.as_str(),
-            "web search attempt failed"
+            "联网搜索尝试失败"
+        ),
+    }
+}
+
+/// 每次真实搜索执行只记录安全结构化诊断，不输出 query、raw_question 或上游正文。
+fn log_web_search_result(
+    tool: &WebSearchTool,
+    request: &WebSearchToolRequest,
+    requested_max_results: Option<u8>,
+    effective_max_results: u8,
+    duration: Duration,
+    outcome: &Result<WebSearchOutcome, LlmError>,
+) {
+    let elapsed_ms = duration.as_millis().min(u128::from(u64::MAX)) as u64;
+    match outcome {
+        Ok(outcome) => tracing::info!(
+            tool_name = WEB_SEARCH_TOOL_NAME,
+            backend = tool.backend_label(),
+            provider = outcome.provider.as_str(),
+            model = request
+                .model_override
+                .as_deref()
+                .unwrap_or("configured_default"),
+            requested_max_results = ?requested_max_results,
+            effective_max_results,
+            elapsed_ms,
+            error_kind = "none",
+            timeout_stage = "none",
+            "联网搜索执行完成"
+        ),
+        Err(error) => tracing::warn!(
+            tool_name = WEB_SEARCH_TOOL_NAME,
+            backend = tool.backend_label(),
+            provider = error
+                .upstream_provider()
+                .unwrap_or_else(|| tool.executor.provider_name()),
+            model = error
+                .upstream_model()
+                .or(request.model_override.as_deref())
+                .unwrap_or("configured_default"),
+            requested_max_results = ?requested_max_results,
+            effective_max_results,
+            elapsed_ms,
+            error_kind = error.error_kind(),
+            timeout_stage = if error.code == "timeout" {
+                error.stage.as_str()
+            } else {
+                "none"
+            },
+            "联网搜索执行失败"
         ),
     }
 }
@@ -618,7 +739,7 @@ fn log_web_search_argument_error(
         task_id = context.task_id.as_str(),
         tool_call_id = context.tool_call_id.as_deref().unwrap_or("direct"),
         tool_round = ?context.tool_round,
-        "web search argument validation failed"
+        "联网搜索参数校验失败"
     );
 }
 
@@ -702,7 +823,7 @@ fn log_web_search_execution(
             .and_then(|value| value.as_str())
             .unwrap_or(""),
         retry_of = ?context.retry_of,
-        "web search tool execution completed"
+        "联网搜索 Tool 执行完成"
     );
 }
 

@@ -76,7 +76,7 @@ impl ManagementRuntime {
         F: Future<Output = ()> + Send + 'static,
     {
         let listener = tokio::net::TcpListener::bind(self.addr).await?;
-        tracing::info!(addr = %self.addr, state = "setup_required", "qq-maid management runtime listening");
+        tracing::info!(addr = %self.addr, state = "setup_required", "qq-maid 管理服务正在监听");
         axum::serve(
             listener,
             build_router(self.http_state).into_make_service_with_connect_info::<SocketAddr>(),
@@ -189,6 +189,11 @@ impl LlmRuntime {
                     core_state.stores.todo_store.clone(),
                     core_state.stores.notification_store.clone(),
                 ))
+                .with_memory_management(
+                    crate::runtime::tools::memory::MemoryManagementService::new(
+                        core_state.stores.memory_store.clone(),
+                    ),
+                )
                 .with_console_user_data(user_data)
                 .with_knowledge_files(
                     knowledge_file_service
@@ -247,7 +252,7 @@ impl LlmRuntime {
 
         workers.spawn();
 
-        tracing::info!(%addr, "qq-maid-core listening");
+        tracing::info!(%addr, "qq-maid-core 正在监听");
         axum::serve(
             listener,
             build_router(http_state).into_make_service_with_connect_info::<SocketAddr>(),
@@ -273,6 +278,9 @@ pub fn init_tracing() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(
             fmt::layer()
+                // 独立 Core/评测入口也不能把日志混入 CLI 的机器可读 stdout。
+                .with_writer(std::io::stderr)
+                .with_ansi(false)
                 .with_target(false)
                 .with_timer(shanghai_log_timer()),
         )

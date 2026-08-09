@@ -37,7 +37,10 @@ const TOOL_LOOP_AMBIGUITY_PROMPT: &str = "\
 工具调用边界：普通问候、闲聊、情绪表达和解释/创作请求不要调用工具；\
 只有用户明确表达任务、提醒、日程、查询或持久化写入意图时才调用对应工具。\
 如果用户要修改待办、记忆或其他持久化状态，但目标、字段或修改内容存在歧义，\
-不要猜测，也不要调用写工具；直接用自然语言追问缺少的信息并结束本轮回复。\
+不要猜测。只有对应领域工具的 schema 或 description 明确声明支持可恢复的缺参澄清时，\
+在已定位具体持久化对象、操作也已确定且只缺少一个可继续补充的字段时，才调用该工具，\
+传入已知上下文与缺失字段空值，由该领域工具保存可跨轮恢复的澄清状态；\
+其他工具缺少必要信息时不要调用写工具，直接用自然语言追问并结束本轮回复。\
 字段归位：中文时间词如今天、明天、周四、上午、下午、晚上应进入时间字段或保留在原文，不要当成标题；\
 标题优先表达核心事项，补充目标放 detail，不能把主项和补充说明反转。\
 响应编排：工具执行前如需可见反馈，只能说“我帮你确认一下/试着处理”，不得提前说已完成、已记好或已成功。";
@@ -277,7 +280,7 @@ impl RustRespondService {
                             .agent
                             .as_deref()
                             .map(|agent| &agent.executed_tools),
-                        "agent final reply failed after verified tool execution; using domain fallback"
+                        "Tool 执行已验真，但 Agent 最终回复失败，改用领域回退"
                     );
                     agent_finalization_error = Some(err.as_info());
                     output
@@ -636,13 +639,14 @@ impl RustRespondService {
         if tracing::enabled!(tracing::Level::DEBUG) {
             let before_mem = qq_maid_common::process_mem::process_memory_sample();
             tracing::debug!(
+                event = "before_knowledge_search",
                 knowledge_mode = %mode.as_str(),
                 user_text_chars = user_text.trim().chars().count(),
                 rss_kb = before_mem.rss_kb,
                 vm_size_kb = before_mem.vm_size_kb,
                 pss_kb = before_mem.pss_kb,
                 private_dirty_kb = before_mem.private_dirty_kb,
-                "before_knowledge_search"
+                "执行知识库搜索前的诊断"
             );
         }
         let evidence = match mode {
@@ -677,7 +681,7 @@ impl RustRespondService {
                         .as_ref()
                         .map(|failure| failure.error_code.as_str())
                         .unwrap_or("knowledge_search_failed"),
-                    "knowledge preflight failed; continuing without injected evidence"
+                    "知识库预检失败，将在不注入证据的情况下继续"
                 );
             }
             return Ok(KnowledgeContextOutcome {
@@ -695,6 +699,7 @@ impl RustRespondService {
         if tracing::enabled!(tracing::Level::DEBUG) {
             let after_mem = qq_maid_common::process_mem::process_memory_sample();
             tracing::debug!(
+                event = "after_knowledge_search",
                 knowledge_mode = %mode.as_str(),
                 candidate_count,
                 hit_count,
@@ -707,7 +712,7 @@ impl RustRespondService {
                 vm_size_kb = after_mem.vm_size_kb,
                 pss_kb = after_mem.pss_kb,
                 private_dirty_kb = after_mem.private_dirty_kb,
-                "after_knowledge_search"
+                "知识库搜索完成后的诊断"
             );
         }
         Ok(KnowledgeContextOutcome {
@@ -827,5 +832,15 @@ mod prompt_protection_tests {
         ] {
             assert!(!is_prompt_extraction_request(input), "{input}");
         }
+    }
+
+    #[test]
+    fn tool_loop_prompt_routes_resumable_missing_fields_into_domain_tools() {
+        assert!(TOOL_LOOP_AMBIGUITY_PROMPT.contains("对应领域工具"));
+        assert!(TOOL_LOOP_AMBIGUITY_PROMPT.contains("schema 或 description 明确声明"));
+        assert!(TOOL_LOOP_AMBIGUITY_PROMPT.contains("缺失字段空值"));
+        assert!(TOOL_LOOP_AMBIGUITY_PROMPT.contains("跨轮恢复"));
+        assert!(!TOOL_LOOP_AMBIGUITY_PROMPT.contains("edit_todo"));
+        assert!(!TOOL_LOOP_AMBIGUITY_PROMPT.contains("reminder_at"));
     }
 }

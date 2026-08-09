@@ -209,7 +209,7 @@ impl<'a> ToolLoopExecutor<'a> {
                         .as_ref()
                         .and_then(|key| self.terminal_read_only_failures.get(key))
                     {
-                        debug!(tool = %tool_name, "agent terminal read-only failure suppressed");
+                        debug!(tool = %tool_name, "已抑制 Agent 只读工具的终态失败");
                         (
                             tool_name,
                             compact_terminal_failure(cached_output),
@@ -223,7 +223,7 @@ impl<'a> ToolLoopExecutor<'a> {
                     {
                         // 缓存只保存已完成的只读结果；命中只回传紧凑引用，避免把
                         // 完整证据再次写入上下文。缓存命中不增加真实执行次数。
-                        debug!(tool = %tool_name, "agent read-only tool cache hit");
+                        debug!(tool = %tool_name, "Agent 只读工具命中缓存");
                         let output = compact_cached_output(cached_output);
                         (
                             tool_name,
@@ -242,7 +242,7 @@ impl<'a> ToolLoopExecutor<'a> {
                             executions = self.execution_counts.get(&tool_name).copied().unwrap_or(0),
                             max_executions = prepared.max_calls_per_request,
                             force_finalization = true,
-                            "tool execution limit reached"
+                            "工具执行次数已达上限"
                         );
                         skipped_for_finalization = true;
                         (

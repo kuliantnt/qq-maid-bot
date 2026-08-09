@@ -74,7 +74,7 @@ impl QqApiClient {
                     group = %masked_group,
                     member = %masked_member,
                     error = %reqwest_error_summary(&error),
-                    "QQ group member detail request failed"
+                    "QQ 群成员详情请求失败"
                 );
                 ApiError::Http(error)
             })?;
@@ -86,7 +86,7 @@ impl QqApiClient {
                 group = %masked_group,
                 member = %masked_member,
                 status = %status,
-                "QQ group member detail returned non-success status"
+                "QQ 群成员详情接口返回非成功状态码"
             );
             return Err(ApiError::Status { status, body });
         }
@@ -99,7 +99,7 @@ impl QqApiClient {
                     group = %masked_group,
                     member = %masked_member,
                     error = %reqwest_error_summary(&error),
-                    "QQ group member detail response decode failed"
+                    "QQ 群成员详情响应解析失败"
                 );
                 ApiError::Http(error)
             })?;
@@ -109,7 +109,7 @@ impl QqApiClient {
             has_username = detail.username.is_some(),
             role = detail.member_role.as_deref().unwrap_or(""),
             is_bot = detail.bot.unwrap_or(false),
-            "qq group member detail fetched"
+            "已获取 QQ 群成员详情"
         );
         Ok(detail)
     }
@@ -234,7 +234,7 @@ impl QqApiClient {
                     group = %mask_openid(group_openid),
                     member = %mask_openid(member_openid),
                     error = %error.log_summary(),
-                    "group member detail fetch failed; caching negative"
+                    "群成员详情获取失败，将缓存失败结果"
                 );
                 self.member_cache.insert(group_openid, member_openid, None);
                 MemberFetchResult::Unavailable

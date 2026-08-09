@@ -131,7 +131,7 @@ impl<'a> RespondRouter<'a> {
                 .is_some_and(|value| !value.trim().is_empty()),
             input_chars = trimmed.chars().count(),
             enabled_tools_count = policy.enabled_tools.len(),
-            "selected core respond route"
+            "已选择 Core 响应路由"
         );
         Ok(planned)
     }

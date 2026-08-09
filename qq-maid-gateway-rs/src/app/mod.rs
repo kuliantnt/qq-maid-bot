@@ -122,7 +122,7 @@ fn log_startup(config: &AppConfig) {
             config.wechat_service.bind_host, config.wechat_service.bind_port
         ),
         wechat_service_callback_path = %config.wechat_service.callback_path,
-        "starting qq-maid Rust gateway"
+        "正在启动 qq-maid Rust Gateway"
     );
 }
 

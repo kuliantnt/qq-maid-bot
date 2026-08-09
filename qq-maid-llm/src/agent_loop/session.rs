@@ -32,6 +32,8 @@ pub struct AgentStreamingDiagnostics {
     pub connection_reset: bool,
     pub parse_error: bool,
     pub explicit_failure_event: bool,
+    /// `response.incomplete.response.incomplete_details.reason` 的低敏稳定值。
+    pub incomplete_reason: Option<String>,
     pub saw_text_delta: bool,
     pub buffered_delta_count: usize,
     pub buffered_text_chars: usize,

@@ -15,15 +15,17 @@ use crate::{
 
 use super::common::{
     EDIT_TODO_TOOL_NAME, TODO_REFERENCE_INVALID_STATE_CODE, TODO_REFERENCE_LAST,
-    bad_tool_arguments, required_non_empty_text, single_todo_selection_request, todo_edit_patch,
-    todo_tool_error, todo_tool_error_output,
+    TODO_REMINDER_TIME_REQUIRED_CODE, bad_tool_arguments, required_non_empty_text,
+    single_todo_selection_request, todo_edit_patch, todo_tool_error, todo_tool_error_output,
 };
 use super::json::todo_selected_item_json;
 use super::recurrence::apply_recurrence_intent_from_text;
 use super::scope::clarification_error_fields;
-use super::scope::{SelectionScope, TodoToolScope};
+use super::scope::{SelectionScope, TodoToolScope, clarification_candidates_for_items};
 use super::selection::{TodoToolSingleItemResolutionWithDraft, prepared_edit_target};
 use super::{sync_reminder_task, validate_draft_reminder};
+
+const TODO_EDIT_PATCH_EMPTY_CODE: &str = "todo_edit_patch_empty";
 
 pub struct EditTodoTool {
     todo_store: crate::runtime::tools::todo::TodoStore,
@@ -59,7 +61,7 @@ impl Tool for EditTodoTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
             name: EDIT_TODO_TOOL_NAME.to_owned(),
-            description: "编辑未完成待办的标题、详情和时间。用户说“清除详情”“删除备注”“去掉内容”“不要详情”等语义时，必须调用本工具并把 detail 传为空字符串；不修改详情时传 null，设置或替换详情时传非空文本。用户明确说“第 N 个”时只能传 number 并依赖最近一次 list_todos 的 visible_number；用户说“刚才那个 / 它”时传 reference=\"last\"。不会接受数据库内部 ID，也不会修改非未完成待办。".to_owned(),
+            description: "编辑未完成待办的标题、详情和时间。用户说“清除详情”“删除备注”“去掉内容”“不要详情”等语义时，必须调用本工具并把 detail 传为空字符串；不修改详情时传 null，设置或替换详情时传非空文本。已定位待办且用户明确要设置提醒、但只给了日期而缺具体时刻时，也必须调用本工具：保留原始表达并把 reminder_at 传 null，工具会保存跨轮澄清状态并追问时刻。用户明确说“第 N 个”时只能传 number 并依赖最近一次 list_todos 的 visible_number；用户说“刚才那个 / 它”时传 reference=\"last\"。不会接受数据库内部 ID，也不会修改非未完成待办。".to_owned(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -238,6 +240,24 @@ impl Tool for EditTodoTool {
                 "edit_todo only accepts pending todos",
             ));
         }
+        if patch.reminder_at.is_none() && super::route::is_reminder_setting_intent(&raw_text) {
+            let question = reminder_time_question(&raw_text);
+            let clarification_arguments = edit_clarification_arguments(&patch, &raw_text);
+            return scope.save_clarification_with_candidates(
+                EDIT_TODO_TOOL_NAME,
+                &clarification_arguments,
+                false,
+                TODO_REMINDER_TIME_REQUIRED_CODE,
+                &question,
+                clarification_candidates_for_items(std::slice::from_ref(&item)),
+            );
+        }
+        if patch.is_empty() && super::route::looks_like_temporal_expression(&raw_text) {
+            return Ok(todo_tool_error_output(
+                TODO_EDIT_PATCH_EMPTY_CODE,
+                "standalone time text requires an active clarification context",
+            ));
+        }
         // 补丁应用逻辑已统一到 `runtime::tools::todo::edit_patch::apply_to_draft`，
         // 与指令侧 `/todo edit` 保持同一套规则。
         let draft = crate::runtime::tools::todo::edit_patch::apply_to_draft(
@@ -270,4 +290,33 @@ impl Tool for EditTodoTool {
         scope.remember_dedup_output(&context, &arguments, &output)?;
         Ok(output)
     }
+}
+
+fn reminder_time_question(raw_text: &str) -> String {
+    let ctx = qq_maid_common::time_context::request_time_context();
+    qq_maid_common::time_context::parse_single_date_expression(raw_text, &ctx)
+        .map(|date| format!("{}几点提醒？", date.raw))
+        .unwrap_or_else(|| "请告诉我哪天几点提醒。".to_owned())
+}
+
+fn edit_clarification_arguments(
+    patch: &crate::runtime::tools::todo::TodoEditPatch,
+    raw_text: &str,
+) -> serde_json::Value {
+    json!({
+        // pending 候选只包含已经定位的目标；恢复时编号 1 仅在该候选作用域内生效。
+        "number": 1,
+        "reference": null,
+        "raw_text": raw_text,
+        "title": patch.title,
+        "detail": patch.detail,
+        "due_date": patch.due_date,
+        "due_at": patch.due_at,
+        "reminder_at": null,
+        "time_precision": patch.time_precision,
+        "recurrence_kind": patch.recurrence_kind,
+        "recurrence_interval": patch.recurrence_interval,
+        "recurrence_unit": patch.recurrence_unit,
+        "recurrence_interval_days": patch.recurrence_interval_days,
+    })
 }

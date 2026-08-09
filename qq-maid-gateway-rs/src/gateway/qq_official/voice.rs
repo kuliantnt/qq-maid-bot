@@ -41,7 +41,7 @@ pub(super) async fn try_c2c_voice_delivery<S: OutboundSender + ?Sized>(
     };
     match sender.send_voice_url(target, &audio_url).await {
         Ok(sent_ids) => {
-            debug!(voice_delivery = "c2c", "QQ voice final reply sent");
+            debug!(voice_delivery = "c2c", "QQ 语音最终回复已发送");
             VoiceDeliveryAttempt::Delivered(sent_ids)
         }
         Err(error) => fallback_from_api_error(error),
@@ -59,7 +59,7 @@ pub(super) async fn try_group_voice_delivery<S: GroupOutboundSender + ?Sized>(
     };
     match sender.send_voice_url(target, &audio_url).await {
         Ok(sent_ids) => {
-            debug!(voice_delivery = "group", "QQ voice final reply sent");
+            debug!(voice_delivery = "group", "QQ 语音最终回复已发送");
             VoiceDeliveryAttempt::Delivered(sent_ids)
         }
         Err(error) => fallback_from_api_error(error),
@@ -80,14 +80,14 @@ async fn synthesize_if_requested(
     else {
         warn!(
             voice_fallback_stage = "empty_after_cleaning",
-            "voice reply has no speakable text; using original text delivery"
+            "语音回复没有可朗读文本，将发送原始文本"
         );
         return None;
     };
     let Some(provider) = provider else {
         warn!(
             voice_fallback_stage = "provider_unavailable",
-            "voice provider is unavailable; using original text delivery"
+            "语音 Provider 不可用，将发送原始文本"
         );
         return None;
     };
@@ -97,7 +97,7 @@ async fn synthesize_if_requested(
             warn!(
                 voice_fallback_stage = "tts",
                 tts_error = error.code(),
-                "voice synthesis failed; using original text delivery"
+                "语音合成失败，将发送原始文本"
             );
             None
         }
@@ -131,7 +131,7 @@ fn fallback_from_api_error(error: ApiError) -> VoiceDeliveryAttempt {
             _ => "qq_send",
         },
         error = %error.log_summary(),
-        "QQ voice delivery failed; using original text delivery"
+        "QQ 语音发送失败，将发送原始文本"
     );
     VoiceDeliveryAttempt::UseText(stage)
 }

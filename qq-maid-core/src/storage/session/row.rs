@@ -105,12 +105,12 @@ fn decode_pending_operation_json(text: Option<&str>) -> Option<PreparedAction> {
     let pending = match serde_json::from_str::<PreparedAction>(text) {
         Ok(pending) => pending,
         Err(err) => {
-            tracing::warn!(error = %err, "discarding unreadable session pending operation");
+            tracing::warn!(error = %err, "丢弃无法读取的 Session pending 操作");
             return None;
         }
     };
     if let Err(err) = pending.validate_envelope() {
-        tracing::warn!(error = %err, "discarding unsupported session pending operation");
+        tracing::warn!(error = %err, "丢弃不受支持的 Session pending 操作");
         return None;
     }
     Some(pending)
@@ -192,7 +192,7 @@ fn decode_message_turn_actor(text: Option<String>) -> Option<SessionTurnActor> {
         Ok(actor) => Some(actor),
         Err(err) => {
             // actor metadata 是增强信息；单行损坏时保留原始历史正文并安全降级为 unknown。
-            tracing::warn!(error = %err, "discarding unreadable session message turn actor");
+            tracing::warn!(error = %err, "丢弃无法读取的 Session 消息发言者信息");
             None
         }
     }

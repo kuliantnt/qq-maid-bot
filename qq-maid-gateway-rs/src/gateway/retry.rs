@@ -67,10 +67,7 @@ where
             Ok(url) => {
                 let recovered_failures = backoff.reset();
                 if recovered_failures > 0 {
-                    info!(
-                        recovered_failures,
-                        "QQ gateway url fetch recovered after transient failures"
-                    );
+                    info!(recovered_failures, "QQ Gateway URL 获取在短暂失败后恢复");
                 }
                 return Ok(GatewayFetchOutcome::Url(url));
             }
@@ -81,7 +78,7 @@ where
                     consecutive_failures = backoff.consecutive_failures(),
                     retry_after_ms = delay.as_millis(),
                     retryable = true,
-                    "failed to fetch QQ gateway url; retrying"
+                    "QQ Gateway URL 获取失败，准备重试"
                 );
                 tokio::select! {
                     _ = shutdown_token.cancelled() => return Ok(GatewayFetchOutcome::Shutdown),
@@ -93,7 +90,7 @@ where
                     error = %error,
                     consecutive_failures = backoff.consecutive_failures().saturating_add(1),
                     retryable = false,
-                    "failed to fetch QQ gateway url; not retrying"
+                    "QQ Gateway URL 获取失败，不再重试"
                 );
                 return Err(error);
             }

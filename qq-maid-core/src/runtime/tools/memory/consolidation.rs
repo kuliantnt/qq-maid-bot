@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use tokio::time::{MissedTickBehavior, interval_at};
-use tracing::{debug, info, warn};
+use tracing::{info, trace, warn};
 
 use super::storage::{ConsolidationLimits, ConsolidationRunStats, MemoryStore};
 
@@ -35,7 +35,7 @@ impl MemoryConsolidationWorker {
 
     pub fn spawn(self) {
         if !self.config.enabled {
-            info!("memory consolidation disabled");
+            info!("Memory 整理已停用");
             return;
         }
         tokio::spawn(async move {
@@ -47,7 +47,7 @@ impl MemoryConsolidationWorker {
                 max_records = self.config.max_records,
                 max_input_chars = self.config.max_input_chars,
                 mode = "exact_duplicate",
-                "memory consolidation worker enabled"
+                "Memory 整理 worker 已启用"
             );
             self.run_loop().await;
         });
@@ -66,7 +66,7 @@ impl MemoryConsolidationWorker {
                     error_code = "memory_consolidation_failed",
                     stage = "storage_transaction",
                     error = %error,
-                    "memory consolidation cycle failed"
+                    "Memory 整理单轮处理失败"
                 );
             }
         }
@@ -93,9 +93,9 @@ impl MemoryConsolidationWorker {
         let stats = MemoryConsolidationRunStats::from(stats);
         let elapsed_ms = started.elapsed().as_millis() as u64;
         if stats.candidate_target_count == 0 {
-            debug!(
+            trace!(
                 skip_reason = "gates_not_met",
-                elapsed_ms, "memory consolidation skipped"
+                elapsed_ms, "Memory 整理未满足执行条件，已跳过"
             );
         } else {
             info!(
@@ -110,7 +110,7 @@ impl MemoryConsolidationWorker {
                 model = "deterministic_exact_duplicate",
                 elapsed_ms,
                 status = "success",
-                "memory consolidation cycle completed"
+                "Memory 整理单轮处理完成"
             );
         }
         Ok(stats)

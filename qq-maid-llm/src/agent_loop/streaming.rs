@@ -13,8 +13,8 @@ use tokio::time::{Duration, timeout};
 
 use crate::{
     agent_loop::{
-        AgentRunHandle, AgentStreamingDiagnostics, AgentTextDeltaFuture, AgentTextDeltaSink,
-        AgentToolResult,
+        AgentRunHandle, AgentStreamingDiagnostics, AgentTextDeltaDelivery, AgentTextDeltaFuture,
+        AgentTextDeltaSink, AgentToolResult,
     },
     error::LlmError,
 };
@@ -107,6 +107,7 @@ pub(super) async fn advance_with_optional_streaming(
                     &err,
                     &diagnostics,
                     run_handle.remaining_budget(),
+                    run_handle,
                     "stream_had_valid_text",
                 );
                 return Err(err);
@@ -121,6 +122,7 @@ pub(super) async fn advance_with_optional_streaming(
                     &err,
                     &diagnostics,
                     run_handle.remaining_budget(),
+                    run_handle,
                     "explicit_failure_event",
                 );
                 return Err(err);
@@ -247,6 +249,7 @@ async fn fallback_to_non_stream(
             err.unwrap_or(&budget_error),
             &diagnostics,
             fallback_remaining_budget,
+            run_handle,
             "insufficient_remaining_budget",
         );
         return Err(budget_error);
@@ -259,6 +262,7 @@ async fn fallback_to_non_stream(
         advance_non_stream_with_timeout(session, results, allow_tool_calls, effective_timeout)
             .await;
     let non_stream_fallback_elapsed_ms = fallback_started.elapsed().as_millis();
+    let agent_diagnostics = run_handle.snapshot();
     tracing::info!(
         provider = session.provider(),
         model = %session.model(),
@@ -276,6 +280,9 @@ async fn fallback_to_non_stream(
         connection_reset = diagnostics.connection_reset,
         parse_error = diagnostics.parse_error,
         explicit_failure_event = diagnostics.explicit_failure_event,
+        incomplete_reason = diagnostics.incomplete_reason.as_deref().unwrap_or("none"),
+        tool_execution_attempted = agent_diagnostics.tool_execution_attempted,
+        tool_executed = !agent_diagnostics.executed_tools.is_empty(),
         saw_text_delta = diagnostics.saw_text_delta,
         chunk_count = diagnostics.chunk_count,
         sse_event_count = diagnostics.sse_event_count,
@@ -291,7 +298,7 @@ async fn fallback_to_non_stream(
         fallback_skipped_reason = "none",
         non_stream_fallback_elapsed_ms,
         non_stream_fallback_succeeded = result.is_ok(),
-        "streaming agent fallback completed"
+        "流式 Agent 降级请求已完成"
     );
     result
         .map(|step| AgentAdvance {
@@ -319,8 +326,10 @@ fn log_streaming_fallback_skipped(
     err: &LlmError,
     diagnostics: &AgentStreamingDiagnostics,
     remaining_budget: Option<Duration>,
+    run_handle: &AgentRunHandle,
     skipped_reason: &str,
 ) {
+    let agent_diagnostics = run_handle.snapshot();
     tracing::warn!(
         provider = session.provider(),
         model = %session.model(),
@@ -337,6 +346,9 @@ fn log_streaming_fallback_skipped(
         connection_reset = diagnostics.connection_reset,
         parse_error = diagnostics.parse_error,
         explicit_failure_event = diagnostics.explicit_failure_event,
+        incomplete_reason = diagnostics.incomplete_reason.as_deref().unwrap_or("none"),
+        tool_execution_attempted = agent_diagnostics.tool_execution_attempted,
+        tool_executed = !agent_diagnostics.executed_tools.is_empty(),
         saw_text_delta = diagnostics.saw_text_delta,
         buffered_delta_count = diagnostics.buffered_delta_count,
         buffered_text_chars = diagnostics.buffered_text_chars,
@@ -345,7 +357,7 @@ fn log_streaming_fallback_skipped(
         stream_remaining_budget_ms = remaining_budget.map(|value| value.as_millis()),
         fallback_remaining_budget_ms = remaining_budget.map(|value| value.as_millis()),
         fallback_skipped_reason = skipped_reason,
-        "streaming agent fallback skipped"
+        "已跳过流式 Agent 降级请求"
     );
 }
 
@@ -365,8 +377,13 @@ fn track_visible_delta_sink(
         let sink = sink.clone();
         let emitted_visible_delta = emitted_visible_delta.clone();
         Box::pin(async move {
-            emitted_visible_delta.store(true, Ordering::SeqCst);
-            sink(delta).await
+            let has_visible_text = !delta.is_empty();
+            let delivery = sink(delta).await?;
+            if has_visible_text && delivery == AgentTextDeltaDelivery::Visible {
+                // 只有下游确认正文已进入可见发送链路后，才关闭本轮安全降级。
+                emitted_visible_delta.store(true, Ordering::SeqCst);
+            }
+            Ok(delivery)
         }) as AgentTextDeltaFuture
     })
 }

@@ -197,6 +197,44 @@ async fn empty_web_search_with_empty_final_text_only_renders_empty_result_hint()
 }
 
 #[tokio::test]
+async fn invalid_web_search_arguments_render_one_local_error_without_model_reply() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results(
+            vec![raw_tool_result(
+                "web_search",
+                serde_json::json!({
+                    "ok": false,
+                    "execution_succeeded": false,
+                    "error": {
+                        "code": "invalid_arguments",
+                        "stage": "tool",
+                        "argument": "time_range"
+                    }
+                }),
+                false,
+            )],
+            "模型声称联网查询已经完成，但这段内容不应直接发送。",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("搜索公开项目"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert_eq!(text.matches("【联网查询】").count(), 1);
+    assert_eq!(text.matches("本次联网查询的参数无效").count(), 1);
+    assert!(!text.contains("联网查询服务暂时不可用"));
+    assert!(!text.contains("模型声称联网查询已经完成"));
+    assert_eq!(
+        response.diagnostics.unwrap()["error_code"],
+        "invalid_arguments"
+    );
+}
+
+#[tokio::test]
 async fn multi_entity_all_empty_search_renders_one_empty_hint_without_retry() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)

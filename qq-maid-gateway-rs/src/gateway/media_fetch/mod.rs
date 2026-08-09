@@ -117,7 +117,7 @@ pub(crate) async fn fetch_qq_official_image_attachments(
                     platform = context.platform,
                     media_status = "available",
                     image_url_scheme = url_scheme,
-                    "QQ official image attachment downloaded"
+                    "QQ 官方图片附件已下载"
                 );
             }
             AttachmentFetchResult::Failed { error, url_scheme } => {
@@ -130,7 +130,7 @@ pub(crate) async fn fetch_qq_official_image_attachments(
                     media_status = error.media_status_label(),
                     image_url_scheme = url_scheme,
                     error = %error.safe_summary(),
-                    "QQ official image attachment download failed"
+                    "QQ 官方图片附件下载失败"
                 );
             }
         }

@@ -101,10 +101,7 @@ fn normalize_with_limits(
         Some(MESSAGE_TYPE_TEXT | MESSAGE_TYPE_QUOTE) | None => {}
         Some(kind) => {
             // 未知类型不能丢弃正文或附件；上面的顶层通用路径已保留它们。
-            debug!(
-                message_type = kind,
-                "QQ inbound message used generic content normalization"
-            );
+            debug!(message_type = kind, "QQ 入站消息已使用通用内容标准化");
         }
     }
 
@@ -297,7 +294,7 @@ impl NormalizerState {
                 node_limited = self.node_limited,
                 text_limited = self.text_limited,
                 media_limited = self.media_limited,
-                "QQ inbound content normalization truncated"
+                "QQ 入站内容标准化结果已截断"
             );
         }
     }
