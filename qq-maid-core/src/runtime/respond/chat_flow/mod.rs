@@ -416,6 +416,9 @@ impl RustRespondService {
             "agent_tool_results": agent_tool_results,
             "agent_turn_status": agent_diagnostics["agent_turn_status"].clone(),
             "tool_outcomes": agent_diagnostics["tool_outcomes"].clone(),
+            "incomplete": agent_diagnostics["incomplete"].clone(),
+            "tool_loop_incomplete": agent_diagnostics["tool_loop_incomplete"].clone(),
+            "tools_with_unknown_result": agent_diagnostics["tools_with_unknown_result"].clone(),
             "tool_retry_count": tool_retry_count,
             "error_code": if let Some(error_code) = agent_turn_outcome
                 .as_ref()

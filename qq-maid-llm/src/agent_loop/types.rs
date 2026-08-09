@@ -106,6 +106,17 @@ pub struct AgentRunDiagnostics {
     pub stop_reason: Option<AgentStopReason>,
 }
 
+impl AgentRunDiagnostics {
+    /// 判断模型发出的 Tool Call 是否有尚未形成结果的缺口。
+    ///
+    /// Tool Loop 对每个已经完成准备/执行/跳过的调用都会写入一个
+    /// `ToolExecutionResult`。因此当 `emitted_tools` 多于 `tool_results` 时，
+    /// 说明循环在仍有 Tool Call 未完成时终止；这与最终模型正文生成失败不同。
+    pub fn has_incomplete_tool_loop(&self) -> bool {
+        self.emitted_tools.len() > self.tool_results.len()
+    }
+}
+
 /// Agent Runtime 与 Core 共享的轨迹快照和取消边界。
 #[derive(Debug, Clone)]
 pub struct AgentRunHandle {

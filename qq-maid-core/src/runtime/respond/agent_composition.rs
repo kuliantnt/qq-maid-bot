@@ -98,8 +98,8 @@ fn join_bodies(first: &str, second: &str) -> String {
 mod tests {
     use super::*;
     use crate::runtime::respond::agent_outcome::{
-        AgentTurnOutcome, OutcomePresentation, ResponseBlock, ToolEffect, ToolExecutionOutcome,
-        ToolOutcomeStatus,
+        AgentTurnOutcome, AgentTurnStatus, OutcomePresentation, ResponseBlock, ToolEffect,
+        ToolExecutionOutcome, ToolOutcomeStatus,
     };
     use crate::runtime::respond::common::CommandBody;
     use crate::util::metrics::LlmMetrics;
@@ -206,6 +206,32 @@ mod tests {
         assert!(output.text.contains("已确认的查询结果"));
         assert!(output.text.contains("unknown_tool"));
         assert!(output.text.contains("状态未知"));
+    }
+
+    #[test]
+    fn incomplete_tool_loop_keeps_known_result_without_claiming_full_success() {
+        let turn =
+            AgentTurnOutcome::from_outcomes_with_visible_snapshot_and_provenance_and_incomplete(
+                vec![outcome(
+                    ToolOutcomeStatus::Succeeded,
+                    ToolEffect::ReadOnly,
+                    "已确认的天气结果",
+                )],
+                None,
+                Vec::new(),
+                Vec::new(),
+                true,
+            );
+        let mut output = output("模型声称后续工具也已完成", false);
+
+        compose_tool_turn_output(&mut output, &turn, AgentReplySource::NaturalLanguageAgent);
+
+        assert_eq!(turn.status, AgentTurnStatus::PartialSuccess);
+        assert!(turn.tool_loop_incomplete);
+        assert!(!output.text.contains("模型声称后续工具也已完成"));
+        assert!(output.text.contains("已确认的天气结果"));
+        assert!(output.text.contains("Tool Loop 未完整结束"));
+        assert!(output.text.contains("不能视为完整成功"));
     }
 
     #[test]

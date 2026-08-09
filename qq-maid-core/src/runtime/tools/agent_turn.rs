@@ -266,11 +266,12 @@ fn project_tool_turn(
     outcomes.extend(search_outcomes.map(|(_, outcome)| outcome));
 
     Ok(
-        AgentTurnOutcome::from_outcomes_with_visible_snapshot_and_provenance(
+        AgentTurnOutcome::from_outcomes_with_visible_snapshot_and_provenance_and_incomplete(
             outcomes,
             visible_entity_snapshot,
             search_provenance,
             output.agent.tools_with_unknown_result.clone(),
+            output.agent.has_incomplete_tool_loop(),
         ),
     )
 }
@@ -301,10 +302,11 @@ pub(crate) fn is_retry_superseded_result(
         .any(|attempt| attempt.retry_of == Some(result_index))
 }
 
-/// 最终模型轮次失败后，只使用已经形成完整 Tool Result 的整轮作为候选回退。
+/// 最终模型轮次失败后，使用已经形成结果的工具轨迹作为候选回退。
 ///
-/// 是否能展示以及展示哪一种领域正文仍由后续投影和合成策略决定；这里不读取
-/// 工具名称、不编造业务成功文案，也不接受取消或未知副作用结果。
+/// 最终正文失败可以直接回退；如果 Tool Loop 在仍有未完成调用时终止，后续
+/// projection 会消费同一份 typed 完整性元数据并阻断成功展示。这里不读取工具名称、
+/// 不编造业务成功文案，也不接受取消或未知副作用结果。
 pub(crate) fn fallback_output_after_agent_failure(
     err: &LlmError,
     model: &str,
@@ -356,5 +358,35 @@ mod tests {
             LlmError::new("cancelled", "request cancelled", "agent").with_agent(diagnostics);
 
         assert!(fallback_output_after_agent_failure(&error, "model").is_none());
+    }
+
+    #[test]
+    fn incomplete_tool_loop_keeps_known_results_for_incomplete_presentation() {
+        let diagnostics = AgentRunDiagnostics {
+            emitted_tools: vec!["get_weather".to_owned(), "tool_b".to_owned()],
+            executed_tools: vec!["get_weather".to_owned()],
+            tool_execution_attempted: true,
+            tool_results: vec![ToolExecutionResult {
+                name: "get_weather".to_owned(),
+                output: serde_json::json!({"ok": true}),
+                succeeded: true,
+            }],
+            stop_reason: Some(AgentStopReason::Failed),
+            ..AgentRunDiagnostics::default()
+        };
+        let error = LlmError::new(
+            "tool_calls_disabled",
+            "provider returned another tool call while finalizing",
+            "tool_loop",
+        )
+        .with_agent(diagnostics);
+
+        let output = fallback_output_after_agent_failure(&error, "model")
+            .expect("known results remain available for incomplete presentation");
+
+        assert!(output.agent.has_incomplete_tool_loop());
+        assert_eq!(output.agent.tool_results.len(), 1);
+        assert_eq!(output.agent.tool_results[0].name, "get_weather");
+        assert!(output.model_reply_empty);
     }
 }

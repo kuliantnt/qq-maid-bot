@@ -59,6 +59,70 @@ async fn readonly_weather_result_preserves_model_advice() {
 }
 
 #[tokio::test]
+async fn weather_result_uses_deterministic_fallback_when_final_model_fails() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_calls_then_error(
+            vec![("get_weather", r#"{"city":"杭州","forecast_days":3}"#)],
+            crate::error::LlmError::new(
+                "context_budget_exceeded",
+                "final answer generation failed",
+                "tool_loop",
+            ),
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("杭州天气怎么样"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("🌦 杭州天气"));
+    assert!(text.contains("未来 3 天"));
+    assert!(!text.contains("final answer generation failed"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["agent_finalization_fallback_used"], true);
+    assert_eq!(
+        diagnostics["agent_finalization_error_code"],
+        "context_budget_exceeded"
+    );
+    assert_eq!(diagnostics["agent_turn_status"], "succeeded");
+    assert_eq!(diagnostics["error_code"], Value::Null);
+}
+
+#[tokio::test]
+async fn incomplete_tool_loop_keeps_weather_result_without_claiming_completion() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_calls_then_error_with_pending_call(
+            vec![("get_weather", r#"{"city":"杭州","forecast_days":3}"#)],
+            vec!["web_search"],
+            crate::error::LlmError::new(
+                "tool_calls_disabled",
+                "provider returned another tool call while finalizing",
+                "tool_loop",
+            ),
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("杭州天气怎么样，并继续核对天气"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("🌦 杭州天气"));
+    assert!(text.contains("Tool Loop 未完整结束"));
+    assert!(text.contains("不能视为完整成功"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["agent_turn_status"], "partial_success");
+    assert_eq!(diagnostics["incomplete"], true);
+    assert_eq!(diagnostics["tool_loop_incomplete"], true);
+    assert_eq!(diagnostics["error_code"], "agent_turn_incomplete");
+}
+
+#[tokio::test]
 async fn weather_only_outcome_does_not_bypass_implicit_todo_success_verification() {
     for reply in [
         "杭州明天晴，另外已记录明天买菜。",

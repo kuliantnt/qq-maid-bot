@@ -210,6 +210,10 @@ pub(crate) struct AgentTurnOutcome {
     pub provenance: Vec<ProvenanceSource>,
     /// 已启动但尚未形成可信结果的工具；它不是一个 Tool Result，不能进入领域投影。
     pub unknown_result_tools: Vec<String>,
+    /// 模型已经发出新的 Tool Call，但 Tool Loop 在调用形成结果前终止。
+    ///
+    /// 这是整轮编排元数据，不是 synthetic Tool Result，不能进入领域投影。
+    pub tool_loop_incomplete: bool,
     pub visible_entity_snapshot: Option<VisibleEntitySnapshot>,
 }
 
@@ -224,14 +228,32 @@ impl AgentTurnOutcome {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn from_outcomes_with_visible_snapshot_and_provenance(
         outcomes: Vec<ToolExecutionOutcome>,
         visible_entity_snapshot: Option<VisibleEntitySnapshot>,
         provenance: Vec<ProvenanceSource>,
         unknown_result_tools: Vec<String>,
     ) -> Self {
+        Self::from_outcomes_with_visible_snapshot_and_provenance_and_incomplete(
+            outcomes,
+            visible_entity_snapshot,
+            provenance,
+            unknown_result_tools,
+            false,
+        )
+    }
+
+    pub(crate) fn from_outcomes_with_visible_snapshot_and_provenance_and_incomplete(
+        outcomes: Vec<ToolExecutionOutcome>,
+        visible_entity_snapshot: Option<VisibleEntitySnapshot>,
+        provenance: Vec<ProvenanceSource>,
+        unknown_result_tools: Vec<String>,
+        tool_loop_incomplete: bool,
+    ) -> Self {
         let unknown_result_tools = deduplicate_tool_names(unknown_result_tools);
-        let status = calculate_turn_status(&outcomes, !unknown_result_tools.is_empty());
+        let incomplete = tool_loop_incomplete || !unknown_result_tools.is_empty();
+        let status = calculate_turn_status(&outcomes, incomplete);
         let mut indexed_blocks = Vec::new();
         for (outcome_index, outcome) in outcomes.iter().enumerate() {
             for (block_index, block) in outcome.blocks.iter().cloned().enumerate() {
@@ -251,13 +273,14 @@ impl AgentTurnOutcome {
             blocks,
             provenance: deduplicate_provenance(provenance),
             unknown_result_tools,
+            tool_loop_incomplete,
             visible_entity_snapshot,
         }
     }
 
     /// 当前整轮是否拥有可安全展示的完整确定性结果。
     pub(crate) fn can_render_deterministic_reply(&self) -> bool {
-        self.unknown_result_tools.is_empty()
+        !self.has_incomplete_result()
             && !self.blocks.is_empty()
             && self
                 .outcomes
@@ -271,7 +294,7 @@ impl AgentTurnOutcome {
     /// 只有真实失败（`empty_result` 是“查询完成但无证据”的兼容状态）才回到确定性
     /// 错误/回执，避免模型把失败工具说成成功。
     pub(crate) fn can_use_model_reply_as_primary(&self) -> bool {
-        if !self.unknown_result_tools.is_empty() || !self.can_render_deterministic_reply() {
+        if self.has_incomplete_result() || !self.can_render_deterministic_reply() {
             return false;
         }
         self.outcomes.iter().all(|outcome| {
@@ -283,7 +306,7 @@ impl AgentTurnOutcome {
     }
 
     pub(crate) fn has_incomplete_result(&self) -> bool {
-        !self.unknown_result_tools.is_empty()
+        self.tool_loop_incomplete || !self.unknown_result_tools.is_empty()
     }
 
     pub(crate) fn render_provenance(&self) -> CommandBody {
@@ -388,29 +411,45 @@ impl AgentTurnOutcome {
         body
     }
 
-    /// 已知结果仍可展示，但未知工具必须以整轮不完整状态追加提示，不能把已知结果
-    /// 当成整轮成功，也不能把未知工具伪造成 Tool Result。
+    /// 已知结果仍可展示，但整轮不完整必须追加提示，不能把已知结果当成整轮成功，
+    /// 也不能把未完成调用伪造成 Tool Result。
     pub(crate) fn render_incomplete_body(&self) -> CommandBody {
         let mut body = if self.has_unhandled_outcome() {
             self.render_compat_body()
         } else {
             self.render_body()
         };
-        let text_lines = std::iter::once("⚠️ 部分工具执行结果未知，无法确认是否成功".to_owned())
-            .chain(
+        if !self.provenance.is_empty() {
+            let provenance = self.render_provenance();
+            body.text = join_body_with_warning(&body.text, &provenance.text);
+            body.markdown = Some(join_body_with_warning(
+                body.markdown.as_deref().unwrap_or_default(),
+                provenance.markdown.as_deref().unwrap_or_default(),
+            ));
+        }
+
+        let mut text_lines = Vec::new();
+        let mut markdown_lines = Vec::new();
+        if self.tool_loop_incomplete {
+            text_lines.push("⚠️ Tool Loop 未完整结束，部分工具调用未执行".to_owned());
+            text_lines.push("- 以上仅展示已经确认的工具结果，本轮不能视为完整成功".to_owned());
+            markdown_lines.push("## ⚠️ Tool Loop 未完整结束，部分工具调用未执行".to_owned());
+            markdown_lines.push("- 以上仅展示已经确认的工具结果，本轮不能视为完整成功".to_owned());
+        }
+        if !self.unknown_result_tools.is_empty() {
+            text_lines.push("⚠️ 部分工具执行结果未知，无法确认是否成功".to_owned());
+            text_lines.extend(
                 self.unknown_result_tools
                     .iter()
                     .map(|tool| format!("- {tool}：执行状态未知")),
-            )
-            .collect::<Vec<_>>();
-        let markdown_lines =
-            std::iter::once("## ⚠️ 部分工具执行结果未知，无法确认是否成功".to_owned())
-                .chain(
-                    self.unknown_result_tools
-                        .iter()
-                        .map(|tool| format!("- {tool}：执行状态未知")),
-                )
-                .collect::<Vec<_>>();
+            );
+            markdown_lines.push("## ⚠️ 部分工具执行结果未知，无法确认是否成功".to_owned());
+            markdown_lines.extend(
+                self.unknown_result_tools
+                    .iter()
+                    .map(|tool| format!("- {tool}：执行状态未知")),
+            );
+        }
         body.text = join_body_with_warning(&body.text, &text_lines.join("\n"));
         body.markdown = Some(join_body_with_warning(
             body.markdown.as_deref().unwrap_or_default(),
@@ -475,16 +514,15 @@ impl AgentTurnOutcome {
                 "error_code": outcome.error_code,
             })).collect::<Vec<_>>(),
             "tools_with_unknown_result": self.unknown_result_tools,
+            "tool_loop_incomplete": self.tool_loop_incomplete,
+            "incomplete": self.has_incomplete_result(),
         })
     }
 }
 
-fn calculate_turn_status(
-    outcomes: &[ToolExecutionOutcome],
-    has_unknown_result: bool,
-) -> AgentTurnStatus {
+fn calculate_turn_status(outcomes: &[ToolExecutionOutcome], incomplete: bool) -> AgentTurnStatus {
     if outcomes.is_empty() {
-        return if has_unknown_result {
+        return if incomplete {
             AgentTurnStatus::Failed
         } else {
             AgentTurnStatus::Succeeded
@@ -528,7 +566,7 @@ fn calculate_turn_status(
             AgentTurnStatus::Failed
         }
     };
-    if has_unknown_result && status == AgentTurnStatus::Succeeded {
+    if incomplete && status == AgentTurnStatus::Succeeded {
         AgentTurnStatus::PartialSuccess
     } else {
         status
