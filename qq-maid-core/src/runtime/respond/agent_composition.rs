@@ -101,8 +101,8 @@ fn join_bodies(first: &str, second: &str) -> String {
 mod tests {
     use super::*;
     use crate::runtime::respond::agent_outcome::{
-        AgentTurnOutcome, AgentTurnStatus, OutcomePresentation, ResponseBlock, ToolEffect,
-        ToolExecutionOutcome, ToolOutcomeStatus,
+        AgentTurnOutcome, AgentTurnStatus, OutcomePresentation, ProvenanceSource, ResponseBlock,
+        ToolEffect, ToolExecutionOutcome, ToolOutcomeStatus,
     };
     use crate::runtime::respond::common::CommandBody;
     use crate::util::metrics::LlmMetrics;
@@ -168,6 +168,32 @@ mod tests {
         compose_tool_turn_output(&mut output, &turn, AgentReplySource::NaturalLanguageAgent);
 
         assert_eq!(output.text, "确定性结果");
+    }
+
+    #[test]
+    fn empty_model_reply_keeps_source_identity_when_answer_equals_snippet() {
+        let answer = "OpenAI 发布了新版本";
+        let turn = AgentTurnOutcome::from_outcomes_with_visible_snapshot_and_provenance(
+            vec![outcome(
+                ToolOutcomeStatus::Succeeded,
+                ToolEffect::ReadOnly,
+                answer,
+            )],
+            None,
+            vec![ProvenanceSource {
+                title: "OpenAI 官方公告".to_owned(),
+                url: "https://example.test".to_owned(),
+                snippet: answer.to_owned(),
+            }],
+            Vec::new(),
+        );
+        let mut output = output("", true);
+
+        compose_tool_turn_output(&mut output, &turn, AgentReplySource::NaturalLanguageAgent);
+
+        assert_eq!(output.text.matches(answer).count(), 1);
+        assert_eq!(output.text.matches("OpenAI 官方公告").count(), 1);
+        assert_eq!(output.text.matches("https://example.test").count(), 1);
     }
 
     #[test]

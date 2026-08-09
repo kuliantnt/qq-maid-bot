@@ -93,6 +93,8 @@ async fn natural_language_tool_query_combines_tomorrow_status_and_keyword() {
     let text = response.text.unwrap();
     assert!(text.starts_with("查询完成"));
     assert!(text.contains("项目 A 报告"));
+    assert!(!text.contains("项目 B 报告"));
+    assert!(!text.contains("项目 A 后续"));
     assert_eq!(inspector.tool_call_count(), 1);
 
     let session = service
@@ -194,6 +196,7 @@ async fn natural_language_tool_query_supports_fuzzy_keyword_search() {
     let text = response.text.unwrap();
     assert!(text.starts_with("查询完成"));
     assert!(text.contains("提交报销报告"));
+    assert!(!text.contains("检查服务器日志"));
     assert_eq!(inspector.tool_call_count(), 1);
 
     let session = service

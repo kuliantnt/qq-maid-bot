@@ -402,7 +402,7 @@ impl AgentTurnOutcome {
             .filter(|source| !source_is_embedded(source, body))
             .cloned()
             .collect::<Vec<_>>();
-        render_provenance_sources(&sources)
+        render_provenance_sources_avoiding_embedded_snippets(&sources, body)
     }
 
     pub(crate) fn render_compat_body(&self) -> CommandBody {
@@ -668,22 +668,55 @@ fn render_provenance_sources(sources: &[ProvenanceSource]) -> CommandBody {
     body
 }
 
+/// 来源的 title/URL 尚未展示时，不能因为 snippet 已经出现在正文中而丢弃整个来源。
+/// 这里只省略重复的摘要文本，避免 answer 与 snippet 相同导致正文重复，来源身份仍保留。
+fn render_provenance_sources_avoiding_embedded_snippets(
+    sources: &[ProvenanceSource],
+    body: &CommandBody,
+) -> CommandBody {
+    let sources = sources
+        .iter()
+        .cloned()
+        .map(|mut source| {
+            if source_snippet_is_embedded(&source, body) {
+                source.snippet.clear();
+            }
+            source
+        })
+        .collect::<Vec<_>>();
+    render_provenance_sources(&sources)
+}
+
 fn source_is_embedded(source: &ProvenanceSource, body: &CommandBody) -> bool {
-    let rendered = format!(
-        "{}\n{}",
-        body.text,
-        body.markdown.as_deref().unwrap_or_default()
-    );
-    if !source.url.trim().is_empty() && rendered.contains(source.url.trim()) {
-        return true;
+    let url = source.url.trim();
+    if !url.is_empty() {
+        // 带 URL 的来源以 URL 为稳定身份；正文只有 answer/snippet 时不能算已展示。
+        return body_contains(body, url);
     }
-    if !source.title.trim().is_empty()
-        && rendered.contains(source.title.trim())
-        && (source.snippet.trim().is_empty() || rendered.contains(source.snippet.trim()))
-    {
-        return true;
+
+    let title = source.title.trim();
+    if !title.is_empty() {
+        // 没有 URL 时至少要出现 title；若有 snippet，也要求摘要同时出现，避免
+        // 仅凭相同的短文本把来源身份误判为已展示。
+        return body_contains(body, title)
+            && (source.snippet.trim().is_empty() || body_contains(body, source.snippet.trim()));
     }
-    !source.snippet.trim().is_empty() && rendered.contains(source.snippet.trim())
+
+    // 只有 title 和 URL 都为空的来源才允许使用 snippet-only 去重。
+    !source.snippet.trim().is_empty() && body_contains(body, source.snippet.trim())
+}
+
+fn source_snippet_is_embedded(source: &ProvenanceSource, body: &CommandBody) -> bool {
+    let snippet = source.snippet.trim();
+    !snippet.is_empty() && body_contains(body, snippet)
+}
+
+fn body_contains(body: &CommandBody, needle: &str) -> bool {
+    body.text.contains(needle)
+        || body
+            .markdown
+            .as_deref()
+            .is_some_and(|markdown| markdown.contains(needle))
 }
 
 fn join_command_bodies(first: &CommandBody, second: &CommandBody) -> CommandBody {
@@ -744,264 +777,4 @@ fn append_source_snippet(reference: String, snippet: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn outcome(
-        tool: &str,
-        domain: &str,
-        status: ToolOutcomeStatus,
-        effect: ToolEffect,
-        blocks: Vec<ResponseBlock>,
-    ) -> ToolExecutionOutcome {
-        ToolExecutionOutcome {
-            tool_name: tool.to_owned(),
-            domain: domain.to_owned(),
-            status,
-            effect,
-            presentation: if blocks.is_empty() {
-                OutcomePresentation::Internal
-            } else {
-                OutcomePresentation::Trusted
-            },
-            blocks,
-            error_code: None,
-            command: None,
-        }
-    }
-
-    #[test]
-    fn status_uses_ok_false_even_without_error_code() {
-        let result = ToolExecutionResult {
-            name: "edit_todo".to_owned(),
-            output: json!({"ok": false, "message": "failed"}),
-            succeeded: false,
-        };
-
-        assert_eq!(
-            ToolOutcomeStatus::from_tool_result(&result),
-            ToolOutcomeStatus::Failed
-        );
-    }
-
-    #[test]
-    fn dependency_skip_has_own_status() {
-        let result = ToolExecutionResult {
-            name: "complete_todos".to_owned(),
-            output: json!({"ok": false, "skipped": true, "reason": "dependency_previous_call_failed"}),
-            succeeded: false,
-        };
-
-        assert_eq!(
-            ToolOutcomeStatus::from_tool_result(&result),
-            ToolOutcomeStatus::Skipped
-        );
-    }
-
-    #[test]
-    fn partial_success_keeps_success_and_failure_blocks() {
-        let turn = AgentTurnOutcome::from_outcomes(vec![
-            outcome(
-                "create_todo",
-                "todo",
-                ToolOutcomeStatus::Succeeded,
-                ToolEffect::Created,
-                vec![ResponseBlock::MutationReceipt(CommandBody::plain(
-                    "✅ 已新增待办",
-                ))],
-            ),
-            outcome(
-                "edit_todo",
-                "todo",
-                ToolOutcomeStatus::Failed,
-                ToolEffect::Updated,
-                vec![ResponseBlock::Error(CommandBody::plain("⚠️ 编辑失败"))],
-            ),
-        ]);
-
-        assert_eq!(turn.status, AgentTurnStatus::PartialSuccess);
-        assert!(turn.can_render_deterministic_reply());
-        let body = turn.render_body();
-        assert!(body.text.contains("✅ 已新增待办"));
-        assert!(body.text.contains("⚠️ 编辑失败"));
-    }
-
-    #[test]
-    fn unhandled_outcome_blocks_full_replacement_even_with_trusted_blocks() {
-        let turn = AgentTurnOutcome::from_outcomes(vec![
-            outcome(
-                "create_todo",
-                "todo",
-                ToolOutcomeStatus::Succeeded,
-                ToolEffect::Created,
-                vec![ResponseBlock::MutationReceipt(CommandBody::plain(
-                    "✅ 已新增待办",
-                ))],
-            ),
-            ToolExecutionOutcome::generic(&ToolExecutionResult {
-                name: "unknown_tool".to_owned(),
-                output: json!({"ok": true, "summary": "unadapted result"}),
-                succeeded: true,
-            }),
-        ]);
-
-        assert_eq!(turn.status, AgentTurnStatus::Succeeded);
-        assert!(!turn.can_render_deterministic_reply());
-        assert_eq!(
-            turn.outcomes[1].presentation,
-            OutcomePresentation::Unhandled
-        );
-    }
-
-    #[test]
-    fn simulated_fact_card_and_light_todo_receipt_are_ordered_by_block_type() {
-        let turn = AgentTurnOutcome::from_outcomes(vec![
-            outcome(
-                "create_todo",
-                "todo",
-                ToolOutcomeStatus::Succeeded,
-                ToolEffect::Created,
-                vec![ResponseBlock::MutationReceipt(CommandBody::plain(
-                    "✅ 已新增待办\n乘坐 G34 前往北京南",
-                ))],
-            ),
-            outcome(
-                "train_search",
-                "train",
-                ToolOutcomeStatus::Succeeded,
-                ToolEffect::ReadOnly,
-                vec![ResponseBlock::FactCard(CommandBody::plain(
-                    "🚄 已查到车次\nG34 · 杭州东 → 北京南 · 07:00",
-                ))],
-            ),
-        ]);
-
-        assert_eq!(turn.status, AgentTurnStatus::Succeeded);
-        let body = turn.render_body();
-        let fact_pos = body.text.find("🚄 已查到车次").unwrap();
-        let todo_pos = body.text.find("✅ 已新增待办").unwrap();
-        assert!(fact_pos < todo_pos);
-    }
-
-    #[test]
-    fn readonly_success_preserves_model_reply() {
-        let turn = AgentTurnOutcome::from_outcomes(vec![outcome(
-            "get_weather",
-            "weather",
-            ToolOutcomeStatus::Succeeded,
-            ToolEffect::ReadOnly,
-            vec![ResponseBlock::FactCard(CommandBody::plain(
-                "🌦 岱山天气\n当前多云",
-            ))],
-        )]);
-
-        assert!(turn.can_render_deterministic_reply());
-        assert!(turn.can_use_model_reply_as_primary());
-    }
-
-    #[test]
-    fn readonly_empty_results_preserve_model_reply() {
-        let mut empty = outcome(
-            "web_search",
-            "search",
-            ToolOutcomeStatus::Failed,
-            ToolEffect::ReadOnly,
-            vec![ResponseBlock::Warning(CommandBody::plain("没查到明确结果"))],
-        );
-        empty.error_code = Some("empty_result".to_owned());
-        let turn = AgentTurnOutcome::from_outcomes(vec![empty]);
-
-        assert!(turn.can_use_model_reply_as_primary());
-    }
-
-    #[test]
-    fn readonly_success_and_empty_result_preserve_model_reply() {
-        let success = outcome(
-            "web_search",
-            "search",
-            ToolOutcomeStatus::Succeeded,
-            ToolEffect::ReadOnly,
-            vec![ResponseBlock::FactCard(CommandBody::plain("有效搜索事实"))],
-        );
-        let mut empty = outcome(
-            "web_search",
-            "search",
-            ToolOutcomeStatus::Failed,
-            ToolEffect::ReadOnly,
-            vec![ResponseBlock::Warning(CommandBody::plain("没查到明确结果"))],
-        );
-        empty.error_code = Some("empty_result".to_owned());
-        let turn = AgentTurnOutcome::from_outcomes(vec![success, empty]);
-
-        assert!(turn.can_use_model_reply_as_primary());
-    }
-
-    #[test]
-    fn deterministic_fallback_keeps_search_source_once() {
-        let turn = AgentTurnOutcome::from_outcomes_with_visible_snapshot_and_provenance(
-            vec![outcome(
-                "web_search",
-                "search",
-                ToolOutcomeStatus::Succeeded,
-                ToolEffect::ReadOnly,
-                vec![ResponseBlock::FactCard(CommandBody::plain("搜索答案"))],
-            )],
-            None,
-            vec![ProvenanceSource {
-                title: "官方来源".to_owned(),
-                url: "https://example.test/source".to_owned(),
-                snippet: "官方摘要".to_owned(),
-            }],
-            Vec::new(),
-        );
-
-        let body = turn.render_body_with_provenance();
-
-        assert_eq!(body.text.matches("官方来源").count(), 1);
-        assert_eq!(body.text.matches("https://example.test/source").count(), 1);
-        assert_eq!(body.text.matches("官方摘要").count(), 1);
-    }
-
-    #[test]
-    fn embedded_search_source_is_not_appended_again() {
-        let turn = AgentTurnOutcome::from_outcomes_with_visible_snapshot_and_provenance(
-            vec![outcome(
-                "web_search",
-                "search",
-                ToolOutcomeStatus::Succeeded,
-                ToolEffect::ReadOnly,
-                vec![ResponseBlock::FactCard(CommandBody::plain(
-                    "搜索答案\n官方来源（https://example.test/source）：官方摘要",
-                ))],
-            )],
-            None,
-            vec![ProvenanceSource {
-                title: "官方来源".to_owned(),
-                url: "https://example.test/source".to_owned(),
-                snippet: "官方摘要".to_owned(),
-            }],
-            Vec::new(),
-        );
-
-        let body = turn.render_body_with_provenance();
-
-        assert!(!body.text.contains("参考来源："));
-        assert_eq!(body.text.matches("官方来源").count(), 1);
-    }
-
-    #[test]
-    fn mutation_success_still_replaces_model_reply() {
-        let turn = AgentTurnOutcome::from_outcomes(vec![outcome(
-            "create_todo",
-            "todo",
-            ToolOutcomeStatus::Succeeded,
-            ToolEffect::Created,
-            vec![ResponseBlock::MutationReceipt(CommandBody::plain(
-                "✅ 已新增待办",
-            ))],
-        )]);
-
-        assert!(turn.can_render_deterministic_reply());
-        assert!(turn.can_use_model_reply_as_primary());
-    }
-}
+mod tests;
