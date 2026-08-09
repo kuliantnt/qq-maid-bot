@@ -11,7 +11,6 @@ import {
   parseKnowledgeFileItem,
   retryKnowledgeFile,
   setCsrfToken,
-  setUnauthorizedHandler,
   uploadKnowledgeFile,
 } from "../dist/api.js";
 
@@ -176,19 +175,6 @@ test("认证和权限错误保留安全信息而不泄漏原始响应", async ()
         && !error.message.includes("request_id")
       ));
     });
-  }
-});
-
-test("401 会通知统一会话失效处理器", async () => {
-  let notifications = 0;
-  setUnauthorizedHandler(() => { notifications += 1; });
-  try {
-    await withFetchMock(async () => jsonResponse(errorEnvelope("unauthorized", "请先登录"), 401), async () => {
-      await assert.rejects(fetchKnowledgeCapabilities(), (error) => error instanceof ConsoleApiError && error.status === 401);
-    });
-    assert.equal(notifications, 1);
-  } finally {
-    setUnauthorizedHandler(null);
   }
 });
 

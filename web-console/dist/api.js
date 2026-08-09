@@ -396,12 +396,14 @@ export async function commitMemoryOperation(input) {
         confirmation_token: input.confirmationToken,
     }));
     const data = record(payload.data);
-    if (data.operation !== input.operation || parseMemoryTarget(data.target).targetRef !== input.targetRef) {
+    const target = parseMemoryTarget(data.target);
+    if (data.operation !== input.operation || target.targetRef !== input.targetRef) {
         throw new ConsoleApiError("Memory 提交接口返回了不匹配的操作范围", "invalid_response");
     }
     return {
         affectedCount: requiredNonNegativeInteger(data.affected_count, "affected_count"),
         capabilities: parseOperationCapabilities(data.capabilities),
+        target,
     };
 }
 function parseTodoPage(value) {
