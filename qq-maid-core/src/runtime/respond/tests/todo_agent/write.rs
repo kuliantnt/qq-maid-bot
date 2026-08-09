@@ -412,7 +412,7 @@ async fn todo_internal_list_before_write_is_not_user_visible_query() {
 }
 
 #[tokio::test]
-async fn todo_write_with_explicit_list_does_not_append_auto_related_list() {
+async fn todo_write_with_explicit_list_keeps_the_explicit_list_visible() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_calls_json(
@@ -473,7 +473,9 @@ async fn todo_write_with_explicit_list_does_not_append_auto_related_list() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert_eq!(text, "已完成第一条");
+    assert!(text.starts_with("已完成第一条"));
+    assert!(text.contains("当前已完成 · 共 1 项"));
+    assert!(text.contains("先完成"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
         diagnostics["agent_executed_tools"],

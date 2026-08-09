@@ -82,7 +82,7 @@ pub(crate) enum OutcomePresentation {
 /// 工具结果可以附带的来源信息。
 ///
 /// 来源是搜索结果的 provenance，不是搜索工具的完整正文；自然语言 Agent 成功
-/// 时只把它作为模型正文后的参考信息追加，模型最终失败时才回退到完整结果卡片。
+/// 时把它作为模型正文后的参考信息追加，确定性回退时也必须保留一次可信来源。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProvenanceSource {
     pub title: String,
@@ -310,24 +310,43 @@ impl AgentTurnOutcome {
     }
 
     pub(crate) fn render_provenance(&self) -> CommandBody {
-        if self.provenance.is_empty() {
-            return CommandBody::plain("");
-        }
+        render_provenance_sources(&self.provenance)
+    }
 
-        let mut text_lines = vec!["参考来源：".to_owned()];
-        let mut markdown_lines = vec!["参考来源：".to_owned()];
-        for source in &self.provenance {
-            let text_reference = source_text_reference(source);
-            let markdown_reference = source_markdown_reference(source);
-            let text_line = append_source_snippet(text_reference, &source.snippet);
-            let markdown_line = append_source_snippet(markdown_reference, &source.snippet);
-            text_lines.push(format!("- {text_line}"));
-            markdown_lines.push(format!("- {markdown_line}"));
-        }
+    /// 自然语言 Agent 成功时允许追加到模型正文后的用户可见补充内容。
+    ///
+    /// 只追加 Todo 的真实可见列表和搜索来源；写操作回执、天气事实卡等仍由模型
+    /// 总结，避免同一轮把所有 Tool 结果重复发送给用户。
+    pub(crate) fn render_natural_language_supplement(&self) -> CommandBody {
+        let related_lists = self.render_related_list_body();
+        let provenance = self.render_provenance();
+        join_command_bodies(&related_lists, &provenance)
+    }
 
-        let mut body = structured_command_body(markdown_lines.join("\n"));
-        body.text = text_lines.join("\n");
-        body
+    /// 确定性结果正文并附加尚未嵌入正文的可信来源。
+    pub(crate) fn render_body_with_provenance(&self) -> CommandBody {
+        let body = self.render_body();
+        let provenance = self.render_provenance_excluding(&body);
+        join_command_bodies(&body, &provenance)
+    }
+
+    /// 最终模型失败时使用的安全回退。
+    ///
+    /// 有确定性块时只展示这些已验证内容；只有内部状态而没有用户正文时，返回
+    /// 明确的重试提示，不能把空字符串当成成功回复。
+    pub(crate) fn render_fallback_body(&self) -> CommandBody {
+        let body = self.render_body_with_provenance();
+        if !body.text.trim().is_empty() {
+            return body;
+        }
+        if self
+            .outcomes
+            .iter()
+            .any(|outcome| outcome.status == ToolOutcomeStatus::Succeeded)
+        {
+            return CommandBody::plain("工具已完成，但模型未能整理出可用回复，请稍后重试。");
+        }
+        CommandBody::plain("本轮工具没有生成可直接展示的结果，请稍后重试。")
     }
 
     pub(crate) fn has_unhandled_outcome(&self) -> bool {
@@ -337,36 +356,57 @@ impl AgentTurnOutcome {
     }
 
     pub(crate) fn render_body(&self) -> CommandBody {
-        let text = self
-            .blocks
+        Self::render_block_bodies(self.blocks.iter())
+    }
+
+    fn render_related_list_body(&self) -> CommandBody {
+        Self::render_block_bodies(
+            self.blocks
+                .iter()
+                .filter(|block| matches!(block, ResponseBlock::RelatedList(_))),
+        )
+    }
+
+    fn render_block_bodies<'a, I>(blocks: I) -> CommandBody
+    where
+        I: IntoIterator<Item = &'a ResponseBlock>,
+    {
+        let bodies = blocks
+            .into_iter()
+            .map(ResponseBlock::body)
+            .collect::<Vec<_>>();
+        let text = bodies
             .iter()
-            .map(|block| block.body().text.trim().to_owned())
+            .map(|body| body.text.trim())
             .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n");
-        let markdown_parts = self
-            .blocks
+        let markdown_parts = bodies
             .iter()
-            .map(|block| {
-                let body = block.body();
+            .map(|body| {
                 body.markdown
                     .as_deref()
                     .unwrap_or(body.text.as_str())
                     .trim()
-                    .to_owned()
             })
-            .filter(|text: &String| !text.is_empty())
+            .filter(|text| !text.is_empty())
             .collect::<Vec<_>>();
-        let markdown = if markdown_parts.is_empty() {
-            None
-        } else {
-            Some(markdown_parts.join("\n\n"))
-        };
+        let markdown = (!markdown_parts.is_empty()).then(|| markdown_parts.join("\n\n"));
         CommandBody { text, markdown }
     }
 
+    fn render_provenance_excluding(&self, body: &CommandBody) -> CommandBody {
+        let sources = self
+            .provenance
+            .iter()
+            .filter(|source| !source_is_embedded(source, body))
+            .cloned()
+            .collect::<Vec<_>>();
+        render_provenance_sources(&sources)
+    }
+
     pub(crate) fn render_compat_body(&self) -> CommandBody {
-        let mut body = self.render_body();
+        let mut body = self.render_body_with_provenance();
         let unhandled = self
             .outcomes
             .iter()
@@ -414,19 +454,11 @@ impl AgentTurnOutcome {
     /// 已知结果仍可展示，但整轮不完整必须追加提示，不能把已知结果当成整轮成功，
     /// 也不能把未完成调用伪造成 Tool Result。
     pub(crate) fn render_incomplete_body(&self) -> CommandBody {
-        let mut body = if self.has_unhandled_outcome() {
+        let body = if self.has_unhandled_outcome() {
             self.render_compat_body()
         } else {
-            self.render_body()
+            self.render_body_with_provenance()
         };
-        if !self.provenance.is_empty() {
-            let provenance = self.render_provenance();
-            body.text = join_body_with_warning(&body.text, &provenance.text);
-            body.markdown = Some(join_body_with_warning(
-                body.markdown.as_deref().unwrap_or_default(),
-                provenance.markdown.as_deref().unwrap_or_default(),
-            ));
-        }
 
         let mut text_lines = Vec::new();
         let mut markdown_lines = Vec::new();
@@ -450,12 +482,11 @@ impl AgentTurnOutcome {
                     .map(|tool| format!("- {tool}：执行状态未知")),
             );
         }
-        body.text = join_body_with_warning(&body.text, &text_lines.join("\n"));
-        body.markdown = Some(join_body_with_warning(
-            body.markdown.as_deref().unwrap_or_default(),
-            &markdown_lines.join("\n"),
-        ));
-        body
+        let warning = CommandBody {
+            text: text_lines.join("\n"),
+            markdown: Some(markdown_lines.join("\n")),
+        };
+        join_command_bodies(&body, &warning)
     }
 
     pub(crate) fn primary_command(&self) -> Option<String> {
@@ -616,11 +647,68 @@ fn deduplicate_tool_names(names: Vec<String>) -> Vec<String> {
     unique
 }
 
-fn join_body_with_warning(body: &str, warning: &str) -> String {
-    if body.trim().is_empty() {
-        warning.trim().to_owned()
-    } else {
-        format!("{}\n\n{}", body.trim(), warning.trim())
+fn render_provenance_sources(sources: &[ProvenanceSource]) -> CommandBody {
+    if sources.is_empty() {
+        return CommandBody::plain("");
+    }
+
+    let mut text_lines = vec!["参考来源：".to_owned()];
+    let mut markdown_lines = vec!["参考来源：".to_owned()];
+    for source in sources {
+        let text_reference = source_text_reference(source);
+        let markdown_reference = source_markdown_reference(source);
+        let text_line = append_source_snippet(text_reference, &source.snippet);
+        let markdown_line = append_source_snippet(markdown_reference, &source.snippet);
+        text_lines.push(format!("- {text_line}"));
+        markdown_lines.push(format!("- {markdown_line}"));
+    }
+
+    let mut body = structured_command_body(markdown_lines.join("\n"));
+    body.text = text_lines.join("\n");
+    body
+}
+
+fn source_is_embedded(source: &ProvenanceSource, body: &CommandBody) -> bool {
+    let rendered = format!(
+        "{}\n{}",
+        body.text,
+        body.markdown.as_deref().unwrap_or_default()
+    );
+    if !source.url.trim().is_empty() && rendered.contains(source.url.trim()) {
+        return true;
+    }
+    if !source.title.trim().is_empty()
+        && rendered.contains(source.title.trim())
+        && (source.snippet.trim().is_empty() || rendered.contains(source.snippet.trim()))
+    {
+        return true;
+    }
+    !source.snippet.trim().is_empty() && rendered.contains(source.snippet.trim())
+}
+
+fn join_command_bodies(first: &CommandBody, second: &CommandBody) -> CommandBody {
+    if second.text.trim().is_empty() && second.markdown.as_deref().is_none_or(str::is_empty) {
+        return first.clone();
+    }
+    if first.text.trim().is_empty() && first.markdown.as_deref().is_none_or(str::is_empty) {
+        return second.clone();
+    }
+    let first_markdown = first.markdown.as_deref().unwrap_or(first.text.as_str());
+    let second_markdown = second.markdown.as_deref().unwrap_or(second.text.as_str());
+    let markdown = join_body_text(first_markdown, second_markdown);
+    CommandBody {
+        text: join_body_text(&first.text, &second.text),
+        markdown: (!markdown.is_empty()).then_some(markdown),
+    }
+}
+
+fn join_body_text(first: &str, second: &str) -> String {
+    match (first.trim(), second.trim()) {
+        (first, second) if !first.is_empty() && !second.is_empty() => {
+            format!("{first}\n\n{second}")
+        }
+        (first, _) if !first.is_empty() => first.to_owned(),
+        (_, second) => second.to_owned(),
     }
 }
 
@@ -846,6 +934,59 @@ mod tests {
         let turn = AgentTurnOutcome::from_outcomes(vec![success, empty]);
 
         assert!(turn.can_use_model_reply_as_primary());
+    }
+
+    #[test]
+    fn deterministic_fallback_keeps_search_source_once() {
+        let turn = AgentTurnOutcome::from_outcomes_with_visible_snapshot_and_provenance(
+            vec![outcome(
+                "web_search",
+                "search",
+                ToolOutcomeStatus::Succeeded,
+                ToolEffect::ReadOnly,
+                vec![ResponseBlock::FactCard(CommandBody::plain("搜索答案"))],
+            )],
+            None,
+            vec![ProvenanceSource {
+                title: "官方来源".to_owned(),
+                url: "https://example.test/source".to_owned(),
+                snippet: "官方摘要".to_owned(),
+            }],
+            Vec::new(),
+        );
+
+        let body = turn.render_body_with_provenance();
+
+        assert_eq!(body.text.matches("官方来源").count(), 1);
+        assert_eq!(body.text.matches("https://example.test/source").count(), 1);
+        assert_eq!(body.text.matches("官方摘要").count(), 1);
+    }
+
+    #[test]
+    fn embedded_search_source_is_not_appended_again() {
+        let turn = AgentTurnOutcome::from_outcomes_with_visible_snapshot_and_provenance(
+            vec![outcome(
+                "web_search",
+                "search",
+                ToolOutcomeStatus::Succeeded,
+                ToolEffect::ReadOnly,
+                vec![ResponseBlock::FactCard(CommandBody::plain(
+                    "搜索答案\n官方来源（https://example.test/source）：官方摘要",
+                ))],
+            )],
+            None,
+            vec![ProvenanceSource {
+                title: "官方来源".to_owned(),
+                url: "https://example.test/source".to_owned(),
+                snippet: "官方摘要".to_owned(),
+            }],
+            Vec::new(),
+        );
+
+        let body = turn.render_body_with_provenance();
+
+        assert!(!body.text.contains("参考来源："));
+        assert_eq!(body.text.matches("官方来源").count(), 1);
     }
 
     #[test]

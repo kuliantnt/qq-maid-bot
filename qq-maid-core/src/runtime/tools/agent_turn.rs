@@ -304,16 +304,15 @@ pub(crate) fn is_retry_superseded_result(
 
 /// 最终模型轮次失败后，使用已经形成结果的工具轨迹作为候选回退。
 ///
-/// 最终正文失败可以直接回退；如果 Tool Loop 在仍有未完成调用时终止，后续
-/// projection 会消费同一份 typed 完整性元数据并阻断成功展示。这里不读取工具名称、
-/// 不编造业务成功文案，也不接受取消或未知副作用结果。
+/// 最终正文失败可以直接回退；如果 Tool Loop 在仍有未完成调用或未知副作用时终止，
+/// 后续 projection 会消费同一份 typed 完整性元数据并追加对应警告。这里不读取工具
+/// 名称、不编造业务成功文案，也不接受取消；只在已经形成至少一个工具结果时回退。
 pub(crate) fn fallback_output_after_agent_failure(
     err: &LlmError,
     model: &str,
 ) -> Option<RespondOutput> {
     let agent = err.agent.as_deref()?;
     if matches!(agent.stop_reason, Some(AgentStopReason::Cancelled))
-        || !agent.tools_with_unknown_result.is_empty()
         || agent.tool_results.is_empty()
     {
         return None;
@@ -388,5 +387,37 @@ mod tests {
         assert_eq!(output.agent.tool_results.len(), 1);
         assert_eq!(output.agent.tool_results[0].name, "get_weather");
         assert!(output.model_reply_empty);
+    }
+
+    #[test]
+    fn unknown_side_effect_does_not_block_known_result_fallback() {
+        let diagnostics = AgentRunDiagnostics {
+            emitted_tools: vec!["get_weather".to_owned(), "create_todo".to_owned()],
+            executed_tools: vec!["get_weather".to_owned(), "create_todo".to_owned()],
+            tool_execution_attempted: true,
+            tool_results: vec![ToolExecutionResult {
+                name: "get_weather".to_owned(),
+                output: serde_json::json!({"ok": true}),
+                succeeded: true,
+            }],
+            tools_with_unknown_result: vec!["create_todo".to_owned()],
+            stop_reason: Some(AgentStopReason::Failed),
+            ..AgentRunDiagnostics::default()
+        };
+        let error = LlmError::new(
+            "tool_execution_failed",
+            "side effect result is unknown",
+            "tool_loop",
+        )
+        .with_agent(diagnostics);
+
+        let output = fallback_output_after_agent_failure(&error, "model")
+            .expect("known result should remain available with an unknown side effect");
+
+        assert_eq!(output.agent.tool_results.len(), 1);
+        assert_eq!(
+            output.agent.tools_with_unknown_result,
+            vec!["create_todo".to_owned()]
+        );
     }
 }

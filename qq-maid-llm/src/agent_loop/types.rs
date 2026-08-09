@@ -107,13 +107,18 @@ pub struct AgentRunDiagnostics {
 }
 
 impl AgentRunDiagnostics {
-    /// 判断模型发出的 Tool Call 是否有尚未形成结果的缺口。
+    /// 判断模型发出的 Tool Call 是否有尚未启动的调用缺口。
     ///
-    /// Tool Loop 对每个已经完成准备/执行/跳过的调用都会写入一个
-    /// `ToolExecutionResult`。因此当 `emitted_tools` 多于 `tool_results` 时，
-    /// 说明循环在仍有 Tool Call 未完成时终止；这与最终模型正文生成失败不同。
+    /// `tools_with_unknown_result` 表示已经越过副作用启动边界、但还没有可信结果
+    /// 的调用；它们不是“尚未执行”。因此这里把“可信结果”和“状态未知”都计入
+    /// 已经处理的调用，避免同一工具同时被渲染成“未执行”和“状态未知”，误导用户
+    /// 自动重试；只读缓存命中也不会被误判成未执行。
     pub fn has_incomplete_tool_loop(&self) -> bool {
-        self.emitted_tools.len() > self.tool_results.len()
+        let accounted_calls = self
+            .tool_results
+            .len()
+            .saturating_add(self.tools_with_unknown_result.len());
+        self.emitted_tools.len() > accounted_calls
     }
 }
 
@@ -567,6 +572,62 @@ pub type AgentTextDeltaFuture =
 /// 该 sink 只能接收已经确认属于最终回答的文本；Provider 在仍允许工具调用的轮次
 /// 必须先缓存模型 delta，确认没有 tool call 后再释放，避免外显工具轮草稿。
 pub type AgentTextDeltaSink = Arc<dyn Fn(String) -> AgentTextDeltaFuture + Send + Sync + 'static>;
+
+#[cfg(test)]
+mod tests {
+    use super::AgentRunDiagnostics;
+
+    #[test]
+    fn started_unknown_tool_is_not_reported_as_unstarted() {
+        let diagnostics = AgentRunDiagnostics {
+            emitted_tools: vec!["write_tool".to_owned()],
+            executed_tools: vec!["write_tool".to_owned()],
+            tools_with_unknown_result: vec!["write_tool".to_owned()],
+            ..AgentRunDiagnostics::default()
+        };
+
+        assert!(!diagnostics.has_incomplete_tool_loop());
+    }
+
+    #[test]
+    fn emitted_tool_without_start_is_reported_as_incomplete() {
+        let diagnostics = AgentRunDiagnostics {
+            emitted_tools: vec!["read_tool".to_owned(), "write_tool".to_owned()],
+            executed_tools: vec!["read_tool".to_owned()],
+            tool_results: vec![super::ToolExecutionResult {
+                name: "read_tool".to_owned(),
+                output: serde_json::Value::Null,
+                succeeded: true,
+            }],
+            ..AgentRunDiagnostics::default()
+        };
+
+        assert!(diagnostics.has_incomplete_tool_loop());
+    }
+
+    #[test]
+    fn cached_tool_result_is_accounted_for_without_real_execution() {
+        let diagnostics = AgentRunDiagnostics {
+            emitted_tools: vec!["search".to_owned(), "search".to_owned()],
+            executed_tools: vec!["search".to_owned()],
+            tool_results: vec![
+                super::ToolExecutionResult {
+                    name: "search".to_owned(),
+                    output: serde_json::Value::Null,
+                    succeeded: true,
+                },
+                super::ToolExecutionResult {
+                    name: "search".to_owned(),
+                    output: serde_json::Value::Null,
+                    succeeded: true,
+                },
+            ],
+            ..AgentRunDiagnostics::default()
+        };
+
+        assert!(!diagnostics.has_incomplete_tool_loop());
+    }
+}
 
 /// 创建 [`AgentStepSession`] 的请求。
 #[derive(Clone, Copy)]

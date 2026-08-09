@@ -33,30 +33,33 @@ pub(crate) fn compose_tool_turn_output(
     }
 
     if !outcome.can_render_deterministic_reply() {
-        // 只有内部状态、没有可信用户正文时，保留模型输出或普通空回复 fallback；
-        // 不凭空把未适配结果包装成成功。
+        // 只有内部状态、没有可信用户正文时，保留有效模型输出；如果最终模型
+        // 失败，则给出明确重试提示，不能把空字符串包装成成功。
+        if output.model_reply_empty {
+            apply_body(output, outcome.render_fallback_body());
+        }
         return;
     }
 
     match source {
         AgentReplySource::DeterministicCommand => {
-            apply_body(output, outcome.render_body());
+            apply_body(output, outcome.render_body_with_provenance());
         }
         AgentReplySource::NaturalLanguageAgent => {
             if outcome.can_use_model_reply_as_primary() && !output.model_reply_empty {
-                append_model_reply_with_provenance(output, outcome);
+                append_model_reply_with_supplement(output, outcome);
             } else {
                 // 正常成功时模型正文是唯一主体；模型为空、失败或工具状态需要
                 // 确定性解释时，才使用已经完成且可信的领域 renderer 降级。
-                apply_body(output, outcome.render_body());
+                apply_body(output, outcome.render_body_with_provenance());
             }
         }
     }
 }
 
-fn append_model_reply_with_provenance(output: &mut RespondOutput, outcome: &AgentTurnOutcome) {
-    let provenance = outcome.render_provenance();
-    if provenance.text.trim().is_empty() {
+fn append_model_reply_with_supplement(output: &mut RespondOutput, outcome: &AgentTurnOutcome) {
+    let supplement = outcome.render_natural_language_supplement();
+    if supplement.text.trim().is_empty() {
         return;
     }
 
@@ -66,12 +69,12 @@ fn append_model_reply_with_provenance(output: &mut RespondOutput, outcome: &Agen
         .as_deref()
         .unwrap_or(output.reply.as_str())
         .trim();
-    output.text = join_bodies(model_text, provenance.text.trim());
+    output.text = join_bodies(model_text, supplement.text.trim());
 
-    let markdown = provenance
+    let markdown = supplement
         .markdown
         .as_deref()
-        .unwrap_or(provenance.text.as_str())
+        .unwrap_or(supplement.text.as_str())
         .trim();
     let composed_markdown = join_bodies(model_markdown, markdown);
     output.reply = composed_markdown.clone();
@@ -165,6 +168,49 @@ mod tests {
         compose_tool_turn_output(&mut output, &turn, AgentReplySource::NaturalLanguageAgent);
 
         assert_eq!(output.text, "确定性结果");
+    }
+
+    #[test]
+    fn natural_language_list_keeps_the_visible_numbered_list() {
+        let mut list = outcome(
+            ToolOutcomeStatus::Succeeded,
+            ToolEffect::ReadOnly,
+            "1. 待办 A",
+        );
+        list.blocks = vec![ResponseBlock::RelatedList(CommandBody::dual(
+            "待办 · 共 1 项\n1. 待办 A",
+            "## 待办 · 共 1 项\n1. 待办 A",
+        ))];
+        let turn = AgentTurnOutcome::from_outcomes(vec![list]);
+        let mut output = output("查询完成", false);
+
+        compose_tool_turn_output(&mut output, &turn, AgentReplySource::NaturalLanguageAgent);
+
+        assert!(output.text.starts_with("查询完成"));
+        assert!(output.text.contains("待办 · 共 1 项"));
+        assert!(output.text.contains("1. 待办 A"));
+    }
+
+    #[test]
+    fn internal_success_gets_non_empty_fallback_when_model_reply_fails() {
+        let turn = AgentTurnOutcome::from_outcomes(vec![ToolExecutionOutcome {
+            tool_name: "knowledge_search".to_owned(),
+            domain: "knowledge".to_owned(),
+            status: ToolOutcomeStatus::Succeeded,
+            effect: ToolEffect::ReadOnly,
+            presentation: OutcomePresentation::Internal,
+            blocks: Vec::new(),
+            error_code: None,
+            command: Some("knowledge".to_owned()),
+        }]);
+        let mut output = output("模型空正文 fallback", true);
+
+        compose_tool_turn_output(&mut output, &turn, AgentReplySource::NaturalLanguageAgent);
+
+        assert_eq!(
+            output.text,
+            "工具已完成，但模型未能整理出可用回复，请稍后重试。"
+        );
     }
 
     #[test]

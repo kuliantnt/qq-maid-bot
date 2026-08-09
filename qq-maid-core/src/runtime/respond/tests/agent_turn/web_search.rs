@@ -98,6 +98,40 @@ async fn nested_research_evidence_keeps_news_summary_when_top_level_fields_are_e
 }
 
 #[tokio::test]
+async fn empty_model_reply_keeps_search_answer_and_sources_once() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results(
+            vec![raw_tool_result(
+                "web_search",
+                serde_json::json!({
+                    "ok": true,
+                    "answer": "搜索到的可信答案",
+                    "sources": [{
+                        "title": "官方来源",
+                        "url": "https://example.test/source",
+                        "snippet": "官方摘要"
+                    }]
+                }),
+                true,
+            )],
+            "  ",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("搜索一个公开项目"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("搜索到的可信答案"));
+    assert_eq!(text.matches("官方来源").count(), 1);
+    assert_eq!(text.matches("https://example.test/source").count(), 1);
+    assert_eq!(text.matches("官方摘要").count(), 1);
+}
+
+#[tokio::test]
 async fn duplicate_web_search_keeps_first_card_and_model_reply_without_counting_cache_hit() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
