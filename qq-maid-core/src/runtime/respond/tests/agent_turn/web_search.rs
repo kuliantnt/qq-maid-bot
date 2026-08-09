@@ -3,7 +3,7 @@
 use super::*;
 
 #[tokio::test]
-async fn multi_entity_web_search_fact_card_preserves_model_summary_without_empty_hint() {
+async fn multi_entity_web_search_keeps_model_summary_and_appends_sources() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_raw_tool_results(
@@ -40,8 +40,10 @@ async fn multi_entity_web_search_fact_card_preserves_model_summary_without_empty
         .unwrap();
 
     let text = response.text.as_deref().unwrap();
-    assert!(text.contains("项目甲适合场景 A"));
+    assert!(!text.contains("项目甲适合场景 A"));
     assert!(text.contains("综合来看，项目甲偏向场景 A"));
+    assert!(text.contains("参考来源："));
+    assert!(text.contains("项目甲文档"));
     assert!(!text.contains("没查到明确结果"));
     assert_eq!(response.command.as_deref(), Some("web_search"));
     let diagnostics = response.diagnostics.unwrap();
@@ -84,9 +86,10 @@ async fn nested_research_evidence_keeps_news_summary_when_top_level_fields_are_e
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("Reuters 报道了可核实的 AI 新闻。"));
+    assert!(!text.contains("Reuters 报道了可核实的 AI 新闻。"));
     assert!(text.contains("Reuters AI News"));
     assert!(text.contains("基于 Reuters 的结果"));
+    assert!(text.contains("参考来源："));
     assert!(!text.contains("没查到明确结果"));
     assert_eq!(
         response.diagnostics.unwrap()["agent_turn_status"],
@@ -140,8 +143,8 @@ async fn duplicate_web_search_keeps_first_card_and_model_reply_without_counting_
         .unwrap();
 
     let text = response.text.unwrap();
-    assert_eq!(text.matches("【联网查询】").count(), 1);
-    assert!(text.contains("首次搜索的可信答案"));
+    assert_eq!(text.matches("【联网查询】").count(), 0);
+    assert!(!text.contains("首次搜索的可信答案"));
     assert!(text.contains("首次搜索来源"));
     assert!(text.contains("模型基于首次搜索证据生成的最终回答"));
     assert!(!text.contains("没查到明确结果"));
@@ -372,12 +375,9 @@ async fn group_two_empty_searches_keep_one_hint_and_one_final_text() {
     let response = service.respond(message("今日 ai 新闻")).await.unwrap();
     let text = response.text.unwrap();
 
-    assert_eq!(text.matches("【联网查询】").count(), 1);
-    assert_eq!(text.matches("没查到明确结果").count(), 1);
-    assert_eq!(
-        text.matches("模型确认本轮没有更明确的公开结果。").count(),
-        1
-    );
+    assert_eq!(text, "模型确认本轮没有更明确的公开结果。");
+    assert!(!text.contains("【联网查询】"));
+    assert!(!text.contains("没查到明确结果"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], "failed");
     assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 2);
@@ -423,8 +423,10 @@ async fn group_partial_search_keeps_success_evidence_and_model_final_text() {
     let response = service.respond(message("今日 ai 新闻")).await.unwrap();
     let text = response.text.unwrap();
 
-    assert!(text.contains("有效搜索事实"));
+    assert!(!text.contains("有效搜索事实"));
     assert!(!text.contains("没查到明确结果"));
+    assert!(text.contains("参考来源："));
+    assert!(text.contains("有效来源"));
     assert_eq!(
         text.matches("Reuters 说这是额外新闻，不能补入结果。")
             .count(),
@@ -465,9 +467,9 @@ async fn group_two_successful_searches_keep_both_evidence_and_supported_summary(
     let response = service.respond(message("今日 ai 新闻")).await.unwrap();
     let text = response.text.unwrap();
 
-    assert!(text.contains("新闻一"));
-    assert!(text.contains("新闻二"));
-    assert!(text.contains("以上两条搜索结果的汇总"));
+    assert_eq!(text, "以上两条搜索结果的汇总。");
+    assert!(!text.contains("新闻一"));
+    assert!(!text.contains("新闻二"));
     assert!(!text.contains("没查到明确结果"));
 }
 
@@ -515,8 +517,8 @@ async fn web_search_retry_renders_final_success_without_previous_failure() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert_eq!(text.matches("【联网查询】").count(), 1);
-    assert!(text.contains("项目最终结果"));
+    assert_eq!(text, "模型最终回复");
+    assert!(!text.contains("项目最终结果"));
     assert!(!text.contains("联网查询服务暂时不可用"));
 }
 
@@ -577,9 +579,9 @@ async fn cross_candidate_retry_projection_keeps_prior_result_and_hides_only_retr
         .unwrap();
 
     let text = response.text.unwrap();
-    assert_eq!(text.matches("【联网查询】").count(), 2);
-    assert!(text.contains("候选A结果"));
-    assert!(text.contains("候选B最终结果"));
+    assert_eq!(text, "模型最终回复");
+    assert!(!text.contains("候选A结果"));
+    assert!(!text.contains("候选B最终结果"));
     assert!(!text.contains("联网查询服务暂时不可用"));
     assert!(!text.contains("没查到明确结果"));
     let diagnostics = response.diagnostics.unwrap();
@@ -632,8 +634,8 @@ async fn independent_web_search_results_are_rendered_separately() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert_eq!(text.matches("【联网查询】").count(), 2);
-    assert!(text.contains("项目甲结果"));
-    assert!(text.contains("项目乙结果"));
+    assert_eq!(text, "模型最终回复");
+    assert!(!text.contains("项目甲结果"));
+    assert!(!text.contains("项目乙结果"));
     assert_eq!(response.diagnostics.unwrap()["tool_retry_count"], 0);
 }

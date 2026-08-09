@@ -7,7 +7,7 @@ use crate::runtime::tools::todo::{TodoItemDraft, TodoStore, TodoTimePrecision};
 use super::super::support::*;
 
 #[tokio::test]
-async fn todo_create_receipt_shows_full_user_visible_card() {
+async fn todo_create_keeps_model_reply_as_primary() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_call_json(
@@ -23,17 +23,14 @@ async fn todo_create_receipt_shows_full_user_visible_card() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("✅ 已新增待办"));
-    assert!(text.contains("装宽带 · 时间：99-01-01 10:00（四）"));
-    assert!(text.contains("提醒："));
-    assert!(text.contains("99-01-01 9:30（四）"));
-    assert!(text.contains("详情：\n提前确认地址并携带身份证"));
-    assert!(!text.contains("created_at"));
-    assert!(!text.contains("scope"));
-    let markdown = response.markdown.unwrap();
-    assert!(markdown.contains("**时间**"));
-    assert!(markdown.contains("**提醒**"));
-    assert!(markdown.contains("详情：\n提前确认地址并携带身份证"));
+    assert_eq!(text, "已新增待办");
+    assert!(
+        !response
+            .markdown
+            .as_deref()
+            .unwrap_or_default()
+            .contains("✅ 已新增待办")
+    );
 }
 
 #[tokio::test]
@@ -74,13 +71,7 @@ async fn todo_edit_receipt_shows_final_detail_card() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("✏️ 已修改待办"));
-    assert!(text.contains("装宽带 · 时间：99-01-01（四）"));
-    assert!(text.contains("详情：\n提前确认地址"));
-    // 写操作默认不再刷新完整列表；详情只需在修改回执本身展示。
-    assert!(!text.contains("🚧 当前进行中"));
-    assert!(!text.contains("旧详情"));
-    assert!(!text.contains("created_at"));
+    assert_eq!(text, "已修改待办");
     assert_eq!(
         service.task_store.list_pending(&owner).unwrap()[0]
             .detail
@@ -127,9 +118,7 @@ async fn todo_edit_receipt_clears_detail_after_successful_tool_result() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("✏️ 已修改待办"));
-    assert!(!text.contains("旧详情不能再显示"));
-    assert!(!text.contains("详情："));
+    assert_eq!(text, "第一条详情已清除");
     assert_eq!(
         service.task_store.list_pending(&owner).unwrap()[0].detail,
         None
@@ -191,9 +180,7 @@ async fn todo_tool_loop_clears_third_and_fourth_details() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert_eq!(text.matches("✏️ 已修改待办").count(), 2);
-    assert!(!text.contains("第3条旧详情"));
-    assert!(!text.contains("第4条旧详情"));
+    assert_eq!(text, "第三条和第四条详情已清除");
     assert_eq!(
         service
             .task_store
@@ -226,7 +213,7 @@ async fn todo_tool_loop_clears_third_and_fourth_details() {
 }
 
 #[tokio::test]
-async fn todo_complete_receipt_reuses_full_user_visible_card() {
+async fn todo_complete_keeps_model_reply_as_primary() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_call_json(
@@ -263,14 +250,7 @@ async fn todo_complete_receipt_reuses_full_user_visible_card() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("✅ 已完成待办"));
-    assert!(text.contains("状态：已完成"));
-    assert!(text.contains("装宽带 · 时间：99-01-01 10:00（四）"));
-    assert!(text.contains("提醒："));
-    assert!(text.contains("99-01-01 9:30（四）"));
-    assert!(text.contains("详情：\n提前确认地址并携带身份证"));
-    assert!(text.contains("完成时间："));
-    assert!(!text.contains("created_at"));
+    assert_eq!(text, "已完成待办");
 }
 
 #[tokio::test]
@@ -408,7 +388,7 @@ async fn todo_internal_list_before_write_is_not_user_visible_query() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("✅ 已完成待办"));
+    assert_eq!(text, "已完成第一条");
     assert!(!text.contains("🚧 当前进行中 · 共 1 项"));
     assert!(!text.contains("先完成\n状态：未完成"));
     let diagnostics = response.diagnostics.unwrap();
@@ -493,9 +473,7 @@ async fn todo_write_with_explicit_list_does_not_append_auto_related_list() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("✅ 已完成待办"));
-    assert!(text.contains("✅ 当前已完成 · 共 1 项"));
-    assert!(!text.contains("🚧 当前进行中 · 共 1 项"));
+    assert_eq!(text, "已完成第一条");
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
         diagnostics["agent_executed_tools"],

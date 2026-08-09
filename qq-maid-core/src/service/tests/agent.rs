@@ -611,17 +611,15 @@ async fn core_agent_buffered_draft_incomplete_falls_back_to_second_candidate_wit
             .is_some_and(|text| text.contains(DRAFT)),
         "first-candidate draft leaked into final response"
     );
-    // 第二候选最终正文只出现一次；领域投影后的可信正文（web_search 结果 + 模型
-    // 总结）取代缓冲草稿，且不会与第一候选草稿拼接。
+    // 第二候选最终正文只出现一次；自然语言 Agent 的模型正文取代缓冲草稿，
+    // 且不会与第一候选草稿拼接。
     assert_eq!(
         deltas.len(),
         1,
         "final body must appear exactly once: {deltas:?}"
     );
     let projected = &deltas[0];
-    assert!(projected.starts_with("【联网查询】"), "{projected}");
-    assert!(projected.contains("web answer: 公开项目"), "{projected}");
-    assert!(projected.ends_with(FINAL), "{projected}");
+    assert_eq!(projected, FINAL);
     assert_eq!(response.text_content(), Some(projected.as_str()));
     // Completed 只出现一次，且之后不再产生事件。
     assert_eq!(completed, 1);

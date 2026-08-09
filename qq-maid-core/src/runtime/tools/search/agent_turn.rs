@@ -11,7 +11,8 @@ use crate::{
     error::LlmError,
     runtime::respond::{
         agent_outcome::{
-            OutcomePresentation, ResponseBlock, ToolEffect, ToolExecutionOutcome, ToolOutcomeStatus,
+            OutcomePresentation, ProvenanceSource, ResponseBlock, ToolEffect, ToolExecutionOutcome,
+            ToolOutcomeStatus,
         },
         common::{CommandBody, structured_command_body},
         search_flow::{
@@ -31,6 +32,7 @@ pub(crate) enum SearchResultProjection {
 pub(crate) struct SearchTurnProjection {
     pub(crate) consumed_result_indexes: HashSet<usize>,
     pub(crate) outcomes: Vec<(usize, ToolExecutionOutcome)>,
+    pub(crate) provenance: Vec<ProvenanceSource>,
 }
 
 /// 搜索结果必须按整轮投影，才能区分“全部失败”和“部分成功”。
@@ -42,6 +44,7 @@ pub(crate) fn project_results(
 ) -> SearchTurnProjection {
     let mut consumed_result_indexes = HashSet::new();
     let mut projected = Vec::new();
+    let mut provenance = Vec::new();
     for (index, result) in results.iter().enumerate() {
         let Some(projection) = project_result(result) else {
             continue;
@@ -54,6 +57,9 @@ pub(crate) fn project_results(
             continue;
         }
         if let SearchResultProjection::Visible(outcome) = projection {
+            if outcome.status == ToolOutcomeStatus::Succeeded {
+                provenance.extend(provenance_from_output(&result.output));
+            }
             projected.push((index, outcome));
         }
     }
@@ -80,6 +86,7 @@ pub(crate) fn project_results(
     SearchTurnProjection {
         consumed_result_indexes,
         outcomes: projected,
+        provenance,
     }
 }
 
@@ -210,6 +217,51 @@ fn string_field(output: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+fn provenance_from_output(output: &Value) -> Vec<ProvenanceSource> {
+    if string_field(output, "mode").as_deref() == Some("multi_entity_research") {
+        return output
+            .get("results")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|item| string_field(item, "status").as_deref() == Some("success"))
+            .flat_map(|item| sources_from_value(item.get("sources")))
+            .collect();
+    }
+    sources_from_value(output.get("sources"))
+}
+
+fn sources_from_value(value: Option<&Value>) -> Vec<ProvenanceSource> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|source| {
+            if let Some(text) = source
+                .as_str()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+            {
+                return Some(ProvenanceSource {
+                    title: text.to_owned(),
+                    url: String::new(),
+                    snippet: String::new(),
+                });
+            }
+            let title = string_field(source, "title").unwrap_or_default();
+            let url = string_field(source, "url").unwrap_or_default();
+            let snippet = string_field(source, "snippet").unwrap_or_default();
+            (!title.is_empty() || !url.is_empty() || !snippet.is_empty()).then_some(
+                ProvenanceSource {
+                    title,
+                    url,
+                    snippet,
+                },
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]

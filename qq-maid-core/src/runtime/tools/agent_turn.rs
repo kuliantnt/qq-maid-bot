@@ -5,10 +5,14 @@
 
 use serde_json::{Map, Value, json};
 
+use qq_maid_llm::agent_loop::AgentStopReason;
+
 use crate::{
     error::LlmError,
     runtime::{
         respond::{
+            RespondRequest,
+            agent_composition::{AgentReplySource, compose_tool_turn_output},
             agent_outcome::{AgentTurnOutcome, AgentTurnStatus, ToolExecutionOutcome},
             llm_service::RespondOutput,
         },
@@ -16,6 +20,7 @@ use crate::{
         tools::{TaskStore, memory, todo},
     },
     service::VisibleEntitySnapshot,
+    util::metrics::LlmMetrics,
 };
 
 use super::agent_presenters::{
@@ -69,6 +74,20 @@ pub(crate) struct ToolTurnDiagnostics {
     domains: Vec<Box<dyn DomainTurnDiagnostics>>,
 }
 
+/// 一次 Tool Turn 后处理所需的共享上下文。
+///
+/// 回复来源是调用方明确选择的 typed value，和 session / domain 上下文一起传入；
+/// 不从 request 文本、工具名称或执行结果反推展示语义。
+pub(crate) struct ToolTurnPostprocessContext<'a> {
+    pub(crate) session_store: &'a SessionStore,
+    pub(crate) task_store: &'a TaskStore,
+    pub(crate) conversation_session: &'a mut SessionRecord,
+    pub(crate) meta: &'a SessionMeta,
+    pub(crate) interaction_meta: &'a SessionMeta,
+    pub(crate) req: &'a RespondRequest,
+    pub(crate) reply_source: AgentReplySource,
+}
+
 impl ToolTurnDiagnostics {
     pub(crate) fn from_plain_output(output: &RespondOutput) -> Self {
         Self {
@@ -102,14 +121,18 @@ impl ToolTurnDiagnostics {
 }
 
 pub(crate) fn postprocess_tool_turn(
-    session_store: &SessionStore,
-    task_store: &TaskStore,
-    conversation_session: &mut SessionRecord,
-    meta: &SessionMeta,
-    interaction_meta: &SessionMeta,
+    context: ToolTurnPostprocessContext<'_>,
     mut output: RespondOutput,
-    req: &crate::runtime::respond::RespondRequest,
 ) -> Result<ToolTurnPostprocess, LlmError> {
+    let ToolTurnPostprocessContext {
+        session_store,
+        task_store,
+        conversation_session,
+        meta,
+        interaction_meta,
+        req,
+        reply_source,
+    } = context;
     let mut standalone_interaction = if interaction_meta.scope_key != meta.scope_key {
         Some(
             session_store
@@ -134,18 +157,14 @@ pub(crate) fn postprocess_tool_turn(
             .map_err(crate::runtime::respond::common::session_error)?;
     }
 
-    let projected_outcome = if outcome.can_replace_model_reply() {
-        if outcome.should_preserve_model_reply() {
-            apply_agent_turn_outcome_with_model_reply(&mut output, &outcome);
-        } else {
-            apply_agent_turn_outcome(&mut output, &outcome);
-        }
-        Some(&outcome)
-    } else if outcome.has_unhandled_outcome() && !outcome.outcomes.is_empty() {
-        apply_agent_turn_compat_output(&mut output, &outcome);
-        Some(&outcome)
-    } else {
+    // 即使最终模型正文为空或失败，也必须把完整 Tool Turn 投影成 outcome，供
+    // session 快照、Todo 验真、来源和确定性 fallback 使用；只有完全没有结果时
+    // 才视为普通模型回复，不进入 domain presentation。
+    let projected_outcome = if outcome.outcomes.is_empty() && !outcome.has_incomplete_result() {
         None
+    } else {
+        compose_tool_turn_output(&mut output, &outcome, reply_source);
+        Some(&outcome)
     };
     let mut domains = Vec::with_capacity(domain_postprocessors.len());
     for postprocessor in domain_postprocessors {
@@ -179,6 +198,9 @@ pub(crate) fn tool_turn_error_code(
         return Some(error_code);
     }
     if let Some(outcome) = outcome {
+        if outcome.has_incomplete_result() {
+            return Some("agent_turn_incomplete");
+        }
         if outcome.has_unhandled_outcome() {
             return Some("tool_outcome_unhandled");
         }
@@ -209,13 +231,14 @@ fn project_tool_turn(
     let visible_entity_snapshot = todo_projection.visible_entity_snapshot;
     let search_projection =
         project_search_results(&output.agent.tool_results, &output.agent.tool_attempts);
+    let search_provenance = search_projection.provenance;
+    let search_consumed_result_indexes = search_projection.consumed_result_indexes;
     let mut outcomes = Vec::new();
     let mut todo_outcomes = todo_projection.outcomes.into_iter().peekable();
     let mut search_outcomes = search_projection.outcomes.into_iter().peekable();
 
     for (index, result) in output.agent.tool_results.iter().enumerate() {
         if is_retry_superseded_result(index, &output.agent.tool_attempts) {
-            // 旧尝试仍保留在 Agent diagnostics；这里只丢弃它对应的用户展示块。
             let mut discarded = Vec::new();
             drain_domain_outcomes_for_result(index, &mut todo_outcomes, &mut discarded);
             drain_domain_outcomes_for_result(index, &mut search_outcomes, &mut discarded);
@@ -223,7 +246,7 @@ fn project_tool_turn(
         }
         if todo_projection.consumed_result_indexes.contains(&index) {
             drain_domain_outcomes_for_result(index, &mut todo_outcomes, &mut outcomes);
-        } else if search_projection.consumed_result_indexes.contains(&index) {
+        } else if search_consumed_result_indexes.contains(&index) {
             drain_domain_outcomes_for_result(index, &mut search_outcomes, &mut outcomes);
         } else if let Some(outcome) = tool_outcome_from_weather_result(result) {
             outcomes.push(outcome);
@@ -242,10 +265,14 @@ fn project_tool_turn(
     outcomes.extend(todo_outcomes.map(|(_, outcome)| outcome));
     outcomes.extend(search_outcomes.map(|(_, outcome)| outcome));
 
-    Ok(AgentTurnOutcome::from_outcomes_with_visible_snapshot(
-        outcomes,
-        visible_entity_snapshot,
-    ))
+    Ok(
+        AgentTurnOutcome::from_outcomes_with_visible_snapshot_and_provenance(
+            outcomes,
+            visible_entity_snapshot,
+            search_provenance,
+            output.agent.tools_with_unknown_result.clone(),
+        ),
+    )
 }
 
 fn drain_domain_outcomes_for_result(
@@ -274,42 +301,60 @@ pub(crate) fn is_retry_superseded_result(
         .any(|attempt| attempt.retry_of == Some(result_index))
 }
 
-fn apply_agent_turn_outcome(output: &mut RespondOutput, outcome: &AgentTurnOutcome) {
-    let body = outcome.render_body();
-    output.reply = body.markdown.clone().unwrap_or_else(|| body.text.clone());
-    output.text = body.text;
-    output.markdown = body.markdown;
-}
-
-fn apply_agent_turn_outcome_with_model_reply(
-    output: &mut RespondOutput,
-    outcome: &AgentTurnOutcome,
-) {
-    let body = outcome.render_body();
-    let model_text = output.reply.trim();
-    if model_text.is_empty() {
-        apply_agent_turn_outcome(output, outcome);
-        return;
+/// 最终模型轮次失败后，只使用已经形成完整 Tool Result 的整轮作为候选回退。
+///
+/// 是否能展示以及展示哪一种领域正文仍由后续投影和合成策略决定；这里不读取
+/// 工具名称、不编造业务成功文案，也不接受取消或未知副作用结果。
+pub(crate) fn fallback_output_after_agent_failure(
+    err: &LlmError,
+    model: &str,
+) -> Option<RespondOutput> {
+    let agent = err.agent.as_deref()?;
+    if matches!(agent.stop_reason, Some(AgentStopReason::Cancelled))
+        || !agent.tools_with_unknown_result.is_empty()
+        || agent.tool_results.is_empty()
+    {
+        return None;
     }
 
-    let text = if body.text.trim().is_empty() {
-        model_text.to_owned()
-    } else {
-        format!("{}\n\n{}", body.text.trim(), model_text)
-    };
-    let markdown = body
-        .markdown
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .map(|markdown| format!("{}\n\n{}", markdown.trim(), model_text));
-    output.reply = markdown.clone().unwrap_or_else(|| text.clone());
-    output.text = text;
-    output.markdown = markdown;
+    Some(RespondOutput {
+        reply: String::new(),
+        text: String::new(),
+        markdown: None,
+        parts: Vec::new(),
+        metrics: LlmMetrics {
+            provider: "rust".to_owned(),
+            model: format!("{model}:agent-tool-result-fallback"),
+            stream: false,
+            ttfe_ms: None,
+            ttft_ms: None,
+            total_latency_ms: 0,
+        },
+        usage: None,
+        agent: agent.clone(),
+        model_reply_empty: true,
+    })
 }
 
-fn apply_agent_turn_compat_output(output: &mut RespondOutput, outcome: &AgentTurnOutcome) {
-    let body = outcome.render_compat_body();
-    output.reply = body.markdown.clone().unwrap_or_else(|| body.text.clone());
-    output.text = body.text;
-    output.markdown = body.markdown;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qq_maid_llm::agent_loop::{AgentRunDiagnostics, AgentStopReason, ToolExecutionResult};
+
+    #[test]
+    fn cancelled_agent_never_enters_tool_result_fallback() {
+        let diagnostics = AgentRunDiagnostics {
+            stop_reason: Some(AgentStopReason::Cancelled),
+            tool_results: vec![ToolExecutionResult {
+                name: "create_todo".to_owned(),
+                output: serde_json::json!({"ok": true}),
+                succeeded: true,
+            }],
+            ..AgentRunDiagnostics::default()
+        };
+        let error =
+            LlmError::new("cancelled", "request cancelled", "agent").with_agent(diagnostics);
+
+        assert!(fallback_output_after_agent_failure(&error, "model").is_none());
+    }
 }

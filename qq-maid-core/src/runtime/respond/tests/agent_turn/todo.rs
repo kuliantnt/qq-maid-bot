@@ -181,10 +181,9 @@ async fn multiple_successful_todo_writes_share_one_background_snapshot() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert_eq!(text.matches("✅ 已新增待办").count(), 2);
+    assert_eq!(text, "已新增最后一条");
+    assert!(!text.contains("✅ 已新增待办"));
     assert_eq!(text.matches("🚧 当前进行中").count(), 0);
-    assert!(text.contains("第一条新增"));
-    assert!(text.contains("第二条新增"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], "succeeded");
     assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 2);

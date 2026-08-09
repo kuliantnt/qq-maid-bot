@@ -193,10 +193,8 @@ async fn private_tool_loop_can_query_train_schedule_with_trusted_rendering() {
         chrono::NaiveDate::from_ymd_opt(2026, 6, 28).unwrap()
     );
     let text = response.text.as_deref().unwrap();
-    assert!(text.contains("G1 列车时刻"));
-    assert!(text.contains("北京南"));
-    assert!(text.contains("上海虹桥"));
-    assert!(text.contains("这趟车早上发车，适合当天安排。"));
+    assert_eq!(text, "这趟车早上发车，适合当天安排。");
+    assert!(!text.contains("G1 列车时刻"));
     assert_eq!(response.command.as_deref(), Some("train"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
@@ -260,8 +258,8 @@ async fn mixed_train_and_todo_request_is_not_captured_by_todo_date_query() {
     assert_ne!(response.command.as_deref(), Some("todo_due_date"));
     let text = response.text.as_deref().unwrap();
     assert!(!text.contains("这一天暂无未完成待办"));
-    assert!(text.contains("G1 列车时刻"));
-    assert!(text.contains("✅ 已新增待办"));
+    assert_eq!(text, "G1 可查，已新增待办");
+    assert!(!text.contains("✅ 已新增待办"));
     let train_requests = train_inspector.requests();
     assert_eq!(train_requests.len(), 1);
     assert_eq!(train_requests[0].train_code, "G1");
@@ -349,12 +347,8 @@ async fn private_tool_loop_can_query_recent_rss_items_with_trusted_rendering() {
 
     assert_eq!(inspector.tool_call_count(), 1);
     let text = response.text.as_deref().unwrap();
-    assert!(text.contains("RSS 最近记录"));
-    assert!(text.contains("Codex 发布"));
-    assert!(text.contains("Codex CLI 0.42 发布"));
-    assert!(text.contains("这次发布改进了工具调用和日志展示"));
-    assert!(text.contains("本地已轮询入库记录"));
-    assert!(text.contains("这条更新主要值得关注工具调用改进。"));
+    assert_eq!(text, "这条更新主要值得关注工具调用改进。");
+    assert!(!text.contains("RSS 最近记录"));
     assert_eq!(response.command.as_deref(), Some("rss"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
@@ -778,7 +772,8 @@ async fn tool_loop_created_todo_survives_chat_history_save_and_records_last_acti
         .await
         .unwrap();
     let first_text = first.text.unwrap();
-    assert!(first_text.contains("✅ 已新增待办"));
+    assert!(!first_text.contains("✅ 已新增待办"));
+    assert!(!first_text.trim().is_empty());
     assert!(!first_text.contains("🚧 当前进行中 · 共 1 项"));
     let first_diagnostics = first.diagnostics.unwrap();
     assert_eq!(first_diagnostics["todo_success_claimed"], true);
@@ -830,10 +825,8 @@ async fn private_scheduled_task_phrase_is_handled_by_agent_tool_loop() {
         .unwrap();
 
     let text = response.text.as_deref().unwrap();
-    assert!(text.contains("✅ 已新增待办"));
-    assert!(text.contains("检查发布清单"));
-    assert!(text.contains("15:00"));
-    assert!(!text.contains("下午检查发布清单 · 时间"));
+    assert_eq!(text, "任务已处理");
+    assert!(!text.contains("✅ 已新增待办"));
     assert_eq!(inspector.tool_call_count(), 1);
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
@@ -858,8 +851,8 @@ async fn private_todo_create_phrase_is_handled_by_agent_tool_loop() {
 
     assert_eq!(response.command.as_deref(), Some("todo_create"));
     let text = response.text.unwrap();
-    assert!(text.contains("✅ 已新增待办"));
-    assert!(text.contains("明天接老公"));
+    assert!(!text.contains("✅ 已新增待办"));
+    assert!(!text.trim().is_empty());
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
         diagnostics["agent_executed_tools"],

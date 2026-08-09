@@ -31,13 +31,16 @@ use crate::{
     runtime::{
         respond::{
             RespondRequest, RespondResponse, RustRespondService,
+            agent_composition::AgentReplySource,
             common::{session_error, tool_context_from_request, tool_conversation_from_request},
             interaction_state::respond_interaction_meta,
             llm_service::{RespondOutput, response_from_output},
         },
         session::{SessionMeta, SessionRecord},
         tools::{
-            agent_turn::{agent_turn_diagnostics, postprocess_tool_turn},
+            agent_turn::{
+                ToolTurnPostprocessContext, agent_turn_diagnostics, postprocess_tool_turn,
+            },
             todo::{CompleteTodoTool, RestoreTodoTool, TodoStore, valid_last_visible_todo_query},
         },
         visible_entity::{VisibleEntityRequestContext, VisibleEntitySelectionScope},
@@ -393,6 +396,7 @@ async fn execute_deterministic_todo(
             },
             usage: None,
             agent,
+            model_reply_empty: true,
         },
         executed_tools,
     ))
@@ -486,13 +490,16 @@ impl RustRespondService {
         latest_session.state = conversation_session.state.clone();
         *conversation_session = latest_session;
         let postprocess = postprocess_tool_turn(
-            &self.session_store,
-            &self.task_store,
-            conversation_session,
-            meta,
-            &interaction_meta,
+            ToolTurnPostprocessContext {
+                session_store: &self.session_store,
+                task_store: &self.task_store,
+                conversation_session,
+                meta,
+                interaction_meta: &interaction_meta,
+                req,
+                reply_source: AgentReplySource::DeterministicCommand,
+            },
             output,
-            req,
         )?;
         let reply = postprocess.output.reply.clone();
         self.session_store

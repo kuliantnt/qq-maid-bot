@@ -375,8 +375,8 @@ async fn natural_language_undo_restores_most_recently_completed_todo() {
             "{input}"
         );
         let text = response.text.unwrap();
-        assert!(text.contains("已恢复待办"), "{input}");
-        assert!(text.contains("买牛奶"), "{input}");
+        assert_eq!(text, "已恢复刚才完成的待办", "{input}");
+        assert!(!text.contains("✅"), "{input}");
         assert_eq!(inspector.tool_call_count(), 2, "{input}");
     }
 }

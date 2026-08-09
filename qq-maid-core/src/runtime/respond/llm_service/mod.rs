@@ -79,6 +79,8 @@ pub struct RespondOutput {
     pub usage: Option<TokenUsage>,
     /// Agent Runtime 的结构化执行轨迹。
     pub agent: AgentRunDiagnostics,
+    /// Provider 是否没有产生可用的最终模型正文；用于决定是否启用领域确定性降级。
+    pub model_reply_empty: bool,
 }
 
 /// `ChatService` 的默认实现。
@@ -287,6 +289,7 @@ fn output_from_raw_reply(
         .output_parts
         .iter()
         .any(|part| matches!(part, OutputPart::Image { .. } | OutputPart::File { .. }));
+    let model_reply_empty = raw_reply.is_empty() && !has_media;
     let (reply, text, markdown) = match req.purpose {
         RespondPurpose::Chat => {
             if raw_reply.is_empty() && has_media {
@@ -324,6 +327,7 @@ fn output_from_raw_reply(
         metrics: outcome.metrics,
         usage: outcome.usage,
         agent: outcome.agent,
+        model_reply_empty,
     })
 }
 

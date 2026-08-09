@@ -10,7 +10,7 @@ use qq_maid_llm::provider::ToolExecutionResult;
 
 use crate::service::VisibleEntitySnapshot;
 
-use super::common::CommandBody;
+use super::common::{CommandBody, structured_command_body};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -77,6 +77,17 @@ pub(crate) enum OutcomePresentation {
     Trusted,
     Internal,
     Unhandled,
+}
+
+/// 工具结果可以附带的来源信息。
+///
+/// 来源是搜索结果的 provenance，不是搜索工具的完整正文；自然语言 Agent 成功
+/// 时只把它作为模型正文后的参考信息追加，模型最终失败时才回退到完整结果卡片。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProvenanceSource {
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
 }
 
 impl OutcomePresentation {
@@ -196,20 +207,31 @@ pub(crate) struct AgentTurnOutcome {
     pub status: AgentTurnStatus,
     pub outcomes: Vec<ToolExecutionOutcome>,
     pub blocks: Vec<ResponseBlock>,
+    pub provenance: Vec<ProvenanceSource>,
+    /// 已启动但尚未形成可信结果的工具；它不是一个 Tool Result，不能进入领域投影。
+    pub unknown_result_tools: Vec<String>,
     pub visible_entity_snapshot: Option<VisibleEntitySnapshot>,
 }
 
 impl AgentTurnOutcome {
     #[cfg(test)]
     pub(crate) fn from_outcomes(outcomes: Vec<ToolExecutionOutcome>) -> Self {
-        Self::from_outcomes_with_visible_snapshot(outcomes, None)
+        Self::from_outcomes_with_visible_snapshot_and_provenance(
+            outcomes,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
     }
 
-    pub(crate) fn from_outcomes_with_visible_snapshot(
+    pub(crate) fn from_outcomes_with_visible_snapshot_and_provenance(
         outcomes: Vec<ToolExecutionOutcome>,
         visible_entity_snapshot: Option<VisibleEntitySnapshot>,
+        provenance: Vec<ProvenanceSource>,
+        unknown_result_tools: Vec<String>,
     ) -> Self {
-        let status = calculate_turn_status(&outcomes);
+        let unknown_result_tools = deduplicate_tool_names(unknown_result_tools);
+        let status = calculate_turn_status(&outcomes, !unknown_result_tools.is_empty());
         let mut indexed_blocks = Vec::new();
         for (outcome_index, outcome) in outcomes.iter().enumerate() {
             for (block_index, block) in outcome.blocks.iter().cloned().enumerate() {
@@ -227,35 +249,62 @@ impl AgentTurnOutcome {
             status,
             outcomes,
             blocks,
+            provenance: deduplicate_provenance(provenance),
+            unknown_result_tools,
             visible_entity_snapshot,
         }
     }
 
-    pub(crate) fn can_replace_model_reply(&self) -> bool {
-        !self.blocks.is_empty()
+    /// 当前整轮是否拥有可安全展示的完整确定性结果。
+    pub(crate) fn can_render_deterministic_reply(&self) -> bool {
+        self.unknown_result_tools.is_empty()
+            && !self.blocks.is_empty()
             && self
                 .outcomes
                 .iter()
                 .all(|outcome| outcome.presentation != OutcomePresentation::Unhandled)
     }
 
-    pub(crate) fn should_preserve_model_reply(&self) -> bool {
-        let readonly_trusted = !self.blocks.is_empty()
-            && self.outcomes.iter().all(|outcome| {
-                outcome.effect == ToolEffect::ReadOnly
-                    && outcome.presentation != OutcomePresentation::Unhandled
-            });
-        if !readonly_trusted {
+    /// 自然语言 Agent 是否可以把模型正文作为本轮唯一主体。
+    ///
+    /// 成功的写操作也走这里；Todo 成功验真仍由 Todo postprocessor 在合成后执行。
+    /// 只有真实失败（`empty_result` 是“查询完成但无证据”的兼容状态）才回到确定性
+    /// 错误/回执，避免模型把失败工具说成成功。
+    pub(crate) fn can_use_model_reply_as_primary(&self) -> bool {
+        if !self.unknown_result_tools.is_empty() || !self.can_render_deterministic_reply() {
             return false;
         }
-
-        // `empty_result` 表示查询已完成但没有可用证据，可与同轮成功结果共同沿用模型回复；
-        // 真实执行失败继续由确定性工具回执覆盖，避免把失败误当成可用结果。
         self.outcomes.iter().all(|outcome| {
             outcome.status == ToolOutcomeStatus::Succeeded
                 || (outcome.status == ToolOutcomeStatus::Failed
+                    && outcome.effect == ToolEffect::ReadOnly
                     && outcome.error_code.as_deref() == Some("empty_result"))
         })
+    }
+
+    pub(crate) fn has_incomplete_result(&self) -> bool {
+        !self.unknown_result_tools.is_empty()
+    }
+
+    pub(crate) fn render_provenance(&self) -> CommandBody {
+        if self.provenance.is_empty() {
+            return CommandBody::plain("");
+        }
+
+        let mut text_lines = vec!["参考来源：".to_owned()];
+        let mut markdown_lines = vec!["参考来源：".to_owned()];
+        for source in &self.provenance {
+            let text_reference = source_text_reference(source);
+            let markdown_reference = source_markdown_reference(source);
+            let text_line = append_source_snippet(text_reference, &source.snippet);
+            let markdown_line = append_source_snippet(markdown_reference, &source.snippet);
+            text_lines.push(format!("- {text_line}"));
+            markdown_lines.push(format!("- {markdown_line}"));
+        }
+
+        let mut body = structured_command_body(markdown_lines.join("\n"));
+        body.text = text_lines.join("\n");
+        body
     }
 
     pub(crate) fn has_unhandled_outcome(&self) -> bool {
@@ -339,6 +388,37 @@ impl AgentTurnOutcome {
         body
     }
 
+    /// 已知结果仍可展示，但未知工具必须以整轮不完整状态追加提示，不能把已知结果
+    /// 当成整轮成功，也不能把未知工具伪造成 Tool Result。
+    pub(crate) fn render_incomplete_body(&self) -> CommandBody {
+        let mut body = if self.has_unhandled_outcome() {
+            self.render_compat_body()
+        } else {
+            self.render_body()
+        };
+        let text_lines = std::iter::once("⚠️ 部分工具执行结果未知，无法确认是否成功".to_owned())
+            .chain(
+                self.unknown_result_tools
+                    .iter()
+                    .map(|tool| format!("- {tool}：执行状态未知")),
+            )
+            .collect::<Vec<_>>();
+        let markdown_lines =
+            std::iter::once("## ⚠️ 部分工具执行结果未知，无法确认是否成功".to_owned())
+                .chain(
+                    self.unknown_result_tools
+                        .iter()
+                        .map(|tool| format!("- {tool}：执行状态未知")),
+                )
+                .collect::<Vec<_>>();
+        body.text = join_body_with_warning(&body.text, &text_lines.join("\n"));
+        body.markdown = Some(join_body_with_warning(
+            body.markdown.as_deref().unwrap_or_default(),
+            &markdown_lines.join("\n"),
+        ));
+        body
+    }
+
     pub(crate) fn primary_command(&self) -> Option<String> {
         [
             ToolOutcomeStatus::Failed,
@@ -394,52 +474,65 @@ impl AgentTurnOutcome {
                 "presentation": outcome.presentation.as_str(),
                 "error_code": outcome.error_code,
             })).collect::<Vec<_>>(),
+            "tools_with_unknown_result": self.unknown_result_tools,
         })
     }
 }
 
-fn calculate_turn_status(outcomes: &[ToolExecutionOutcome]) -> AgentTurnStatus {
+fn calculate_turn_status(
+    outcomes: &[ToolExecutionOutcome],
+    has_unknown_result: bool,
+) -> AgentTurnStatus {
     if outcomes.is_empty() {
-        return AgentTurnStatus::Succeeded;
+        return if has_unknown_result {
+            AgentTurnStatus::Failed
+        } else {
+            AgentTurnStatus::Succeeded
+        };
     }
-    if outcomes
+    let status = if outcomes
         .iter()
         .all(|outcome| outcome.status == ToolOutcomeStatus::Succeeded)
     {
-        return AgentTurnStatus::Succeeded;
-    }
+        AgentTurnStatus::Succeeded
+    } else {
+        let has_success = outcomes
+            .iter()
+            .any(|outcome| outcome.status == ToolOutcomeStatus::Succeeded);
+        let has_completed_side_effect = outcomes.iter().any(|outcome| {
+            outcome.status == ToolOutcomeStatus::Succeeded
+                && outcome.effect.is_completed_side_effect()
+        });
+        let has_failed_or_skipped = outcomes.iter().any(|outcome| {
+            matches!(
+                outcome.status,
+                ToolOutcomeStatus::Failed | ToolOutcomeStatus::Skipped
+            )
+        });
+        let has_clarification = outcomes
+            .iter()
+            .any(|outcome| outcome.status == ToolOutcomeStatus::RequiresClarification);
+        let has_pending = outcomes
+            .iter()
+            .any(|outcome| outcome.status == ToolOutcomeStatus::PendingConfirmation);
 
-    let has_success = outcomes
-        .iter()
-        .any(|outcome| outcome.status == ToolOutcomeStatus::Succeeded);
-    let has_completed_side_effect = outcomes.iter().any(|outcome| {
-        outcome.status == ToolOutcomeStatus::Succeeded && outcome.effect.is_completed_side_effect()
-    });
-    let has_failed_or_skipped = outcomes.iter().any(|outcome| {
-        matches!(
-            outcome.status,
-            ToolOutcomeStatus::Failed | ToolOutcomeStatus::Skipped
-        )
-    });
-    let has_clarification = outcomes
-        .iter()
-        .any(|outcome| outcome.status == ToolOutcomeStatus::RequiresClarification);
-    let has_pending = outcomes
-        .iter()
-        .any(|outcome| outcome.status == ToolOutcomeStatus::PendingConfirmation);
-
-    if (has_success || has_completed_side_effect)
-        && (has_failed_or_skipped || has_clarification || has_pending)
-    {
-        return AgentTurnStatus::PartialSuccess;
+        if (has_success || has_completed_side_effect)
+            && (has_failed_or_skipped || has_clarification || has_pending)
+        {
+            AgentTurnStatus::PartialSuccess
+        } else if has_clarification {
+            AgentTurnStatus::RequiresClarification
+        } else if has_pending {
+            AgentTurnStatus::PendingConfirmation
+        } else {
+            AgentTurnStatus::Failed
+        }
+    };
+    if has_unknown_result && status == AgentTurnStatus::Succeeded {
+        AgentTurnStatus::PartialSuccess
+    } else {
+        status
     }
-    if has_clarification {
-        return AgentTurnStatus::RequiresClarification;
-    }
-    if has_pending {
-        return AgentTurnStatus::PendingConfirmation;
-    }
-    AgentTurnStatus::Failed
 }
 
 fn structured_error_code(output: &Value) -> Option<String> {
@@ -453,6 +546,75 @@ fn structured_error_code(output: &Value) -> Option<String> {
                 .and_then(Value::as_str)
         })
         .map(str::to_owned)
+}
+
+fn deduplicate_provenance(sources: Vec<ProvenanceSource>) -> Vec<ProvenanceSource> {
+    let mut unique = Vec::new();
+    for source in sources {
+        let duplicate = unique.iter().any(|existing: &ProvenanceSource| {
+            if !source.url.is_empty() && !existing.url.is_empty() {
+                source.url == existing.url
+            } else {
+                source.title == existing.title
+                    && source.url == existing.url
+                    && source.snippet == existing.snippet
+            }
+        });
+        if !duplicate {
+            unique.push(source);
+        }
+    }
+    unique
+}
+
+fn deduplicate_tool_names(names: Vec<String>) -> Vec<String> {
+    let mut unique = Vec::new();
+    for name in names {
+        let name = name.trim();
+        if !name.is_empty() && !unique.iter().any(|existing| existing == name) {
+            unique.push(name.to_owned());
+        }
+    }
+    unique
+}
+
+fn join_body_with_warning(body: &str, warning: &str) -> String {
+    if body.trim().is_empty() {
+        warning.trim().to_owned()
+    } else {
+        format!("{}\n\n{}", body.trim(), warning.trim())
+    }
+}
+
+fn source_text_reference(source: &ProvenanceSource) -> String {
+    match (source.title.trim(), source.url.trim()) {
+        (title, url) if !title.is_empty() && !url.is_empty() => {
+            format!("{title}（{url}）")
+        }
+        (title, _) if !title.is_empty() => title.to_owned(),
+        (_, url) if !url.is_empty() => url.to_owned(),
+        _ => "未命名来源".to_owned(),
+    }
+}
+
+fn source_markdown_reference(source: &ProvenanceSource) -> String {
+    match (source.title.trim(), source.url.trim()) {
+        (title, url) if !title.is_empty() && !url.is_empty() => {
+            format!("[{title}]({url})")
+        }
+        (title, _) if !title.is_empty() => title.to_owned(),
+        (_, url) if !url.is_empty() => url.to_owned(),
+        _ => "未命名来源".to_owned(),
+    }
+}
+
+fn append_source_snippet(reference: String, snippet: &str) -> String {
+    let snippet = snippet.trim();
+    if snippet.is_empty() {
+        reference
+    } else {
+        format!("{reference}：{snippet}")
+    }
 }
 
 #[cfg(test)]
@@ -532,7 +694,7 @@ mod tests {
         ]);
 
         assert_eq!(turn.status, AgentTurnStatus::PartialSuccess);
-        assert!(turn.can_replace_model_reply());
+        assert!(turn.can_render_deterministic_reply());
         let body = turn.render_body();
         assert!(body.text.contains("✅ 已新增待办"));
         assert!(body.text.contains("⚠️ 编辑失败"));
@@ -558,7 +720,7 @@ mod tests {
         ]);
 
         assert_eq!(turn.status, AgentTurnStatus::Succeeded);
-        assert!(!turn.can_replace_model_reply());
+        assert!(!turn.can_render_deterministic_reply());
         assert_eq!(
             turn.outcomes[1].presentation,
             OutcomePresentation::Unhandled
@@ -607,8 +769,8 @@ mod tests {
             ))],
         )]);
 
-        assert!(turn.can_replace_model_reply());
-        assert!(turn.should_preserve_model_reply());
+        assert!(turn.can_render_deterministic_reply());
+        assert!(turn.can_use_model_reply_as_primary());
     }
 
     #[test]
@@ -623,7 +785,7 @@ mod tests {
         empty.error_code = Some("empty_result".to_owned());
         let turn = AgentTurnOutcome::from_outcomes(vec![empty]);
 
-        assert!(turn.should_preserve_model_reply());
+        assert!(turn.can_use_model_reply_as_primary());
     }
 
     #[test]
@@ -645,7 +807,7 @@ mod tests {
         empty.error_code = Some("empty_result".to_owned());
         let turn = AgentTurnOutcome::from_outcomes(vec![success, empty]);
 
-        assert!(turn.should_preserve_model_reply());
+        assert!(turn.can_use_model_reply_as_primary());
     }
 
     #[test]
@@ -660,7 +822,7 @@ mod tests {
             ))],
         )]);
 
-        assert!(turn.can_replace_model_reply());
-        assert!(!turn.should_preserve_model_reply());
+        assert!(turn.can_render_deterministic_reply());
+        assert!(turn.can_use_model_reply_as_primary());
     }
 }

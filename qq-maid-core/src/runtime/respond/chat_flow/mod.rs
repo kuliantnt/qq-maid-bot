@@ -22,6 +22,7 @@ use crate::{
 
 use super::{
     RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
+    agent_composition::AgentReplySource,
     agent_outcome::AgentTurnOutcome,
     agent_route::AgentRouteDecision,
     common::{command_response, empty_respond_request, merge_metadata, session_error},
@@ -313,6 +314,7 @@ impl RustRespondService {
                 &interaction_meta,
                 output,
                 &req,
+                AgentReplySource::NaturalLanguageAgent,
             )?;
             (
                 postprocess.output,

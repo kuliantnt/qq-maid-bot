@@ -91,9 +91,7 @@ async fn natural_language_tool_query_combines_tomorrow_status_and_keyword() {
         .await
         .unwrap();
     let text = response.text.unwrap();
-    assert!(text.contains("项目 A 报告"));
-    assert!(!text.contains("项目 B 报告"));
-    assert!(!text.contains("项目 A 后续"));
+    assert_eq!(text, "查询完成");
     assert_eq!(inspector.tool_call_count(), 1);
 
     let session = service
@@ -143,7 +141,7 @@ async fn natural_language_tomorrow_todo_query_still_uses_list_date_range() {
         .unwrap();
 
     assert_eq!(response.command.as_deref(), Some("todo_list"));
-    assert!(response.text.as_deref().unwrap().contains("明天的待办"));
+    assert_eq!(response.text.as_deref(), Some("查询完成"));
     assert_eq!(
         response.diagnostics.unwrap()["agent_executed_tools"],
         serde_json::json!(["list_todos"])
@@ -191,8 +189,7 @@ async fn natural_language_tool_query_supports_fuzzy_keyword_search() {
         .await
         .unwrap();
     let text = response.text.unwrap();
-    assert!(text.contains("提交报销报告"));
-    assert!(!text.contains("检查服务器日志"));
+    assert_eq!(text, "查询完成");
     assert_eq!(inspector.tool_call_count(), 1);
 
     let session = service
@@ -279,9 +276,7 @@ async fn list_todos_due_date_receipt_preserves_filtered_visible_snapshot() {
         .await
         .unwrap();
     let text = response.text.unwrap();
-    assert!(text.contains("今天事项"));
-    assert!(!text.contains("明天事项"));
-    assert!(!text.contains("无时间事项"));
+    assert_eq!(text, "今天待办");
 
     let session = service
         .session_store
@@ -394,8 +389,7 @@ async fn list_todos_completed_date_range_receipt_uses_completed_at_snapshot() {
         .await
         .unwrap();
     let text = response.text.unwrap();
-    assert!(text.contains("昨天完成但计划较早"));
-    assert!(!text.contains("计划昨天但完成较早"), "{text}");
+    assert_eq!(text, "昨天完成的待办");
     let diagnostics = response.diagnostics.as_ref().unwrap();
     assert_eq!(
         diagnostics["agent_executed_tools"],
@@ -509,7 +503,7 @@ async fn natural_language_todo_queries_enter_tool_loop_instead_of_shortcut() {
     for input in ["看一下待办", "看一下代办", "查看待办"] {
         let response = service.respond(private_message(input)).await.unwrap();
         assert_eq!(response.command.as_deref(), Some("todo_list"), "{input}");
-        assert!(response.text.unwrap().contains("自然语言待办"), "{input}");
+        assert_eq!(response.text.as_deref(), Some("查询完成"), "{input}");
     }
     assert_eq!(inspector.tool_call_count(), 3);
 }
@@ -845,10 +839,7 @@ async fn todo_retry_keeps_replay_context_on_final_truncated_list_result() {
         .await
         .unwrap();
     let collapsed_text = collapsed.text.unwrap();
-    assert!(collapsed_text.contains("周期查询匹配项 1"));
-    assert!(collapsed_text.contains("周期查询匹配项 10"));
-    assert!(!collapsed_text.contains("周期查询匹配项 11"));
-    assert!(!collapsed_text.contains("周期查询一次性干扰项"));
+    assert_eq!(collapsed_text, "查询完成");
     assert!(!collapsed_text.contains("旧失败结果不应展示"));
 
     let snapshot = last_todo_snapshot(&service, "retry collapsed");
