@@ -13,6 +13,7 @@ use qq_maid_llm::provider::{
     status::{UpstreamStatus, observe_provider},
     types::{ChatRequest, TokenUsage},
 };
+use rusqlite::params;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -249,6 +250,19 @@ impl TestApi {
             .unwrap()
             .set_management_audit_failure_for_tests(enabled);
     }
+
+    fn audit_count(&self, action: &str, outcome: &str) -> i64 {
+        self.database
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM console_audit_events
+                 WHERE event_type = ?1 AND outcome = ?2",
+                params![action, outcome],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
 }
 
 fn personal_scope(user: &str) -> String {
@@ -441,11 +455,22 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
     );
     assert!(created["data"]["memory"].get("source_text").is_none());
     assert!(created["data"]["memory"].get("source_ref").is_none());
+    assert_eq!(api.audit_count("memory.create", "success"), 1);
 
     let old_memory_ref = created["data"]["memory"]["memory_ref"]
         .as_str()
         .unwrap()
         .to_owned();
+    let (status, persisted) = api
+        .post(
+            "/api/v1/console/memories/get",
+            json!({"target_ref": api.target_ref, "memory_ref": old_memory_ref}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{persisted}");
+    assert_eq!(persisted["data"]["content"], "管理员创建的内容");
+    assert_eq!(persisted["data"]["version"], 1);
+
     let (status, updated) = api
         .post(
             "/api/v1/console/memories/update",
@@ -460,6 +485,7 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
     assert_eq!(status, StatusCode::OK, "{updated}");
     assert_eq!(updated["data"]["memory"]["version"], 2);
     assert_eq!(updated["data"]["archived_count"], 1);
+    assert_eq!(api.audit_count("memory.update", "success"), 1);
     let updated_memory_ref = updated["data"]["memory"]["memory_ref"]
         .as_str()
         .unwrap()
@@ -479,6 +505,16 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
     assert_eq!(status, StatusCode::CONFLICT, "{stale}");
     assert_eq!(stale["error"]["code"], "conflict");
     assert!(!stale.to_string().contains("stale write"));
+    assert_eq!(api.audit_count("memory.update", "denied"), 1);
+    let (status, unchanged) = api
+        .post(
+            "/api/v1/console/memories/get",
+            json!({"target_ref": api.target_ref, "memory_ref": updated_memory_ref}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{unchanged}");
+    assert_eq!(unchanged["data"]["content"], "管理员编辑后的内容");
+    assert_eq!(unchanged["data"]["version"], 2);
 
     let (status, archived) = api
         .post(
@@ -493,6 +529,7 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
     assert_eq!(status, StatusCode::OK, "{archived}");
     assert_eq!(archived["data"]["memory"]["status"], "archived");
     assert_eq!(archived["data"]["memory"]["version"], 3);
+    assert_eq!(api.audit_count("memory.archive", "success"), 1);
 
     let (status, restored) = api
         .post(
@@ -507,6 +544,7 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
     assert_eq!(status, StatusCode::OK, "{restored}");
     assert_eq!(restored["data"]["memory"]["status"], "active");
     assert_eq!(restored["data"]["memory"]["version"], 4);
+    assert_eq!(api.audit_count("memory.restore", "success"), 1);
 
     let (status, empty_patch) = api
         .post(
@@ -551,6 +589,7 @@ async fn memory_api_audit_failure_rolls_back_mutations_and_consumes_commit_token
         )
         .await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{create_failed}");
+    assert_eq!(api.audit_count("memory.create", "success"), 0);
     api.set_audit_failure(false);
     let (status, after_create) = api
         .post(
@@ -574,6 +613,7 @@ async fn memory_api_audit_failure_rolls_back_mutations_and_consumes_commit_token
         )
         .await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{update_failed}");
+    assert_eq!(api.audit_count("memory.update", "success"), 0);
     api.set_audit_failure(false);
     let (status, after_update) = api
         .post(
@@ -617,6 +657,7 @@ async fn memory_api_audit_failure_rolls_back_mutations_and_consumes_commit_token
         )
         .await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{commit_failed}");
+    assert_eq!(api.audit_count("memory.operation_commit", "success"), 0);
     api.set_audit_failure(false);
     let (status, after_commit) = api
         .post(
@@ -673,6 +714,15 @@ async fn memory_api_prepare_commit_is_actor_bound_one_shot_and_snapshot_safe() {
     assert_eq!(status, StatusCode::OK, "{committed}");
     assert_eq!(committed["data"]["affected_count"], 1);
     assert_eq!(committed["data"]["operation"], "clear_target");
+    assert_eq!(api.audit_count("memory.operation_commit", "success"), 1);
+    let (status, active_after_commit) = api
+        .post(
+            "/api/v1/console/memories/list",
+            json!({"target_ref": api.target_ref, "status": "active"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{active_after_commit}");
+    assert_eq!(active_after_commit["data"]["total"], 0);
 
     let audit_dump = api
         .database

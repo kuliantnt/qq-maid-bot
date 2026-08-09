@@ -131,7 +131,6 @@ pub(super) async fn create(
             Some(&target_ref),
             None,
             service_result,
-            |value| Some(value.memory.version),
         )
     })();
     respond(&state, &headers, &context, result)
@@ -173,7 +172,6 @@ pub(super) async fn update(
             Some(&target_ref),
             Some(expected_version),
             service_result,
-            |value| Some(value.memory.version),
         )
     })();
     respond(&state, &headers, &context, result)
@@ -214,7 +212,6 @@ pub(super) async fn archive(
             Some(&target_ref),
             Some(expected_version),
             service_result,
-            |value| Some(value.memory.version),
         )
     })();
     respond(&state, &headers, &context, result)
@@ -255,7 +252,6 @@ pub(super) async fn restore(
             Some(&target_ref),
             Some(expected_version),
             service_result,
-            |value| Some(value.memory.version),
         )
     })();
     respond(&state, &headers, &context, result)
@@ -328,7 +324,6 @@ pub(super) async fn commit_operation(
             Some(&target_ref),
             None,
             service_result,
-            |_| None,
         )
     })();
     respond(&state, &headers, &context, result)
@@ -398,6 +393,7 @@ fn audit_success_in_transaction(
     })
 }
 
+/// 成功审计已经随业务事务原子提交；这里只有普通领域失败需要补写事务外 denied 审计。
 fn finish_mutation<T>(
     state: &OpsHttpState,
     context: &ApiRequestContext,
@@ -405,26 +401,24 @@ fn finish_mutation<T>(
     target_ref: Option<&str>,
     before_version: Option<u64>,
     service_result: Result<T, MemoryManagementError>,
-    after_version: impl FnOnce(&T) -> Option<u64>,
 ) -> Result<T, ApiError> {
-    let audit_needed = !matches!(
-        &service_result,
-        Err(MemoryManagementError::AuditUnavailable)
-    );
-    let result = service_result.map_err(map_memory_error);
-    if audit_needed {
-        let after_version = result.as_ref().ok().and_then(after_version);
-        audit_action(
-            state,
-            context,
-            action,
-            target_ref,
-            before_version,
-            after_version,
-            &result,
-        )?;
+    match service_result {
+        Ok(value) => Ok(value),
+        Err(error @ MemoryManagementError::AuditUnavailable) => Err(map_memory_error(error)),
+        Err(error) => {
+            let result = Err(map_memory_error(error));
+            audit_action(
+                state,
+                context,
+                action,
+                target_ref,
+                before_version,
+                None,
+                &result,
+            )?;
+            result
+        }
     }
-    result
 }
 
 fn audit_action<T>(
