@@ -97,6 +97,7 @@ pub(super) fn resolved_target(
         TARGET_REF_PREFIX,
         &[&scope_type, &memory_kind, &scope_id, &subject_id],
     );
+    let capabilities = operation_capabilities(&target, true);
     Ok(ResolvedTarget {
         target,
         summary: MemoryTargetSummary {
@@ -106,6 +107,7 @@ pub(super) fn resolved_target(
             account_ref,
             group_ref,
             subject_ref,
+            capabilities,
         },
     })
 }

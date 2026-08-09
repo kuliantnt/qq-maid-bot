@@ -250,6 +250,7 @@ export interface MemoryTargetView {
   accountRef: string;
   groupRef: string | null;
   subjectRef: string | null;
+  capabilities: MemoryOperationCapabilities;
 }
 
 export interface MemoryCapabilities {

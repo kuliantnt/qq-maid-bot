@@ -777,6 +777,17 @@ async fn memory_api_prepare_commit_is_actor_bound_one_shot_and_snapshot_safe() {
         disabled["data"]["capabilities"]["can_disable_group_profile"],
         false
     );
+    let (status, targets) = api
+        .post("/api/v1/console/memories/targets", json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{targets}");
+    let target = targets["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["target_ref"] == profile_ref)
+        .expect("disabled group profile remains discoverable");
+    assert_eq!(target["capabilities"]["can_disable_group_profile"], false);
 }
 
 #[tokio::test]

@@ -25,7 +25,7 @@ let viewGeneration = 0;
 let page = 1;
 let items: MemoryItem[] = [];
 let targetOptions: MemoryTargetView[] = [];
-// targets 接口只返回 opaque target 摘要；范围操作完成后用提交响应中的能力更新当前会话状态。
+// targets 接口返回服务端能力；提交响应到达前，保留本地覆盖避免旧 DOM 重复触发高影响操作。
 let targetOperationCapabilities = new Map<string, MemoryOperationCapabilities>();
 let currentPage: { total: number; totalPages: number } = { total: 0, totalPages: 0 };
 
@@ -91,6 +91,7 @@ export function disposeMemory(): void {
   targetOptions = [];
   targetOperationCapabilities.clear();
   currentPage = { total: 0, totalPages: 0 };
+  resetMemoryCreateForm();
   document.getElementById("memory-list")?.replaceChildren();
   document.getElementById("memory-targets")?.replaceChildren();
   document.getElementById("memory-pagination")?.replaceChildren();
@@ -120,6 +121,19 @@ function bindControls(): void {
     event.preventDefault();
     void submitCreate(form);
   };
+}
+
+function resetMemoryCreateForm(): void {
+  const form = document.getElementById("memory-create-form");
+  if (form instanceof HTMLFormElement) form.reset();
+  const content = document.getElementById("memory-create-content");
+  if (content instanceof HTMLTextAreaElement) content.value = "";
+  const target = document.getElementById("memory-create-target");
+  if (target instanceof HTMLSelectElement) target.value = "";
+  const visibility = document.getElementById("memory-create-visibility");
+  if (visibility instanceof HTMLSelectElement) visibility.value = "";
+  const pinned = document.getElementById("memory-create-pinned");
+  if (pinned instanceof HTMLInputElement) pinned.checked = false;
 }
 
 function memoryFilterDefaults(): Readonly<Record<string, string>> {
@@ -453,10 +467,7 @@ function targetLabel(target: MemoryTargetView): string {
 }
 
 function operationCapabilitiesFor(target: MemoryTargetView): MemoryOperationCapabilities {
-  return targetOperationCapabilities.get(target.targetRef) ?? {
-    canClearTarget: true,
-    canDisableGroupProfile: true,
-  };
+  return targetOperationCapabilities.get(target.targetRef) ?? target.capabilities;
 }
 
 function canClearTarget(target: MemoryTargetView): boolean {

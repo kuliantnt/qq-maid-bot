@@ -241,6 +241,15 @@ fn bulk_mutation_results_include_commit_state_without_snapshot_reads() {
         .unwrap();
     assert_eq!(disabled.affected_count, 1);
     assert!(!disabled.capabilities.can_disable_group_profile);
+    store.fail_management_snapshot_for_test(false);
+    let target = service
+        .targets(MemoryTargetFilter::default(), 20, 0)
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|item| item.target_ref == profile_ref)
+        .unwrap();
+    assert!(!target.capabilities.can_disable_group_profile);
 }
 
 #[test]

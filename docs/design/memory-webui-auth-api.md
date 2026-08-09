@@ -1,6 +1,6 @@
 # Memory WebUI 身份授权与 API 边界
 
-> 状态：第一阶段（部署管理员 Memory 管理 API）已实现，更新于 2026-08-09；第二阶段原生 TypeScript WebUI 尚未实现。
+> 状态：Issue #476 的部署管理员 Memory 管理 API 与原生 TypeScript WebUI 均已实现，更新于 2026-08-09。
 
 本文记录 Issue #476 第一阶段的真实后端边界。历史 v1 设计及当时的威胁分析保留在[设计归档](./archive/memory-webui-auth-api-v1.md)。路由、DTO 和错误细节以 `qq-maid-core/src/http/api/memory/` 及[管理 API 约定](../development/management-api.md)为准。
 
@@ -14,7 +14,7 @@
 | 管理审计 | 已实现 | Memory 操作写入既有 `console_audit_events`，只增加安全元数据列 |
 | Memory 领域门面 | 已实现 | `runtime/tools/memory/management/` 编排目标发现、DTO 所需结果、revision 和确认协议 |
 | Memory 管理 API | 已实现 | 只在 `WEB_CONSOLE_ENABLED=true` 时注册，路径统一为 `/api/v1/console/memories/*` |
-| 原生 TypeScript WebUI | 未实现 | 本阶段不修改 `web-console/`，也不生成前端 `dist/` |
+| 原生 TypeScript WebUI | 已实现 | `web-console/` 提供受控 Memory 列表、筛选、创建、编辑、归档/恢复和范围确认操作，`dist/` 由构建生成 |
 | 平台用户/群管理员自助 | 未实现 | 没有把部署管理员身份转换为平台用户或群角色的绑定链路 |
 
 ## 部署管理员边界
@@ -41,7 +41,7 @@ target discovery 从已存在且可可信解析的 v3 Memory 记录中恢复稳�
 - `memory_subject:v1:<digest>`；
 - `memory:v1:<digest>`。
 
-摘要只返回 scope 名称、平台名和 opaque ref，不返回 scope key、account/group/user ID、owner ID、关系 subject raw ID 或内部 row key。服务器每次使用 target ref 都重新回查当前候选目标；客户端持有旧 ref 不会跳过当前合法性检查。memory ref 同时绑定 target ref 和记录 ID，因此 target mismatch、未知 ID、目标外 ID 和 legacy probing 都统一安全失败。
+摘要只返回 scope 名称、平台名、opaque ref 和目标级 capabilities，不返回 scope key、account/group/user ID、owner ID、关系 subject raw ID 或内部 row key。`can_disable_group_profile` 由服务端持久化的群画像 preference 计算，客户端重新登录或刷新 target 列表后仍能得到真实状态。服务器每次使用 target ref 都重新回查当前候选目标；客户端持有旧 ref 不会跳过当前合法性检查。memory ref 同时绑定 target ref 和记录 ID，因此 target mismatch、未知 ID、目标外 ID 和 legacy probing 都统一安全失败。
 
 ## API 与生命周期
 
@@ -49,7 +49,7 @@ target discovery 从已存在且可可信解析的 v3 Memory 记录中恢复稳�
 
 | 路径 | 领域动作 |
 | --- | --- |
-| `POST /api/v1/console/memories/targets` | 分页发现可管理 target，并支持 scope/platform/account_ref/group_ref/subject_ref 筛选 |
+| `POST /api/v1/console/memories/targets` | 分页发现可管理 target，返回目标级 capabilities，并支持 scope/platform/account_ref/group_ref/subject_ref 筛选 |
 | `POST /api/v1/console/memories/list` | 按 target、结构化字段和正文 keyword 分页查询 |
 | `POST /api/v1/console/memories/get` | 按 target_ref + memory_ref 读取安全详情 |
 | `POST /api/v1/console/memories/create` | 对重新回查成功的 target 创建人工导入 |

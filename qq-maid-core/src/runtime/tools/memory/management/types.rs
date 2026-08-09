@@ -40,6 +40,8 @@ pub(crate) struct MemoryTargetSummary {
     pub(crate) group_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subject_ref: Option<String>,
+    /// 目标级操作能力；群画像的停用能力来自持久化 profile preference。
+    pub(crate) capabilities: MemoryOperationCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

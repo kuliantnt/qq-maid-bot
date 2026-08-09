@@ -14,6 +14,7 @@ import {
   setCsrfToken,
   updateMemory,
 } from "../dist/api.js";
+import { disposeMemory } from "../dist/views/memory/memory.js";
 
 const TARGET_REF = "memory_target:v1:target";
 const MEMORY_REF = "memory:v1:item";
@@ -26,6 +27,10 @@ function targetSummary(overrides = {}) {
     account_ref: "memory_account:v1:account",
     group_ref: null,
     subject_ref: null,
+    capabilities: {
+      can_clear_target: true,
+      can_disable_group_profile: false,
+    },
     ...overrides,
   };
 }
@@ -117,6 +122,10 @@ test("Memory target 列表解析 master 的直接 target summary", async () => {
     const result = await listMemoryTargets();
     assert.equal(result.items[0].targetRef, TARGET_REF);
     assert.equal(result.items[0].accountRef, "memory_account:v1:account");
+    assert.deepEqual(result.items[0].capabilities, {
+      canClearTarget: true,
+      canDisableGroupProfile: false,
+    });
   });
 });
 
@@ -199,4 +208,66 @@ test("Memory parser 保留 409 冲突，不把失败伪装成成功", async () =
       (error) => error instanceof ConsoleApiError && error.status === 409 && error.code === "conflict",
     );
   });
+});
+
+test("Memory 登出会清空创建草稿和固定状态", () => {
+  class FakeElement {
+    constructor() {
+      this.value = "";
+      this.checked = false;
+      this.classList = { toggle: () => undefined };
+    }
+
+    replaceChildren() {}
+  }
+  class FakeForm extends FakeElement {
+    reset() { this.resetCalled = true; }
+  }
+  class FakeTextArea extends FakeElement {}
+  class FakeSelect extends FakeElement {}
+  class FakeInput extends FakeElement {}
+
+  const form = new FakeForm();
+  const content = new FakeTextArea();
+  content.value = "尚未提交的私人记忆";
+  const target = new FakeSelect();
+  target.value = TARGET_REF;
+  const visibility = new FakeSelect();
+  visibility.value = "private";
+  const pinned = new FakeInput();
+  pinned.checked = true;
+  const elements = new Map([
+    ["memory-create-form", form],
+    ["memory-create-content", content],
+    ["memory-create-target", target],
+    ["memory-create-visibility", visibility],
+    ["memory-create-pinned", pinned],
+  ]);
+  const previous = {
+    document: globalThis.document,
+    HTMLElement: globalThis.HTMLElement,
+    HTMLFormElement: globalThis.HTMLFormElement,
+    HTMLTextAreaElement: globalThis.HTMLTextAreaElement,
+    HTMLSelectElement: globalThis.HTMLSelectElement,
+    HTMLInputElement: globalThis.HTMLInputElement,
+  };
+  globalThis.HTMLElement = FakeElement;
+  globalThis.HTMLFormElement = FakeForm;
+  globalThis.HTMLTextAreaElement = FakeTextArea;
+  globalThis.HTMLSelectElement = FakeSelect;
+  globalThis.HTMLInputElement = FakeInput;
+  globalThis.document = { getElementById: (id) => elements.get(id) ?? null };
+  try {
+    disposeMemory();
+    assert.equal(form.resetCalled, true);
+    assert.equal(content.value, "");
+    assert.equal(target.value, "");
+    assert.equal(visibility.value, "");
+    assert.equal(pinned.checked, false);
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[name];
+      else globalThis[name] = value;
+    }
+  }
 });

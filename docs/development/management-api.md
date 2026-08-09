@@ -277,7 +277,7 @@ Memory 管理 API 只在 `WEB_CONSOLE_ENABLED=true` 时注册，所有接口均�
 
 | 路径 | 用途 |
 | --- | --- |
-| `/api/v1/console/memories/targets` | 发现可管理 target；支持 `scope`、`platform`、`account_ref`、`group_ref`、`subject_ref` |
+| `/api/v1/console/memories/targets` | 发现可管理 target，返回目标级 capabilities；支持 `scope`、`platform`、`account_ref`、`group_ref`、`subject_ref` |
 | `/api/v1/console/memories/list` | 按 target、scope/platform/opaque refs、category/kind/status/visibility/pinned/keyword 分页 |
 | `/api/v1/console/memories/get` | `target_ref` + `memory_ref` 读取单条安全 DTO |
 | `/api/v1/console/memories/create` | 使用服务端重新回查的 target 创建 `ManualImport` Memory |
@@ -291,7 +291,7 @@ Memory 管理 API 只在 `WEB_CONSOLE_ENABLED=true` 时注册，所有接口均�
 
 支持的 Memory scope 为 `personal`、`group_profile` 和 `group`。`legacy_unassigned` 不进入 discovery、list、get、create、update、archive、restore 或批量操作；请求不得通过 raw ID、scope key、owner、role 或 source 字段构造授权事实。
 
-target、account、group、subject 和 memory 使用带 `v1` 前缀的 SHA-256 opaque reference。服务端从已存在的合法 v3 Memory 目标发现 reference，并在每次写入前重新回查；客户端不能解析或拼接 reference。未知目标、目标外记录、legacy 记录和 target mismatch 对外统一为 `not_found` 或安全的校验错误，不返回探测差异。
+target、account、group、subject 和 memory 使用带 `v1` 前缀的 SHA-256 opaque reference。target 摘要同时返回服务端计算的目标级 capabilities；群画像的 `can_disable_group_profile` 来自持久化 profile preference，而不是客户端会话缓存。服务端从已存在的合法 v3 Memory 目标发现 reference，并在每次写入前重新回查；客户端不能解析或拼接 reference。未知目标、目标外记录、legacy 记录和 target mismatch 对外统一为 `not_found` 或安全的校验错误，不返回探测差异。
 
 成功的 list/get/mutation DTO 可包含 `memory_ref`、`version`、安全 target 摘要、正文、kind/category、visibility、status、pinned、时间、safe source type 和 capabilities；不包含 `scope_key`、scope ID、user/group/account raw ID、owner、source_text、source_ref、内部 row key 或 token。成功返回正文是 API 契约的一部分，但错误、日志、审计和 confirmation storage 不保存正文。
 
@@ -307,7 +307,7 @@ target、account、group、subject 和 memory 使用带 `v1` 前缀的 SHA-256 o
 
 keyword 只搜索 `content`，使用参数化 SQLite `LIKE`，不启用 FTS。trim 后为空视为未设置，长度上限为 256 字符；反斜杠、`%`、`_` 作为用户字面字符转义，并使用明确的 `ESCAPE` 规则。COUNT 与 page query 使用完全相同的 WHERE 条件，排序为 pinned、更新时间、内部 row key 的确定顺序；内部 row key 不返回。source_text、source_ref、raw identity 和 scope 不参与搜索。
 
-Memory API、Memory domain 或管理审计的具体实现说明见[Memory WebUI 身份授权与 API 边界](../design/memory-webui-auth-api.md)。第二阶段原生 TypeScript WebUI 尚未实现，本阶段不修改 `web-console/`。
+Memory API、Memory domain 或管理审计的具体实现说明见[Memory WebUI 身份授权与 API 边界](../design/memory-webui-auth-api.md)。原生 TypeScript WebUI 源码位于 `web-console/`，其 `dist/` 由构建生成并随前端改动提交。
 
 ## 后续资源模块
 

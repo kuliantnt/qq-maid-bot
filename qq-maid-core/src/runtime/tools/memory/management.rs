@@ -14,7 +14,8 @@ mod tests;
 use rusqlite::Transaction;
 
 use super::{
-    MemoryCategory, MemoryError, MemoryRecord, MemorySourceType, MemoryStatus, MemoryStore,
+    MemoryCategory, MemoryError, MemoryKind, MemoryRecord, MemorySourceType, MemoryStatus,
+    MemoryStore,
     ops::validate_visibility,
     storage::{ManagementListQuery, PersistMemoryRequest},
 };
@@ -23,8 +24,8 @@ use self::{
     confirmation::{commit as commit_confirmation, prepare as prepare_confirmation},
     refs::{
         ResolvedTarget, ensure_expected_version, memory_item, memory_ref_for, normalize_keyword,
-        record_matches_target, resolved_target, target_matches_filter, validate_content,
-        validate_list_filter, validate_ref, validate_target_filter,
+        operation_capabilities, record_matches_target, resolved_target, target_matches_filter,
+        validate_content, validate_list_filter, validate_ref, validate_target_filter,
     },
     types::{
         MemoryManagementItem, MemoryManagementMutationResult, MemoryManagementPage,
@@ -54,7 +55,7 @@ impl MemoryManagementService {
         offset: usize,
     ) -> Result<MemoryTargetPage, MemoryManagementError> {
         validate_target_filter(&filter)?;
-        let targets = self.visible_targets()?;
+        let targets = self.visible_targets_with_capabilities()?;
         let mut filtered = targets
             .into_iter()
             .filter(|target| target_matches_filter(target, &filter))
@@ -269,7 +270,7 @@ impl MemoryManagementService {
             })
             .map_err(MemoryManagementError::from)?;
         Ok(MemoryManagementMutationResult {
-            memory: memory_item(&target, archived.record, archived.profile_enabled)?,
+            memory: self.present_record(&target, archived.record, archived.profile_enabled)?,
             archived_count: 1,
         })
     }
@@ -304,7 +305,7 @@ impl MemoryManagementService {
             })
             .map_err(MemoryManagementError::from)?;
         Ok(MemoryManagementMutationResult {
-            memory: memory_item(&target, restored.record, restored.profile_enabled)?,
+            memory: self.present_record(&target, restored.record, restored.profile_enabled)?,
             archived_count: 0,
         })
     }
@@ -353,13 +354,33 @@ impl MemoryManagementService {
     }
 
     fn visible_targets(&self) -> Result<Vec<ResolvedTarget>, MemoryManagementError> {
-        Ok(self
+        let candidates = self
             .store
             .management_target_candidates()
-            .map_err(MemoryManagementError::from)?
+            .map_err(MemoryManagementError::from)?;
+        Ok(candidates
             .into_iter()
-            .filter_map(|target| resolved_target(target).ok())
+            .filter_map(|candidate| resolved_target(candidate).ok())
             .collect())
+    }
+
+    fn visible_targets_with_capabilities(
+        &self,
+    ) -> Result<Vec<ResolvedTarget>, MemoryManagementError> {
+        let mut targets = self.visible_targets()?;
+        for target in &mut targets {
+            let profile_enabled = if target.target.memory_kind() == MemoryKind::GroupProfile {
+                self.store
+                    .management_snapshot(&target.target)
+                    .map_err(MemoryManagementError::from)?
+                    .profile_enabled
+                    .unwrap_or(true)
+            } else {
+                true
+            };
+            target.summary.capabilities = operation_capabilities(&target.target, profile_enabled);
+        }
+        Ok(targets)
     }
 
     pub(super) fn resolve_target_ref(
@@ -428,7 +449,7 @@ impl MemoryManagementService {
     ) -> Result<MemoryManagementMutationResult, MemoryManagementError> {
         let archived_count = result.archived_ids.len();
         Ok(MemoryManagementMutationResult {
-            memory: memory_item(target, result.record, result.profile_enabled)?,
+            memory: self.present_record(target, result.record, result.profile_enabled)?,
             archived_count,
         })
     }
@@ -444,7 +465,18 @@ impl MemoryManagementService {
             .map_err(MemoryManagementError::from)?
             .profile_enabled
             .unwrap_or(true);
-        memory_item(target, record, profile_enabled)
+        self.present_record(target, record, profile_enabled)
+    }
+
+    fn present_record(
+        &self,
+        target: &ResolvedTarget,
+        record: MemoryRecord,
+        profile_enabled: bool,
+    ) -> Result<MemoryManagementItem, MemoryManagementError> {
+        let mut target = target.clone();
+        target.summary.capabilities = operation_capabilities(&target.target, profile_enabled);
+        memory_item(&target, record, profile_enabled)
     }
 
     fn present_page(

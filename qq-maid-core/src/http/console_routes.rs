@@ -246,6 +246,11 @@ const CONSOLE_ASSETS: &[(&str, &str, &str)] = &[
         "text/javascript; charset=utf-8",
     ),
     (
+        "views/memory/memory.js",
+        include_str!("../../../web-console/dist/views/memory/memory.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
         "views/dashboard.js",
         include_str!("../../../web-console/dist/views/dashboard.js"),
         "text/javascript; charset=utf-8",

@@ -565,6 +565,7 @@ function parseMemoryTarget(value: unknown): MemoryTargetView {
     accountRef: requiredString(target.account_ref, "account_ref"),
     groupRef: nullableString(target.group_ref),
     subjectRef: nullableString(target.subject_ref),
+    capabilities: parseOperationCapabilities(target.capabilities),
   };
 }
 

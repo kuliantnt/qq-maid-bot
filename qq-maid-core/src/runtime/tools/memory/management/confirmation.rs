@@ -24,7 +24,7 @@ pub(super) fn prepare(
     target_ref: &str,
 ) -> Result<PreparedMemoryOperation, MemoryManagementError> {
     let operation = ManagementOperation::parse(operation)?;
-    let target = service.resolve_target_ref(target_ref)?;
+    let mut target = service.resolve_target_ref(target_ref)?;
     if operation == ManagementOperation::DisableGroupProfile
         && target.target.memory_kind() != MemoryKind::GroupProfile
     {
@@ -36,6 +36,8 @@ pub(super) fn prepare(
         .store
         .management_snapshot(&target.target)
         .map_err(MemoryManagementError::from)?;
+    target.summary.capabilities =
+        operation_capabilities(&target.target, snapshot.profile_enabled.unwrap_or(true));
     let expires_at = now_seconds().saturating_add(CONFIRMATION_TTL_SECONDS);
     let token = format!("{CONFIRMATION_PREFIX}{}", Uuid::new_v4());
     let digest = token_digest(&token);
@@ -100,7 +102,7 @@ pub(super) fn commit(
         confirmations.remove(&digest);
         entry
     };
-    let target = service.resolve_target_ref(target_ref)?;
+    let mut target = service.resolve_target_ref(target_ref)?;
     if target.target != entry.target {
         return Err(MemoryManagementError::Conflict(
             "memory target changed after confirmation was prepared".to_owned(),
@@ -131,6 +133,7 @@ pub(super) fn commit(
             )
             .map_err(MemoryManagementError::from)?,
     };
+    target.summary.capabilities = operation_capabilities(&target.target, mutation.profile_enabled);
     Ok(MemoryOperationResult {
         operation: operation.as_str().to_owned(),
         target: target.summary,
