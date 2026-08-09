@@ -30,7 +30,7 @@ pub fn format_local_date_for_display(value: &str) -> String {
         .unwrap_or_else(|| value.trim().to_owned())
 }
 
-/// 格式化日期为 "MM-DD（星期X）" 的简短显示格式。
+/// 格式化日期为 "MM-DD 星期几" 的用户展示格式。
 pub fn format_local_date_with_weekday_for_display(value: &str) -> String {
     local_date_from_timestamp(value)
         .map(format_short_date_with_weekday)
@@ -298,7 +298,7 @@ pub fn format_todo_time_for_display(value: &str) -> String {
 /// 格式化待办时间为紧凑 chip 样式，用于列表和单条卡片展示。
 ///
 /// 展示规则只影响用户可见文本，不参与时间解析或持久化：
-/// - 当前年内显示 `MM-DD`，跨年显示 `YY-MM-DD`；
+/// - 当前年内显示 `MM-DD`，跨年显示 `YY-MM-DD`，均附带完整的中文星期；
 /// - 只有日期时不显示时间；
 /// - 有具体时间时显示 `H:MM`；
 /// - 不使用反引号等 Markdown 语法，避免 QQ Markdown 对行内 code 支持不稳定。
@@ -355,12 +355,12 @@ fn format_datetime_with_offset(datetime: DateTime<FixedOffset>) -> String {
 }
 
 fn format_short_date_with_weekday(date: NaiveDate) -> String {
-    format!("{}（{}）", date.format("%m-%d"), chinese_weekday(date))
+    format!("{} {}", date.format("%m-%d"), chinese_weekday(date))
 }
 
 fn format_todo_datetime(datetime: NaiveDateTime) -> String {
     format!(
-        "{}{:02}:{:02}",
+        "{} {:02}:{:02}",
         format_short_date_with_weekday(datetime.date()),
         datetime.hour(),
         datetime.minute()
@@ -370,7 +370,7 @@ fn format_todo_datetime(datetime: NaiveDateTime) -> String {
 fn format_todo_datetime_chip(datetime: NaiveDateTime, current_year: i32) -> String {
     let date = datetime.date();
     format!(
-        "{} {}:{:02}（{}）",
+        "{} {}:{:02} {}",
         todo_chip_date_label(date, current_year),
         datetime.hour(),
         datetime.minute(),
@@ -380,7 +380,7 @@ fn format_todo_datetime_chip(datetime: NaiveDateTime, current_year: i32) -> Stri
 
 fn format_todo_date_chip(date: NaiveDate, current_year: i32) -> String {
     format!(
-        "{}（{}）",
+        "{} {}",
         todo_chip_date_label(date, current_year),
         chinese_weekday(date)
     )
@@ -400,13 +400,13 @@ fn current_cn_year() -> i32 {
 
 fn chinese_weekday(date: NaiveDate) -> &'static str {
     match date.weekday().number_from_monday() {
-        1 => "一",
-        2 => "二",
-        3 => "三",
-        4 => "四",
-        5 => "五",
-        6 => "六",
-        7 => "日",
+        1 => "星期一",
+        2 => "星期二",
+        3 => "星期三",
+        4 => "星期四",
+        5 => "星期五",
+        6 => "星期六",
+        7 => "星期日",
         _ => unreachable!("weekday should be 1..=7"),
     }
 }
