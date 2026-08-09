@@ -487,6 +487,33 @@ test("登出停止轮询，重新登录不重复绑定控件并重建上传输�
   delete globalThis.fetch;
 });
 
+test("登出期间 capabilities 响应不会重新安装上传输入或发起列表请求", async () => {
+  setupKnowledgePage();
+  let resolveCapabilities;
+  let capabilityCalls = 0;
+  let listCalls = 0;
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init.body));
+    if (body.page === undefined) {
+      capabilityCalls += 1;
+      return new Promise((resolve) => { resolveCapabilities = () => resolve(new Response(JSON.stringify({ ok: true, data: knowledgeCapabilities() }))); });
+    }
+    listCalls += 1;
+    return new Response(JSON.stringify(knowledgeResponse()));
+  };
+
+  const initialization = initializeKnowledge();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(capabilityCalls, 1);
+  disposeKnowledge();
+  resolveCapabilities();
+  await initialization;
+
+  assert.equal(listCalls, 0);
+  assert.equal(document.getElementById("knowledge-upload-input"), null);
+  delete globalThis.fetch;
+});
+
 test("首屏列表失败退出加载态并可重试恢复列表", async () => {
   setupKnowledgePage();
   let attempts = 0;

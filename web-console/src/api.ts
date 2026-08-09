@@ -36,6 +36,7 @@ import type {
   MemoryItem,
   MemoryListParams,
   MemoryOperation,
+  MemoryOperationCapabilities,
   MemoryPage,
   MemoryStatus,
   MemoryTargetPage,
@@ -502,7 +503,7 @@ export async function commitMemoryOperation(input: {
   readonly operation: MemoryOperation;
   readonly targetRef: string;
   readonly confirmationToken: string;
-}): Promise<{ affectedCount: number }> {
+}): Promise<{ affectedCount: number; capabilities: MemoryOperationCapabilities }> {
   const payload = record(await mutatingJson(MEMORY_ROUTES.commit, "POST", {
     operation: input.operation,
     target_ref: input.targetRef,
@@ -512,8 +513,10 @@ export async function commitMemoryOperation(input: {
   if (data.operation !== input.operation || parseMemoryTarget(data.target).targetRef !== input.targetRef) {
     throw new ConsoleApiError("Memory 提交接口返回了不匹配的操作范围", "invalid_response");
   }
-  parseOperationCapabilities(data.capabilities);
-  return { affectedCount: requiredNonNegativeInteger(data.affected_count, "affected_count") };
+  return {
+    affectedCount: requiredNonNegativeInteger(data.affected_count, "affected_count"),
+    capabilities: parseOperationCapabilities(data.capabilities),
+  };
 }
 
 function parseTodoPage(value: unknown): TodoPage {
@@ -628,10 +631,14 @@ function parseMemoryCapabilities(value: unknown): MemoryItem["capabilities"] {
   };
 }
 
-function parseOperationCapabilities(value: unknown): void {
+function parseOperationCapabilities(value: unknown): MemoryOperationCapabilities {
   const data = record(value);
-  requiredBoolean(data.can_clear_target, "capabilities.can_clear_target");
-  requiredBoolean(data.can_disable_group_profile, "capabilities.can_disable_group_profile");
+  const canClearTarget = requiredBoolean(data.can_clear_target, "capabilities.can_clear_target");
+  const canDisableGroupProfile = requiredBoolean(data.can_disable_group_profile, "capabilities.can_disable_group_profile");
+  return {
+    canClearTarget,
+    canDisableGroupProfile,
+  };
 }
 
 function memoryKindValue(value: unknown): MemoryItem["kind"] | null {

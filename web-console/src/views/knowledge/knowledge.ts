@@ -20,6 +20,8 @@ let uploadFlowInstalled = false;
 let loadMoreInFlight = false;
 // 用户主动请求与轮询拥有不同的生命周期，轮询不能让刷新/分页请求失效。
 let listRequestGeneration = 0;
+// capabilities 请求发生在页面初始化阶段，必须与登出/重新登录的页面生命周期绑定。
+let knowledgeLifecycleGeneration = 0;
 let knowledgeInitialized = false;
 let controlsBound = false;
 let documentListenersBound = false;
@@ -69,23 +71,33 @@ const actions = createKnowledgeActionHandlers({
 
 export async function initializeKnowledge(): Promise<void> {
   if (knowledgeInitialized) return;
+  const lifecycleGeneration = ++knowledgeLifecycleGeneration;
   knowledgeInitialized = true;
   bindKnowledgeControls();
   bindDocumentListeners();
   try {
-    capabilities = await fetchKnowledgeCapabilities();
+    const loadedCapabilities = await fetchKnowledgeCapabilities();
+    if (!isKnowledgeLifecycleActive(lifecycleGeneration)) return;
+    capabilities = loadedCapabilities;
   } catch (cause) {
+    if (!isKnowledgeLifecycleActive(lifecycleGeneration)) return;
     showKnowledgeError(cause, "知识库能力加载失败");
   }
+  if (!isKnowledgeLifecycleActive(lifecycleGeneration)) return;
   if (!uploadFlowInstalled) {
-    installKnowledgeUpload({ inputId: "knowledge-upload-input", buttonId: "knowledge-upload-open", setStatus: (text) => setText("knowledge-result", text), getCapabilities: getKnowledgeCapabilities, upload: uploadKnowledgeFile, onUploaded: () => void refreshKnowledgeList("upload") });
+    installKnowledgeUpload({ inputId: "knowledge-upload-input", buttonId: "knowledge-upload-open", setStatus: (text) => setText("knowledge-result", text), getCapabilities: getKnowledgeCapabilities, upload: uploadKnowledgeFile, onUploaded: () => {
+      if (isKnowledgeLifecycleActive(lifecycleGeneration)) void refreshKnowledgeList("upload");
+    } });
     uploadFlowInstalled = true;
   }
+  if (!isKnowledgeLifecycleActive(lifecycleGeneration)) return;
   await refreshKnowledgeList("refresh");
+  if (!isKnowledgeLifecycleActive(lifecycleGeneration)) return;
 }
 
 export function disposeKnowledge(): void {
   polling.stop();
+  knowledgeLifecycleGeneration += 1;
   listRequestGeneration += 1;
   if (documentListenersBound && typeof document !== "undefined" && typeof document.removeEventListener === "function") document.removeEventListener("visibilitychange", onVisibilityChange);
   if (documentListenersBound && typeof window !== "undefined" && typeof window.removeEventListener === "function") {
@@ -116,6 +128,10 @@ export function disposeKnowledge(): void {
 
 export function getKnowledgeCapabilities(): KnowledgeFileCapabilities | null {
   return capabilities;
+}
+
+function isKnowledgeLifecycleActive(generation: number): boolean {
+  return knowledgeInitialized && generation === knowledgeLifecycleGeneration;
 }
 
 export async function refreshKnowledgeList(reason: KnowledgeRefreshReason): Promise<void> {

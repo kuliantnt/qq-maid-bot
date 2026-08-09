@@ -258,6 +258,11 @@ export interface MemoryCapabilities {
   canRestore: boolean;
 }
 
+export interface MemoryOperationCapabilities {
+  canClearTarget: boolean;
+  canDisableGroupProfile: boolean;
+}
+
 export interface MemoryItem {
   memoryRef: string;
   target: MemoryTargetView;

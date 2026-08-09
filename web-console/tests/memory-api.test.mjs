@@ -177,6 +177,10 @@ test("Memory 范围确认使用新的 operation/token 协议并保留 CSRF", asy
       confirmationToken: prepared.confirmationToken,
     });
     assert.equal(committed.affectedCount, 2);
+    assert.deepEqual(committed.capabilities, {
+      canClearTarget: true,
+      canDisableGroupProfile: false,
+    });
     assert.equal(calls[0].input, "/api/v1/console/memories/operations/prepare");
     assert.equal(calls[1].input, "/api/v1/console/memories/operations/commit");
     assert.equal(calls[0].init.headers["X-CSRF-Token"], "csrf-memory");

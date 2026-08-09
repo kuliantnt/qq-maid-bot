@@ -223,9 +223,9 @@
           </div>
           <div class="memory-advanced-filter">
             <label>平台<input id="memory-platform-filter" placeholder="qq_official"></label>
-            <label>账号引用<input id="memory-account-filter" placeholder="memory_account:v1:…"></label>
-            <label>群组引用<input id="memory-group-filter" placeholder="memory_group:v1:…"></label>
-            <label>用户引用<input id="memory-user-filter" placeholder="memory_subject:v1:…"></label>
+            <label>账号引用<select id="memory-account-filter"><option value="">全部账号</option></select></label>
+            <label>群组引用<select id="memory-group-filter"><option value="">全部群组</option></select></label>
+            <label>用户引用<select id="memory-user-filter"><option value="">全部用户</option></select></label>
             <label>可见性<select id="memory-visibility-filter"><option value="all">全部</option><option value="private">仅本人</option><option value="context_only">当前上下文</option><option value="group_members">群成员</option><option value="public">公开</option></select></label>
           </div>
           <p id="memory-result" class="status-message" role="status" aria-live="polite"></p>

@@ -399,8 +399,10 @@ export async function commitMemoryOperation(input) {
     if (data.operation !== input.operation || parseMemoryTarget(data.target).targetRef !== input.targetRef) {
         throw new ConsoleApiError("Memory 提交接口返回了不匹配的操作范围", "invalid_response");
     }
-    parseOperationCapabilities(data.capabilities);
-    return { affectedCount: requiredNonNegativeInteger(data.affected_count, "affected_count") };
+    return {
+        affectedCount: requiredNonNegativeInteger(data.affected_count, "affected_count"),
+        capabilities: parseOperationCapabilities(data.capabilities),
+    };
 }
 function parseTodoPage(value) {
     const data = record(value);
@@ -507,8 +509,12 @@ function parseMemoryCapabilities(value) {
 }
 function parseOperationCapabilities(value) {
     const data = record(value);
-    requiredBoolean(data.can_clear_target, "capabilities.can_clear_target");
-    requiredBoolean(data.can_disable_group_profile, "capabilities.can_disable_group_profile");
+    const canClearTarget = requiredBoolean(data.can_clear_target, "capabilities.can_clear_target");
+    const canDisableGroupProfile = requiredBoolean(data.can_disable_group_profile, "capabilities.can_disable_group_profile");
+    return {
+        canClearTarget,
+        canDisableGroupProfile,
+    };
 }
 function memoryKindValue(value) {
     return value === "personal" || value === "group_profile" || value === "group" ? value : null;

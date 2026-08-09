@@ -4,6 +4,8 @@ let viewGeneration = 0;
 let page = 1;
 let items = [];
 let targetOptions = [];
+// targets 接口只返回 opaque target 摘要；范围操作完成后用提交响应中的能力更新当前会话状态。
+let targetOperationCapabilities = new Map();
 let currentPage = { total: 0, totalPages: 0 };
 const KIND_LABELS = {
     personal: "个人记忆",
@@ -60,6 +62,7 @@ export function disposeMemory() {
     page = 1;
     items = [];
     targetOptions = [];
+    targetOperationCapabilities.clear();
     currentPage = { total: 0, totalPages: 0 };
     document.getElementById("memory-list")?.replaceChildren();
     document.getElementById("memory-targets")?.replaceChildren();
@@ -115,8 +118,18 @@ async function refreshMemories() {
         ]);
         if (!initialized || generation !== viewGeneration)
             return;
+        // 归档/恢复可能让当前页失效；回到最后有效页，避免空列表把分页控件一起隐藏。
+        if (page > Math.max(result.totalPages, 1) && page > 1) {
+            page = Math.max(1, result.totalPages);
+            return refreshMemories();
+        }
         items = result.items;
         targetOptions = targets;
+        const discoveredTargets = new Set(targets.map((target) => target.targetRef));
+        for (const targetRef of targetOperationCapabilities.keys()) {
+            if (!discoveredTargets.has(targetRef))
+                targetOperationCapabilities.delete(targetRef);
+        }
         currentPage = { total: result.total, totalPages: result.totalPages };
         renderMemoryContent();
         setResult(`${result.total} 条记忆`, false);
@@ -164,6 +177,7 @@ function renderMemoryContent() {
         for (const item of items)
             list.append(memoryCard(item));
     }
+    renderMemoryAdvancedFilters();
     renderTargetControls();
     renderMemoryTargets();
     renderPagination();
@@ -216,8 +230,10 @@ function renderTargetControls() {
         const label = document.createElement("span");
         label.textContent = targetLabel(target);
         row.append(label);
-        row.append(actionButton("清空此范围", () => void confirmTargetOperation("clear_target", target), "danger"));
-        if (target.scope === "group_profile") {
+        if (canClearTarget(target)) {
+            row.append(actionButton("清空此范围", () => void confirmTargetOperation("clear_target", target), "danger"));
+        }
+        if (canDisableGroupProfile(target)) {
             row.append(actionButton("停止画像", () => void confirmTargetOperation("disable_group_profile", target), "danger"));
         }
         targetContainer.append(row);
@@ -225,12 +241,28 @@ function renderTargetControls() {
 }
 function renderMemoryTargets() {
     const select = element("memory-create-target", HTMLSelectElement);
-    select.replaceChildren(new Option(targetOptions.length > 0 ? "选择已授权范围…" : "暂无可用范围", ""));
-    for (const target of targetOptions) {
+    const creatableTargets = targetOptions.filter(canCreateMemory);
+    select.replaceChildren(new Option(creatableTargets.length > 0 ? "选择已授权范围…" : "暂无可用范围", ""));
+    for (const target of creatableTargets) {
         select.append(new Option(targetLabel(target), target.targetRef));
     }
-    select.disabled = targetOptions.length === 0;
+    select.disabled = creatableTargets.length === 0;
     updateCreateVisibilityOptions();
+}
+function renderMemoryAdvancedFilters() {
+    renderOpaqueRefFilter("memory-account-filter", "全部账号", uniqueRefs(targetOptions.map((target) => target.accountRef)));
+    renderOpaqueRefFilter("memory-group-filter", "全部群组", uniqueRefs(targetOptions.flatMap((target) => target.groupRef ? [target.groupRef] : [])));
+    renderOpaqueRefFilter("memory-user-filter", "全部用户", uniqueRefs(targetOptions.flatMap((target) => target.subjectRef ? [target.subjectRef] : [])));
+}
+function renderOpaqueRefFilter(id, emptyLabel, refs) {
+    const select = element(id, HTMLSelectElement);
+    const previous = select.value;
+    select.replaceChildren(new Option(emptyLabel, ""), ...refs.map((ref) => new Option(ref, ref)));
+    select.value = refs.includes(previous) ? previous : "";
+    select.disabled = refs.length === 0;
+}
+function uniqueRefs(refs) {
+    return [...new Set(refs)];
 }
 async function loadAllMemoryTargets() {
     const first = await listMemoryTargets(1, 100);
@@ -261,7 +293,7 @@ async function submitCreate(form) {
     const visibility = asMemoryVisibility(element("memory-create-visibility", HTMLSelectElement).value);
     const pinned = element("memory-create-pinned", HTMLInputElement).checked;
     const target = targetOptions.find((option) => option.targetRef === targetRef);
-    if (!targetRef || !target || !content || category === null || visibility === null) {
+    if (!targetRef || !target || !canCreateMemory(target) || !content || category === null || visibility === null) {
         setResult("创建需要选择范围、有效可见性并填写内容", true);
         return;
     }
@@ -336,6 +368,7 @@ async function confirmTargetOperation(operation, target) {
             targetRef: target.targetRef,
             confirmationToken: confirmation.confirmationToken,
         });
+        targetOperationCapabilities.set(target.targetRef, result.capabilities);
         setResult(`服务端已完成${noun}：${result.affectedCount} 条`, false);
         await refreshMemories();
     }
@@ -393,6 +426,21 @@ function targetLabel(target) {
         target.groupRef ? `群组 ${compactRef(target.groupRef)}` : null,
         target.subjectRef ? `用户 ${compactRef(target.subjectRef)}` : null,
     ].filter((value) => value !== null).join(" · ");
+}
+function operationCapabilitiesFor(target) {
+    return targetOperationCapabilities.get(target.targetRef) ?? {
+        canClearTarget: true,
+        canDisableGroupProfile: true,
+    };
+}
+function canClearTarget(target) {
+    return operationCapabilitiesFor(target).canClearTarget;
+}
+function canDisableGroupProfile(target) {
+    return target.scope === "group_profile" && operationCapabilitiesFor(target).canDisableGroupProfile;
+}
+function canCreateMemory(target) {
+    return target.scope !== "group_profile" || operationCapabilitiesFor(target).canDisableGroupProfile;
 }
 function compactRef(value) {
     return value.length <= 32 ? value : `${value.slice(0, 22)}…${value.slice(-8)}`;
