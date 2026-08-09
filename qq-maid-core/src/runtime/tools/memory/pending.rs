@@ -90,6 +90,8 @@ pub enum MemoryPendingPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_updated_at: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_record: Option<Box<super::MemoryRecord>>,
         draft: PreparedMemoryDraft,
         created_at: String,
@@ -102,6 +104,8 @@ pub enum MemoryPendingPayload {
         /// 旧字段仅用于兼容已持久化的 PreparedAction；新确认必须使用完整记录快照 CAS。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_updated_at: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_record: Option<Box<super::MemoryRecord>>,
         content_snapshot: String,
@@ -133,7 +137,25 @@ impl MemoryPendingPayload {
         if pending.domain() != MEMORY_PENDING_DOMAIN {
             return Ok(None);
         }
-        serde_json::from_value(pending.payload().clone()).map(Some)
+        let mut payload: Self = serde_json::from_value(pending.payload().clone())?;
+        payload.restore_expected_revision();
+        Ok(Some(payload))
+    }
+
+    fn restore_expected_revision(&mut self) {
+        match self {
+            Self::Replace {
+                expected_revision: Some(revision),
+                expected_record: Some(record),
+                ..
+            }
+            | Self::Delete {
+                expected_revision: Some(revision),
+                expected_record: Some(record),
+                ..
+            } => record.revision = *revision,
+            _ => {}
+        }
     }
 
     pub(crate) fn into_prepared_action(self, scope_key: &str) -> PreparedAction {

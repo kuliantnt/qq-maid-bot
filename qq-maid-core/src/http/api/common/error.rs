@@ -35,6 +35,10 @@ struct ApiErrorBody<'a> {
 }
 
 impl ApiError {
+    pub(crate) fn code(&self) -> &str {
+        &self.code
+    }
+
     pub(crate) fn new(
         status: StatusCode,
         code: impl Into<String>,

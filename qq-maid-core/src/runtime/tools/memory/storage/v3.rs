@@ -52,18 +52,30 @@ impl MemoryStore {
         &self,
         req: PersistMemoryRequest,
     ) -> Result<PersistMemoryResult, MemoryError> {
+        self.persist_v3_with_audit(req, |_, _| Ok(()))
+    }
+
+    /// 与附加写入（例如管理审计）共享 Memory 的 IMMEDIATE 事务。
+    pub(crate) fn persist_v3_with_audit<F>(
+        &self,
+        req: PersistMemoryRequest,
+        audit: F,
+    ) -> Result<PersistMemoryResult, MemoryError>
+    where
+        F: FnOnce(&Transaction<'_>, &PersistMemoryResult) -> Result<(), MemoryError>,
+    {
         let record = build_v3_record(req)?;
-        let mut conn = self.connection()?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(MemoryError::from_sql)?;
-        ensure_profile_enabled_unlocked(&tx, &record)?;
-        let archived_ids = archive_conflicts_unlocked(&tx, &record, None)?;
-        insert_record_unlocked(&tx, &record)?;
-        tx.commit().map_err(MemoryError::from_sql)?;
-        Ok(PersistMemoryResult {
-            record,
-            archived_ids,
+        self.with_immediate_transaction(|tx| {
+            let profile_enabled = ensure_profile_enabled_unlocked(tx, &record)?;
+            let archived_ids = archive_conflicts_unlocked(tx, &record, None)?;
+            insert_record_unlocked(tx, &record)?;
+            let result = PersistMemoryResult {
+                record,
+                archived_ids,
+                profile_enabled,
+            };
+            audit(tx, &result)?;
+            Ok(result)
         })
     }
 
@@ -83,7 +95,7 @@ impl MemoryStore {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(MemoryError::from_sql)?;
-        ensure_profile_enabled_unlocked(&tx, &record)?;
+        let profile_enabled = ensure_profile_enabled_unlocked(&tx, &record)?;
         if !memory_exists_for_target_unlocked(&tx, &target, id, MemoryStatus::Active)? {
             return Err(MemoryError::not_found("memory not found"));
         }
@@ -99,6 +111,7 @@ impl MemoryStore {
         Ok(PersistMemoryResult {
             record,
             archived_ids,
+            profile_enabled,
         })
     }
 
@@ -110,31 +123,49 @@ impl MemoryStore {
         expected: &MemoryRecord,
         req: PersistMemoryRequest,
     ) -> Result<PersistMemoryResult, MemoryError> {
+        self.replace_v3_if_unchanged_with_audit(target, id, expected, req, |_, _| Ok(()))
+    }
+
+    pub(crate) fn replace_v3_if_unchanged_with_audit<F>(
+        &self,
+        target: &MemoryTarget,
+        id: &str,
+        expected: &MemoryRecord,
+        req: PersistMemoryRequest,
+        audit: F,
+    ) -> Result<PersistMemoryResult, MemoryError>
+    where
+        F: FnOnce(&Transaction<'_>, &PersistMemoryResult) -> Result<(), MemoryError>,
+    {
         let target = target.clean()?;
-        let record = build_v3_record(req)?;
+        let mut record = build_v3_record(req)?;
         if record_target(&record) != target {
             return Err(MemoryError::bad_request("replacement target mismatch"));
         }
-        let mut conn = self.connection()?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(MemoryError::from_sql)?;
-        ensure_record_unchanged_unlocked(&tx, &target, id, expected)?;
-        ensure_profile_enabled_unlocked(&tx, &record)?;
-        let mut archived_ids = archive_conflicts_unlocked(&tx, &record, Some(id))?;
-        if archive_id_for_target_unlocked(&tx, &target, id)? == 0 {
-            return Err(MemoryError::changed(
-                "memory changed after confirmation was prepared",
-            ));
-        }
-        if !archived_ids.iter().any(|archived| archived == id) {
-            archived_ids.push(id.to_owned());
-        }
-        insert_record_unlocked(&tx, &record)?;
-        tx.commit().map_err(MemoryError::from_sql)?;
-        Ok(PersistMemoryResult {
-            record,
-            archived_ids,
+        self.with_immediate_transaction(|tx| {
+            ensure_record_unchanged_unlocked(tx, &target, id, expected)?;
+            let profile_enabled = ensure_profile_enabled_unlocked(tx, &record)?;
+            record.revision = expected
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| MemoryError::io("memory revision overflow"))?;
+            let mut archived_ids = archive_conflicts_unlocked(tx, &record, Some(id))?;
+            if archive_id_for_target_unlocked(tx, &target, id)? == 0 {
+                return Err(MemoryError::changed(
+                    "memory changed after confirmation was prepared",
+                ));
+            }
+            if !archived_ids.iter().any(|archived| archived == id) {
+                archived_ids.push(id.to_owned());
+            }
+            insert_record_unlocked(tx, &record)?;
+            let result = PersistMemoryResult {
+                record,
+                archived_ids,
+                profile_enabled,
+            };
+            audit(tx, &result)?;
+            Ok(result)
         })
     }
 
@@ -353,13 +384,24 @@ fn ensure_record_unchanged_unlocked(
     id: &str,
     expected: &MemoryRecord,
 ) -> Result<(), MemoryError> {
+    ensure_record_unchanged_for_management(tx, target, id, expected)?;
+    if expected.status != MemoryStatus::Active {
+        return Err(MemoryError::changed(
+            "memory is not active in the prepared state",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn ensure_record_unchanged_for_management(
+    tx: &Transaction<'_>,
+    target: &MemoryTarget,
+    id: &str,
+    expected: &MemoryRecord,
+) -> Result<(), MemoryError> {
     let current = super::get_by_id_unlocked(tx, id)?
         .ok_or_else(|| MemoryError::changed("memory changed after confirmation was prepared"))?;
-    if expected.id != id
-        || expected.status != MemoryStatus::Active
-        || record_target(expected) != *target
-        || current != *expected
-    {
+    if expected.id != id || record_target(expected) != *target || current != *expected {
         return Err(MemoryError::changed(
             "memory changed after confirmation was prepared",
         ));
@@ -382,7 +424,7 @@ fn record_target(record: &MemoryRecord) -> MemoryTarget {
 pub(super) fn build_v3_record(req: PersistMemoryRequest) -> Result<MemoryRecord, MemoryError> {
     let target = req.target.clean()?;
     let now = now_iso_cn();
-    let created_by_user_id = clean_required(req.created_by_user_id, "created_by_user_id")?;
+    let created_by_user_id = clean_optional_option(req.created_by_user_id);
     let content = clean_required(req.content, "content")?;
     let attribute_key = clean_attribute_key(req.attribute_key)?;
     let source_ref = clean_source_ref(req.source_ref)?;
@@ -407,7 +449,7 @@ pub(super) fn build_v3_record(req: PersistMemoryRequest) -> Result<MemoryRecord,
         scope: clean_optional(req.legacy_scope).unwrap_or_else(default_scope),
         scope_type: target.scope_type.as_str().to_owned(),
         scope_id: Some(target.scope_id),
-        created_by_user_id: Some(created_by_user_id),
+        created_by_user_id,
         memory_kind: target.memory_kind,
         subject_id: target.subject_id,
         relation_subject_id,
@@ -419,6 +461,7 @@ pub(super) fn build_v3_record(req: PersistMemoryRequest) -> Result<MemoryRecord,
         status: MemoryStatus::Active,
         pinned: req.pinned,
         attribute_key,
+        revision: 1,
         user_id: None,
         group_id: None,
         content: redact_sensitive_text(&content),
@@ -429,13 +472,13 @@ pub(super) fn build_v3_record(req: PersistMemoryRequest) -> Result<MemoryRecord,
 pub(super) fn ensure_profile_enabled_unlocked(
     tx: &Transaction<'_>,
     record: &MemoryRecord,
-) -> Result<(), MemoryError> {
+) -> Result<bool, MemoryError> {
     if record.memory_kind != MemoryKind::GroupProfile {
-        return Ok(());
+        return Ok(true);
     }
     let enabled = profile_enabled_for_target_unlocked(tx, &record_target(record))?;
     if enabled {
-        Ok(())
+        Ok(true)
     } else {
         Err(MemoryError::profile_opted_out())
     }
@@ -494,7 +537,7 @@ fn archive_conflicts_unlocked(
         .map_err(MemoryError::from_sql)?;
     drop(stmt);
     tx.execute(
-        "UPDATE memories SET status = 'archived', updated_at = ?1
+        "UPDATE memories SET status = 'archived', updated_at = ?1, revision = revision + 1
          WHERE scope_type = ?2 AND scope_id = ?3 AND memory_kind = ?4
            AND subject_id IS ?5
            AND relation_subject_id IS ?6 AND relation_object_id IS ?7
@@ -573,7 +616,7 @@ fn archive_target_unlocked(
     target: &MemoryTarget,
 ) -> Result<usize, MemoryError> {
     tx.execute(
-        "UPDATE memories SET status = 'archived', updated_at = ?1
+        "UPDATE memories SET status = 'archived', updated_at = ?1, revision = revision + 1
          WHERE scope_type = ?2 AND scope_id = ?3 AND memory_kind = ?4
            AND subject_id IS ?5 AND status = 'active'",
         params![
@@ -587,13 +630,20 @@ fn archive_target_unlocked(
     .map_err(MemoryError::from_sql)
 }
 
+pub(super) fn archive_target_unlocked_for_management(
+    tx: &Transaction<'_>,
+    target: &MemoryTarget,
+) -> Result<usize, MemoryError> {
+    archive_target_unlocked(tx, target)
+}
+
 fn archive_id_for_target_unlocked(
     tx: &Transaction<'_>,
     target: &MemoryTarget,
     id: &str,
 ) -> Result<usize, MemoryError> {
     tx.execute(
-        "UPDATE memories SET status = 'archived', updated_at = ?1
+        "UPDATE memories SET status = 'archived', updated_at = ?1, revision = revision + 1
          WHERE id = ?2 AND scope_type = ?3 AND scope_id = ?4 AND memory_kind = ?5
            AND subject_id IS ?6 AND status = 'active'",
         params![
@@ -606,4 +656,12 @@ fn archive_id_for_target_unlocked(
         ],
     )
     .map_err(MemoryError::from_sql)
+}
+
+pub(super) fn archive_id_for_target_unlocked_for_management(
+    tx: &Transaction<'_>,
+    target: &MemoryTarget,
+    id: &str,
+) -> Result<usize, MemoryError> {
+    archive_id_for_target_unlocked(tx, target, id)
 }

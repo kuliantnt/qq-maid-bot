@@ -1,8 +1,8 @@
 # 管理 API 约定
 
-> 当前状态：本文记录已落地的部署管理员资源 API 通用约定，以及 Todo、当前用户偏好和通用文件资源的现行契约。路由和 DTO 仍以 `qq-maid-core/src/http/api/` 源码为准。
+> 当前状态：本文记录已落地的部署管理员资源 API 通用约定，以及 Todo、Memory、当前用户偏好和通用文件资源的现行契约。路由和 DTO 仍以 `qq-maid-core/src/http/api/` 源码为准。
 
-本文定义 Web 控制台资源管理接口的公共约定。Todo 使用部署管理员的全局管理权限；用户偏好和文件严格归属当前登录管理员。后续 Memory、知识库等接口复用鉴权、分页、响应和错误基础设施，但必须保留各自的领域权限与数据归属模型。
+本文定义 Web 控制台资源管理接口的公共约定。Todo 和第一阶段 Memory 使用部署管理员的实例级管理权限；用户偏好和文件严格归属当前登录管理员。各领域复用鉴权、分页、响应和错误基础设施，但必须保留各自的领域权限与数据归属模型。
 
 ## 路由与公共鉴权
 
@@ -268,6 +268,46 @@ Todo 筛选：
 - 微信服务号当前不在统一主动 Push Sink 中。微信 Todo 可以通过管理 API 查询、修改或创建，但只要最终 pending Todo 带 `reminder_at`，请求会在写库前返回 422，不创建不可投递提醒。
 - 更新提醒时间会取消旧 pending/retry/sending/failed 任务并写入新的去重事件；已发送历史保留。
 - 完成一次性 Todo 或删除 Todo 会取消旧提醒；完成周期 Todo 会推进时间并写入下一周期提醒。
+
+## Memory 管理 API（Issue #476 第一阶段）
+
+Memory 管理 API 只在 `WEB_CONSOLE_ENABLED=true` 时注册，所有接口均为 `POST`，复用本文件前述管理员 Session、Origin、CSRF、限流、请求 ID、成功/错误 envelope 和分页。HTTP Handler 不直接访问 `MemoryStore` 或 SQL；目标权限、可见性、生命周期、revision 和高影响事务由 `MemoryManagementService` 与 `runtime/tools/memory/` storage 门面负责。
+
+### 路由
+
+| 路径 | 用途 |
+| --- | --- |
+| `/api/v1/console/memories/targets` | 发现可管理 target；支持 `scope`、`platform`、`account_ref`、`group_ref`、`subject_ref` |
+| `/api/v1/console/memories/list` | 按 target、scope/platform/opaque refs、category/kind/status/visibility/pinned/keyword 分页 |
+| `/api/v1/console/memories/get` | `target_ref` + `memory_ref` 读取单条安全 DTO |
+| `/api/v1/console/memories/create` | 使用服务端重新回查的 target 创建 `ManualImport` Memory |
+| `/api/v1/console/memories/update` | `memory_ref` + `expected_version` + patch，保留归档历史 |
+| `/api/v1/console/memories/archive` | `expected_version` 原子归档 |
+| `/api/v1/console/memories/restore` | `expected_version` 原子恢复 |
+| `/api/v1/console/memories/operations/prepare` | 准备 `clear_target` / `disable_group_profile` |
+| `/api/v1/console/memories/operations/commit` | 提交一次性 confirmation token |
+
+### 目标和安全 DTO
+
+支持的 Memory scope 为 `personal`、`group_profile` 和 `group`。`legacy_unassigned` 不进入 discovery、list、get、create、update、archive、restore 或批量操作；请求不得通过 raw ID、scope key、owner、role 或 source 字段构造授权事实。
+
+target、account、group、subject 和 memory 使用带 `v1` 前缀的 SHA-256 opaque reference。服务端从已存在的合法 v3 Memory 目标发现 reference，并在每次写入前重新回查；客户端不能解析或拼接 reference。未知目标、目标外记录、legacy 记录和 target mismatch 对外统一为 `not_found` 或安全的校验错误，不返回探测差异。
+
+成功的 list/get/mutation DTO 可包含 `memory_ref`、`version`、安全 target 摘要、正文、kind/category、visibility、status、pinned、时间、safe source type 和 capabilities；不包含 `scope_key`、scope ID、user/group/account raw ID、owner、source_text、source_ref、内部 row key 或 token。成功返回正文是 API 契约的一部分，但错误、日志、审计和 confirmation storage 不保存正文。
+
+### revision、生命周期与确认
+
+`memory_management_schema_v5_revision` 为历史记录初始化 revision=1。revision 由服务端维护；update、archive、restore 和批量操作使用 expected version，并在 SQLite transaction 内比较完整快照或 `(id, revision)`，stale write 返回 `conflict`。update 延续“归档旧记录 + 创建新记录”的历史语义；Memory 管理 API 不提供永久物理删除。
+
+`clear_target` 的定义是事务内归档目标范围内当前 active Memory，历史保留并可恢复，返回真实受影响数量。`disable_group_profile` 复用现有群画像 opt-out：同一事务写入 profile preference=false 并归档 active 群画像；没有为了 API 发明重新启用语义，也不会自动恢复 archived 历史。
+
+`clear_target`、`disable_group_profile` 走 prepare/commit。确认绑定管理员 actor、当前管理 Session 摘要、operation、target、active revision 快照、画像状态和 5 分钟 TTL；服务端只保存 token 摘要，不保存 token 原文。commit 在互斥锁内一次性消费 token，再重新校验 Session、Origin、CSRF、operation、target、TTL 和快照；跨 Session/actor、过期、replay、operation mismatch 或快照变化均 fail closed。confirmation 不绑定具体 CSRF token，CSRF 由两次 HTTP 请求分别复用现有认证流程校验。
+
+### Memory keyword
+
+keyword 只搜索 `content`，使用参数化 SQLite `LIKE`，不启用 FTS。trim 后为空视为未设置，长度上限为 256 字符；反斜杠、`%`、`_` 作为用户字面字符转义，并使用明确的 `ESCAPE` 规则。COUNT 与 page query 使用完全相同的 WHERE 条件，排序为 pinned、更新时间、内部 row key 的确定顺序；内部 row key 不返回。source_text、source_ref、raw identity 和 scope 不参与搜索。
+
+Memory API、Memory domain 或管理审计的具体实现说明见[Memory WebUI 身份授权与 API 边界](../design/memory-webui-auth-api.md)。第二阶段原生 TypeScript WebUI 尚未实现，本阶段不修改 `web-console/`。
 
 ## 后续资源模块
 

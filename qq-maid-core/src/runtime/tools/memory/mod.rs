@@ -8,6 +8,7 @@ mod consolidation;
 mod draft;
 mod dream;
 mod flow;
+mod management;
 mod ops;
 mod pending;
 mod recall;
@@ -27,6 +28,10 @@ pub(crate) use draft::{
 };
 pub use dream::MemoryDreamConfig;
 pub(crate) use dream::{MemoryDreamContext, MemoryDreamWorker};
+pub(crate) use management::{
+    ManagementActor, MemoryCreateInput, MemoryListFilter, MemoryManagementError,
+    MemoryManagementService, MemoryTargetFilter, MemoryUpdatePatch,
+};
 pub use ops::MemoryOperations;
 pub(crate) use pending::{
     MEMORY_PENDING_DOMAIN, MemoryPendingPayload, PreparedMemoryDraft, draft_confirmation_text,
@@ -42,11 +47,11 @@ pub use save::SaveMemoryTool;
 // 扩散到 respond 或其他业务域。
 pub use storage::{
     CreateMemoryRequest, CreateScopedMemoryRequest, ListMemoryQuery,
-    MEMORY_CONSOLIDATION_SCHEMA_V4, MEMORY_DOMAIN_SCHEMA_V3, MEMORY_MIGRATIONS, MEMORY_SCHEMA_V1,
-    MEMORY_SCOPE_SCHEMA_V2, MemoryCategory, MemoryDeleteResponse, MemoryError, MemoryErrorInfo,
-    MemoryItemResponse, MemoryKind, MemoryListResponse, MemoryQuery, MemoryRecord, MemoryScopeType,
-    MemorySourceType, MemoryStatus, MemoryStore, MemoryTarget, MemoryVisibility, ScopedMemoryQuery,
-    UpdateMemoryRequest,
+    MEMORY_CONSOLIDATION_SCHEMA_V4, MEMORY_DOMAIN_SCHEMA_V3, MEMORY_MANAGEMENT_SCHEMA_V5,
+    MEMORY_MIGRATIONS, MEMORY_SCHEMA_V1, MEMORY_SCOPE_SCHEMA_V2, MemoryCategory,
+    MemoryDeleteResponse, MemoryError, MemoryErrorInfo, MemoryItemResponse, MemoryKind,
+    MemoryListResponse, MemoryQuery, MemoryRecord, MemoryScopeType, MemorySourceType, MemoryStatus,
+    MemoryStore, MemoryTarget, MemoryVisibility, ScopedMemoryQuery, UpdateMemoryRequest,
 };
 pub(crate) use types::MemoryRecall;
 pub use types::{

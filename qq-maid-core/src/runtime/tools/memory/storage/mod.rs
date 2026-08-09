@@ -5,7 +5,7 @@
 //! 领域层负责，storage 仅提供精确查询、持久化和事务能力。
 
 use qq_maid_common::{redaction::redact_sensitive_text, time_context::now_iso_cn};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -36,6 +36,7 @@ const GROUP_LAYER_VISIBILITIES: &[MemoryVisibility] = &[
 mod clean;
 mod consolidation;
 mod dream;
+mod management;
 mod query;
 mod row;
 mod schema;
@@ -47,9 +48,10 @@ pub(crate) use dream::{
     DreamCandidate, DreamCompletion, DreamContext, DreamFinalizeStats, DreamLimits, DreamMessage,
     DreamTriggerPolicy,
 };
+pub(crate) use management::{ManagementListQuery, ManagementPage, ManagementTargetSnapshot};
 pub use schema::{
-    MEMORY_CONSOLIDATION_SCHEMA_V4, MEMORY_DOMAIN_SCHEMA_V3, MEMORY_MIGRATIONS, MEMORY_SCHEMA_V1,
-    MEMORY_SCOPE_SCHEMA_V2,
+    MEMORY_CONSOLIDATION_SCHEMA_V4, MEMORY_DOMAIN_SCHEMA_V3, MEMORY_MANAGEMENT_SCHEMA_V5,
+    MEMORY_MIGRATIONS, MEMORY_SCHEMA_V1, MEMORY_SCOPE_SCHEMA_V2,
 };
 pub use types::{
     CreateMemoryRequest, CreateScopedMemoryRequest, ListMemoryQuery, MemoryCategory, MemoryKind,
@@ -115,11 +117,19 @@ pub struct MemoryError {
 #[derive(Debug, Clone)]
 pub struct MemoryStore {
     database: SqliteDatabase,
+    #[cfg(test)]
+    management_snapshot_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MemoryStore {
     pub(crate) fn new(database: SqliteDatabase) -> Self {
-        Self { database }
+        Self {
+            database,
+            #[cfg(test)]
+            management_snapshot_failure: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
+        }
     }
 
     /// 兼容旧入口：仅根据已有 user/group 字段保守推导访问边界。
@@ -447,6 +457,29 @@ impl MemoryStore {
             .map_err(MemoryError::from_database)
     }
 
+    /// 在 Memory 管理领域需要附加写入（例如管理审计）时，统一复用同一个事务。
+    ///
+    /// 回调失败或提交失败都会让 SQLite 自动回滚，调用方不能看到只完成一半的操作。
+    pub(crate) fn with_immediate_transaction<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, MemoryError>,
+    ) -> Result<T, MemoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(MemoryError::from_sql)?;
+        let value = operation(&transaction)?;
+        transaction.commit().map_err(MemoryError::from_sql)?;
+        Ok(value)
+    }
+
+    /// 仅用于证明管理 mutation 的成功响应不依赖提交后的 snapshot 读取。
+    #[cfg(test)]
+    pub(crate) fn fail_management_snapshot_for_test(&self, enabled: bool) {
+        self.management_snapshot_failure
+            .store(enabled, std::sync::atomic::Ordering::SeqCst);
+    }
+
     #[cfg(test)]
     pub fn drop_schema_for_test(&self) -> Result<(), MemoryError> {
         self.connection()?
@@ -580,6 +613,13 @@ impl MemoryError {
         }
     }
 
+    pub(crate) fn audit_failed(message: impl Into<String>) -> Self {
+        Self {
+            code: "management_audit_error",
+            message: message.into(),
+        }
+    }
+
     fn io(message: impl Into<String>) -> Self {
         Self {
             code: "io_error",
@@ -656,6 +696,7 @@ fn build_scoped_record(req: CreateScopedMemoryRequest) -> Result<MemoryRecord, M
         status,
         pinned: false,
         attribute_key: None,
+        revision: 1,
         user_id: clean_optional_option(req.user_id),
         group_id: clean_optional_option(req.group_id),
         content: redact_sensitive_text(&content),
@@ -671,9 +712,9 @@ fn insert_record_unlocked(conn: &Connection, record: &MemoryRecord) -> Result<()
             user_id, group_id, content, source_text,
             memory_kind, subject_id, relation_subject_id, relation_object_id,
             visibility, source_type, source_ref, last_confirmed_at,
-            status, pinned, attribute_key
+            status, pinned, attribute_key, revision
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                   ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                   ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         params![
             record.id,
             record.created_at,
@@ -698,6 +739,8 @@ fn insert_record_unlocked(conn: &Connection, record: &MemoryRecord) -> Result<()
             record.status.as_str(),
             record.pinned,
             record.attribute_key,
+            i64::try_from(record.revision)
+                .map_err(|_| MemoryError::io("memory revision exceeds SQLite integer range"))?,
         ],
     )
     .map_err(MemoryError::from_sql)?;

@@ -6,15 +6,15 @@
 use crate::{
     config::center::CONFIG_SECRET_SCHEMA_V1,
     management::{
-        CONSOLE_ADMIN_SCHEMA_V1, CONSOLE_USER_DATA_SCHEMA_V1, CONSOLE_USER_DATA_SCHEMA_V2,
-        CONSOLE_USER_DATA_SCHEMA_V3,
+        CONSOLE_ADMIN_SCHEMA_V1, CONSOLE_AUDIT_SCHEMA_V2, CONSOLE_USER_DATA_SCHEMA_V1,
+        CONSOLE_USER_DATA_SCHEMA_V2, CONSOLE_USER_DATA_SCHEMA_V3,
     },
     runtime::tools::knowledge::{
         KNOWLEDGE_SCHEMA_V1, KNOWLEDGE_SCHEMA_V2, KNOWLEDGE_SCHEMA_V3, KNOWLEDGE_SCHEMA_V4,
     },
     runtime::tools::memory::{
-        MEMORY_CONSOLIDATION_SCHEMA_V4, MEMORY_DOMAIN_SCHEMA_V3, MEMORY_SCHEMA_V1,
-        MEMORY_SCOPE_SCHEMA_V2,
+        MEMORY_CONSOLIDATION_SCHEMA_V4, MEMORY_DOMAIN_SCHEMA_V3, MEMORY_MANAGEMENT_SCHEMA_V5,
+        MEMORY_SCHEMA_V1, MEMORY_SCOPE_SCHEMA_V2,
     },
     runtime::tools::ops::OPS_EXECUTION_SCHEMA_V1,
     runtime::tools::rss::{
@@ -46,6 +46,7 @@ use crate::{
 pub const APP_MIGRATIONS: &[SqliteMigration] = &[
     CONFIG_SECRET_SCHEMA_V1,
     CONSOLE_ADMIN_SCHEMA_V1,
+    CONSOLE_AUDIT_SCHEMA_V2,
     CONSOLE_USER_DATA_SCHEMA_V1,
     CONSOLE_USER_DATA_SCHEMA_V2,
     RSS_SUBSCRIPTIONS_SCHEMA,
@@ -70,6 +71,7 @@ pub const APP_MIGRATIONS: &[SqliteMigration] = &[
     MEMORY_SCOPE_SCHEMA_V2,
     MEMORY_DOMAIN_SCHEMA_V3,
     MEMORY_CONSOLIDATION_SCHEMA_V4,
+    MEMORY_MANAGEMENT_SCHEMA_V5,
     MANUAL_DISPLAY_NAMES_SCHEMA_V1,
     KNOWLEDGE_SCHEMA_V1,
     KNOWLEDGE_SCHEMA_V2,
@@ -204,11 +206,31 @@ mod tests {
             .unwrap();
         drop(memory_store);
 
-        let reopened_memory =
-            MemoryStore::new(SqliteDatabase::open(&path, APP_MIGRATIONS).unwrap());
+        let reopened_database = SqliteDatabase::open(&path, APP_MIGRATIONS).unwrap();
+        let reopened_memory = MemoryStore::new(reopened_database.clone());
         let memories = reopened_memory.list(ListMemoryQuery::default()).unwrap();
         assert_eq!(memories.len(), 1);
         assert_eq!(memories[0].id, memory.id);
+        assert_eq!(memories[0].revision, 1);
+
+        let connection = reopened_database.connection().unwrap();
+        let audit_columns = connection
+            .prepare("SELECT name FROM pragma_table_info('console_audit_events')")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for column in [
+            "request_id",
+            "target_digest",
+            "before_version",
+            "after_version",
+            "safe_error_code",
+        ] {
+            assert!(audit_columns.iter().any(|value| value == column));
+        }
+        drop(connection);
     }
 
     #[test]

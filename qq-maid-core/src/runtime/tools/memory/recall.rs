@@ -256,6 +256,7 @@ mod tests {
     fn record(id: &str, content: &str, source_type: MemorySourceType) -> MemoryRecord {
         MemoryRecord {
             id: id.to_owned(),
+            revision: 1,
             ts: "2026-07-17T10:00:00+08:00".to_owned(),
             created_at: "2026-07-17T10:00:00+08:00".to_owned(),
             updated_at: None,
