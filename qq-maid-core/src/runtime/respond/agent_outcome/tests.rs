@@ -216,6 +216,7 @@ fn mixed_trusted_and_internal_fallback_is_explicitly_partial() {
 
     assert!(!turn.can_render_deterministic_reply());
     assert!(turn.has_renderable_deterministic_body());
+    assert!(turn.can_render_agent_failure_fallback());
     let body = turn.render_fallback_body();
     assert!(body.text.contains("可信天气结果"));
     assert!(body.text.contains("只包含可确定展示的部分结果"));

@@ -9,7 +9,7 @@ use crate::{
         respond::{
             RespondRequest,
             agent_composition::AgentReplySource,
-            agent_outcome::{AgentTurnOutcome, ResponseBlock, ToolEffect, ToolOutcomeStatus},
+            agent_outcome::{AgentTurnOutcome, ToolEffect, ToolOutcomeStatus},
             llm_service::RespondOutput,
         },
         session::{SessionMeta, SessionRecord},
@@ -26,6 +26,7 @@ use crate::{
 /// 感知验真候选细节，也避免事实卡或工具回执干扰成功声明判定。
 pub(crate) struct TodoTurnPostprocessor {
     candidate_scope: todo::success_guard::TodoSuccessVerificationScope,
+    /// Todo 成功验真仍需检查模型是否声称写入成功；这里只不再用它推断列表是否展示。
     original_model_reply: String,
 }
 
@@ -53,21 +54,8 @@ impl DomainTurnPostprocessor for TodoTurnPostprocessor {
         projected_outcome: Option<&mut AgentTurnOutcome>,
         output: &mut RespondOutput,
         state_session: &mut SessionRecord,
-        reply_source: AgentReplySource,
+        _reply_source: AgentReplySource,
     ) -> Box<dyn DomainTurnDiagnostics> {
-        // 自然语言 Agent 正常成功时模型正文是唯一主体，确定性 RelatedList 不再
-        // 附加。只有模型正文没有完整包含这份列表时才撤销快照；如果模型已经把
-        // 同一份列表展示出来，必须保留结构化快照，供下一轮“第一条”等引用继续
-        // 绑定用户刚刚看到的编号。
-        let model_primary_hides_related_list =
-            matches!(reply_source, AgentReplySource::NaturalLanguageAgent)
-                && !output.model_reply_empty
-                && projected_outcome.as_deref().is_some_and(|outcome| {
-                    outcome.has_related_list()
-                        && outcome.can_use_model_reply_as_primary()
-                        && !model_reply_contains_related_list(&self.original_model_reply, outcome)
-                });
-
         let (validation, guard_applied) = if let Some(validation) = projected_outcome
             .as_deref()
             .and_then(success_validation_from_agent_outcome)
@@ -98,9 +86,10 @@ impl DomainTurnPostprocessor for TodoTurnPostprocessor {
             }
         };
 
-        if (guard_applied || model_primary_hides_related_list)
-            && let Some(outcome) = projected_outcome
-        {
+        // `aggregate_todo_tool_results` 已用同一批真实条目建立 RelatedList 与快照，
+        // 这就是跨轮编号的结构化展示契约。自然语言 Agent 可以改写列表正文，不能
+        // 再通过扫描模型字符串决定快照是否存在；只有成功验真失败时才撤销本轮列表。
+        if guard_applied && let Some(outcome) = projected_outcome {
             let clears_list_snapshot = outcome.has_related_list();
             outcome.visible_entity_snapshot = None;
             if clears_list_snapshot {
@@ -114,25 +103,6 @@ impl DomainTurnPostprocessor for TodoTurnPostprocessor {
             guard_applied,
         ))
     }
-}
-
-fn model_reply_contains_related_list(model_reply: &str, outcome: &AgentTurnOutcome) -> bool {
-    let related_lists = outcome
-        .blocks
-        .iter()
-        .filter_map(|block| match block {
-            ResponseBlock::RelatedList(body) => Some(body),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    !related_lists.is_empty()
-        && related_lists.iter().all(|body| {
-            [Some(body.text.as_str()), body.markdown.as_deref()]
-                .into_iter()
-                .flatten()
-                .map(str::trim)
-                .any(|rendered| !rendered.is_empty() && model_reply.contains(rendered))
-        })
 }
 
 pub(crate) fn project_results(

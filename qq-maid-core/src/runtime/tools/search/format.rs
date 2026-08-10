@@ -3,9 +3,29 @@
 //! formatter 同时生成正文和来源字段的展示状态，调用方不需要再扫描最终字符串
 //! 推断来源是否已经出现，避免 URL 或摘要子串造成误判。
 
+use qq_maid_common::text::truncate_chars_with_ellipsis_trimmed as truncate_chars;
 use serde_json::Value;
 
-use super::super::common::truncate_chars;
+use crate::error::LlmError;
+
+const WEB_SEARCH_EMPTY_RESULT_REPLY: &str =
+    "【联网查询】\n\n没查到明确结果。可以换一个关键词再试。";
+const WEB_SEARCH_ARGUMENT_ERROR_REPLY: &str =
+    "【联网查询】\n\n本次联网查询的参数无效，查询未执行。请换一种说法再试。";
+const WEB_SEARCH_CONFIG_ERROR_REPLY: &str = "【联网查询】\n\n联网查询还没有配置好，请检查 tools.web_search 后端、搜索 route 和对应 Provider 配置。";
+const WEB_SEARCH_DISABLED_REPLY: &str =
+    "【联网查询】\n\n联网查询已在 tools.web_search 配置中关闭。";
+const WEB_SEARCH_TAVILY_KEY_MISSING_REPLY: &str =
+    "【联网查询】\n\n已选择 Tavily，但还没有配置 TAVILY_API_KEY。请在配置中心完成设置后重启。";
+const WEB_SEARCH_TAVILY_AUTH_REPLY: &str =
+    "【联网查询】\n\nTavily API Key 无效或已失效，请在配置中心检查后重启。";
+const WEB_SEARCH_RATE_LIMIT_REPLY: &str =
+    "【联网查询】\n\n联网查询请求过于频繁，已被上游限流，请稍后再试。";
+const WEB_SEARCH_QUOTA_REPLY: &str =
+    "【联网查询】\n\nTavily 查询额度已用尽或账户不可用，请检查账户额度。";
+const WEB_SEARCH_TIMEOUT_REPLY: &str = "【联网查询】\n\n联网查询超时了，请稍后再试。";
+const WEB_SEARCH_UPSTREAM_ERROR_REPLY: &str =
+    "【联网查询】\n\n联网查询服务暂时不可用，可能是上游接口、代理或网络配置异常。请稍后再试。";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FormattedWebSearchToolReply {
@@ -98,6 +118,37 @@ impl SearchReplyBuilder {
 #[cfg(test)]
 pub(crate) fn format_web_search_tool_reply(output: &Value) -> String {
     format_web_search_tool_reply_with_sources(output).body
+}
+
+/// `/查` 和 Agent fallback 共用的搜索正文入口；正文长度和空结果文案必须一致。
+pub(crate) fn format_web_search_command_reply(answer: &str) -> String {
+    let mut text = answer.trim().to_owned();
+    if text.is_empty() {
+        text = WEB_SEARCH_EMPTY_RESULT_REPLY
+            .strip_prefix("【联网查询】\n\n")
+            .unwrap_or(WEB_SEARCH_EMPTY_RESULT_REPLY)
+            .to_owned();
+    }
+    if !text.starts_with("【联网查询】") {
+        text = format!("【联网查询】\n\n{text}");
+    }
+    truncate_chars(&text, 1500)
+}
+
+/// 把搜索工具错误映射为用户可执行的稳定文案；上游原始错误只进入日志和诊断。
+pub(crate) fn format_web_search_error_reply(err: &LlmError) -> String {
+    match err.code.as_str() {
+        "config" => WEB_SEARCH_CONFIG_ERROR_REPLY.to_owned(),
+        "web_search_disabled" => WEB_SEARCH_DISABLED_REPLY.to_owned(),
+        "web_search_not_configured" => WEB_SEARCH_TAVILY_KEY_MISSING_REPLY.to_owned(),
+        "tavily_auth_error" => WEB_SEARCH_TAVILY_AUTH_REPLY.to_owned(),
+        "rate_limited" => WEB_SEARCH_RATE_LIMIT_REPLY.to_owned(),
+        "quota_exhausted" => WEB_SEARCH_QUOTA_REPLY.to_owned(),
+        "empty_result" => WEB_SEARCH_EMPTY_RESULT_REPLY.to_owned(),
+        "invalid_arguments" | "bad_tool_arguments" => WEB_SEARCH_ARGUMENT_ERROR_REPLY.to_owned(),
+        "timeout" => WEB_SEARCH_TIMEOUT_REPLY.to_owned(),
+        _ => WEB_SEARCH_UPSTREAM_ERROR_REPLY.to_owned(),
+    }
 }
 
 pub(crate) fn format_web_search_tool_reply_with_sources(
@@ -362,7 +413,8 @@ fn source_range_survives_truncation(
     range.is_some_and(|range| original_length <= keep_limit + 1 || range.end <= keep_limit)
 }
 
-fn json_string_field(value: &Value, key: &str) -> Option<String> {
+/// 解析搜索 JSON 中的非空字符串字段，供 formatter 与整轮投影共用。
+pub(crate) fn json_string_field(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)
         .and_then(Value::as_str)

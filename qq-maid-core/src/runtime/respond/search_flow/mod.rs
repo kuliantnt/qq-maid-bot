@@ -19,6 +19,7 @@ use crate::{
         tools::{
             WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME, WebSearchDeltaHandler,
             WebSearchTool, WebSearchToolRequest,
+            search::{format_web_search_command_reply, format_web_search_error_reply},
         },
     },
 };
@@ -31,16 +32,6 @@ use super::{
     },
 };
 
-mod format;
-
-pub(crate) use format::{
-    WebSearchRenderedSource, WebSearchSourceLocation, format_web_search_research_error_reply,
-    format_web_search_tool_reply_with_sources,
-};
-
-#[cfg(test)]
-pub(crate) use format::format_web_search_tool_reply;
-
 // /查 指令的空参数用法提示
 const WEB_SEARCH_USAGE_REPLY: &str = "用法：/查 关键词（也可用 /查询 关键词 或 /search 关键词）
 例如：/查 Cloudflare D1 binding DB is not configured";
@@ -49,41 +40,6 @@ const WEB_SEARCH_RUNNING_DELTA: &str = "正在联网查询中…\n\n";
 const WEB_SEARCH_REWRITE_PURPOSE: &str = "search_query_rewrite";
 const WEB_SEARCH_REWRITE_MAX_OUTPUT_TOKENS: u64 = 96;
 const WEB_SEARCH_REWRITE_CONTEXT_MAX_CHARS: usize = 1200;
-// 搜索结果为空时的回复
-const WEB_SEARCH_EMPTY_RESULT_REPLY: &str = "【联网查询】
-
-没查到明确结果。可以换一个关键词再试。";
-// 模型工具参数错误只说明本次调用未执行，不能误导为上游或网络故障。
-const WEB_SEARCH_ARGUMENT_ERROR_REPLY: &str = "【联网查询】
-
-本次联网查询的参数无效，查询未执行。请换一种说法再试。";
-// 联网查询未配置时的回复
-const WEB_SEARCH_CONFIG_ERROR_REPLY: &str = "【联网查询】
-
-联网查询还没有配置好，请检查 tools.web_search 后端、搜索 route 和对应 Provider 配置。";
-const WEB_SEARCH_DISABLED_REPLY: &str = "【联网查询】
-
-联网查询已在 tools.web_search 配置中关闭。";
-const WEB_SEARCH_TAVILY_KEY_MISSING_REPLY: &str = "【联网查询】
-
-已选择 Tavily，但还没有配置 TAVILY_API_KEY。请在配置中心完成设置后重启。";
-const WEB_SEARCH_TAVILY_AUTH_REPLY: &str = "【联网查询】
-
-Tavily API Key 无效或已失效，请在配置中心检查后重启。";
-const WEB_SEARCH_RATE_LIMIT_REPLY: &str = "【联网查询】
-
-联网查询请求过于频繁，已被上游限流，请稍后再试。";
-const WEB_SEARCH_QUOTA_REPLY: &str = "【联网查询】
-
-Tavily 查询额度已用尽或账户不可用，请检查账户额度。";
-// 联网查询超时时的回复
-const WEB_SEARCH_TIMEOUT_REPLY: &str = "【联网查询】
-
-联网查询超时了，请稍后再试。";
-// 上游服务异常时的回复
-const WEB_SEARCH_UPSTREAM_ERROR_REPLY: &str = "【联网查询】
-
-联网查询服务暂时不可用，可能是上游接口、代理或网络配置异常。请稍后再试。";
 
 #[derive(Debug, Clone)]
 struct WebSearchToolOutput {
@@ -196,11 +152,7 @@ impl RustRespondService {
             }
         };
 
-        let reply = if output.answer.trim().is_empty() {
-            WEB_SEARCH_EMPTY_RESULT_REPLY.to_owned()
-        } else {
-            format_web_search_command_reply(&output.answer)
-        };
+        let reply = format_web_search_command_reply(&output.answer);
         self.session_store
             .append_exchange(session, &command_text, &reply)
             .map_err(session_error)?;
@@ -693,32 +645,6 @@ fn parse_compact_web_search_command(text: &str) -> Option<ParsedCommand> {
     }
 
     None
-}
-
-pub(crate) fn format_web_search_command_reply(answer: &str) -> String {
-    let mut text = answer.trim().to_owned();
-    if text.is_empty() {
-        text = "没查到明确结果。可以换一个关键词再试。".to_owned();
-    }
-    if !text.starts_with("【联网查询】") {
-        text = format!("【联网查询】\n\n{text}");
-    }
-    truncate_chars(&text, 1500)
-}
-
-pub(crate) fn format_web_search_error_reply(err: &LlmError) -> String {
-    match err.code.as_str() {
-        "config" => WEB_SEARCH_CONFIG_ERROR_REPLY.to_owned(),
-        "web_search_disabled" => WEB_SEARCH_DISABLED_REPLY.to_owned(),
-        "web_search_not_configured" => WEB_SEARCH_TAVILY_KEY_MISSING_REPLY.to_owned(),
-        "tavily_auth_error" => WEB_SEARCH_TAVILY_AUTH_REPLY.to_owned(),
-        "rate_limited" => WEB_SEARCH_RATE_LIMIT_REPLY.to_owned(),
-        "quota_exhausted" => WEB_SEARCH_QUOTA_REPLY.to_owned(),
-        "empty_result" => WEB_SEARCH_EMPTY_RESULT_REPLY.to_owned(),
-        "invalid_arguments" | "bad_tool_arguments" => WEB_SEARCH_ARGUMENT_ERROR_REPLY.to_owned(),
-        "timeout" => WEB_SEARCH_TIMEOUT_REPLY.to_owned(),
-        _ => WEB_SEARCH_UPSTREAM_ERROR_REPLY.to_owned(),
-    }
 }
 
 fn web_search_output_from_outcome(outcome: WebSearchOutcome) -> WebSearchToolOutput {

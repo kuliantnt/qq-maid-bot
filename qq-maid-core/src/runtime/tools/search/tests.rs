@@ -366,7 +366,7 @@ async fn large_search_result_keeps_structured_evidence_through_tool_registry() {
     assert_ne!(output["truncated"], true);
     assert!(serialized.chars().count() <= OUTPUT_MAX_CHARS);
 
-    let rendered = crate::runtime::respond::search_flow::format_web_search_tool_reply(&output);
+    let rendered = super::format_web_search_tool_reply(&output);
     assert!(rendered.contains("昨日 AI 新闻重点"));
     assert!(!rendered.contains("没查到明确结果"));
 }

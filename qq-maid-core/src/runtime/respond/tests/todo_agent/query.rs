@@ -510,8 +510,8 @@ async fn natural_language_todo_queries_enter_tool_loop_instead_of_shortcut() {
         let text = response.text.as_deref().unwrap();
         assert_eq!(text, "查询完成", "{input}");
         assert!(!text.contains("自然语言待办"), "{input}");
-        assert!(response.visible_entity_snapshot.is_none(), "{input}");
-        assert!(active_private_session(&service).last_todo_query.is_none());
+        assert!(response.visible_entity_snapshot.is_some(), "{input}");
+        assert!(active_private_session(&service).last_todo_query.is_some());
     }
     assert_eq!(inspector.tool_call_count(), 3);
 }

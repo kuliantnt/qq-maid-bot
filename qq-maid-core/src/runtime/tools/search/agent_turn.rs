@@ -15,14 +15,14 @@ use crate::{
             ToolOutcomeStatus,
         },
         common::{CommandBody, structured_command_body},
-        search_flow::{
-            WebSearchRenderedSource, WebSearchSourceLocation, format_web_search_error_reply,
-            format_web_search_research_error_reply, format_web_search_tool_reply_with_sources,
-        },
     },
 };
 
-use super::WEB_SEARCH_TOOL_NAME;
+use super::{
+    WEB_SEARCH_TOOL_NAME, WebSearchRenderedSource, WebSearchSourceLocation,
+    format_web_search_error_reply, format_web_search_research_error_reply,
+    format_web_search_tool_reply_with_sources, json_string_field,
+};
 
 pub(crate) enum SearchResultProjection {
     Hidden,
@@ -150,28 +150,28 @@ fn error_body(output: &Value, projected_error_code: Option<&str>) -> CommandBody
         .unwrap_or("web_search");
     let err = LlmError::new(code, "web search tool failed", stage);
     let reply = format_web_search_error_reply(&err);
-    if string_field(output, "mode").as_deref() == Some("multi_entity_research") {
+    if json_string_field(output, "mode").as_deref() == Some("multi_entity_research") {
         return structured_command_body(format_web_search_research_error_reply(output, &reply));
     }
     structured_command_body(reply)
 }
 
 fn output_has_evidence(output: &Value) -> bool {
-    if string_field(output, "mode").as_deref() == Some("multi_entity_research") {
+    if json_string_field(output, "mode").as_deref() == Some("multi_entity_research") {
         return output
             .get("results")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .any(|item| {
-                string_field(item, "status").as_deref() == Some("success")
-                    && (string_field(item, "facts").is_some()
-                        || string_field(item, "summary").is_some()
-                        || string_field(item, "answer").is_some()
+                json_string_field(item, "status").as_deref() == Some("success")
+                    && (json_string_field(item, "facts").is_some()
+                        || json_string_field(item, "summary").is_some()
+                        || json_string_field(item, "answer").is_some()
                         || sources_have_evidence(item.get("sources")))
             });
     }
-    string_field(output, "answer").is_some() || sources_have_evidence(output.get("sources"))
+    json_string_field(output, "answer").is_some() || sources_have_evidence(output.get("sources"))
 }
 
 fn sources_have_evidence(value: Option<&Value>) -> bool {
@@ -181,14 +181,14 @@ fn sources_have_evidence(value: Option<&Value>) -> bool {
         .flatten()
         .any(|source| {
             source.as_str().is_some_and(|text| !text.trim().is_empty())
-                || string_field(source, "title").is_some()
-                || string_field(source, "url").is_some()
-                || string_field(source, "snippet").is_some()
+                || json_string_field(source, "title").is_some()
+                || json_string_field(source, "url").is_some()
+                || json_string_field(source, "snippet").is_some()
         })
 }
 
 fn skip_body(output: &Value) -> CommandBody {
-    let text = match string_field(output, "reason").as_deref() {
+    let text = match json_string_field(output, "reason").as_deref() {
         Some("dependency_previous_call_failed") => {
             "联网查询因前序工具失败已跳过；根因以上方失败信息为准。".to_owned()
         }
@@ -211,27 +211,18 @@ fn structured_error_code(output: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn string_field(output: &Value, key: &str) -> Option<String> {
-    output
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
 fn provenance_from_output(output: &Value) -> Vec<ProvenanceSource> {
     // 来源是否已展示由 formatter 在组装字段时返回；后部条目的来源行即使被
     // 1500 字符上限裁掉，也不会因最终正文的偶然子串而误判。
     let formatted = format_web_search_tool_reply_with_sources(output);
-    if string_field(output, "mode").as_deref() == Some("multi_entity_research") {
+    if json_string_field(output, "mode").as_deref() == Some("multi_entity_research") {
         return output
             .get("results")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .enumerate()
-            .filter(|(_, item)| string_field(item, "status").as_deref() == Some("success"))
+            .filter(|(_, item)| json_string_field(item, "status").as_deref() == Some("success"))
             .flat_map(|(result_index, item)| {
                 let mut sources = sources_from_value(item.get("sources"));
                 apply_rendered_source_markers(
@@ -288,9 +279,9 @@ fn sources_from_value(value: Option<&Value>) -> Vec<(usize, ProvenanceSource)> {
                     },
                 ));
             }
-            let title = string_field(source, "title").unwrap_or_default();
-            let url = string_field(source, "url").unwrap_or_default();
-            let snippet = string_field(source, "snippet").unwrap_or_default();
+            let title = json_string_field(source, "title").unwrap_or_default();
+            let url = json_string_field(source, "url").unwrap_or_default();
+            let snippet = json_string_field(source, "snippet").unwrap_or_default();
             (!title.is_empty() || !url.is_empty() || !snippet.is_empty()).then_some((
                 source_index,
                 ProvenanceSource {

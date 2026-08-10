@@ -200,10 +200,15 @@ async fn multiple_successful_todo_writes_share_one_background_snapshot() {
 }
 
 #[tokio::test]
-async fn only_list_todos_success_does_not_claim_todo_write_success() {
+async fn only_list_todos_success_preserves_structured_snapshot_without_write_claim() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
-        .with_tool_call_json("list_todos", r#"{"status":"pending"}"#, "当前待办列表");
+        .with_tool_call_json("list_todos", r#"{"status":"pending"}"#, "当前待办列表")
+        .with_tool_call_json(
+            "complete_todos",
+            r#"{"numbers":[1],"selection_text":null,"reference":null}"#,
+            "已完成第一条",
+        );
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     service
@@ -232,15 +237,15 @@ async fn only_list_todos_success_does_not_claim_todo_write_success() {
         .unwrap();
 
     assert_eq!(response.text.as_deref(), Some("当前待办列表"));
-    assert!(response.visible_entity_snapshot.is_none());
+    assert!(response.visible_entity_snapshot.is_some());
     assert!(
         service
             .session_store
             .get_or_create_active(&private_test_meta())
             .unwrap()
             .last_todo_query
-            .is_none(),
-        "模型正文未结构化展示编号时不能登记隐藏列表"
+            .is_some(),
+        "Todo projection 已建立结构化展示契约，不能因模型改写正文而丢失快照"
     );
 
     let diagnostics = response.diagnostics.unwrap();
@@ -250,6 +255,16 @@ async fn only_list_todos_success_does_not_claim_todo_write_success() {
     assert_eq!(diagnostics["tool_outcomes"][0]["domain"], "todo");
     assert_eq!(diagnostics["tool_outcomes"][0]["effect"], "read_only");
     assert_eq!(diagnostics["tool_outcomes"][0]["status"], "succeeded");
+
+    let completed = service
+        .respond(private_message("完成第一条待办"))
+        .await
+        .unwrap();
+    assert_eq!(completed.text.as_deref(), Some("已完成第一条"));
+    assert!(
+        service.task_store.list_pending(&owner).unwrap().is_empty(),
+        "自然语言改写后的列表仍应支持下一轮按可见编号操作"
+    );
 }
 
 #[tokio::test]

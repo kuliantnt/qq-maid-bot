@@ -45,7 +45,7 @@ fn web_search_errors_have_actionable_user_replies() {
 
     for (code, expected) in cases {
         let error = LlmError::new(code, "test error", "test");
-        let reply = crate::runtime::respond::search_flow::format_web_search_error_reply(&error);
+        let reply = crate::runtime::tools::search::format_web_search_error_reply(&error);
         assert!(
             reply.contains(expected),
             "unexpected reply for {code}: {reply}"
