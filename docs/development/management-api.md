@@ -284,13 +284,12 @@ Memory 管理 API 只在 `WEB_CONSOLE_ENABLED=true` 时注册，所有接口均�
 | `/api/v1/console/memories/update` | `memory_ref` + `expected_version` + patch，保留归档历史 |
 | `/api/v1/console/memories/archive` | `expected_version` 原子归档 |
 | `/api/v1/console/memories/restore` | `expected_version` 原子恢复 |
-| `/api/v1/console/memories/delete` | `expected_version` CAS 永久删除 active Memory；不可恢复 |
-| `/api/v1/console/memories/operations/prepare` | 准备 `clear_target` / `disable_group_profile` |
+| `/api/v1/console/memories/operations/prepare` | 准备 `clear_target` / `disable_group_profile` / `delete_memory`；删除时携带 opaque `memory_ref` 与 `expected_version` |
 | `/api/v1/console/memories/operations/commit` | 提交一次性 confirmation token |
 
 ### 目标和安全 DTO
 
-支持的 Memory scope 为 `personal`、`group_profile` 和 `group`。`legacy_unassigned` 不进入 discovery、list、get、create、update、archive、restore、delete 或批量操作；请求不得通过 raw ID、scope key、owner、role 或 source 字段构造授权事实。
+支持的 Memory scope 为 `personal`、`group_profile` 和 `group`。`legacy_unassigned` 不进入 discovery、list、get、create、update、archive、restore、`delete_memory` 或批量操作；请求不得通过 raw ID、scope key、owner、role 或 source 字段构造授权事实。
 
 target、account、group、subject 和 memory 使用带 `v1` 前缀的 SHA-256 opaque reference。target 摘要同时返回服务端计算的目标级 capabilities；群画像的 `can_disable_group_profile` 来自持久化 profile preference，而不是客户端会话缓存。服务端从已存在的合法 v3 Memory 目标发现 reference，并在每次写入前重新回查；客户端不能解析或拼接 reference。未知目标、目标外记录、legacy 记录和 target mismatch 对外统一为 `not_found` 或安全的校验错误，不返回探测差异。
 

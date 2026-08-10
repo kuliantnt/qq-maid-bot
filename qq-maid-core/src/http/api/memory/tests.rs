@@ -560,8 +560,9 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
 
     let (status, stale_delete) = api
         .post(
-            "/api/v1/console/memories/delete",
+            "/api/v1/console/memories/operations/prepare",
             json!({
+                "operation": "delete_memory",
                 "target_ref": api.target_ref,
                 "memory_ref": updated_memory_ref,
                 "expected_version": 3
@@ -570,22 +571,39 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
         .await;
     assert_eq!(status, StatusCode::CONFLICT, "{stale_delete}");
     assert_eq!(stale_delete["error"]["code"], "conflict");
-    assert_eq!(api.audit_count("memory.delete", "denied"), 1);
+    assert_eq!(api.audit_count("memory.operation_prepare", "denied"), 1);
 
-    let (status, deleted) = api
+    let (status, prepared_delete) = api
         .post(
-            "/api/v1/console/memories/delete",
+            "/api/v1/console/memories/operations/prepare",
             json!({
+                "operation": "delete_memory",
                 "target_ref": api.target_ref,
                 "memory_ref": updated_memory_ref,
                 "expected_version": 4
             }),
         )
         .await;
+    assert_eq!(status, StatusCode::OK, "{prepared_delete}");
+    let delete_token = prepared_delete["data"]["confirmation_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, deleted) = api
+        .post(
+            "/api/v1/console/memories/operations/commit",
+            json!({
+                "operation": "delete_memory",
+                "target_ref": api.target_ref,
+                "confirmation_token": delete_token
+            }),
+        )
+        .await;
     assert_eq!(status, StatusCode::OK, "{deleted}");
     assert_eq!(deleted["data"]["deleted"], true);
     assert_eq!(deleted["data"]["memory_ref"], updated_memory_ref);
-    assert_eq!(api.audit_count("memory.delete", "success"), 1);
+    assert_eq!(deleted["data"]["operation"], "delete_memory");
+    assert_eq!(api.audit_count("memory.operation_commit", "success"), 1);
     let (status, missing) = api
         .post(
             "/api/v1/console/memories/get",
@@ -681,19 +699,35 @@ async fn memory_api_audit_failure_rolls_back_mutations_and_consumes_commit_token
     assert_eq!(unchanged["data"]["version"], 1);
     assert_eq!(unchanged["data"]["content"], "初始 % 内容");
 
-    api.set_audit_failure(true);
-    let (status, delete_failed) = api
+    let (status, prepared_delete) = api
         .post(
-            "/api/v1/console/memories/delete",
+            "/api/v1/console/memories/operations/prepare",
             json!({
+                "operation": "delete_memory",
                 "target_ref": api.target_ref,
                 "memory_ref": initial_memory_ref,
                 "expected_version": 1
             }),
         )
         .await;
+    assert_eq!(status, StatusCode::OK, "{prepared_delete}");
+    let delete_token = prepared_delete["data"]["confirmation_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    api.set_audit_failure(true);
+    let (status, delete_failed) = api
+        .post(
+            "/api/v1/console/memories/operations/commit",
+            json!({
+                "operation": "delete_memory",
+                "target_ref": api.target_ref,
+                "confirmation_token": delete_token
+            }),
+        )
+        .await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{delete_failed}");
-    assert_eq!(api.audit_count("memory.delete", "success"), 0);
+    assert_eq!(api.audit_count("memory.operation_commit", "success"), 0);
     api.set_audit_failure(false);
     let (status, after_delete) = api
         .post(

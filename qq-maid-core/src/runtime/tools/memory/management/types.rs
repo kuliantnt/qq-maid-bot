@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use super::super::storage::ManagementTargetSnapshot;
 use super::super::{
-    MemoryCategory, MemoryError, MemoryKind, MemoryStatus, MemoryStore, MemoryTarget,
+    MemoryCategory, MemoryError, MemoryKind, MemoryRecord, MemoryStatus, MemoryStore, MemoryTarget,
     MemoryVisibility,
 };
 
@@ -77,6 +77,7 @@ pub(crate) struct MemoryManagementMutationResult {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) struct MemoryDeleteResult {
     pub(crate) memory_ref: String,
     pub(crate) deleted: bool,
@@ -109,6 +110,11 @@ pub(crate) struct MemoryOperationResult {
     pub(crate) target: MemoryTargetSummary,
     pub(crate) affected_count: usize,
     pub(crate) capabilities: MemoryOperationCapabilities,
+    /// 仅永久删除返回被删除的 opaque reference；不返回内部记录 ID 或正文。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) memory_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) deleted: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -234,6 +240,9 @@ pub(super) struct ConfirmationEntry {
     pub(super) target_ref: String,
     pub(super) target: MemoryTarget,
     pub(super) snapshot: ManagementTargetSnapshot,
+    /// 删除确认绑定完整记录快照，确保 commit 不能改用同 target 下的另一条记录。
+    pub(super) memory_ref: Option<String>,
+    pub(super) memory: Option<MemoryRecord>,
     pub(super) expires_at: i64,
 }
 
@@ -241,6 +250,7 @@ pub(super) struct ConfirmationEntry {
 pub(super) enum ManagementOperation {
     ClearTarget,
     DisableGroupProfile,
+    DeleteMemory,
 }
 
 impl ManagementOperation {
@@ -248,6 +258,7 @@ impl ManagementOperation {
         match value.trim() {
             "clear_target" => Ok(Self::ClearTarget),
             "disable_group_profile" => Ok(Self::DisableGroupProfile),
+            "delete_memory" => Ok(Self::DeleteMemory),
             _ => Err(MemoryManagementError::Validation(
                 "operation is not supported".to_owned(),
             )),
@@ -258,6 +269,7 @@ impl ManagementOperation {
         match self {
             Self::ClearTarget => "clear_target",
             Self::DisableGroupProfile => "disable_group_profile",
+            Self::DeleteMemory => "delete_memory",
         }
     }
 }

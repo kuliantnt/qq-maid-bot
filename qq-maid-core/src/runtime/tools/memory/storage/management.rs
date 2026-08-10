@@ -447,7 +447,7 @@ impl MemoryStore {
         target: &MemoryTarget,
         expected: &MemoryRecord,
         audit: F,
-    ) -> Result<(), MemoryError>
+    ) -> Result<bool, MemoryError>
     where
         F: FnOnce(&Transaction<'_>, Option<u64>) -> Result<(), MemoryError>,
     {
@@ -485,7 +485,7 @@ impl MemoryStore {
                 ));
             }
             audit(tx, None)?;
-            Ok(())
+            Ok(profile_enabled)
         })
     }
 }

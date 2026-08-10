@@ -28,10 +28,13 @@ use self::{
         validate_content, validate_list_filter, validate_ref, validate_target_filter,
     },
     types::{
-        MemoryDeleteResult, MemoryManagementItem, MemoryManagementMutationResult,
-        MemoryManagementPage, MemoryTargetPage, PreparedMemoryOperation,
+        MemoryManagementItem, MemoryManagementMutationResult, MemoryManagementPage,
+        MemoryTargetPage, PreparedMemoryOperation,
     },
 };
+
+#[cfg(test)]
+use self::types::MemoryDeleteResult;
 
 pub(crate) use self::types::{
     ManagementActor, MemoryCreateInput, MemoryListFilter, MemoryManagementError,
@@ -321,6 +324,7 @@ impl MemoryManagementService {
         self.delete_with_audit(target_ref, memory_ref, expected_version, |_, _| Ok(()))
     }
 
+    #[cfg(test)]
     pub(crate) fn delete_with_audit<F>(
         &self,
         target_ref: &str,
@@ -345,13 +349,31 @@ impl MemoryManagementService {
         })
     }
 
+    /// 提交已绑定确认快照的永久删除；调用方必须先完成 target 与记录回查。
+    pub(super) fn delete_confirmed_with_audit<F>(
+        &self,
+        target: &super::MemoryTarget,
+        expected: &MemoryRecord,
+        audit: F,
+    ) -> Result<bool, MemoryManagementError>
+    where
+        F: Fn(&Transaction<'_>, Option<u64>) -> Result<(), MemoryManagementError>,
+    {
+        self.store
+            .management_delete_if_unchanged_with_audit(target, expected, |tx, version| {
+                audit(tx, version).map_err(|error| MemoryError::audit_failed(error.message()))
+            })
+            .map_err(MemoryManagementError::from)
+    }
+
     pub(crate) fn prepare(
         &self,
         actor: ManagementActor,
         operation: &str,
         target_ref: &str,
+        memory: Option<(&str, u64)>,
     ) -> Result<PreparedMemoryOperation, MemoryManagementError> {
-        prepare_confirmation(self, actor, operation, target_ref)
+        prepare_confirmation(self, actor, operation, target_ref, memory)
     }
 
     #[cfg(test)]

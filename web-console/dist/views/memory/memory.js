@@ -1,6 +1,7 @@
-import { archiveMemory, commitMemoryOperation, createMemory, deleteMemory, getMemory, listMemoryTargets, listMemories, prepareMemoryOperation, restoreMemory, updateMemory, } from "../../memory-api.js";
+import { archiveMemory, commitMemoryOperation, createMemory, getMemory, listMemoryTargets, listMemories, prepareMemoryOperation, restoreMemory, updateMemory, } from "../../memory-api.js";
 let initialized = false;
-let viewGeneration = 0;
+let lifecycleGeneration = 0;
+let listRequestGeneration = 0;
 let page = 1;
 let items = [];
 let targetOptions = [];
@@ -66,7 +67,8 @@ export async function initializeMemory() {
 }
 export function disposeMemory() {
     initialized = false;
-    viewGeneration += 1;
+    lifecycleGeneration += 1;
+    listRequestGeneration += 1;
     page = 1;
     items = [];
     targetOptions = [];
@@ -93,8 +95,9 @@ function bindControls() {
     const createTarget = element("memory-create-target", HTMLSelectElement);
     categoryFilter.replaceChildren(...CATEGORY_OPTIONS.map(([value, label]) => new Option(label, value)));
     refresh.onclick = () => {
+        const params = readParams();
         void refreshMemoryTargets(true);
-        void refreshMemories();
+        void refreshMemories(params);
     };
     apply.onclick = () => { page = 1; void refreshMemories(); };
     reset.onclick = () => {
@@ -143,17 +146,18 @@ function memoryFilterDefaults() {
         "memory-user-filter": "",
     };
 }
-async function refreshMemories() {
-    const generation = ++viewGeneration;
+async function refreshMemories(params = readParams()) {
+    const generation = ++listRequestGeneration;
+    const lifecycle = lifecycleGeneration;
     renderLoading();
     try {
-        const result = await listMemories(readParams());
-        if (!initialized || generation !== viewGeneration)
+        const result = await listMemories(params);
+        if (!isCurrentLifecycle(lifecycle) || generation !== listRequestGeneration)
             return;
         // 归档/恢复可能让当前页失效；回到最后有效页，避免空列表把分页控件一起隐藏。
         if (page > Math.max(result.totalPages, 1) && page > 1) {
             page = Math.max(1, result.totalPages);
-            return refreshMemories();
+            return refreshMemories({ ...params, page });
         }
         items = result.items;
         currentPage = { total: result.total, totalPages: result.totalPages };
@@ -161,11 +165,14 @@ async function refreshMemories() {
         setResult(`${result.total} 条记忆`, false);
     }
     catch (cause) {
-        if (!initialized || generation !== viewGeneration)
+        if (!isCurrentLifecycle(lifecycle) || generation !== listRequestGeneration)
             return;
         renderError();
         setResult(cause instanceof Error ? cause.message : "Memory 列表加载失败", true);
     }
+}
+function isCurrentLifecycle(generation) {
+    return initialized && generation === lifecycleGeneration;
 }
 function readParams() {
     const value = (id) => {
@@ -410,9 +417,12 @@ function renderMemoryAdvancedFilters() {
 function renderOpaqueRefFilter(id, emptyLabel, refs) {
     const select = element(id, HTMLSelectElement);
     const previous = select.value;
-    select.replaceChildren(new Option(emptyLabel, ""), ...refs.map((ref) => new Option(ref, ref)));
-    select.value = refs.includes(previous) ? previous : "";
-    select.disabled = refs.length === 0;
+    // 刷新 target 时先清空已加载页，但当前 opaque 筛选仍必须保留；否则
+    // 列表请求会在 target 响应返回前丢失用户选择，尤其是第二页 target。
+    const visibleRefs = uniqueRefs(previous ? [...refs, previous] : refs);
+    select.replaceChildren(new Option(emptyLabel, ""), ...visibleRefs.map((ref) => new Option(ref, ref)));
+    select.value = visibleRefs.includes(previous) ? previous : "";
+    select.disabled = refs.length === 0 && !previous;
 }
 function uniqueRefs(refs) {
     return [...new Set(refs)];
@@ -454,17 +464,17 @@ async function submitCreate(form) {
     const submit = form.querySelector("button[type=submit]");
     if (submit)
         submit.disabled = true;
-    const generation = viewGeneration;
+    const generation = lifecycleGeneration;
     try {
         await createMemory({ targetRef, content, category, visibility, pinned });
-        if (!initialized || generation !== viewGeneration)
+        if (!isCurrentLifecycle(generation))
             return;
         form.reset();
         setResult("Memory 已由服务端确认创建", false);
         await refreshMemories();
     }
     catch (cause) {
-        if (!initialized || generation !== viewGeneration)
+        if (!isCurrentLifecycle(generation))
             return;
         setResult(cause instanceof Error ? cause.message : "Memory 创建失败", true);
     }
@@ -474,10 +484,10 @@ async function submitCreate(form) {
     }
 }
 async function editMemory(item) {
-    const generation = viewGeneration;
+    const generation = lifecycleGeneration;
     try {
         const latest = await getMemory(item.target.targetRef, item.memoryRef);
-        if (!initialized || generation !== viewGeneration)
+        if (!isCurrentLifecycle(generation))
             return;
         if (!latest.capabilities.canUpdate) {
             setResult("该 Memory 当前不可编辑，请刷新后重试", true);
@@ -492,42 +502,54 @@ async function editMemory(item) {
             expectedVersion: latest.version,
             patch: { content: content.trim() },
         });
-        if (!initialized || generation !== viewGeneration)
+        if (!isCurrentLifecycle(generation))
             return;
         setResult("Memory 已由服务端确认更新", false);
         await refreshMemories();
     }
     catch (cause) {
-        if (!initialized || generation !== viewGeneration)
+        if (!isCurrentLifecycle(generation))
             return;
         setResult(cause instanceof Error ? cause.message : "Memory 更新失败", true);
     }
 }
 async function deleteItem(item) {
-    const generation = viewGeneration;
-    if (!window.confirm("确定永久删除这条 Memory 吗？删除后无法恢复。"))
-        return;
+    const generation = lifecycleGeneration;
     try {
-        await deleteMemory({
+        const confirmation = await prepareMemoryOperation({
+            operation: "delete_memory",
             targetRef: item.target.targetRef,
             memoryRef: item.memoryRef,
             expectedVersion: item.version,
         });
-        if (!initialized || generation !== viewGeneration)
+        if (!isCurrentLifecycle(generation))
             return;
+        if (!window.confirm(`确定永久删除这条 Memory 吗？删除后无法恢复。服务端已准备确认。`))
+            return;
+        const result = await commitMemoryOperation({
+            operation: confirmation.operation,
+            targetRef: item.target.targetRef,
+            confirmationToken: confirmation.confirmationToken,
+        });
+        if (!isCurrentLifecycle(generation))
+            return;
+        if (result.deleted !== true || result.memoryRef !== item.memoryRef) {
+            throw new Error("Memory 删除结果无法与原记录确认");
+        }
         setResult("Memory 已由服务端确认删除", false);
         // 删除最后一条记录后 target 可能从服务端 discovery 消失，及时丢弃旧创建范围。
+        const params = readParams();
         void refreshMemoryTargets(true);
-        await refreshMemories();
+        await refreshMemories(params);
     }
     catch (cause) {
-        if (!initialized || generation !== viewGeneration)
+        if (!isCurrentLifecycle(generation))
             return;
         setResult(cause instanceof Error ? cause.message : "Memory 删除失败", true);
     }
 }
 async function archiveItem(item) {
-    const generation = viewGeneration;
+    const generation = lifecycleGeneration;
     if (!window.confirm("确定归档这条 Memory 吗？归档后仍可恢复。"))
         return;
     try {
@@ -536,26 +558,26 @@ async function archiveItem(item) {
             memoryRef: item.memoryRef,
             expectedVersion: item.version,
         });
-        if (!initialized || generation !== viewGeneration)
+        if (!isCurrentLifecycle(generation))
             return;
         setResult("Memory 已由服务端确认归档", false);
         await refreshMemories();
     }
     catch (cause) {
-        if (!initialized || generation !== viewGeneration)
+        if (!isCurrentLifecycle(generation))
             return;
         setResult(cause instanceof Error ? cause.message : "Memory 归档失败", true);
     }
 }
 async function confirmTargetOperation(operation, target) {
-    const generation = viewGeneration;
+    const generation = lifecycleGeneration;
     if (memoryListState !== "ready") {
         setResult("Memory 列表当前不可用，请刷新后重试", true);
         return;
     }
     try {
         const confirmation = await prepareMemoryOperation({ operation, targetRef: target.targetRef });
-        if (!initialized || generation !== viewGeneration)
+        if (!isCurrentLifecycle(generation))
             return;
         const noun = operation === "disable_group_profile" ? "停止画像并归档" : "清空";
         if (!window.confirm(`确定${noun} ${confirmation.affectedCount} 条 Memory 吗？此操作需要服务端确认。`))
@@ -565,7 +587,7 @@ async function confirmTargetOperation(operation, target) {
             targetRef: target.targetRef,
             confirmationToken: confirmation.confirmationToken,
         });
-        if (!initialized || generation !== viewGeneration)
+        if (!isCurrentLifecycle(generation))
             return;
         targetOptions = targetOptions.map((current) => current.targetRef === result.target.targetRef ? result.target : current);
         renderTargetState();
@@ -573,26 +595,26 @@ async function confirmTargetOperation(operation, target) {
         await refreshMemories();
     }
     catch (cause) {
-        if (!initialized || generation !== viewGeneration)
+        if (!isCurrentLifecycle(generation))
             return;
         setResult(cause instanceof Error ? cause.message : "Memory 操作失败", true);
     }
 }
 async function restoreItem(item) {
-    const generation = viewGeneration;
+    const generation = lifecycleGeneration;
     try {
         await restoreMemory({
             targetRef: item.target.targetRef,
             memoryRef: item.memoryRef,
             expectedVersion: item.version,
         });
-        if (!initialized || generation !== viewGeneration)
+        if (!isCurrentLifecycle(generation))
             return;
         setResult("Memory 已由服务端确认恢复", false);
         await refreshMemories();
     }
     catch (cause) {
-        if (!initialized || generation !== viewGeneration)
+        if (!isCurrentLifecycle(generation))
             return;
         setResult(cause instanceof Error ? cause.message : "Memory 恢复失败", true);
     }

@@ -208,17 +208,35 @@ test("Memory 范围确认使用新的 operation/token 协议并保留 CSRF", asy
 
 test("Memory 删除使用 opaque ref、CAS 和 CSRF，并验证服务端成功结果", async () => {
   setCsrfToken("csrf-memory-delete");
-  await withFetchMock(async (_input, init) => {
+  await withFetchMock(async (input, init) => {
+    const path = String(input);
     assert.deepEqual(JSON.parse(String(init.body)), {
-      target_ref: TARGET_REF,
-      memory_ref: MEMORY_REF,
-      expected_version: 7,
+      ...(path.endsWith("/prepare")
+        ? { operation: "delete_memory", target_ref: TARGET_REF, memory_ref: MEMORY_REF, expected_version: 7 }
+        : { operation: "delete_memory", target_ref: TARGET_REF, confirmation_token: "memory_confirmation:v1:delete" }),
     });
-    return jsonResponse({ ok: true, data: { deleted: true, memory_ref: MEMORY_REF } });
+    return path.endsWith("/prepare")
+      ? jsonResponse({ ok: true, data: {
+        confirmation_token: "memory_confirmation:v1:delete",
+        operation: "delete_memory",
+        target: targetSummary(),
+        affected_count: 1,
+        expires_at: 123,
+      } })
+      : jsonResponse({ ok: true, data: {
+        operation: "delete_memory",
+        target: targetSummary(),
+        affected_count: 1,
+        capabilities: targetSummary().capabilities,
+        deleted: true,
+        memory_ref: MEMORY_REF,
+      } });
   }, async (calls) => {
     await deleteMemory({ targetRef: TARGET_REF, memoryRef: MEMORY_REF, expectedVersion: 7 });
-    assert.equal(calls[0].input, "/api/v1/console/memories/delete");
+    assert.equal(calls[0].input, "/api/v1/console/memories/operations/prepare");
+    assert.equal(calls[1].input, "/api/v1/console/memories/operations/commit");
     assert.equal(calls[0].init.headers["X-CSRF-Token"], "csrf-memory-delete");
+    assert.equal(calls[1].init.headers["X-CSRF-Token"], "csrf-memory-delete");
   });
 });
 

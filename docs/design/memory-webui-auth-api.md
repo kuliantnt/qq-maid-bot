@@ -56,11 +56,10 @@ target discovery 从已存在且可可信解析的 v3 Memory 记录中恢复稳�
 | `POST /api/v1/console/memories/update` | 携带 expected_version 编辑，保留旧记录并写入新记录 |
 | `POST /api/v1/console/memories/archive` | 携带 expected_version 原子归档 |
 | `POST /api/v1/console/memories/restore` | 携带 expected_version 原子恢复 |
-| `POST /api/v1/console/memories/delete` | 携带 expected_version 原子永久删除 active Memory |
-| `POST /api/v1/console/memories/operations/prepare` | 准备高影响操作 |
+| `POST /api/v1/console/memories/operations/prepare` | 准备 `clear_target` / `disable_group_profile` / `delete_memory`；单条删除同时携带 opaque `memory_ref` 与 `expected_version` |
 | `POST /api/v1/console/memories/operations/commit` | 提交一次性确认 |
 
-编辑沿用当前领域的历史语义：旧记录变为 archived，新记录获得新 ID；不会原地覆盖正文，也不能修改 target、owner、source 或创建者。永久删除只接受 active Memory，并使用 expected_version 做 CAS；这是不可恢复操作，WebUI 必须二次确认。服务端只返回 opaque memory_ref，不暴露内部记录 ID。
+编辑沿用当前领域的历史语义：旧记录变为 archived，新记录获得新 ID；不会原地覆盖正文，也不能修改 target、owner、source 或创建者。永久删除通过 `delete_memory` 的服务端 prepare/commit 双阶段确认，只接受 active Memory；prepare 将 opaque `memory_ref` 与完整 revision 快照绑定到 session-bound 一次性 token，commit 在事务内再次校验后物理删除。服务端只返回 opaque memory_ref，不暴露内部记录 ID。
 
 `clear_target` 的语义是事务内把目标范围当前 active Memory 全部归档，历史保留且可恢复；它不是 DELETE。`disable_group_profile` 复用群画像 opt-out 生命周期：在同一事务写入 profile preference=false，并归档当前 active 画像。第一阶段没有重新启用画像的管理路由；历史 archived 记录不会被自动恢复。
 

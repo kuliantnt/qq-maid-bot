@@ -73,15 +73,22 @@ export async function restoreMemory(input) {
     }));
     return parseMemoryMutation(payload.data, input.targetRef);
 }
-/** 物理删除只接受服务端返回的 opaque memory_ref 与真实成功标记。 */
+/**
+ * 物理删除必须经过服务端 prepare/commit；该便捷函数不绕过确认协议。
+ */
 export async function deleteMemory(input) {
-    const payload = record(await mutatingJson(MEMORY_ROUTES.delete, "POST", {
-        target_ref: input.targetRef,
-        memory_ref: input.memoryRef,
-        expected_version: input.expectedVersion,
-    }));
-    const data = record(payload.data);
-    if (data.deleted !== true || data.memory_ref !== input.memoryRef) {
+    const confirmation = await prepareMemoryOperation({
+        operation: "delete_memory",
+        targetRef: input.targetRef,
+        memoryRef: input.memoryRef,
+        expectedVersion: input.expectedVersion,
+    });
+    const result = await commitMemoryOperation({
+        operation: confirmation.operation,
+        targetRef: input.targetRef,
+        confirmationToken: confirmation.confirmationToken,
+    });
+    if (result.deleted !== true || result.memoryRef !== input.memoryRef) {
         throw new ConsoleApiError("Memory 删除接口返回了无法确认的结果", "invalid_response");
     }
     return { deleted: true, memoryRef: input.memoryRef };
@@ -90,6 +97,8 @@ export async function prepareMemoryOperation(input) {
     const payload = record(await mutatingJson(MEMORY_ROUTES.prepare, "POST", {
         operation: input.operation,
         target_ref: input.targetRef,
+        ...(input.memoryRef === undefined ? {} : { memory_ref: input.memoryRef }),
+        ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion }),
     }));
     const confirmation = parseMemoryConfirmation(payload.data);
     if (confirmation.operation !== input.operation || confirmation.target.targetRef !== input.targetRef) {
@@ -108,10 +117,17 @@ export async function commitMemoryOperation(input) {
     if (data.operation !== input.operation || target.targetRef !== input.targetRef) {
         throw new ConsoleApiError("Memory 提交接口返回了不匹配的操作范围", "invalid_response");
     }
+    const deleted = data.deleted === undefined ? undefined : requiredBoolean(data.deleted, "deleted");
+    const memoryRef = data.memory_ref === undefined ? undefined : requiredString(data.memory_ref, "memory_ref");
+    if (input.operation === "delete_memory" && (deleted !== true || memoryRef === undefined)) {
+        throw new ConsoleApiError("Memory 删除接口返回了无法确认的结果", "invalid_response");
+    }
     return {
         affectedCount: requiredNonNegativeInteger(data.affected_count, "affected_count"),
         capabilities: parseOperationCapabilities(data.capabilities),
         target,
+        ...(deleted === true ? { deleted: true } : {}),
+        ...(memoryRef === undefined ? {} : { memoryRef }),
     };
 }
 function parseMemoryPage(value) {
@@ -189,7 +205,7 @@ function ensureMemoryTarget(item, targetRef) {
 function parseMemoryConfirmation(value) {
     const data = record(value);
     const operation = data.operation;
-    if (operation !== "clear_target" && operation !== "disable_group_profile") {
+    if (operation !== "clear_target" && operation !== "disable_group_profile" && operation !== "delete_memory") {
         throw new ConsoleApiError("Memory 确认操作无效", "invalid_response");
     }
     return {

@@ -313,7 +313,7 @@ export interface MemoryListParams {
   subjectRef: string;
 }
 
-export type MemoryOperation = "clear_target" | "disable_group_profile";
+export type MemoryOperation = "clear_target" | "disable_group_profile" | "delete_memory";
 
 export interface MemoryConfirmation {
   confirmationToken: string;

@@ -38,7 +38,6 @@ export const MEMORY_ROUTES = {
     update: "/api/v1/console/memories/update",
     archive: "/api/v1/console/memories/archive",
     restore: "/api/v1/console/memories/restore",
-    delete: "/api/v1/console/memories/delete",
     prepare: "/api/v1/console/memories/operations/prepare",
     commit: "/api/v1/console/memories/operations/commit",
 };

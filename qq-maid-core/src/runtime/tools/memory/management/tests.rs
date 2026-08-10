@@ -271,7 +271,9 @@ fn bulk_mutation_results_include_commit_state_without_snapshot_reads() {
         admin_id: 1,
         session_digest: [3; 32],
     };
-    let prepared = service.prepare(actor, "clear_target", &target_ref).unwrap();
+    let prepared = service
+        .prepare(actor, "clear_target", &target_ref, None)
+        .unwrap();
     store.fail_management_snapshot_for_test(true);
     let cleared = service
         .commit(
@@ -296,7 +298,7 @@ fn bulk_mutation_results_include_commit_state_without_snapshot_reads() {
         .unwrap()
         .target_ref;
     let prepared = service
-        .prepare(actor, "disable_group_profile", &profile_ref)
+        .prepare(actor, "disable_group_profile", &profile_ref, None)
         .unwrap();
     store.fail_management_snapshot_for_test(true);
     let disabled = service
@@ -335,7 +337,9 @@ fn clear_and_profile_disable_are_snapshot_bound_and_one_shot() {
         admin_id: 1,
         session_digest: [1; 32],
     };
-    let prepared = service.prepare(actor, "clear_target", &target_ref).unwrap();
+    let prepared = service
+        .prepare(actor, "clear_target", &target_ref, None)
+        .unwrap();
     service
         .create(MemoryCreateInput {
             target_ref: target_ref.clone(),
@@ -355,7 +359,9 @@ fn clear_and_profile_disable_are_snapshot_bound_and_one_shot() {
         ),
         Err(MemoryManagementError::Conflict(_))
     ));
-    let prepared = service.prepare(actor, "clear_target", &target_ref).unwrap();
+    let prepared = service
+        .prepare(actor, "clear_target", &target_ref, None)
+        .unwrap();
     let committed = service
         .commit(
             actor,
@@ -390,7 +396,7 @@ fn clear_and_profile_disable_are_snapshot_bound_and_one_shot() {
         session_digest: [2; 32],
     };
     let prepared = service
-        .prepare(profile_actor, "disable_group_profile", &profile_ref)
+        .prepare(profile_actor, "disable_group_profile", &profile_ref, None)
         .unwrap();
     assert!(matches!(
         service.commit(
@@ -413,6 +419,83 @@ fn clear_and_profile_disable_are_snapshot_bound_and_one_shot() {
         )
         .unwrap();
     assert_eq!(committed.affected_count, 1);
+}
+
+#[test]
+fn delete_confirmation_binds_memory_snapshot_and_is_one_shot() {
+    let (service, store) = test_service();
+    let target = MemoryTarget::personal(personal_scope("delete-confirmation-user"));
+    let original = seed(&store, target, "删除确认前");
+    let target_ref = service
+        .targets(MemoryTargetFilter::default(), 20, 0)
+        .unwrap()
+        .items[0]
+        .target_ref
+        .clone();
+    let original_ref = memory_ref_for(&target_ref, &original.id);
+    let actor = ManagementActor {
+        admin_id: 7,
+        session_digest: [7; 32],
+    };
+    let prepared = service
+        .prepare(
+            actor,
+            "delete_memory",
+            &target_ref,
+            Some((&original_ref, original.revision)),
+        )
+        .unwrap();
+    let updated = service
+        .update(
+            &target_ref,
+            &original_ref,
+            original.revision,
+            MemoryUpdatePatch {
+                content: Some("删除确认后已变化".to_owned()),
+                ..MemoryUpdatePatch::default()
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        service.commit(
+            actor,
+            "delete_memory",
+            &target_ref,
+            &prepared.confirmation_token,
+        ),
+        Err(MemoryManagementError::Conflict(_))
+    ));
+    assert!(matches!(
+        service.commit(
+            actor,
+            "delete_memory",
+            &target_ref,
+            &prepared.confirmation_token,
+        ),
+        Err(MemoryManagementError::NotFound)
+    ));
+
+    let prepared = service
+        .prepare(
+            actor,
+            "delete_memory",
+            &target_ref,
+            Some((&updated.memory.memory_ref, updated.memory.version)),
+        )
+        .unwrap();
+    let deleted = service
+        .commit(
+            actor,
+            "delete_memory",
+            &target_ref,
+            &prepared.confirmation_token,
+        )
+        .unwrap();
+    assert_eq!(deleted.deleted, Some(true));
+    assert_eq!(
+        deleted.memory_ref.as_deref(),
+        Some(updated.memory.memory_ref.as_str())
+    );
 }
 
 #[test]
@@ -726,7 +809,9 @@ fn expired_confirmation_is_removed_without_exposing_snapshot() {
         admin_id: 9,
         session_digest: [9; 32],
     };
-    let prepared = service.prepare(actor, "clear_target", &target_ref).unwrap();
+    let prepared = service
+        .prepare(actor, "clear_target", &target_ref, None)
+        .unwrap();
     let digest = super::refs::token_digest(&prepared.confirmation_token);
     service
         .confirmations
