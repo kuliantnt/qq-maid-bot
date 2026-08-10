@@ -4,10 +4,7 @@
 //! 车次与日期均在本地完成解析，再通过 `runtime::tools::train` 执行器查询真实时刻表。
 
 use chrono::{Datelike, Duration, NaiveDate};
-use qq_maid_common::{
-    markdown::escape_inline,
-    time_context::{RequestTimeContext, request_time_context},
-};
+use qq_maid_common::time_context::{RequestTimeContext, request_time_context};
 use serde_json::json;
 
 use crate::{
@@ -15,13 +12,19 @@ use crate::{
     runtime::{
         command::{ParsedCommand, parse_slash_command},
         session::SessionRecord,
-        tools::train::{TrainSchedule, TrainScheduleRequest, TrainStop},
+        tools::train::TrainScheduleRequest,
     },
 };
 
 use super::{
     RespondResponse, RustRespondService,
     common::{command_response, session_error},
+};
+
+// `/火车` 保留原有 flow 入口；实际错误与时刻表正文由 Train 领域门面统一维护，
+// Agent Tool 与 slash 命令因此共享同一套可信展示规则。
+pub(crate) use crate::runtime::tools::train::{
+    format_train_error_reply, format_train_schedule_reply,
 };
 
 /// 查询参数最长字符数，限制异常输入。
@@ -33,17 +36,6 @@ const TRAIN_CODE_REQUIRED_REPLY: &str = "请先提供车次，例如：/火车 G
 /// 日期格式无法识别提示。
 const TRAIN_DATE_INVALID_REPLY: &str =
     "日期暂时只支持 今天、明天、后天、YYYY-MM-DD、YYYY年M月D日 或 M月D日。";
-/// 12306 无开行数据提示。
-const TRAIN_NO_SCHEDULE_REPLY: &str = "该日期未查询到开行信息。";
-/// 12306 超时提示。
-const TRAIN_TIMEOUT_REPLY: &str = "【火车】铁路时刻服务超时了，请稍后再试。";
-/// 12306 上游异常提示。
-const TRAIN_UPSTREAM_ERROR_REPLY: &str =
-    "【火车】铁路时刻服务暂时不可用，可能是上游接口、代理或网络配置异常。请稍后再试。";
-/// 响应字段异常提示。
-const TRAIN_RESPONSE_INVALID_REPLY: &str =
-    "【火车】铁路时刻服务返回了不完整数据，本次无法整理时刻表。请稍后再试。";
-
 /// 已解析的 `/火车` 指令。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ParsedTrainCommand {
@@ -278,167 +270,11 @@ fn parse_month_day_train_date(text: &str, today: NaiveDate) -> Option<NaiveDate>
     Some(date)
 }
 
-pub(crate) fn format_train_error_reply(err: &LlmError) -> String {
-    match err.code.as_str() {
-        "no_schedule" => TRAIN_NO_SCHEDULE_REPLY.to_owned(),
-        "timeout" => TRAIN_TIMEOUT_REPLY.to_owned(),
-        "provider_error" if err.stage == "train_json" => TRAIN_RESPONSE_INVALID_REPLY.to_owned(),
-        _ => TRAIN_UPSTREAM_ERROR_REPLY.to_owned(),
-    }
-}
-
 fn parse_error_reply(error: Option<TrainCommandParseError>) -> Option<&'static str> {
     match error? {
         TrainCommandParseError::MissingCode => Some(TRAIN_CODE_REQUIRED_REPLY),
         TrainCommandParseError::ArgumentTooLong => Some(TRAIN_ARGUMENT_TOO_LONG_REPLY),
         TrainCommandParseError::InvalidDate => Some(TRAIN_DATE_INVALID_REPLY),
-    }
-}
-
-pub(crate) fn format_train_schedule_reply(schedule: &TrainSchedule) -> super::common::CommandBody {
-    let mut text_rows = vec![
-        format!("🚄 {} 列车时刻", schedule.train_code),
-        String::new(),
-        format!("日期：{}", schedule.travel_date),
-        format!(
-            "行程：{} → {}",
-            schedule.start_station, schedule.end_station
-        ),
-    ];
-    let mut markdown_rows = vec![
-        format!("# 🚄 {} 列车时刻", escape_inline(&schedule.train_code)),
-        String::new(),
-        format!("**日期：** {}", schedule.travel_date),
-        format!(
-            "**行程：** {} → {}",
-            escape_inline(&schedule.start_station),
-            escape_inline(&schedule.end_station)
-        ),
-    ];
-    // 以下 4 个字段来自 12306 可选属性，缺失或为空时省略对应行，
-    // 只展示接口真实返回的数据，不推测、不补造。
-    push_optional_info_row(
-        &mut text_rows,
-        &mut markdown_rows,
-        "完整车次",
-        &schedule.full_train_code,
-    );
-    push_optional_info_row(
-        &mut text_rows,
-        &mut markdown_rows,
-        "担当客运段",
-        &schedule.corporation,
-    );
-    push_optional_info_row(
-        &mut text_rows,
-        &mut markdown_rows,
-        "车型信息",
-        &schedule.train_style,
-    );
-    push_optional_info_row(
-        &mut text_rows,
-        &mut markdown_rows,
-        "配属",
-        &schedule.dept_train,
-    );
-
-    text_rows.push(String::new());
-    text_rows.push("站序 / 车站 / 到达 / 出发 / 停留".to_owned());
-    markdown_rows.push(String::new());
-    markdown_rows.push("| 站序 | 车站 | 到达 | 出发 | 停留 |".to_owned());
-    markdown_rows.push("| ---: | --- | ---: | ---: | ---: |".to_owned());
-
-    let stop_count = schedule.stops.len();
-    for (index, stop) in schedule.stops.iter().enumerate() {
-        // 始发站 / 终到站 / 中间站 / 单站异常数据分别按位置渲染到发和停留三列，
-        // 避免始发站也显示到达时间、终到站也显示出发时间造成误解。
-        let (arrive, departure, stopover) = format_stop_columns(stop, index, stop_count);
-        let station_name = format_station_name(stop);
-        markdown_rows.push(format!(
-            "| {} | {} | {} | {} | {} |",
-            stop.station_no,
-            escape_inline(&station_name),
-            arrive,
-            departure,
-            stopover
-        ));
-        text_rows.push(format!(
-            "{} / {} / {} / {} / {}",
-            stop.station_no, station_name, arrive, departure, stopover
-        ));
-    }
-    text_rows.push(String::new());
-    text_rows.push(TRAIN_SCHEDULE_FOOTER_REPLY.to_owned());
-    markdown_rows.push(String::new());
-    markdown_rows.push(format!("> {}", TRAIN_SCHEDULE_FOOTER_REPLY));
-    super::common::CommandBody::dual(text_rows.join("\n"), markdown_rows.join("\n"))
-}
-
-/// 将 12306 可选字段追加到纯文本和 Markdown 输出中。
-///
-/// 字段为 `None` 时直接跳过，不输出对应行；非空时纯文本侧为 `标签：值`，
-/// Markdown 侧为 `**标签：** 值`，并对值做行内 Markdown 转义。
-fn push_optional_info_row(
-    text_rows: &mut Vec<String>,
-    markdown_rows: &mut Vec<String>,
-    label: &str,
-    value: &Option<String>,
-) {
-    let Some(value) = value else {
-        return;
-    };
-    text_rows.push(format!("{label}：{value}"));
-    markdown_rows.push(format!("**{label}：** {}", escape_inline(value)));
-}
-
-/// 时刻表底部提示，强调当日计划时刻与实时信息的差异。
-const TRAIN_SCHEDULE_FOOTER_REPLY: &str =
-    "当前展示为当日计划时刻，不含实时正晚点、余票及临时停运信息，请以铁路12306或车站公告为准。";
-
-/// 根据经停站在时刻表中的位置渲染到达、出发和停留三列。
-///
-/// - 始发站（第一站）：到达显示 `--`，出发取实际发车时间，停留显示 `始发`；
-/// - 终到站（最后一站）：到达取实际到达时间，出发显示 `--`，停留显示 `终到`；
-/// - 中间站：保持原来到发时间和停留分钟数逻辑；
-/// - 仅一站的异常数据：不同时硬标为始发和终到，保留原始到发数据，停留显示 `--`。
-fn format_stop_columns(
-    stop: &TrainStop,
-    index: usize,
-    stop_count: usize,
-) -> (String, String, String) {
-    let arrive = stop.arrive_time.as_deref().unwrap_or("--");
-    let departure = stop.departure_time.as_deref().unwrap_or("--");
-    if stop_count <= 1 {
-        // 只有一站的异常数据，保留原始到发，停留用 -- 占位，避免同时硬标始发/终到。
-        return (arrive.to_owned(), departure.to_owned(), "--".to_owned());
-    }
-    if index == 0 {
-        // 始发站：到达无意义，统一显示 --；停留固定为始发。
-        return ("--".to_owned(), departure.to_owned(), "始发".to_owned());
-    }
-    if index == stop_count - 1 {
-        // 终到站：出发无意义，统一显示 --；停留固定为终到。
-        return (arrive.to_owned(), "--".to_owned(), "终到".to_owned());
-    }
-    // 中间站保持原有停留分钟数逻辑。
-    let stopover = format_stopover(stop);
-    (arrive.to_owned(), departure.to_owned(), stopover)
-}
-
-fn format_station_name(stop: &TrainStop) -> String {
-    if stop.day_difference <= 0 {
-        return stop.station_name.clone();
-    }
-    format!("{}（+{}天）", stop.station_name, stop.day_difference)
-}
-
-fn format_stopover(stop: &TrainStop) -> String {
-    match stop.stopover_minutes {
-        Some(0) if stop.arrive_time.is_some() && stop.departure_time.is_some() => {
-            "0 分钟".to_owned()
-        }
-        Some(0) | None => "--".to_owned(),
-        Some(minutes) => format!("{minutes} 分钟"),
     }
 }
 

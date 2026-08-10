@@ -25,7 +25,7 @@ use crate::{
 
 use super::agent_presenters::{
     tool_outcome_from_knowledge_result, tool_outcome_from_rss_result,
-    tool_outcome_from_train_result, tool_outcome_from_weather_result,
+    tool_outcome_from_weather_result,
 };
 use super::search::agent_turn::project_results as project_search_results;
 
@@ -280,7 +280,7 @@ fn project_tool_turn(
             drain_domain_outcomes_for_result(index, &mut search_outcomes, &mut outcomes);
         } else if let Some(outcome) = tool_outcome_from_weather_result(result) {
             outcomes.push(outcome);
-        } else if let Some(outcome) = tool_outcome_from_train_result(result) {
+        } else if let Some(outcome) = super::train::tool_outcome_from_result(result) {
             outcomes.push(outcome);
         } else if let Some(outcome) = tool_outcome_from_rss_result(result) {
             outcomes.push(outcome);
@@ -295,15 +295,47 @@ fn project_tool_turn(
     outcomes.extend(todo_outcomes.map(|(_, outcome)| outcome));
     outcomes.extend(search_outcomes.map(|(_, outcome)| outcome));
 
-    Ok(
+    let mut outcome =
         AgentTurnOutcome::from_outcomes_with_visible_snapshot_and_provenance_and_incomplete(
             outcomes,
             visible_entity_snapshot,
             search_provenance,
             output.agent.tools_with_unknown_result.clone(),
             output.agent.has_incomplete_tool_loop(),
-        ),
-    )
+        );
+    outcome.published_tool_result_indexes = published_tool_result_indexes(output);
+    Ok(outcome)
+}
+
+fn published_tool_result_indexes(output: &RespondOutput) -> Vec<usize> {
+    let declared_call_ids = output
+        .display_contract
+        .published_tool_call_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    if declared_call_ids.is_empty() {
+        return Vec::new();
+    }
+
+    // 候选链和重试都可能把轨迹追加到同一份 diagnostics；同一 call id 只取
+    // 最后一次尝试，避免最终候选声明一个复用的 id 时误绑定前一候选结果。
+    let mut seen_call_ids = std::collections::HashSet::new();
+    let mut indexes = output
+        .agent
+        .tool_attempts
+        .iter()
+        .rev()
+        .filter(|attempt| {
+            declared_call_ids.contains(attempt.call_id.as_str())
+                && seen_call_ids.insert(attempt.call_id.as_str())
+        })
+        .filter_map(|attempt| {
+            (attempt.result_index < output.agent.tool_results.len()).then_some(attempt.result_index)
+        })
+        .collect::<Vec<_>>();
+    indexes.sort_unstable();
+    indexes
 }
 
 fn drain_domain_outcomes_for_result(
@@ -363,6 +395,7 @@ pub(crate) fn fallback_output_after_agent_failure(
         },
         usage: None,
         agent: agent.clone(),
+        display_contract: Default::default(),
         model_reply_empty: true,
     })
 }

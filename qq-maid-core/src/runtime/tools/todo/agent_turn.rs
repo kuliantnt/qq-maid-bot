@@ -15,7 +15,10 @@ use crate::{
         session::{SessionMeta, SessionRecord},
         tools::{
             TaskStore,
-            agent_turn::{DomainResultProjection, DomainTurnDiagnostics, DomainTurnPostprocessor},
+            agent_turn::{
+                DomainResultProjection, DomainTurnDiagnostics, DomainTurnPostprocessor,
+                is_retry_superseded_result,
+            },
             todo,
         },
     },
@@ -56,10 +59,12 @@ impl DomainTurnPostprocessor for TodoTurnPostprocessor {
         state_session: &mut SessionRecord,
         reply_source: AgentReplySource,
     ) -> Box<dyn DomainTurnDiagnostics> {
-        // 自然语言 Agent 的非空模型正文是唯一主体；composer 此时不会发布
-        // RelatedList，因此本轮由领域投影建立的列表快照不能继续留在 session 中。
-        // 空模型正文会走确定性 fallback，RelatedList 会随回退正文真实出站，此时
-        // 才保留快照。这里复用 typed 的 composer 分支，不扫描模型正文内容。
+        // 自然语言 Agent 的非空模型正文通常是唯一主体；只有模型通过结构化展示
+        // 契约声明实际展示了成功的 list_todos 结果时，RelatedList 对应的快照才
+        // 继续有效。不能因为正文非空，或正文看起来像列表，就推断用户看到了编号。
+        let model_published_related_list = projected_outcome.as_deref().is_some_and(|outcome| {
+            outcome.has_related_list() && model_published_visible_todo_list(output, outcome)
+        });
         let model_primary_hides_related_list =
             matches!(reply_source, AgentReplySource::NaturalLanguageAgent)
                 && !output.model_reply_empty
@@ -98,7 +103,7 @@ impl DomainTurnPostprocessor for TodoTurnPostprocessor {
 
         // `aggregate_todo_tool_results` 已用同一批真实条目建立 RelatedList 与快照。
         // 只有该结构化列表实际由 composer 发布时，快照才拥有跨轮编号的展示契约。
-        if (guard_applied || model_primary_hides_related_list)
+        if (guard_applied || (model_primary_hides_related_list && !model_published_related_list))
             && let Some(outcome) = projected_outcome
         {
             let clears_list_snapshot = outcome.has_related_list();
@@ -114,6 +119,20 @@ impl DomainTurnPostprocessor for TodoTurnPostprocessor {
             guard_applied,
         ))
     }
+}
+
+fn model_published_visible_todo_list(output: &RespondOutput, outcome: &AgentTurnOutcome) -> bool {
+    output
+        .agent
+        .tool_results
+        .iter()
+        .enumerate()
+        .any(|(index, result)| {
+            result.name == todo::LIST_TODOS_TOOL_NAME
+                && result.succeeded
+                && !is_retry_superseded_result(index, &output.agent.tool_attempts)
+                && outcome.published_tool_result_indexes.contains(&index)
+        })
 }
 
 pub(crate) fn project_results(

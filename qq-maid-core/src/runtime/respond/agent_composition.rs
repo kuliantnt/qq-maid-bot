@@ -122,6 +122,7 @@ mod tests {
             },
             usage: None,
             agent: AgentRunDiagnostics::default(),
+            display_contract: Default::default(),
             model_reply_empty,
         }
     }

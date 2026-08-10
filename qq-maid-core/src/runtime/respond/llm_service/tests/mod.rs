@@ -677,6 +677,7 @@ fn respond_response_serialization_only_exposes_display_channels() {
         },
         usage: Some(usage.clone()),
         agent: Default::default(),
+        display_contract: Default::default(),
         model_reply_empty: false,
     };
     let response = response_from_output(output);

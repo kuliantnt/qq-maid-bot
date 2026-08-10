@@ -320,6 +320,55 @@ async fn natural_language_model_list_without_structured_publication_does_not_pre
 }
 
 #[tokio::test]
+async fn structured_model_list_publication_preserves_snapshot_for_next_turn() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "list_todos",
+            r#"{"status":"pending"}"#,
+            r#"{"reply":"🚧 当前进行中 · 共 1 项\n1. 可继续引用的待办","published_tool_call_ids":["mock-call-0"]}"#,
+        )
+        .with_tool_call_json(
+            "complete_todos",
+            r#"{"numbers":[1],"selection_text":null,"reference":null}"#,
+            "已完成第一条",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    service
+        .task_store
+        .create(&owner, todo_draft("可继续引用的待办"))
+        .unwrap();
+
+    let response = service
+        .respond(private_message("检查待办状态"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.text.as_deref(),
+        Some("🚧 当前进行中 · 共 1 项\n· 可继续引用的待办")
+    );
+    assert!(response.visible_entity_snapshot.is_some());
+    assert!(
+        service
+            .session_store
+            .get_or_create_active(&private_test_meta())
+            .unwrap()
+            .last_todo_query
+            .is_some(),
+        "只有结构化契约确认正文发布了列表，才能保留跨轮编号快照"
+    );
+
+    service
+        .respond(private_message("完成第一条待办"))
+        .await
+        .unwrap();
+
+    assert!(service.task_store.list_pending(&owner).unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn corrected_todo_argument_failure_same_tool_later_round_is_not_exposed() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)

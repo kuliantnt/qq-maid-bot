@@ -396,6 +396,7 @@ async fn execute_deterministic_todo(
             },
             usage: None,
             agent,
+            display_contract: Default::default(),
             model_reply_empty: true,
         },
         executed_tools,

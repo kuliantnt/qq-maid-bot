@@ -34,12 +34,14 @@ use qq_maid_common::markdown::to_chat_text;
 use super::common::tool_context_from_request;
 use super::{RespondPurpose, RespondRequest, RespondResponse};
 
+mod agent_output;
 mod cache_diagnostics;
 mod compact_messages;
 pub(crate) mod context_diagnostics;
 mod message_parts;
 mod trace;
 
+use agent_output::{AgentDisplayContract, parse_agent_reply};
 use cache_diagnostics::{PromptCacheDiagnostics, prompt_cache_diagnostics};
 use compact_messages::build_compact_messages;
 use context_diagnostics::{
@@ -79,6 +81,8 @@ pub struct RespondOutput {
     pub usage: Option<TokenUsage>,
     /// Agent Runtime 的结构化执行轨迹。
     pub agent: AgentRunDiagnostics,
+    /// 模型明确声明最终正文实际展示的 Tool 结果；只由领域 adapter 验证后使用。
+    pub(crate) display_contract: AgentDisplayContract,
     /// Provider 是否没有产生可用的最终模型文本；媒体附件不能代替工具结果总结，
     /// 该标记用于决定是否启用领域确定性降级。
     pub model_reply_empty: bool,
@@ -285,6 +289,8 @@ fn output_from_raw_reply(
     outcome: ChatOutcome,
     bot_display_name: &str,
 ) -> Result<RespondOutput, LlmError> {
+    let parsed_reply = parse_agent_reply(raw_reply, &outcome.agent);
+    let raw_reply = parsed_reply.reply;
     trace_chat_raw_reply(req, &raw_reply);
     let has_media = outcome
         .output_parts
@@ -330,6 +336,7 @@ fn output_from_raw_reply(
         metrics: outcome.metrics,
         usage: outcome.usage,
         agent: outcome.agent,
+        display_contract: parsed_reply.display_contract,
         model_reply_empty,
     })
 }

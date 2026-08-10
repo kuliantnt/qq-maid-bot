@@ -228,6 +228,11 @@ pub(crate) struct AgentTurnOutcome {
     ///
     /// 这是整轮编排元数据，不是 synthetic Tool Result，不能进入领域投影。
     pub tool_loop_incomplete: bool,
+    /// 模型最终正文通过结构化展示契约声明实际展示的 Tool Result 下标。
+    ///
+    /// 这里只保存通用结果索引；具体领域仍需校验工具成功状态、重试覆盖和自身
+    /// 的可见块，不能把模型声明直接当作用户已经看到的业务事实。
+    pub published_tool_result_indexes: Vec<usize>,
     pub visible_entity_snapshot: Option<VisibleEntitySnapshot>,
 }
 
@@ -288,6 +293,7 @@ impl AgentTurnOutcome {
             provenance: deduplicate_provenance(provenance),
             unknown_result_tools,
             tool_loop_incomplete,
+            published_tool_result_indexes: Vec::new(),
             visible_entity_snapshot,
         }
     }

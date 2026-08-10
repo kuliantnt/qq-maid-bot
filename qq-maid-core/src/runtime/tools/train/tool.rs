@@ -19,7 +19,7 @@ use crate::{
     runtime::tools::train::{DynTrainExecutor, TrainSchedule, TrainScheduleRequest, TrainStop},
 };
 
-const TRAIN_TOOL_NAME: &str = "get_train_schedule";
+use super::TRAIN_TOOL_NAME;
 const TRAIN_TOOL_CODE_MAX_CHARS: usize = 20;
 
 pub(crate) mod route {
