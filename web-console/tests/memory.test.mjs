@@ -264,6 +264,35 @@ test("Memory API error 状态显示重试而不是空成功", async () => {
   });
 });
 
+test("Memory 刷新失败会清理旧分页并禁用写控件", async () => {
+  setupMemoryPage();
+  let failList = false;
+  await withMemoryFetch(async (path, body) => {
+    if (path.endsWith("/targets")) return targetPage(1, 1, [rawTarget()], 1);
+    if (failList) return jsonResponse({ ok: false, error: { code: "unavailable", message: "Memory 服务暂不可用" } }, 503);
+    return memoryPage([rawMemory()], { page: body.page, total: 2, total_pages: 2 });
+  }, async () => {
+    await initializeMemory();
+    await flushMicrotasks();
+    const pagination = document.getElementById("memory-pagination");
+    const oldNext = pagination.children[2];
+    assert.ok(oldNext);
+    assert.equal(oldNext.disabled, false);
+
+    failList = true;
+    document.getElementById("memory-refresh").onclick();
+    await flushMicrotasks();
+
+    assert.equal(pagination.children.length, 0);
+    assert.equal(oldNext.disabled, true);
+    assert.equal(oldNext.onclick, null);
+    assert.equal(document.getElementById("memory-create-target").disabled, true);
+    assert.equal(document.getElementById("memory-create-content").disabled, true);
+    assert.equal(buttonWithText(document.getElementById("memory-targets"), "清空此范围").disabled, true);
+    assert.match(treeText(document.getElementById("memory-list")), /Memory 列表加载失败/);
+  });
+});
+
 test("Memory 409 conflict 不显示成功文案", async () => {
   setupMemoryPage();
   await withMemoryFetch(async (path) => {
