@@ -6,6 +6,7 @@ let items = [];
 let targetOptions = [];
 // target discovery 使用服务端分页；只把已加载页用于创建、筛选和范围操作。
 const MEMORY_TARGET_PAGE_SIZE = 100;
+let memoryListState = "loading";
 let targetPage = 0;
 let targetTotal = 0;
 let targetTotalPages = 0;
@@ -69,6 +70,7 @@ export function disposeMemory() {
     page = 1;
     items = [];
     targetOptions = [];
+    memoryListState = "loading";
     targetPage = 0;
     targetTotal = 0;
     targetTotalPages = 0;
@@ -189,6 +191,7 @@ function readParams() {
     };
 }
 function renderMemoryContent() {
+    memoryListState = "ready";
     const list = element("memory-list", HTMLElement);
     list.replaceChildren();
     if (items.length === 0) {
@@ -340,10 +343,14 @@ function renderTargetControls() {
         label.textContent = targetLabel(target);
         row.append(label);
         if (canClearTarget(target)) {
-            row.append(actionButton("清空此范围", () => void confirmTargetOperation("clear_target", target), "danger"));
+            const clear = actionButton("清空此范围", () => void confirmTargetOperation("clear_target", target), "danger");
+            clear.disabled = memoryListState !== "ready";
+            row.append(clear);
         }
         if (canDisableGroupProfile(target)) {
-            row.append(actionButton("停止画像", () => void confirmTargetOperation("disable_group_profile", target), "danger"));
+            const disable = actionButton("停止画像", () => void confirmTargetOperation("disable_group_profile", target), "danger");
+            disable.disabled = memoryListState !== "ready";
+            row.append(disable);
         }
         targetContainer.append(row);
     }
@@ -373,6 +380,7 @@ function renderTargetControls() {
 function renderMemoryTargets() {
     const select = element("memory-create-target", HTMLSelectElement);
     const creatableTargets = targetOptions.filter(canCreateMemory);
+    setMemoryCreateControlsDisabled(memoryListState !== "ready");
     const placeholder = targetLoading && targetOptions.length === 0
         ? "加载范围中…"
         : targetError && targetOptions.length === 0
@@ -386,7 +394,7 @@ function renderMemoryTargets() {
     for (const target of creatableTargets) {
         select.append(new Option(targetLabel(target), target.targetRef));
     }
-    select.disabled = creatableTargets.length === 0;
+    select.disabled = memoryListState !== "ready" || creatableTargets.length === 0;
     updateCreateVisibilityOptions();
 }
 function renderMemoryAdvancedFilters() {
@@ -411,7 +419,7 @@ function updateCreateVisibilityOptions() {
     const options = target ? VISIBILITY_OPTIONS[target.scope] : [];
     const previous = visibilitySelect.value;
     visibilitySelect.replaceChildren(...options.map(([value, label]) => new Option(label, value)));
-    visibilitySelect.disabled = options.length === 0;
+    visibilitySelect.disabled = memoryListState !== "ready" || options.length === 0;
     if (options.some(([value]) => value === previous)) {
         visibilitySelect.value = previous;
     }
@@ -420,6 +428,10 @@ function updateCreateVisibilityOptions() {
     }
 }
 async function submitCreate(form) {
+    if (memoryListState !== "ready") {
+        setResult("Memory 列表当前不可用，请刷新后重试", true);
+        return;
+    }
     const targetRef = element("memory-create-target", HTMLSelectElement).value;
     const content = element("memory-create-content", HTMLTextAreaElement).value.trim();
     const category = asMemoryCategory(element("memory-create-type", HTMLSelectElement).value);
@@ -491,6 +503,10 @@ async function archiveItem(item) {
     }
 }
 async function confirmTargetOperation(operation, target) {
+    if (memoryListState !== "ready") {
+        setResult("Memory 列表当前不可用，请刷新后重试", true);
+        return;
+    }
     try {
         const confirmation = await prepareMemoryOperation({ operation, targetRef: target.targetRef });
         const noun = operation === "disable_group_profile" ? "停止画像并归档" : "清空";
@@ -527,7 +543,7 @@ async function restoreItem(item) {
 function renderPagination() {
     const target = element("memory-pagination", HTMLElement);
     target.replaceChildren();
-    if (currentPage.totalPages <= 1)
+    if (memoryListState !== "ready" || currentPage.totalPages <= 1)
         return;
     const previous = actionButton("上一页", () => { if (page > 1) {
         page -= 1;
@@ -544,12 +560,49 @@ function renderPagination() {
     target.append(previous, label, next);
 }
 function renderLoading() {
+    memoryListState = "loading";
     element("memory-list", HTMLElement).replaceChildren(Object.assign(document.createElement("p"), { className: "hint", textContent: "正在加载 Memory…" }));
+    clearMemoryPagination();
+    renderTargetState();
 }
 function renderError() {
+    memoryListState = "error";
     const target = element("memory-list", HTMLElement);
     const retry = actionButton("重试", () => void refreshMemories());
     target.replaceChildren(Object.assign(document.createElement("p"), { className: "hint", textContent: "Memory 列表加载失败，请检查权限或重试。" }), retry);
+    clearMemoryPagination();
+    renderTargetState();
+}
+function clearMemoryPagination() {
+    const target = element("memory-pagination", HTMLElement);
+    for (const child of target.children) {
+        if (child instanceof HTMLButtonElement) {
+            child.disabled = true;
+            child.onclick = null;
+        }
+    }
+    target.replaceChildren();
+}
+function setMemoryCreateControlsDisabled(disabled) {
+    for (const id of [
+        "memory-create-target",
+        "memory-create-type",
+        "memory-create-visibility",
+        "memory-create-content",
+        "memory-create-pinned",
+    ]) {
+        const field = document.getElementById(id);
+        if (field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement) {
+            field.disabled = disabled;
+        }
+    }
+    const form = document.getElementById("memory-create-form");
+    if (form instanceof HTMLFormElement) {
+        const submit = form.querySelector("button[type=submit]");
+        if (submit)
+            submit.disabled = disabled;
+        form.setAttribute("aria-disabled", String(disabled));
+    }
 }
 /** 管理 API 只返回 opaque ref；页面不尝试反解析原始账号、群组或用户 ID。 */
 function targetLabel(target) {
