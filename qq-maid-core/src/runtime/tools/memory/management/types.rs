@@ -49,6 +49,7 @@ pub(crate) struct MemoryCapabilities {
     pub(crate) can_update: bool,
     pub(crate) can_archive: bool,
     pub(crate) can_restore: bool,
+    pub(crate) can_delete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -73,6 +74,12 @@ pub(crate) struct MemoryManagementItem {
 pub(crate) struct MemoryManagementMutationResult {
     pub(crate) memory: MemoryManagementItem,
     pub(crate) archived_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct MemoryDeleteResult {
+    pub(crate) memory_ref: String,
+    pub(crate) deleted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

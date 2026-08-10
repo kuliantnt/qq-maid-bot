@@ -95,6 +95,7 @@ fn create_update_archive_restore_use_monotonic_revision_and_cas() {
             },
         )
         .unwrap();
+    assert!(created.memory.capabilities.can_delete);
     assert!(updated.memory.version > created.memory.version);
     assert!(matches!(
         service.update(
@@ -120,8 +121,75 @@ fn create_update_archive_restore_use_monotonic_revision_and_cas() {
         )
         .unwrap();
     assert_eq!(restored.memory.status, "active");
+    assert!(!archived.memory.capabilities.can_delete);
+    assert!(restored.memory.capabilities.can_delete);
     assert!(restored.memory.version > archived.memory.version);
     assert_eq!(seeded.revision, 1);
+}
+
+#[test]
+fn delete_uses_active_revision_cas_and_removes_memory() {
+    let (service, store) = test_service();
+    let target = MemoryTarget::personal(personal_scope("delete-user"));
+    let record = seed(&store, target, "待删除");
+    let target_ref = service
+        .targets(MemoryTargetFilter::default(), 20, 0)
+        .unwrap()
+        .items[0]
+        .target_ref
+        .clone();
+    let memory_ref = memory_ref_for(&target_ref, &record.id);
+
+    assert!(matches!(
+        service.delete(&target_ref, &memory_ref, record.revision + 1),
+        Err(MemoryManagementError::Conflict(_))
+    ));
+    let deleted = service
+        .delete(&target_ref, &memory_ref, record.revision)
+        .unwrap();
+    assert!(deleted.deleted);
+    assert_eq!(deleted.memory_ref, memory_ref);
+    assert!(matches!(
+        service.get(&target_ref, &memory_ref),
+        Err(MemoryManagementError::NotFound)
+    ));
+    assert!(
+        service
+            .list(MemoryListFilter::default(), 20, 0)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+}
+
+#[test]
+fn target_capabilities_are_computed_after_filtering_and_paging() {
+    let (service, store) = test_service();
+    seed(
+        &store,
+        MemoryTarget::personal(personal_scope("paged-personal")),
+        "个人目标",
+    );
+    seed(
+        &store,
+        MemoryTarget::group_profile(group_scope("paged-group"), personal_scope("paged-user")),
+        "群画像目标",
+    );
+    // 旧实现会先为全部 target 读取 snapshot；筛选到 personal 后不应触发群画像 snapshot。
+    store.fail_management_snapshot_for_test(true);
+    let page = service
+        .targets(
+            MemoryTargetFilter {
+                scope: Some(MemoryKind::Personal),
+                ..MemoryTargetFilter::default()
+            },
+            1,
+            0,
+        )
+        .unwrap();
+    assert_eq!(page.total_count, 1);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].scope, "personal");
 }
 
 #[test]

@@ -440,6 +440,54 @@ impl MemoryStore {
             })
         })
     }
+
+    /// 管理员永久删除只允许 active 记录；完整快照校验、DELETE 和审计共享同一事务。
+    pub(crate) fn management_delete_if_unchanged_with_audit<F>(
+        &self,
+        target: &MemoryTarget,
+        expected: &MemoryRecord,
+        audit: F,
+    ) -> Result<(), MemoryError>
+    where
+        F: FnOnce(&Transaction<'_>, Option<u64>) -> Result<(), MemoryError>,
+    {
+        let target = target.clean()?;
+        if expected.status != MemoryStatus::Active {
+            return Err(MemoryError::changed(
+                "memory is no longer in the prepared active state",
+            ));
+        }
+        self.with_immediate_transaction(|tx| {
+            super::v3::ensure_record_unchanged_for_management(tx, &target, &expected.id, expected)?;
+            let profile_enabled = profile_enabled_for_management_in_transaction(tx, &target)?;
+            if expected.memory_kind == MemoryKind::GroupProfile && !profile_enabled {
+                return Err(MemoryError::profile_opted_out());
+            }
+            let changed = tx
+                .execute(
+                    "DELETE FROM memories
+                     WHERE id = ?1 AND scope_type = ?2 AND scope_id = ?3
+                       AND memory_kind = ?4 AND subject_id IS ?5
+                       AND status = 'active' AND revision = ?6",
+                    params![
+                        expected.id,
+                        target.scope_type.as_str(),
+                        target.scope_id,
+                        target.memory_kind.as_str(),
+                        target.subject_id,
+                        sqlite_revision(expected.revision)?,
+                    ],
+                )
+                .map_err(MemoryError::from_sql)?;
+            if changed != 1 {
+                return Err(MemoryError::changed(
+                    "memory changed after confirmation was prepared",
+                ));
+            }
+            audit(tx, None)?;
+            Ok(())
+        })
+    }
 }
 
 fn management_where(query: &ManagementListQuery) -> (String, Vec<SqlValue>) {

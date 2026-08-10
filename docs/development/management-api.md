@@ -284,12 +284,13 @@ Memory 管理 API 只在 `WEB_CONSOLE_ENABLED=true` 时注册，所有接口均�
 | `/api/v1/console/memories/update` | `memory_ref` + `expected_version` + patch，保留归档历史 |
 | `/api/v1/console/memories/archive` | `expected_version` 原子归档 |
 | `/api/v1/console/memories/restore` | `expected_version` 原子恢复 |
+| `/api/v1/console/memories/delete` | `expected_version` CAS 永久删除 active Memory；不可恢复 |
 | `/api/v1/console/memories/operations/prepare` | 准备 `clear_target` / `disable_group_profile` |
 | `/api/v1/console/memories/operations/commit` | 提交一次性 confirmation token |
 
 ### 目标和安全 DTO
 
-支持的 Memory scope 为 `personal`、`group_profile` 和 `group`。`legacy_unassigned` 不进入 discovery、list、get、create、update、archive、restore 或批量操作；请求不得通过 raw ID、scope key、owner、role 或 source 字段构造授权事实。
+支持的 Memory scope 为 `personal`、`group_profile` 和 `group`。`legacy_unassigned` 不进入 discovery、list、get、create、update、archive、restore、delete 或批量操作；请求不得通过 raw ID、scope key、owner、role 或 source 字段构造授权事实。
 
 target、account、group、subject 和 memory 使用带 `v1` 前缀的 SHA-256 opaque reference。target 摘要同时返回服务端计算的目标级 capabilities；群画像的 `can_disable_group_profile` 来自持久化 profile preference，而不是客户端会话缓存。服务端从已存在的合法 v3 Memory 目标发现 reference，并在每次写入前重新回查；客户端不能解析或拼接 reference。未知目标、目标外记录、legacy 记录和 target mismatch 对外统一为 `not_found` 或安全的校验错误，不返回探测差异。
 
@@ -297,7 +298,7 @@ target、account、group、subject 和 memory 使用带 `v1` 前缀的 SHA-256 o
 
 ### revision、生命周期与确认
 
-`memory_management_schema_v5_revision` 为历史记录初始化 revision=1。revision 由服务端维护；update、archive、restore 和批量操作使用 expected version，并在 SQLite transaction 内比较完整快照或 `(id, revision)`，stale write 返回 `conflict`。update 延续“归档旧记录 + 创建新记录”的历史语义；Memory 管理 API 不提供永久物理删除。
+`memory_management_schema_v5_revision` 为历史记录初始化 revision=1。revision 由服务端维护；update、archive、restore、delete 和批量操作使用 expected version，并在 SQLite transaction 内比较完整快照或 `(id, revision)`，stale write 返回 `conflict`。update 延续“归档旧记录 + 创建新记录”的历史语义；delete 仅允许 active Memory，CAS 成功后物理删除且不可恢复，WebUI 必须在提交前二次确认。服务端返回的结果只包含 opaque `memory_ref` 与 `deleted=true`，不暴露内部 ID。
 
 `clear_target` 的定义是事务内归档目标范围内当前 active Memory，历史保留并可恢复，返回真实受影响数量。`disable_group_profile` 复用现有群画像 opt-out：同一事务写入 profile preference=false 并归档 active 群画像；没有为了 API 发明重新启用语义，也不会自动恢复 archived 历史。
 

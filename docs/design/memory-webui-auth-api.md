@@ -14,7 +14,7 @@
 | 管理审计 | 已实现 | Memory 操作写入既有 `console_audit_events`，只增加安全元数据列 |
 | Memory 领域门面 | 已实现 | `runtime/tools/memory/management/` 编排目标发现、DTO 所需结果、revision 和确认协议 |
 | Memory 管理 API | 已实现 | 只在 `WEB_CONSOLE_ENABLED=true` 时注册，路径统一为 `/api/v1/console/memories/*` |
-| 原生 TypeScript WebUI | 已实现 | `web-console/` 提供受控 Memory 列表、筛选、创建、编辑、归档/恢复和范围确认操作，`dist/` 由构建生成 |
+| 原生 TypeScript WebUI | 已实现 | `web-console/` 提供受控 Memory 列表、筛选、创建、编辑、归档/恢复、永久删除和范围确认操作，`dist/` 由构建生成 |
 | 平台用户/群管理员自助 | 未实现 | 没有把部署管理员身份转换为平台用户或群角色的绑定链路 |
 
 ## 部署管理员边界
@@ -56,16 +56,17 @@ target discovery 从已存在且可可信解析的 v3 Memory 记录中恢复稳�
 | `POST /api/v1/console/memories/update` | 携带 expected_version 编辑，保留旧记录并写入新记录 |
 | `POST /api/v1/console/memories/archive` | 携带 expected_version 原子归档 |
 | `POST /api/v1/console/memories/restore` | 携带 expected_version 原子恢复 |
+| `POST /api/v1/console/memories/delete` | 携带 expected_version 原子永久删除 active Memory |
 | `POST /api/v1/console/memories/operations/prepare` | 准备高影响操作 |
 | `POST /api/v1/console/memories/operations/commit` | 提交一次性确认 |
 
-编辑沿用当前领域的历史语义：旧记录变为 archived，新记录获得新 ID；不会原地覆盖正文，也不能修改 target、owner、source 或创建者。管理 API 不提供永久物理删除。
+编辑沿用当前领域的历史语义：旧记录变为 archived，新记录获得新 ID；不会原地覆盖正文，也不能修改 target、owner、source 或创建者。永久删除只接受 active Memory，并使用 expected_version 做 CAS；这是不可恢复操作，WebUI 必须二次确认。服务端只返回 opaque memory_ref，不暴露内部记录 ID。
 
 `clear_target` 的语义是事务内把目标范围当前 active Memory 全部归档，历史保留且可恢复；它不是 DELETE。`disable_group_profile` 复用群画像 opt-out 生命周期：在同一事务写入 profile preference=false，并归档当前 active 画像。第一阶段没有重新启用画像的管理路由；历史 archived 记录不会被自动恢复。
 
 ## revision 与并发
 
-`memory_management_schema_v5_revision` 为旧记录和新记录增加 `revision INTEGER NOT NULL DEFAULT 1`。revision 由服务端维护，不接受客户端指定。更新、归档、恢复和批量操作都在 SQLite `IMMEDIATE` transaction 中比较完整记录或 `(id, revision)` 快照；相同 expected version 的并发请求最多一个提交，另一个返回 `conflict`，事务失败不会留下部分结果。
+`memory_management_schema_v5_revision` 为旧记录和新记录增加 `revision INTEGER NOT NULL DEFAULT 1`。revision 由服务端维护，不接受客户端指定。更新、归档、恢复、永久删除和批量操作都在 SQLite `IMMEDIATE` transaction 中比较完整记录或 `(id, revision)` 快照；相同 expected version 的并发请求最多一个提交，另一个返回 `conflict`，事务失败不会留下部分结果。永久删除在 CAS 成功后物理移除 active 记录，不能恢复。
 
 ## prepare / commit
 

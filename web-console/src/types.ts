@@ -257,6 +257,7 @@ export interface MemoryCapabilities {
   canUpdate: boolean;
   canArchive: boolean;
   canRestore: boolean;
+  canDelete: boolean;
 }
 
 export interface MemoryOperationCapabilities {

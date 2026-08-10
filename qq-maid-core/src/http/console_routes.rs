@@ -101,6 +101,11 @@ const CONSOLE_ASSETS: &[(&str, &str, &str)] = &[
         "text/javascript; charset=utf-8",
     ),
     (
+        "memory-api.js",
+        include_str!("../../../web-console/dist/memory-api.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
         "app.js",
         include_str!("../../../web-console/dist/app.js"),
         "text/javascript; charset=utf-8",

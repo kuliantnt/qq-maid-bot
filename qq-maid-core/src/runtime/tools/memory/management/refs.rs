@@ -250,6 +250,7 @@ pub(super) fn memory_item(
             can_update: active && profile_allowed,
             can_archive: active,
             can_restore: !active && profile_allowed,
+            can_delete: active && profile_allowed,
         },
     })
 }
