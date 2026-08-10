@@ -4,6 +4,8 @@
 //! pending 或任何持久化状态。白名单命中必须由 command dispatcher 放在正式命令之后、
 //! unknown/suppressed 兜底之前处理。
 
+use qq_maid_common::text::sanitize_visible_text;
+
 use super::{RespondRequest, RespondResponse, common::command_response};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,25 +166,23 @@ fn review_target(req: &RespondRequest) -> Option<String> {
         .iter()
         .filter(|mention| !mention.is_self)
         .find_map(|mention| {
-            mention
-                .target
-                .display_name
-                .as_deref()
-                .or(mention.raw_text.as_deref())
-                .and_then(normalize_review_target)
+            [
+                mention.target.display_name.as_deref(),
+                mention.raw_text.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .find_map(normalize_review_target)
         })
 }
 
 fn normalize_review_target(value: &str) -> Option<String> {
+    let value = sanitize_visible_text(value);
     let value = value.trim().trim_start_matches('@').trim();
     if value.is_empty() {
         return None;
     }
-    let display_name = value
-        .chars()
-        .filter(|ch| !ch.is_control())
-        .take(24)
-        .collect::<String>();
+    let display_name = value.chars().take(24).collect::<String>();
     (!display_name.is_empty()).then(|| format!("@{display_name}"))
 }
 
@@ -238,5 +238,23 @@ mod tests {
                 "{command} must keep its existing route"
             );
         }
+    }
+
+    #[test]
+    fn review_target_removes_invisible_formats_before_truncating() {
+        assert_eq!(
+            normalize_review_target("安\u{202e}全\u{200b}昵称\u{2066}"),
+            Some("@安全昵称".to_owned())
+        );
+        assert_eq!(
+            normalize_review_target("\u{200b}@安全昵称"),
+            Some("@安全昵称".to_owned())
+        );
+
+        let padded = format!("{}abcdefghijklmnopqrstuvwx", "\u{200b}".repeat(24));
+        assert_eq!(
+            normalize_review_target(&padded),
+            Some("@abcdefghijklmnopqrstuvwx".to_owned())
+        );
     }
 }
