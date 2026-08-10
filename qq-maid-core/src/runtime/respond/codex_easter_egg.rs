@@ -8,93 +8,134 @@ use super::{RespondRequest, RespondResponse, common::command_response};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CodexEasterEgg {
-    Approve,
-    Approvals,
-    Cloud,
-    CloudEnvironment,
-    Diff,
-    Fast,
-    Feedback,
-    Fork,
-    Goal,
-    IdeContext,
-    Init,
-    Local,
-    Mcp,
-    Memories,
-    Model,
-    Pet,
-    Personality,
-    Plan,
-    Project,
-    Reasoning,
+    Static(&'static str),
     Review,
-    Side,
-    Status,
-    Task,
-    Worktree,
 }
+
+struct StaticCodexCommand {
+    name: &'static str,
+    reply: &'static str,
+}
+
+/// 静态彩蛋的命令名和确定性回复必须在同一张表中维护；需要请求上下文的 `/review`
+/// 使用单独策略，避免把动态内容塞进静态映射。
+const STATIC_CODEX_COMMANDS: &[StaticCodexCommand] = &[
+    StaticCodexCommand {
+        name: "approve",
+        reply: "批准了，但没完全批准。",
+    },
+    StaticCodexCommand {
+        name: "approvals",
+        reply: "批准了，但没完全批准。",
+    },
+    StaticCodexCommand {
+        name: "cloud",
+        reply: "云端已就位。天气不负责。",
+    },
+    StaticCodexCommand {
+        name: "cloud-environment",
+        reply: "云环境已选好。大概是晴天。",
+    },
+    StaticCodexCommand {
+        name: "diff",
+        reply: "差异存在，眼神坚定。",
+    },
+    StaticCodexCommand {
+        name: "fast",
+        reply: "快模式已开启。先别问有多快。",
+    },
+    StaticCodexCommand {
+        name: "feedback",
+        reply: "反馈收到，情绪稳定。",
+    },
+    StaticCodexCommand {
+        name: "fork",
+        reply: "分叉成功，平行宇宙自行负责。",
+    },
+    StaticCodexCommand {
+        name: "goal",
+        reply: "目标已锁定。方向感稍后补上。",
+    },
+    StaticCodexCommand {
+        name: "ide-context",
+        reply: "IDE 上下文若隐若现。",
+    },
+    StaticCodexCommand {
+        name: "init",
+        reply: "初始化完成：从想象开始。",
+    },
+    StaticCodexCommand {
+        name: "local",
+        reply: "本地模式：离线但不失联。",
+    },
+    StaticCodexCommand {
+        name: "mcp",
+        reply: "MCP 已连接到想象力服务器。",
+    },
+    StaticCodexCommand {
+        name: "memories",
+        reply: "记忆功能记得自己没开。",
+    },
+    StaticCodexCommand {
+        name: "model",
+        reply: "模型选择困难症已启动。",
+    },
+    StaticCodexCommand {
+        name: "pet",
+        reply: "电子宠物正在假装工作。",
+    },
+    StaticCodexCommand {
+        name: "personality",
+        reply: "人格加载中，请勿拍打。",
+    },
+    StaticCodexCommand {
+        name: "plan",
+        reply: "计划很完整，变化也很完整。",
+    },
+    StaticCodexCommand {
+        name: "project",
+        reply: "项目已选中，需求仍在移动。",
+    },
+    StaticCodexCommand {
+        name: "reasoning",
+        reply: "推理强度：想得挺美。",
+    },
+    StaticCodexCommand {
+        name: "side",
+        reply: "支线聊天已开启，主线假装没看见。",
+    },
+    StaticCodexCommand {
+        name: "status",
+        reply: "状态：还能继续写。大概。",
+    },
+    StaticCodexCommand {
+        name: "task",
+        reply: "任务已创建：继续保持忙碌。",
+    },
+    StaticCodexCommand {
+        name: "worktree",
+        reply: "工作树长出来了，先别浇水。",
+    },
+];
 
 impl CodexEasterEgg {
     fn parse(text: &str) -> Option<Self> {
         let command = text.trim().strip_prefix('/')?.trim_start();
-        let action = command.split_whitespace().next()?.to_ascii_lowercase();
-        Some(match action.as_str() {
-            "approve" => Self::Approve,
-            "approvals" => Self::Approvals,
-            "cloud" => Self::Cloud,
-            "cloud-environment" => Self::CloudEnvironment,
-            "diff" => Self::Diff,
-            "fast" => Self::Fast,
-            "feedback" => Self::Feedback,
-            "fork" => Self::Fork,
-            "goal" => Self::Goal,
-            "ide-context" => Self::IdeContext,
-            "init" => Self::Init,
-            "local" => Self::Local,
-            "mcp" => Self::Mcp,
-            "memories" => Self::Memories,
-            "model" => Self::Model,
-            "pet" => Self::Pet,
-            "personality" => Self::Personality,
-            "plan" => Self::Plan,
-            "project" => Self::Project,
-            "reasoning" => Self::Reasoning,
-            "review" => Self::Review,
-            "side" => Self::Side,
-            "status" => Self::Status,
-            "task" => Self::Task,
-            "worktree" => Self::Worktree,
-            _ => return None,
-        })
+        let action = command.split_whitespace().next()?;
+        if action.eq_ignore_ascii_case("review") {
+            return Some(Self::Review);
+        }
+
+        STATIC_CODEX_COMMANDS
+            .iter()
+            .find(|command| action.eq_ignore_ascii_case(command.name))
+            .map(|command| Self::Static(command.reply))
     }
 
     fn reply(self, req: &RespondRequest) -> String {
         match self {
-            Self::Approve | Self::Approvals => "批准了，但没完全批准。".to_owned(),
-            Self::Cloud => "云端已就位。天气不负责。".to_owned(),
-            Self::CloudEnvironment => "云环境已选好。大概是晴天。".to_owned(),
-            Self::Diff => "差异存在，眼神坚定。".to_owned(),
-            Self::Fast => "快模式已开启。先别问有多快。".to_owned(),
-            Self::Feedback => "反馈收到，情绪稳定。".to_owned(),
-            Self::Fork => "分叉成功，平行宇宙自行负责。".to_owned(),
-            Self::Goal => "目标已锁定。方向感稍后补上。".to_owned(),
-            Self::IdeContext => "IDE 上下文若隐若现。".to_owned(),
-            Self::Init => "初始化完成：从想象开始。".to_owned(),
-            Self::Local => "本地模式：离线但不失联。".to_owned(),
-            Self::Mcp => "MCP 已连接到想象力服务器。".to_owned(),
-            Self::Memories => "记忆功能记得自己没开。".to_owned(),
-            Self::Model => "模型选择困难症已启动。".to_owned(),
-            Self::Pet => "电子宠物正在假装工作。".to_owned(),
-            Self::Personality => "人格加载中，请勿拍打。".to_owned(),
-            Self::Plan => "计划很完整，变化也很完整。".to_owned(),
-            Self::Project => "项目已选中，需求仍在移动。".to_owned(),
-            Self::Reasoning => "推理强度：想得挺美。".to_owned(),
+            Self::Static(reply) => reply.to_owned(),
             Self::Review => review_reply(req),
-            Self::Side => "支线聊天已开启，主线假装没看见。".to_owned(),
-            Self::Status => "状态：还能继续写。大概。".to_owned(),
-            Self::Task => "任务已创建：继续保持忙碌。".to_owned(),
-            Self::Worktree => "工作树长出来了，先别浇水。".to_owned(),
         }
     }
 }
