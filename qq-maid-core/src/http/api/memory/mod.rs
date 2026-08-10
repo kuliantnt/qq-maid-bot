@@ -16,6 +16,7 @@ pub(crate) fn router() -> Router<OpsHttpState> {
         .route("/api/v1/console/memories/update", post(handlers::update))
         .route("/api/v1/console/memories/archive", post(handlers::archive))
         .route("/api/v1/console/memories/restore", post(handlers::restore))
+        .route("/api/v1/console/memories/delete", post(handlers::delete))
         .route(
             "/api/v1/console/memories/operations/prepare",
             post(handlers::prepare_operation),

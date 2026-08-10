@@ -3,17 +3,20 @@ import assert from "node:assert/strict";
 
 import {
   ConsoleApiError,
+  setCsrfToken,
+} from "../dist/api.js";
+import {
   archiveMemory,
   commitMemoryOperation,
   createMemory,
+  deleteMemory,
   getMemory,
   listMemoryTargets,
   listMemories,
   prepareMemoryOperation,
   restoreMemory,
-  setCsrfToken,
   updateMemory,
-} from "../dist/api.js";
+} from "../dist/memory-api.js";
 import { disposeMemory } from "../dist/views/memory/memory.js";
 
 const TARGET_REF = "memory_target:v1:target";
@@ -54,6 +57,7 @@ function memoryItem(overrides = {}) {
       can_update: true,
       can_archive: true,
       can_restore: false,
+      can_delete: true,
     },
     ...overrides,
   };
@@ -136,7 +140,7 @@ test("Memory CRUD 始终携带 target_ref 与 CAS version，解析 mutation enve
     const body = JSON.parse(String(init.body));
     if (path.endsWith("/create")) return jsonResponse({ ok: true, data: { memory: memoryItem() } });
     if (path.endsWith("/update")) return jsonResponse({ ok: true, data: { memory: memoryItem({ version: body.expected_version + 1, content: "已更新" }) } });
-    if (path.endsWith("/archive")) return jsonResponse({ ok: true, data: { memory: memoryItem({ version: body.expected_version + 1, status: "archived", capabilities: { can_update: false, can_archive: false, can_restore: true } }) } });
+    if (path.endsWith("/archive")) return jsonResponse({ ok: true, data: { memory: memoryItem({ version: body.expected_version + 1, status: "archived", capabilities: { can_update: false, can_archive: false, can_restore: true, can_delete: false } }) } });
     return jsonResponse({ ok: true, data: { memory: memoryItem({ version: body.expected_version + 1 }) } });
   }, async (calls) => {
     await getMemory(TARGET_REF, MEMORY_REF);
@@ -199,6 +203,31 @@ test("Memory 范围确认使用新的 operation/token 协议并保留 CSRF", asy
     assert.equal(calls[1].input, "/api/v1/console/memories/operations/commit");
     assert.equal(calls[0].init.headers["X-CSRF-Token"], "csrf-memory");
     assert.equal(calls[1].init.headers["X-CSRF-Token"], "csrf-memory");
+  });
+});
+
+test("Memory 删除使用 opaque ref、CAS 和 CSRF，并验证服务端成功结果", async () => {
+  setCsrfToken("csrf-memory-delete");
+  await withFetchMock(async (_input, init) => {
+    assert.deepEqual(JSON.parse(String(init.body)), {
+      target_ref: TARGET_REF,
+      memory_ref: MEMORY_REF,
+      expected_version: 7,
+    });
+    return jsonResponse({ ok: true, data: { deleted: true, memory_ref: MEMORY_REF } });
+  }, async (calls) => {
+    await deleteMemory({ targetRef: TARGET_REF, memoryRef: MEMORY_REF, expectedVersion: 7 });
+    assert.equal(calls[0].input, "/api/v1/console/memories/delete");
+    assert.equal(calls[0].init.headers["X-CSRF-Token"], "csrf-memory-delete");
+  });
+});
+
+test("Memory 删除返回不匹配结果时失败", async () => {
+  await withFetchMock(async () => jsonResponse({ ok: true, data: { deleted: true, memory_ref: "memory:v1:other" } }), async () => {
+    await assert.rejects(
+      deleteMemory({ targetRef: TARGET_REF, memoryRef: MEMORY_REF, expectedVersion: 1 }),
+      (error) => error instanceof ConsoleApiError && error.code === "invalid_response",
+    );
   });
 });
 

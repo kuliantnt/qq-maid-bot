@@ -257,6 +257,46 @@ pub(super) async fn restore(
     respond(&state, &headers, &context, result)
 }
 
+pub(super) async fn delete(
+    State(state): State<OpsHttpState>,
+    headers: HeaderMap,
+    payload: Result<Json<VersionedMemoryRequest>, JsonRejection>,
+) -> Response {
+    let context = match ApiRequestContext::authenticate(&state, &headers) {
+        Ok(context) => context,
+        Err(error) => return respond_error(&state, &headers, error),
+    };
+    let result = (|| {
+        let request = json_payload(payload, &context)?;
+        let (target_ref, memory_ref, expected_version) = request.into_parts()?;
+        let service_result = service(&state)?.delete_with_audit(
+            &target_ref,
+            &memory_ref,
+            expected_version,
+            |transaction, version| {
+                audit_success_in_transaction(
+                    &state,
+                    &context,
+                    transaction,
+                    "memory.delete",
+                    Some(&target_ref),
+                    Some(expected_version),
+                    version,
+                )
+            },
+        );
+        finish_mutation(
+            &state,
+            &context,
+            "memory.delete",
+            Some(&target_ref),
+            Some(expected_version),
+            service_result,
+        )
+    })();
+    respond(&state, &headers, &context, result)
+}
+
 pub(super) async fn prepare_operation(
     State(state): State<OpsHttpState>,
     headers: HeaderMap,

@@ -44,6 +44,7 @@ function rawMemory(overrides = {}) {
       can_update: true,
       can_archive: true,
       can_restore: false,
+      can_delete: true,
     },
     ...overrides,
   };
@@ -222,7 +223,7 @@ test("后续 target 页失败不影响已经成功的 Memory 列表", async () =
   });
 });
 
-test("Memory 刷新、筛选和翻页不重新请求 target 页面", async () => {
+test("Memory 筛选和翻页不重新请求 target 页面，显式刷新会更新 target", async () => {
   setupMemoryPage();
   await withMemoryFetch(async (path, body) => {
     if (path.endsWith("/targets")) return targetPage(1, 2, [rawTarget()], 2);
@@ -237,7 +238,7 @@ test("Memory 刷新、筛选和翻页不重新请求 target 页面", async () =>
     await flushMicrotasks();
     document.getElementById("memory-refresh").onclick();
     await flushMicrotasks();
-    assert.equal(targetCalls(calls).length, 1);
+    assert.equal(targetCalls(calls).length, 2);
     assert.equal(memoryCalls(calls).length, 4);
   });
 });
@@ -305,11 +306,63 @@ test("Memory 409 conflict 不显示成功文案", async () => {
     window.confirm = () => true;
     assert.equal(memoryCalls(calls).length, 1);
     assert.equal(document.getElementById("memory-list").children.length, 1);
-    assert.deepEqual(document.getElementById("memory-list").querySelectorAll("button").map((button) => button.textContent), ["纠正内容", "归档"]);
+    assert.deepEqual(document.getElementById("memory-list").querySelectorAll("button").map((button) => button.textContent), ["纠正内容", "归档", "永久删除"]);
     buttonWithText(document.getElementById("memory-list"), "归档").onclick();
     await flushMicrotasks();
     assert.match(document.getElementById("memory-result").textContent, /版本已变化/);
     assert.equal(document.getElementById("memory-result").textContent.includes("已由服务端确认归档"), false);
+  });
+});
+
+test("Memory 删除确认取消不会请求服务端", async () => {
+  setupMemoryPage();
+  let deletes = 0;
+  await withMemoryFetch(async (path) => {
+    if (path.endsWith("/delete")) deletes += 1;
+    if (path.endsWith("/targets")) return targetPage(1, 1);
+    return memoryPage([rawMemory()]);
+  }, async () => {
+    await initializeMemory();
+    await flushMicrotasks();
+    window.confirm = () => false;
+    buttonWithText(document.getElementById("memory-list"), "永久删除").onclick();
+    await flushMicrotasks();
+    assert.equal(deletes, 0);
+  });
+});
+
+test("Memory 删除成功后刷新列表，409 不显示成功文案", async () => {
+  setupMemoryPage();
+  let mode = "success";
+  let deletes = 0;
+  let deleted = false;
+  await withMemoryFetch(async (path) => {
+    if (path.endsWith("/targets")) return targetPage(1, 1);
+    if (path.endsWith("/delete")) {
+      deletes += 1;
+      if (mode === "success") deleted = true;
+      return mode === "success"
+        ? jsonResponse({ ok: true, data: { deleted: true, memory_ref: "memory:v1:item-1" } })
+        : jsonResponse({ ok: false, error: { code: "conflict", message: "删除时版本已变化" } }, 409);
+    }
+    return mode === "success" && deleted ? memoryPage([]) : memoryPage([rawMemory()]);
+  }, async () => {
+    await initializeMemory();
+    await flushMicrotasks();
+    window.confirm = () => true;
+    buttonWithText(document.getElementById("memory-list"), "永久删除").onclick();
+    await flushMicrotasks();
+    assert.equal(deletes, 1);
+    assert.equal(document.getElementById("memory-list").children[0].textContent, "当前筛选没有可展示的记忆。");
+
+    mode = "conflict";
+    disposeMemory();
+    await initializeMemory();
+    await flushMicrotasks();
+    buttonWithText(document.getElementById("memory-list"), "永久删除").onclick();
+    await flushMicrotasks();
+    assert.match(document.getElementById("memory-result").textContent, /删除时版本已变化/);
+    assert.equal(document.getElementById("memory-result").textContent.includes("已由服务端确认删除"), false);
   });
 });
 
@@ -329,6 +382,60 @@ test("401/session expired 后清理 Memory 内容", async () => {
     await flushMicrotasks();
     assert.equal(document.getElementById("memory-list").children.length, 0);
     assert.equal(document.getElementById("memory-result").textContent, "");
+  });
+});
+
+test("Memory 详情请求在登出后返回不会弹出旧正文", async () => {
+  setupMemoryPage();
+  let resolveGet;
+  const getResponse = new Promise((resolve) => { resolveGet = resolve; });
+  let promptCalls = 0;
+  await withMemoryFetch(async (path) => {
+    if (path.endsWith("/targets")) return targetPage(1, 1);
+    if (path.endsWith("/get")) return getResponse;
+    return memoryPage([rawMemory()]);
+  }, async () => {
+    await initializeMemory();
+    await flushMicrotasks();
+    window.prompt = () => {
+      promptCalls += 1;
+      return "不应出现的旧正文";
+    };
+    buttonWithText(document.getElementById("memory-list"), "纠正内容").onclick();
+    await flushMicrotasks();
+    disposeMemory();
+    resolveGet(jsonResponse({ ok: true, data: rawMemory({ content: "旧会话正文" }) }));
+    await flushMicrotasks();
+    assert.equal(promptCalls, 0);
+    assert.equal(document.getElementById("memory-result").textContent, "");
+  });
+});
+
+test("Memory 刷新使用服务端最新 target capability", async () => {
+  setupMemoryPage();
+  const disabled = rawTarget("memory_target:v1:profile-1", {
+    scope: "group_profile",
+    capabilities: { can_clear_target: true, can_disable_group_profile: false },
+  });
+  const enabled = rawTarget("memory_target:v1:profile-1", {
+    scope: "group_profile",
+    capabilities: { can_clear_target: true, can_disable_group_profile: true },
+  });
+  let targetRequest = 0;
+  await withMemoryFetch(async (path) => {
+    if (path.endsWith("/targets")) {
+      targetRequest += 1;
+      return targetPage(1, 1, [targetRequest === 1 ? disabled : enabled]);
+    }
+    return memoryPage();
+  }, async () => {
+    await initializeMemory();
+    await flushMicrotasks();
+    assert.equal(buttonWithText(document.getElementById("memory-targets"), "停止画像"), undefined);
+    document.getElementById("memory-refresh").onclick();
+    await flushMicrotasks();
+    assert.equal(targetRequest, 2);
+    assert.ok(buttonWithText(document.getElementById("memory-targets"), "停止画像"));
   });
 });
 

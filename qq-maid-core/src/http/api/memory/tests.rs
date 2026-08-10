@@ -448,6 +448,10 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
     assert_eq!(created["data"]["memory"]["version"], 1);
     assert_eq!(created["data"]["memory"]["content"], "管理员创建的内容");
     assert_eq!(created["data"]["memory"]["source_type"], "manual_import");
+    assert_eq!(
+        created["data"]["memory"]["capabilities"]["can_delete"],
+        true
+    );
     assert!(
         created["data"]["memory"]
             .get("created_by_user_id")
@@ -529,6 +533,10 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
     assert_eq!(status, StatusCode::OK, "{archived}");
     assert_eq!(archived["data"]["memory"]["status"], "archived");
     assert_eq!(archived["data"]["memory"]["version"], 3);
+    assert_eq!(
+        archived["data"]["memory"]["capabilities"]["can_delete"],
+        false
+    );
     assert_eq!(api.audit_count("memory.archive", "success"), 1);
 
     let (status, restored) = api
@@ -544,7 +552,47 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
     assert_eq!(status, StatusCode::OK, "{restored}");
     assert_eq!(restored["data"]["memory"]["status"], "active");
     assert_eq!(restored["data"]["memory"]["version"], 4);
+    assert_eq!(
+        restored["data"]["memory"]["capabilities"]["can_delete"],
+        true
+    );
     assert_eq!(api.audit_count("memory.restore", "success"), 1);
+
+    let (status, stale_delete) = api
+        .post(
+            "/api/v1/console/memories/delete",
+            json!({
+                "target_ref": api.target_ref,
+                "memory_ref": updated_memory_ref,
+                "expected_version": 3
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale_delete}");
+    assert_eq!(stale_delete["error"]["code"], "conflict");
+    assert_eq!(api.audit_count("memory.delete", "denied"), 1);
+
+    let (status, deleted) = api
+        .post(
+            "/api/v1/console/memories/delete",
+            json!({
+                "target_ref": api.target_ref,
+                "memory_ref": updated_memory_ref,
+                "expected_version": 4
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["data"]["deleted"], true);
+    assert_eq!(deleted["data"]["memory_ref"], updated_memory_ref);
+    assert_eq!(api.audit_count("memory.delete", "success"), 1);
+    let (status, missing) = api
+        .post(
+            "/api/v1/console/memories/get",
+            json!({"target_ref": api.target_ref, "memory_ref": updated_memory_ref}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
 
     let (status, empty_patch) = api
         .post(
@@ -632,6 +680,29 @@ async fn memory_api_audit_failure_rolls_back_mutations_and_consumes_commit_token
     assert_eq!(status, StatusCode::OK, "{unchanged}");
     assert_eq!(unchanged["data"]["version"], 1);
     assert_eq!(unchanged["data"]["content"], "初始 % 内容");
+
+    api.set_audit_failure(true);
+    let (status, delete_failed) = api
+        .post(
+            "/api/v1/console/memories/delete",
+            json!({
+                "target_ref": api.target_ref,
+                "memory_ref": initial_memory_ref,
+                "expected_version": 1
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{delete_failed}");
+    assert_eq!(api.audit_count("memory.delete", "success"), 0);
+    api.set_audit_failure(false);
+    let (status, after_delete) = api
+        .post(
+            "/api/v1/console/memories/get",
+            json!({"target_ref": api.target_ref, "memory_ref": initial_memory_ref}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{after_delete}");
+    assert_eq!(after_delete["data"]["content"], "初始 % 内容");
 
     let (status, prepared) = api
         .post(

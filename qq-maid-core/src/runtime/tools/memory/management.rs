@@ -28,8 +28,8 @@ use self::{
         validate_content, validate_list_filter, validate_ref, validate_target_filter,
     },
     types::{
-        MemoryManagementItem, MemoryManagementMutationResult, MemoryManagementPage,
-        MemoryTargetPage, PreparedMemoryOperation,
+        MemoryDeleteResult, MemoryManagementItem, MemoryManagementMutationResult,
+        MemoryManagementPage, MemoryTargetPage, PreparedMemoryOperation,
     },
 };
 
@@ -55,17 +55,18 @@ impl MemoryManagementService {
         offset: usize,
     ) -> Result<MemoryTargetPage, MemoryManagementError> {
         validate_target_filter(&filter)?;
-        let targets = self.visible_targets_with_capabilities()?;
+        let targets = self.visible_targets()?;
         let mut filtered = targets
             .into_iter()
             .filter(|target| target_matches_filter(target, &filter))
-            .map(|target| target.summary)
             .collect::<Vec<_>>();
         let total_count = filtered.len();
         let start = offset.min(total_count);
         let end = start.saturating_add(limit).min(total_count);
+        let mut page = filtered.drain(start..end).collect::<Vec<_>>();
+        self.apply_capabilities(&mut page)?;
         Ok(MemoryTargetPage {
-            items: filtered.drain(start..end).collect(),
+            items: page.into_iter().map(|target| target.summary).collect(),
             total_count,
         })
     }
@@ -310,6 +311,40 @@ impl MemoryManagementService {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn delete(
+        &self,
+        target_ref: &str,
+        memory_ref: &str,
+        expected_version: u64,
+    ) -> Result<MemoryDeleteResult, MemoryManagementError> {
+        self.delete_with_audit(target_ref, memory_ref, expected_version, |_, _| Ok(()))
+    }
+
+    pub(crate) fn delete_with_audit<F>(
+        &self,
+        target_ref: &str,
+        memory_ref: &str,
+        expected_version: u64,
+        audit: F,
+    ) -> Result<MemoryDeleteResult, MemoryManagementError>
+    where
+        F: Fn(&Transaction<'_>, Option<u64>) -> Result<(), MemoryManagementError>,
+    {
+        let target = self.resolve_target_ref(target_ref)?;
+        let current = self.resolve_memory_ref(&target, memory_ref)?;
+        ensure_expected_version(&current, expected_version)?;
+        self.store
+            .management_delete_if_unchanged_with_audit(&target.target, &current, |tx, version| {
+                audit(tx, version).map_err(|error| MemoryError::audit_failed(error.message()))
+            })
+            .map_err(MemoryManagementError::from)?;
+        Ok(MemoryDeleteResult {
+            memory_ref: memory_ref.to_owned(),
+            deleted: true,
+        })
+    }
+
     pub(crate) fn prepare(
         &self,
         actor: ManagementActor,
@@ -364,11 +399,11 @@ impl MemoryManagementService {
             .collect())
     }
 
-    fn visible_targets_with_capabilities(
+    fn apply_capabilities(
         &self,
-    ) -> Result<Vec<ResolvedTarget>, MemoryManagementError> {
-        let mut targets = self.visible_targets()?;
-        for target in &mut targets {
+        targets: &mut [ResolvedTarget],
+    ) -> Result<(), MemoryManagementError> {
+        for target in targets {
             let profile_enabled = if target.target.memory_kind() == MemoryKind::GroupProfile {
                 self.store
                     .management_snapshot(&target.target)
@@ -380,7 +415,7 @@ impl MemoryManagementService {
             };
             target.summary.capabilities = operation_capabilities(&target.target, profile_enabled);
         }
-        Ok(targets)
+        Ok(())
     }
 
     pub(super) fn resolve_target_ref(
