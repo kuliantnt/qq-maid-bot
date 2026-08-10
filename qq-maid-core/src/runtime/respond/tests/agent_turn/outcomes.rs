@@ -130,7 +130,7 @@ async fn internal_only_result_propagates_final_generation_error() {
 }
 
 #[tokio::test]
-async fn mixed_trusted_and_internal_results_warn_when_final_generation_fails() {
+async fn mixed_trusted_and_internal_results_propagate_final_generation_error() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_raw_tool_results_then_error(
@@ -167,20 +167,11 @@ async fn mixed_trusted_and_internal_results_warn_when_final_generation_fails() {
         );
     let service = test_service_with_provider_and_tool_calling(inspector, true);
 
-    let response = service
+    let error = service
         .respond(private_message("查杭州天气并结合知识库说明"))
         .await
-        .unwrap();
+        .unwrap_err();
 
-    let text = response.text.unwrap();
-    assert!(text.contains("🌦 杭州天气"));
-    assert!(text.contains("以上只包含可确定展示的部分结果"));
-    assert!(!text.contains("内部证据"));
-    let diagnostics = response.diagnostics.unwrap();
-    assert_eq!(diagnostics["agent_finalization_fallback_used"], true);
-    assert_eq!(diagnostics["agent_turn_status"], "partial_success");
-    assert_eq!(
-        diagnostics["agent_finalization_error_code"],
-        "context_budget_exceeded"
-    );
+    assert_eq!(error.code, "context_budget_exceeded");
+    assert_eq!(error.stage, "tool_loop");
 }

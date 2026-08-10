@@ -9,7 +9,7 @@ use crate::{
         respond::{
             RespondRequest,
             agent_composition::AgentReplySource,
-            agent_outcome::{AgentTurnOutcome, ToolEffect, ToolOutcomeStatus},
+            agent_outcome::{AgentTurnOutcome, ResponseBlock, ToolEffect, ToolOutcomeStatus},
             llm_service::RespondOutput,
         },
         session::{SessionMeta, SessionRecord},
@@ -56,13 +56,16 @@ impl DomainTurnPostprocessor for TodoTurnPostprocessor {
         reply_source: AgentReplySource,
     ) -> Box<dyn DomainTurnDiagnostics> {
         // 自然语言 Agent 正常成功时模型正文是唯一主体，确定性 RelatedList 不再
-        // 附加。既然列表正文没有结构化发布，就同步撤销本轮 list_todos 写入的快照，
-        // 避免下一轮“第一条”命中用户未见过的编号。
+        // 附加。只有模型正文没有完整包含这份列表时才撤销快照；如果模型已经把
+        // 同一份列表展示出来，必须保留结构化快照，供下一轮“第一条”等引用继续
+        // 绑定用户刚刚看到的编号。
         let model_primary_hides_related_list =
             matches!(reply_source, AgentReplySource::NaturalLanguageAgent)
                 && !output.model_reply_empty
                 && projected_outcome.as_deref().is_some_and(|outcome| {
-                    outcome.has_related_list() && outcome.can_use_model_reply_as_primary()
+                    outcome.has_related_list()
+                        && outcome.can_use_model_reply_as_primary()
+                        && !model_reply_contains_related_list(&self.original_model_reply, outcome)
                 });
 
         let (validation, guard_applied) = if let Some(validation) = projected_outcome
@@ -111,6 +114,25 @@ impl DomainTurnPostprocessor for TodoTurnPostprocessor {
             guard_applied,
         ))
     }
+}
+
+fn model_reply_contains_related_list(model_reply: &str, outcome: &AgentTurnOutcome) -> bool {
+    let related_lists = outcome
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            ResponseBlock::RelatedList(body) => Some(body),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    !related_lists.is_empty()
+        && related_lists.iter().all(|body| {
+            [Some(body.text.as_str()), body.markdown.as_deref()]
+                .into_iter()
+                .flatten()
+                .map(str::trim)
+                .any(|rendered| !rendered.is_empty() && model_reply.contains(rendered))
+        })
 }
 
 pub(crate) fn project_results(

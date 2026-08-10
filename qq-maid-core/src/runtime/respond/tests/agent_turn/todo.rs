@@ -253,6 +253,73 @@ async fn only_list_todos_success_does_not_claim_todo_write_success() {
 }
 
 #[tokio::test]
+async fn model_rendered_todo_list_preserves_visible_snapshot() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "list_todos",
+            r#"{"status":"pending"}"#,
+            "🚧 当前进行中 · 共 1 项\n1. 只读查询不算写入",
+        )
+        .with_tool_call_json(
+            "complete_todos",
+            r#"{"numbers":[1],"selection_text":null,"reference":null}"#,
+            "已完成第一条",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    service
+        .task_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "只读查询不算写入".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
+            },
+        )
+        .unwrap();
+
+    let response = service
+        .respond(private_message("检查待办状态"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.text.as_deref(),
+        Some("🚧 当前进行中 · 共 1 项\n· 只读查询不算写入")
+    );
+    assert!(response.visible_entity_snapshot.is_some());
+    assert!(
+        service
+            .session_store
+            .get_or_create_active(&private_test_meta())
+            .unwrap()
+            .last_todo_query
+            .is_some(),
+        "模型已展示完整列表时应保留刚刚展示的编号快照"
+    );
+
+    let completed = service
+        .respond(private_message("完成第一条待办"))
+        .await
+        .unwrap();
+    assert_eq!(completed.text.as_deref(), Some("已完成第一条"));
+    assert!(
+        service.task_store.list_pending(&owner).unwrap().is_empty(),
+        "后续编号操作应命中刚刚展示的列表快照"
+    );
+}
+
+#[tokio::test]
 async fn corrected_todo_argument_failure_same_tool_later_round_is_not_exposed() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)

@@ -642,6 +642,42 @@ impl LlmProvider for MockProvider {
                     diagnostics.stop_reason = Some(AgentStopReason::Failed);
                     return Err(error.with_agent(diagnostics));
                 }
+                MockToolAction::ExecuteToolsThenFailWithUnknownResult {
+                    calls,
+                    unknown_tools,
+                    error,
+                } => {
+                    let mut executed_tools = Vec::new();
+                    let mut tool_results = Vec::new();
+                    for (name, arguments) in calls {
+                        let output = req
+                            .tools
+                            .execute_json(&req.tool_context, &name, &arguments)
+                            .await?;
+                        let output = serde_json::from_str::<Value>(&output).unwrap_or_else(|_| {
+                            json!({
+                                "raw": output,
+                            })
+                        });
+                        let succeeded = output.get("ok").and_then(Value::as_bool) != Some(false);
+                        executed_tools.push(name.clone());
+                        tool_results.push(qq_maid_llm::provider::ToolExecutionResult {
+                            name,
+                            output,
+                            succeeded,
+                        });
+                    }
+                    let mut emitted_tools = executed_tools.clone();
+                    emitted_tools.extend(unknown_tools.iter().cloned());
+                    let mut diagnostics = agent_tool_trace(emitted_tools, tool_results);
+                    diagnostics.tools_with_unknown_result = unknown_tools.clone();
+                    diagnostics
+                        .side_effecting_tools_started
+                        .extend(unknown_tools);
+                    diagnostics.model_rounds = 4;
+                    diagnostics.stop_reason = Some(AgentStopReason::Failed);
+                    return Err(error.with_agent(diagnostics));
+                }
                 MockToolAction::ReturnToolResults {
                     results,
                     attempts,

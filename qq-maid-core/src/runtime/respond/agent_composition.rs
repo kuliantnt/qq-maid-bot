@@ -3,7 +3,11 @@
 //! Tool Result 的领域投影仍由 `runtime/tools` 完成；本模块只根据明确的回复来源，
 //! 决定模型正文、来源、确定性回执和兼容提示如何组成最终 `RespondOutput`。
 
-use super::{agent_outcome::AgentTurnOutcome, common::CommandBody, llm_service::RespondOutput};
+use super::{
+    agent_outcome::AgentTurnOutcome,
+    common::{CommandBody, join_body_text},
+    llm_service::RespondOutput,
+};
 
 /// 标记本轮最终正文的业务来源。
 ///
@@ -64,14 +68,14 @@ fn append_model_reply_with_supplement(output: &mut RespondOutput, outcome: &Agen
         .as_deref()
         .unwrap_or(output.reply.as_str())
         .trim();
-    output.text = join_bodies(model_text, supplement.text.trim());
+    output.text = join_body_text(model_text, supplement.text.trim());
 
     let markdown = supplement
         .markdown
         .as_deref()
         .unwrap_or(supplement.text.as_str())
         .trim();
-    let composed_markdown = join_bodies(model_markdown, markdown);
+    let composed_markdown = join_body_text(model_markdown, markdown);
     output.reply = composed_markdown.clone();
     output.markdown = Some(composed_markdown);
 }
@@ -80,16 +84,6 @@ fn apply_body(output: &mut RespondOutput, body: CommandBody) {
     output.reply = body.markdown.clone().unwrap_or_else(|| body.text.clone());
     output.text = body.text;
     output.markdown = body.markdown;
-}
-
-fn join_bodies(first: &str, second: &str) -> String {
-    match (first.trim(), second.trim()) {
-        (first, second) if !first.is_empty() && !second.is_empty() => {
-            format!("{first}\n\n{second}")
-        }
-        (first, _) if !first.is_empty() => first.to_owned(),
-        (_, second) => second.to_owned(),
-    }
 }
 
 #[cfg(test)]

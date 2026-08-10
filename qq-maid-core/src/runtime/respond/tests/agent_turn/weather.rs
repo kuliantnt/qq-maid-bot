@@ -123,6 +123,42 @@ async fn incomplete_tool_loop_keeps_weather_result_without_claiming_completion()
 }
 
 #[tokio::test]
+async fn unknown_side_effect_keeps_known_weather_result_and_marks_unknown_status() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_calls_then_error_with_unknown_result(
+            vec![("get_weather", r#"{"city":"杭州","forecast_days":3}"#)],
+            vec!["create_todo"],
+            crate::error::LlmError::new(
+                "tool_execution_failed",
+                "side effect result is unknown",
+                "tool_loop",
+            ),
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("查杭州天气，并记录买菜待办"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("🌦 杭州天气"));
+    assert!(text.contains("部分工具执行结果未知"));
+    assert!(text.contains("create_todo：执行状态未知"));
+    assert!(!text.contains("部分工具调用未执行"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["agent_turn_status"], "partial_success");
+    assert_eq!(diagnostics["incomplete"], true);
+    assert_eq!(diagnostics["tool_loop_incomplete"], false);
+    assert_eq!(diagnostics["error_code"], "agent_turn_incomplete");
+    assert_eq!(
+        diagnostics["tools_with_unknown_result"],
+        serde_json::json!(["create_todo"])
+    );
+}
+
+#[tokio::test]
 async fn weather_only_outcome_does_not_bypass_implicit_todo_success_verification() {
     for reply in [
         "杭州明天晴，另外已记录明天买菜。",

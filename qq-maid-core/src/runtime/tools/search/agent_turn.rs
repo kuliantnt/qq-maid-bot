@@ -16,8 +16,8 @@ use crate::{
         },
         common::{CommandBody, structured_command_body},
         search_flow::{
-            format_web_search_error_reply, format_web_search_research_error_reply,
-            format_web_search_tool_reply,
+            WebSearchRenderedSource, WebSearchSourceLocation, format_web_search_error_reply,
+            format_web_search_research_error_reply, format_web_search_tool_reply_with_sources,
         },
     },
 };
@@ -113,9 +113,10 @@ fn visible_outcome(result: &ToolExecutionResult) -> ToolExecutionOutcome {
         error_code = Some("empty_result".to_owned());
     }
     let block = match status {
-        ToolOutcomeStatus::Succeeded => ResponseBlock::FactCard(structured_command_body(
-            format_web_search_tool_reply(&result.output),
-        )),
+        ToolOutcomeStatus::Succeeded => {
+            let formatted = format_web_search_tool_reply_with_sources(&result.output);
+            ResponseBlock::FactCard(structured_command_body(formatted.body))
+        }
         ToolOutcomeStatus::Skipped => ResponseBlock::Warning(skip_body(&result.output)),
         ToolOutcomeStatus::RequiresClarification => {
             ResponseBlock::Clarification(CommandBody::plain("请说明要联网查询什么内容。"))
@@ -220,85 +221,78 @@ fn string_field(output: &Value, key: &str) -> Option<String> {
 }
 
 fn provenance_from_output(output: &Value) -> Vec<ProvenanceSource> {
-    // 来源去重标记必须以 formatter 截断后的实际正文为准；否则后部条目的来源行
-    // 已被 1500 字符上限裁掉时，fallback 仍会误以为来源已经展示。
-    let deterministic_body = format_web_search_tool_reply(output);
+    // 来源是否已展示由 formatter 在组装字段时返回；后部条目的来源行即使被
+    // 1500 字符上限裁掉，也不会因最终正文的偶然子串而误判。
+    let formatted = format_web_search_tool_reply_with_sources(output);
     if string_field(output, "mode").as_deref() == Some("multi_entity_research") {
         return output
             .get("results")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter(|item| string_field(item, "status").as_deref() == Some("success"))
-            .flat_map(|item| {
+            .enumerate()
+            .filter(|(_, item)| string_field(item, "status").as_deref() == Some("success"))
+            .flat_map(|(result_index, item)| {
                 let mut sources = sources_from_value(item.get("sources"));
-                mark_first_source_rendered_fields(&mut sources, &deterministic_body);
-                mark_rendered_snippets(&mut sources, &deterministic_body);
-                sources
+                apply_rendered_source_markers(
+                    &mut sources,
+                    Some(result_index),
+                    &formatted.rendered_sources,
+                );
+                sources.into_iter().map(|(_, source)| source)
             })
             .collect();
     }
-    let answer = string_field(output, "answer");
     let mut sources = sources_from_value(output.get("sources"));
-    if answer.is_some() {
-        mark_rendered_snippets(&mut sources, &deterministic_body);
-    } else {
-        mark_first_source_rendered_fields(&mut sources, &deterministic_body);
-    }
-    sources
+    apply_rendered_source_markers(&mut sources, None, &formatted.rendered_sources);
+    sources.into_iter().map(|(_, source)| source).collect()
 }
 
-/// formatter 对无顶层 answer 的单次搜索、以及每个多目标条目，只尝试嵌入第一个
-/// 可展示来源。只有完整身份和摘要确实保留在截断后正文里，才标记为已展示。
-fn mark_first_source_rendered_fields(sources: &mut [ProvenanceSource], body: &str) {
-    if let Some(source) = sources.first_mut() {
-        source.identity_in_deterministic_body = source_identity(source)
-            .as_deref()
-            .is_some_and(|identity| body.contains(identity));
-        source.snippet_in_deterministic_body =
-            !source.snippet.is_empty() && body.contains(source.snippet.as_str());
-    }
-}
-
-fn mark_rendered_snippets(sources: &mut [ProvenanceSource], body: &str) {
-    for source in sources {
-        source.snippet_in_deterministic_body =
-            !source.snippet.is_empty() && body.contains(source.snippet.as_str());
+fn apply_rendered_source_markers(
+    sources: &mut [(usize, ProvenanceSource)],
+    result_index: Option<usize>,
+    markers: &[WebSearchRenderedSource],
+) {
+    for (source_index, source) in sources {
+        let location = WebSearchSourceLocation {
+            result_index,
+            source_index: *source_index,
+        };
+        if let Some(marker) = markers.iter().find(|marker| marker.location == location) {
+            source.identity_in_deterministic_body = marker.identity_rendered;
+            source.snippet_in_deterministic_body = marker.snippet_rendered;
+        }
     }
 }
 
-fn source_identity(source: &ProvenanceSource) -> Option<String> {
-    match (source.title.trim(), source.url.trim()) {
-        (title, url) if !title.is_empty() && !url.is_empty() => Some(format!("[{title}]({url})")),
-        (title, _) if !title.is_empty() => Some(title.to_owned()),
-        (_, url) if !url.is_empty() => Some(url.to_owned()),
-        _ => None,
-    }
-}
-
-fn sources_from_value(value: Option<&Value>) -> Vec<ProvenanceSource> {
+fn sources_from_value(value: Option<&Value>) -> Vec<(usize, ProvenanceSource)> {
     value
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|source| {
+        .enumerate()
+        .filter_map(|(source_index, source)| {
             if let Some(text) = source
                 .as_str()
                 .map(str::trim)
                 .filter(|text| !text.is_empty())
             {
-                return Some(ProvenanceSource {
-                    title: text.to_owned(),
-                    url: String::new(),
-                    snippet: String::new(),
-                    identity_in_deterministic_body: false,
-                    snippet_in_deterministic_body: false,
-                });
+                return Some((
+                    source_index,
+                    ProvenanceSource {
+                        title: text.to_owned(),
+                        url: String::new(),
+                        snippet: String::new(),
+                        identity_in_deterministic_body: false,
+                        snippet_in_deterministic_body: false,
+                    },
+                ));
             }
             let title = string_field(source, "title").unwrap_or_default();
             let url = string_field(source, "url").unwrap_or_default();
             let snippet = string_field(source, "snippet").unwrap_or_default();
-            (!title.is_empty() || !url.is_empty() || !snippet.is_empty()).then_some(
+            (!title.is_empty() || !url.is_empty() || !snippet.is_empty()).then_some((
+                source_index,
                 ProvenanceSource {
                     title,
                     url,
@@ -306,7 +300,7 @@ fn sources_from_value(value: Option<&Value>) -> Vec<ProvenanceSource> {
                     identity_in_deterministic_body: false,
                     snippet_in_deterministic_body: false,
                 },
-            )
+            ))
         })
         .collect()
 }

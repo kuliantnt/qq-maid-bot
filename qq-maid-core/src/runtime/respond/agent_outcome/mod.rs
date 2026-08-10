@@ -10,7 +10,7 @@ use qq_maid_llm::provider::ToolExecutionResult;
 
 use crate::service::VisibleEntitySnapshot;
 
-use super::common::{CommandBody, structured_command_body};
+use super::common::{CommandBody, join_body_text, structured_command_body};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -298,6 +298,20 @@ impl AgentTurnOutcome {
     /// 已知部分并明确警告；一段正文都没有时必须传播原始生成错误。
     pub(crate) fn has_renderable_deterministic_body(&self) -> bool {
         self.outcomes.iter().any(outcome_has_deterministic_body)
+    }
+
+    /// 判断 Agent 最终生成失败后是否仍可安全回退到已投影结果。
+    ///
+    /// 普通失败只能在整轮所有结果都有可信正文时回退；如果 Tool Loop 已经不完整，
+    /// 允许保留每个已形成的可信结果并追加“不完整”警告，但不能静默丢掉 Internal
+    /// 结果或把空结果包装成成功回复。
+    pub(crate) fn can_render_agent_failure_fallback(&self) -> bool {
+        if self.has_unhandled_outcome() || self.outcomes.is_empty() {
+            return false;
+        }
+        self.outcomes
+            .iter()
+            .all(outcome_has_complete_deterministic_body)
     }
 
     /// 自然语言 Agent 是否可以把模型正文作为本轮唯一主体。
@@ -725,16 +739,6 @@ fn join_command_bodies(first: &CommandBody, second: &CommandBody) -> CommandBody
     CommandBody {
         text: join_body_text(&first.text, &second.text),
         markdown: (!markdown.is_empty()).then_some(markdown),
-    }
-}
-
-fn join_body_text(first: &str, second: &str) -> String {
-    match (first.trim(), second.trim()) {
-        (first, second) if !first.is_empty() && !second.is_empty() => {
-            format!("{first}\n\n{second}")
-        }
-        (first, _) if !first.is_empty() => first.to_owned(),
-        (_, second) => second.to_owned(),
     }
 }
 

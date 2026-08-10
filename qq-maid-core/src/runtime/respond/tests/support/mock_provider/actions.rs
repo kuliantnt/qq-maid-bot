@@ -32,6 +32,11 @@ pub(super) enum MockToolAction {
         pending_tools: Vec<String>,
         error: LlmError,
     },
+    ExecuteToolsThenFailWithUnknownResult {
+        calls: Vec<(String, String)>,
+        unknown_tools: Vec<String>,
+        error: LlmError,
+    },
     ReturnToolResults {
         results: Vec<ToolExecutionResult>,
         attempts: Vec<ToolExecutionAttempt>,
@@ -142,6 +147,25 @@ impl MockProvider {
                     .map(|(name, arguments)| (name.to_owned(), arguments.to_owned()))
                     .collect(),
                 pending_tools: pending_tools.into_iter().map(str::to_owned).collect(),
+                error,
+            },
+        );
+        self
+    }
+
+    pub(crate) fn with_tool_calls_then_error_with_unknown_result(
+        self,
+        calls: Vec<(&str, &str)>,
+        unknown_tools: Vec<&str>,
+        error: LlmError,
+    ) -> Self {
+        self.tool_actions.lock().unwrap().push(
+            MockToolAction::ExecuteToolsThenFailWithUnknownResult {
+                calls: calls
+                    .into_iter()
+                    .map(|(name, arguments)| (name.to_owned(), arguments.to_owned()))
+                    .collect(),
+                unknown_tools: unknown_tools.into_iter().map(str::to_owned).collect(),
                 error,
             },
         );

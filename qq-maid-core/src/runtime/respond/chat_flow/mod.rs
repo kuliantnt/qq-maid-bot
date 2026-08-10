@@ -317,10 +317,12 @@ impl RustRespondService {
                 AgentReplySource::NaturalLanguageAgent,
             )?;
             if agent_finalization_error.is_some()
-                && !postprocess.outcome.has_renderable_deterministic_body()
+                && !postprocess.outcome.can_render_agent_failure_fallback()
             {
-                // Knowledge 等 Internal 结果需要模型整理，不能仅凭“存在 Tool Result”
-                // 把最终生成错误包装成 ok=true 的空回复或伪成功提示。
+                // Knowledge 等 Internal 结果需要模型整理；只有整轮均有可信正文时
+                // 才允许从最终生成错误回退，不能仅凭“存在 Tool Result”包装成空回复
+                // 或伪成功提示。Tool Loop 不完整但已形成可信结果的情况由 composer
+                // 追加明确警告后保留，避免丢掉已确认的事实。
                 return Err(agent_finalization_error
                     .take()
                     .expect("checked finalization error must exist"));

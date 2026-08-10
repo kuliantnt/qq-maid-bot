@@ -5,6 +5,7 @@
 //! 不含任何协议形态（Responses `input` / Chat Completions `messages`）。
 
 use std::{
+    collections::HashMap,
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -114,11 +115,25 @@ impl AgentRunDiagnostics {
     /// 已经处理的调用，避免同一工具同时被渲染成“未执行”和“状态未知”，误导用户
     /// 自动重试；只读缓存命中也不会被误判成未执行。
     pub fn has_incomplete_tool_loop(&self) -> bool {
-        let accounted_calls = self
-            .tool_results
-            .len()
-            .saturating_add(self.tools_with_unknown_result.len());
-        self.emitted_tools.len() > accounted_calls
+        let mut accounted_calls = HashMap::<&str, usize>::new();
+        for result in &self.tool_results {
+            *accounted_calls.entry(result.name.as_str()).or_default() += 1;
+        }
+        for tool in &self.tools_with_unknown_result {
+            *accounted_calls.entry(tool.as_str()).or_default() += 1;
+        }
+
+        let mut emitted_calls = accounted_calls;
+        self.emitted_tools.iter().any(|tool| {
+            let Some(count) = emitted_calls.get_mut(tool.as_str()) else {
+                return true;
+            };
+            if *count == 0 {
+                return true;
+            }
+            *count -= 1;
+            false
+        })
     }
 }
 
@@ -626,6 +641,22 @@ mod tests {
         };
 
         assert!(!diagnostics.has_incomplete_tool_loop());
+    }
+
+    #[test]
+    fn mismatched_unknown_name_does_not_cover_an_unstarted_call() {
+        let diagnostics = AgentRunDiagnostics {
+            emitted_tools: vec!["read_tool".to_owned(), "write_tool".to_owned()],
+            tool_results: vec![super::ToolExecutionResult {
+                name: "read_tool".to_owned(),
+                output: serde_json::Value::Null,
+                succeeded: true,
+            }],
+            tools_with_unknown_result: vec!["other_write".to_owned()],
+            ..AgentRunDiagnostics::default()
+        };
+
+        assert!(diagnostics.has_incomplete_tool_loop());
     }
 }
 
