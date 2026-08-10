@@ -101,12 +101,19 @@ pub(crate) fn tool_outcome_from_train_result(
         return None;
     }
 
-    let status = ToolOutcomeStatus::from_tool_result(result);
-    let error_code = structured_error_code(&result.output);
+    let mut status = ToolOutcomeStatus::from_tool_result(result);
+    let mut error_code = structured_error_code(&result.output);
     let block = match status {
-        ToolOutcomeStatus::Succeeded => train_schedule_from_output(&result.output)
-            .map(|schedule| ResponseBlock::FactCard(format_train_schedule_reply(&schedule)))
-            .unwrap_or_else(|| ResponseBlock::Error(train_error_body(Some("provider_error")))),
+        ToolOutcomeStatus::Succeeded => match train_schedule_from_output(&result.output) {
+            Some(schedule) => ResponseBlock::FactCard(format_train_schedule_reply(&schedule)),
+            None => {
+                // Tool Registry 的截断包装或畸形成功 JSON 不包含可验证车次；投影失败
+                // 必须进入失败语义，不能让模型正文覆盖确定性错误。
+                status = ToolOutcomeStatus::Failed;
+                error_code = Some("provider_error".to_owned());
+                ResponseBlock::Error(train_error_body(error_code.as_deref()))
+            }
+        },
         ToolOutcomeStatus::Skipped => ResponseBlock::Warning(train_skip_body(&result.output)),
         ToolOutcomeStatus::RequiresClarification => {
             ResponseBlock::Clarification(CommandBody::plain("请说明要查询哪个车次。"))
@@ -819,5 +826,24 @@ mod tests {
         assert!(body.text.contains("未找到 2 个目标"));
         assert!(body.text.contains("missing-id"));
         assert!(!body.text.contains("RSS 本地记录暂时无法读取"));
+    }
+
+    #[test]
+    fn truncated_train_success_is_projected_as_failure() {
+        let result = ToolExecutionResult {
+            name: TRAIN_TOOL_NAME.to_owned(),
+            output: json!({
+                "truncated": true,
+                "original_chars": 12000,
+                "preview": "{\"ok\":true,\"train_code\":\"G1\""
+            }),
+            succeeded: true,
+        };
+
+        let outcome = tool_outcome_from_train_result(&result).expect("train result is consumed");
+
+        assert_eq!(outcome.status, ToolOutcomeStatus::Failed);
+        assert_eq!(outcome.error_code.as_deref(), Some("provider_error"));
+        assert!(matches!(outcome.blocks[0], ResponseBlock::Error(_)));
     }
 }

@@ -79,7 +79,8 @@ pub struct RespondOutput {
     pub usage: Option<TokenUsage>,
     /// Agent Runtime 的结构化执行轨迹。
     pub agent: AgentRunDiagnostics,
-    /// Provider 是否没有产生可用的最终模型正文；用于决定是否启用领域确定性降级。
+    /// Provider 是否没有产生可用的最终模型文本；媒体附件不能代替工具结果总结，
+    /// 该标记用于决定是否启用领域确定性降级。
     pub model_reply_empty: bool,
 }
 
@@ -289,7 +290,9 @@ fn output_from_raw_reply(
         .output_parts
         .iter()
         .any(|part| matches!(part, OutputPart::Image { .. } | OutputPart::File { .. }));
-    let model_reply_empty = raw_reply.is_empty() && !has_media;
+    // 图片和文件是附件，不是对工具执行结果的自然语言总结。即使媒体可正常发送，
+    // 仍要让上层为同轮写操作或确定性错误保留可信正文。
+    let model_reply_empty = raw_reply.is_empty();
     let (reply, text, markdown) = match req.purpose {
         RespondPurpose::Chat => {
             if raw_reply.is_empty() && has_media {

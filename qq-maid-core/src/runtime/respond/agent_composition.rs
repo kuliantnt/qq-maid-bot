@@ -4,7 +4,7 @@
 //! 决定模型正文、来源、确定性回执和兼容提示如何组成最终 `RespondOutput`。
 
 use super::{
-    agent_outcome::AgentTurnOutcome,
+    agent_outcome::{AgentFallbackReason, AgentTurnOutcome},
     common::{CommandBody, join_body_text},
     llm_service::RespondOutput,
 };
@@ -41,7 +41,10 @@ pub(crate) fn compose_tool_turn_output(
             if outcome.can_render_deterministic_reply() {
                 apply_body(output, outcome.render_body_with_provenance());
             } else {
-                apply_body(output, outcome.render_fallback_body());
+                apply_body(
+                    output,
+                    outcome.render_fallback_body(AgentFallbackReason::ToolOutcomeAuthoritative),
+                );
             }
         }
         AgentReplySource::NaturalLanguageAgent => {
@@ -50,7 +53,12 @@ pub(crate) fn compose_tool_turn_output(
             } else {
                 // 正常成功时模型正文是唯一主体；模型为空、失败或工具状态需要
                 // 确定性解释时，才使用已经完成且可信的领域 renderer 降级。
-                apply_body(output, outcome.render_fallback_body());
+                let reason = if output.model_reply_empty {
+                    AgentFallbackReason::ModelReplyUnavailable
+                } else {
+                    AgentFallbackReason::ToolOutcomeAuthoritative
+                };
+                apply_body(output, outcome.render_fallback_body(reason));
             }
         }
     }
@@ -95,6 +103,7 @@ mod tests {
     };
     use crate::runtime::respond::common::CommandBody;
     use crate::util::metrics::LlmMetrics;
+    use qq_maid_common::output_part::{OutputMedia, OutputPart};
     use qq_maid_llm::agent_loop::AgentRunDiagnostics;
 
     fn output(reply: &str, model_reply_empty: bool) -> RespondOutput {
@@ -157,6 +166,27 @@ mod tests {
         compose_tool_turn_output(&mut output, &turn, AgentReplySource::NaturalLanguageAgent);
 
         assert_eq!(output.text, "确定性结果");
+    }
+
+    #[test]
+    fn media_only_model_reply_keeps_attachment_and_trusted_mutation_receipt() {
+        let turn = AgentTurnOutcome::from_outcomes(vec![outcome(
+            ToolOutcomeStatus::Succeeded,
+            ToolEffect::Created,
+            "✅ 已新增待办",
+        )]);
+        let mut output = output("图片已生成。", true);
+        output.parts.push(OutputPart::Image {
+            media: OutputMedia {
+                media_id: Some("generated-image".to_owned()),
+                ..OutputMedia::default()
+            },
+        });
+
+        compose_tool_turn_output(&mut output, &turn, AgentReplySource::NaturalLanguageAgent);
+
+        assert_eq!(output.text, "✅ 已新增待办");
+        assert_eq!(output.parts.len(), 1);
     }
 
     #[test]
@@ -274,6 +304,41 @@ mod tests {
 
         assert_eq!(output.text, "模型综合天气与知识库结果");
         assert!(!output.text.contains("最终回复生成失败"));
+    }
+
+    #[test]
+    fn tool_failure_with_model_text_is_not_reported_as_generation_failure() {
+        let failed = ToolExecutionOutcome {
+            tool_name: "get_weather".to_owned(),
+            domain: "weather".to_owned(),
+            status: ToolOutcomeStatus::Failed,
+            effect: ToolEffect::ReadOnly,
+            presentation: OutcomePresentation::Trusted,
+            blocks: vec![ResponseBlock::Error(CommandBody::plain(
+                "天气查询失败，请检查城市名称",
+            ))],
+            error_code: Some("provider_error".to_owned()),
+            command: Some("weather".to_owned()),
+        };
+        let internal = ToolExecutionOutcome {
+            tool_name: "knowledge_search".to_owned(),
+            domain: "knowledge".to_owned(),
+            status: ToolOutcomeStatus::Succeeded,
+            effect: ToolEffect::ReadOnly,
+            presentation: OutcomePresentation::Internal,
+            blocks: Vec::new(),
+            error_code: None,
+            command: Some("knowledge".to_owned()),
+        };
+        let turn = AgentTurnOutcome::from_outcomes(vec![failed, internal]);
+        let mut output = output("模型整理出的正文", false);
+
+        compose_tool_turn_output(&mut output, &turn, AgentReplySource::NaturalLanguageAgent);
+
+        assert!(output.text.contains("天气查询失败"));
+        assert!(output.text.contains("部分结果"));
+        assert!(!output.text.contains("最终回复生成失败"));
+        assert!(!output.text.contains("模型整理出的正文"));
     }
 
     #[test]

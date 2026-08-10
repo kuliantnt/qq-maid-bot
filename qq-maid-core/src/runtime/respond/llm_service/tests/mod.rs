@@ -8,6 +8,7 @@ use qq_maid_common::{
         MessageActorContext, MessageContext,
     },
     input_part::{MediaStatus, MessageInputPart, MessageMedia, QuotedMessageContext, TextSource},
+    output_part::{OutputMedia, OutputPart},
 };
 use qq_maid_llm::provider::types::TokenUsage;
 
@@ -617,6 +618,40 @@ fn empty_chat_reply_uses_configured_bot_display_name() {
     );
     assert_eq!(output.text, output.reply);
     assert_eq!(output.markdown, None);
+}
+
+#[test]
+fn media_only_chat_reply_still_marks_model_text_as_empty() {
+    let req = RespondRequest {
+        purpose: RespondPurpose::Chat,
+        ..Default::default()
+    };
+    let outcome = ChatOutcome {
+        reply: String::new(),
+        output_parts: vec![OutputPart::Image {
+            media: OutputMedia {
+                media_id: Some("generated-image".to_owned()),
+                ..OutputMedia::default()
+            },
+        }],
+        metrics: LlmMetrics {
+            provider: "mock".to_owned(),
+            model: "mock".to_owned(),
+            stream: false,
+            ttfe_ms: None,
+            ttft_ms: None,
+            total_latency_ms: 0,
+        },
+        usage: None,
+        fallback_used: false,
+        agent: Default::default(),
+    };
+
+    let output = output_from_raw_reply(&req, String::new(), outcome, "小助手").unwrap();
+
+    assert!(output.model_reply_empty);
+    assert_eq!(output.reply, "图片已生成。");
+    assert_eq!(output.parts.len(), 1);
 }
 
 #[test]

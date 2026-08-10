@@ -194,6 +194,16 @@ pub(crate) enum AgentTurnStatus {
     Failed,
 }
 
+/// 确定性正文接管最终回复的原因。
+///
+/// 模型没有生成文本与模型文本因工具状态不可信而被弃用是两类不同故障，回退文案
+/// 必须据此给出真实定位，不能把业务工具失败误报为模型生成失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentFallbackReason {
+    ModelReplyUnavailable,
+    ToolOutcomeAuthoritative,
+}
+
 impl AgentTurnStatus {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
@@ -320,12 +330,19 @@ impl AgentTurnOutcome {
             return false;
         }
         self.outcomes.iter().all(|outcome| {
-            outcome.status == ToolOutcomeStatus::Succeeded
-                || (outcome.status == ToolOutcomeStatus::Skipped
-                    && outcome.presentation == OutcomePresentation::Internal)
-                || (outcome.status == ToolOutcomeStatus::Failed
-                    && outcome.effect == ToolEffect::ReadOnly
-                    && outcome.error_code.as_deref() == Some("empty_result"))
+            // 领域 presenter 可能因截断或畸形的“成功”JSON 生成确定性错误块；
+            // 此时 Tool 状态不能反过来吞掉真实投影错误。
+            !(outcome.status == ToolOutcomeStatus::Succeeded
+                && outcome
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, ResponseBlock::Error(_))))
+                && (outcome.status == ToolOutcomeStatus::Succeeded
+                    || (outcome.status == ToolOutcomeStatus::Skipped
+                        && outcome.presentation == OutcomePresentation::Internal)
+                    || (outcome.status == ToolOutcomeStatus::Failed
+                        && outcome.effect == ToolEffect::ReadOnly
+                        && outcome.error_code.as_deref() == Some("empty_result")))
         })
     }
 
@@ -356,16 +373,22 @@ impl AgentTurnOutcome {
     ///
     /// 有确定性块时只展示这些已验证内容；只有内部状态而没有用户正文时，返回
     /// 明确的重试提示，不能把空字符串当成成功回复。
-    pub(crate) fn render_fallback_body(&self) -> CommandBody {
+    pub(crate) fn render_fallback_body(&self, reason: AgentFallbackReason) -> CommandBody {
         let body = self.render_body_with_provenance();
         if !body.text.trim().is_empty() {
             if self.can_render_deterministic_reply() {
                 return body;
             }
-            let warning = CommandBody::dual(
-                "⚠️ 以上只包含可确定展示的部分结果；另有工具结果需要模型整理，但最终回复生成失败，请稍后重试。",
-                "## ⚠️ 结果不完整\n\n以上只包含可确定展示的部分结果；另有工具结果需要模型整理，但最终回复生成失败，请稍后重试。",
-            );
+            let warning = match reason {
+                AgentFallbackReason::ModelReplyUnavailable => CommandBody::dual(
+                    "⚠️ 以上只包含可确定展示的部分结果；另有工具结果需要模型整理，但最终回复生成失败，请稍后重试。",
+                    "## ⚠️ 结果不完整\n\n以上只包含可确定展示的部分结果；另有工具结果需要模型整理，但最终回复生成失败，请稍后重试。",
+                ),
+                AgentFallbackReason::ToolOutcomeAuthoritative => CommandBody::dual(
+                    "⚠️ 以上只包含可确定展示的部分结果；另有工具结果无法直接展示，请根据以上提示调整后重试。",
+                    "## ⚠️ 结果不完整\n\n以上只包含可确定展示的部分结果；另有工具结果无法直接展示，请根据以上提示调整后重试。",
+                ),
+            };
             return join_command_bodies(&body, &warning);
         }
         if self
@@ -373,7 +396,14 @@ impl AgentTurnOutcome {
             .iter()
             .any(|outcome| outcome.status == ToolOutcomeStatus::Succeeded)
         {
-            return CommandBody::plain("工具已完成，但模型未能整理出可用回复，请稍后重试。");
+            return match reason {
+                AgentFallbackReason::ModelReplyUnavailable => {
+                    CommandBody::plain("工具已完成，但模型未能整理出可用回复，请稍后重试。")
+                }
+                AgentFallbackReason::ToolOutcomeAuthoritative => CommandBody::plain(
+                    "本轮工具结果未能生成可安全展示的正文，请根据工具状态调整后重试。",
+                ),
+            };
         }
         CommandBody::plain("本轮工具没有生成可直接展示的结果，请稍后重试。")
     }

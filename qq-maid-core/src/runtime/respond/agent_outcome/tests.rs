@@ -1,6 +1,6 @@
 use super::{
-    AgentTurnOutcome, AgentTurnStatus, OutcomePresentation, ProvenanceSource, ResponseBlock,
-    ToolEffect, ToolExecutionOutcome, ToolOutcomeStatus,
+    AgentFallbackReason, AgentTurnOutcome, AgentTurnStatus, OutcomePresentation, ProvenanceSource,
+    ResponseBlock, ToolEffect, ToolExecutionOutcome, ToolOutcomeStatus,
 };
 use crate::runtime::respond::common::CommandBody;
 use qq_maid_llm::provider::ToolExecutionResult;
@@ -217,7 +217,7 @@ fn mixed_trusted_and_internal_fallback_is_explicitly_partial() {
     assert!(!turn.can_render_deterministic_reply());
     assert!(turn.has_renderable_deterministic_body());
     assert!(turn.can_render_agent_failure_fallback());
-    let body = turn.render_fallback_body();
+    let body = turn.render_fallback_body(AgentFallbackReason::ModelReplyUnavailable);
     assert!(body.text.contains("可信天气结果"));
     assert!(body.text.contains("只包含可确定展示的部分结果"));
 }
@@ -330,4 +330,24 @@ fn mutation_success_still_replaces_model_reply() {
 
     assert!(turn.can_render_deterministic_reply());
     assert!(turn.can_use_model_reply_as_primary());
+}
+
+#[test]
+fn succeeded_status_cannot_hide_deterministic_error_block() {
+    let turn = AgentTurnOutcome::from_outcomes(vec![outcome(
+        "get_train_schedule",
+        "train",
+        ToolOutcomeStatus::Succeeded,
+        ToolEffect::ReadOnly,
+        vec![ResponseBlock::Error(CommandBody::plain(
+            "车次查询结果无法解析",
+        ))],
+    )]);
+
+    assert!(!turn.can_use_model_reply_as_primary());
+    assert_eq!(
+        turn.render_fallback_body(AgentFallbackReason::ToolOutcomeAuthoritative)
+            .text,
+        "车次查询结果无法解析"
+    );
 }
