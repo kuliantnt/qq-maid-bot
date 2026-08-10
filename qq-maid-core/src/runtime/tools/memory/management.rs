@@ -37,7 +37,7 @@ use self::{
 use self::types::MemoryDeleteResult;
 
 pub(crate) use self::types::{
-    ManagementActor, MemoryCreateInput, MemoryListFilter, MemoryManagementError,
+    ManagementActor, MemoryCommitAudit, MemoryCreateInput, MemoryListFilter, MemoryManagementError,
     MemoryManagementService, MemoryTargetFilter, MemoryUpdatePatch,
 };
 
@@ -398,7 +398,7 @@ impl MemoryManagementService {
         audit: F,
     ) -> Result<types::MemoryOperationResult, MemoryManagementError>
     where
-        F: Fn(&Transaction<'_>, Option<u64>) -> Result<(), MemoryManagementError>,
+        F: Fn(&Transaction<'_>, types::MemoryCommitAudit<'_>) -> Result<(), MemoryManagementError>,
     {
         commit_confirmation(
             self,

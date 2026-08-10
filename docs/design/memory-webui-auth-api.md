@@ -59,7 +59,7 @@ target discovery 从已存在且可可信解析的 v3 Memory 记录中恢复稳�
 | `POST /api/v1/console/memories/operations/prepare` | 准备 `clear_target` / `disable_group_profile` / `delete_memory`；单条删除同时携带 opaque `memory_ref` 与 `expected_version` |
 | `POST /api/v1/console/memories/operations/commit` | 提交一次性确认 |
 
-编辑沿用当前领域的历史语义：旧记录变为 archived，新记录获得新 ID；不会原地覆盖正文，也不能修改 target、owner、source 或创建者。永久删除通过 `delete_memory` 的服务端 prepare/commit 双阶段确认，只接受 active Memory；prepare 将 opaque `memory_ref` 与完整 revision 快照绑定到 session-bound 一次性 token，commit 在事务内再次校验后物理删除。服务端只返回 opaque memory_ref，不暴露内部记录 ID。
+编辑沿用当前领域的历史语义：旧记录变为 archived，新记录获得新 ID；不会原地覆盖正文，也不能修改 target、owner、source 或创建者。永久删除通过 `delete_memory` 的服务端 prepare/commit 双阶段确认，只接受 active Memory；prepare 只将 opaque `memory_ref` 与 `expected_version` 保存到 session-bound 一次性 token，commit 时重新回查完整记录并在事务内执行 CAS 后物理删除。确认缓存不保存正文、source detail 或 raw identity；服务端只返回 opaque memory_ref，不暴露内部记录 ID。
 
 `clear_target` 的语义是事务内把目标范围当前 active Memory 全部归档，历史保留且可恢复；它不是 DELETE。`disable_group_profile` 复用群画像 opt-out 生命周期：在同一事务写入 profile preference=false，并归档当前 active 画像。第一阶段没有重新启用画像的管理路由；历史 archived 记录不会被自动恢复。
 
@@ -69,9 +69,9 @@ target discovery 从已存在且可可信解析的 v3 Memory 记录中恢复稳�
 
 ## prepare / commit
 
-`clear_target` 和 `disable_group_profile` 必须先 prepare。确认条目绑定部署管理员 ID、当前管理 Session 摘要、operation、target、active `(id, revision)` 快照、画像开关快照和 5 分钟 TTL。响应只返回随机 confirmation token 原文一次；服务端只保存 token 的 SHA-256 摘要及上述绑定信息，不保存 token 原文。
+`clear_target`、`disable_group_profile` 和 `delete_memory` 必须先 prepare。确认条目绑定部署管理员 ID、当前管理 Session 摘要、operation、target、active `(id, revision)` 快照、画像开关快照和 5 分钟 TTL；其中 `delete_memory` 只保存 opaque `memory_ref` 与 `expected_version`，commit 时重新回查记录，不缓存完整 `MemoryRecord`。响应只返回随机 confirmation token 原文一次；服务端只保存 token 的 SHA-256 摘要及上述最小绑定信息，不保存 token 原文、正文、source detail 或 raw identity。
 
-commit 会重新校验当前 Session、管理员、Origin、CSRF、TTL、token、operation、target 和当前 target 合法性，再由领域 storage 事务比较快照。成功前 token 在互斥锁内消费，因此不能 replay；跨 actor、跨 Session、错误 operation、目标变化、revision 变化或过期都会 fail closed。CSRF 只由每次 HTTP 请求的现有认证流程校验，不写入 confirmation 状态，因此合法的 CSRF 轮换不会无故使确认失效。确认状态是进程内最小状态；进程重启会丢弃未提交确认并安全失败，不新增第二套数据库确认表。
+commit 会重新校验当前 Session、管理员、Origin、CSRF、TTL、token、operation、target 和当前 target 合法性，再由领域 storage 事务比较快照；单条删除还会重新读取 opaque `memory_ref` 对应记录并比较 `expected_version`。成功前 token 在互斥锁内消费，因此不能 replay；跨 actor、跨 Session、错误 operation、目标变化、revision 变化或过期都会 fail closed。永久删除的持久审计使用 `memory.delete_commit`，记录 target 摘要、memory ref 的 `resource_digest` 和删除前版本，不记录正文或原始身份。CSRF 只由每次 HTTP 请求的现有认证流程校验，不写入 confirmation 状态，因此合法的 CSRF 轮换不会无故使确认失效。确认状态是进程内最小状态；进程重启会丢弃未提交确认并安全失败，不新增第二套数据库确认表。
 
 ## 搜索、分页与 DTO
 

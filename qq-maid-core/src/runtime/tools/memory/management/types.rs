@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use super::super::storage::ManagementTargetSnapshot;
 use super::super::{
-    MemoryCategory, MemoryError, MemoryKind, MemoryRecord, MemoryStatus, MemoryStore, MemoryTarget,
+    MemoryCategory, MemoryError, MemoryKind, MemoryStatus, MemoryStore, MemoryTarget,
     MemoryVisibility,
 };
 
@@ -240,10 +240,23 @@ pub(super) struct ConfirmationEntry {
     pub(super) target_ref: String,
     pub(super) target: MemoryTarget,
     pub(super) snapshot: ManagementTargetSnapshot,
-    /// 删除确认绑定完整记录快照，确保 commit 不能改用同 target 下的另一条记录。
-    pub(super) memory_ref: Option<String>,
-    pub(super) memory: Option<MemoryRecord>,
+    /// 删除确认只保存 opaque reference 和 revision；正文、来源和身份字段在缓存中不可达。
+    pub(super) delete: Option<DeleteMemoryConfirmation>,
     pub(super) expires_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DeleteMemoryConfirmation {
+    pub(super) memory_ref: String,
+    pub(super) expected_version: u64,
+}
+
+/// 高影响 commit 成功审计所需的最小、无正文元数据。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MemoryCommitAudit<'a> {
+    pub(crate) before_version: Option<u64>,
+    pub(crate) after_version: Option<u64>,
+    pub(crate) memory_ref: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

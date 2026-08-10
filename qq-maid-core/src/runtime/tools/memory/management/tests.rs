@@ -422,7 +422,7 @@ fn clear_and_profile_disable_are_snapshot_bound_and_one_shot() {
 }
 
 #[test]
-fn delete_confirmation_binds_memory_snapshot_and_is_one_shot() {
+fn delete_confirmation_reloads_record_and_is_one_shot() {
     let (service, store) = test_service();
     let target = MemoryTarget::personal(personal_scope("delete-confirmation-user"));
     let original = seed(&store, target, "删除确认前");
@@ -445,6 +445,14 @@ fn delete_confirmation_binds_memory_snapshot_and_is_one_shot() {
             Some((&original_ref, original.revision)),
         )
         .unwrap();
+    {
+        let confirmations = service.confirmations.lock().unwrap();
+        let digest = super::refs::token_digest(&prepared.confirmation_token);
+        let entry = confirmations.get(&digest).unwrap();
+        let delete = entry.delete.as_ref().unwrap();
+        assert_eq!(delete.memory_ref, original_ref);
+        assert_eq!(delete.expected_version, original.revision);
+    }
     let updated = service
         .update(
             &target_ref,

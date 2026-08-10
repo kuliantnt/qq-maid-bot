@@ -13,6 +13,7 @@ pub(super) struct ValidatedManagementAudit {
     action: String,
     result: String,
     target_digest: Option<String>,
+    resource_digest: Option<String>,
     before_version: Option<i64>,
     after_version: Option<i64>,
     safe_error_code: Option<String>,
@@ -27,6 +28,7 @@ pub(super) fn validate_management_audit(
         action,
         result,
         target_digest,
+        resource_digest,
         before_version,
         after_version,
         safe_error_code,
@@ -38,12 +40,8 @@ pub(super) fn validate_management_audit(
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
         || !safe_audit_value(action)
         || !safe_audit_value(result)
-        || target_digest.is_some_and(|value| {
-            value.len() != 64
-                || !value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
+        || target_digest.is_some_and(|value| !is_safe_digest(value))
+        || resource_digest.is_some_and(|value| !is_safe_digest(value))
         || safe_error_code.is_some_and(|value| !safe_audit_value(value))
     {
         return Err(AdminAuthError::storage("invalid management audit metadata"));
@@ -62,6 +60,7 @@ pub(super) fn validate_management_audit(
         action: action.to_owned(),
         result: result.to_owned(),
         target_digest: target_digest.map(str::to_owned),
+        resource_digest: resource_digest.map(str::to_owned),
         before_version,
         after_version,
         safe_error_code: safe_error_code.map(str::to_owned),
@@ -75,9 +74,9 @@ pub(super) fn insert_management_audit(
     connection
         .execute(
             "INSERT INTO console_audit_events
-             (created_at, actor_admin_id, event_type, outcome, request_id,
-              target_digest, before_version, after_version, safe_error_code)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            (created_at, actor_admin_id, event_type, outcome, request_id,
+              target_digest, resource_digest, before_version, after_version, safe_error_code)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 unix_seconds(),
                 event.actor_admin_id,
@@ -85,6 +84,7 @@ pub(super) fn insert_management_audit(
                 event.result,
                 event.request_id,
                 event.target_digest,
+                event.resource_digest,
                 event.before_version,
                 event.after_version,
                 event.safe_error_code,
@@ -92,4 +92,11 @@ pub(super) fn insert_management_audit(
         )
         .map_err(database_error)?;
     Ok(())
+}
+
+fn is_safe_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }

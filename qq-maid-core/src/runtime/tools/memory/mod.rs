@@ -29,7 +29,7 @@ pub(crate) use draft::{
 pub use dream::MemoryDreamConfig;
 pub(crate) use dream::{MemoryDreamContext, MemoryDreamWorker};
 pub(crate) use management::{
-    ManagementActor, MemoryCreateInput, MemoryListFilter, MemoryManagementError,
+    ManagementActor, MemoryCommitAudit, MemoryCreateInput, MemoryListFilter, MemoryManagementError,
     MemoryManagementService, MemoryTargetFilter, MemoryUpdatePatch,
 };
 pub use ops::MemoryOperations;

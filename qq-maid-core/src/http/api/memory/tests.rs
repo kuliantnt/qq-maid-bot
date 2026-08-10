@@ -15,6 +15,7 @@ use qq_maid_llm::provider::{
 };
 use rusqlite::params;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 
 use crate::{
@@ -571,7 +572,7 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
         .await;
     assert_eq!(status, StatusCode::CONFLICT, "{stale_delete}");
     assert_eq!(stale_delete["error"]["code"], "conflict");
-    assert_eq!(api.audit_count("memory.operation_prepare", "denied"), 1);
+    assert_eq!(api.audit_count("memory.delete_prepare", "denied"), 1);
 
     let (status, prepared_delete) = api
         .post(
@@ -603,7 +604,36 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
     assert_eq!(deleted["data"]["deleted"], true);
     assert_eq!(deleted["data"]["memory_ref"], updated_memory_ref);
     assert_eq!(deleted["data"]["operation"], "delete_memory");
-    assert_eq!(api.audit_count("memory.operation_commit", "success"), 1);
+    assert_eq!(api.audit_count("memory.delete_commit", "success"), 1);
+    let (event_type, resource_digest, before_version, after_version) = api
+        .database
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT event_type, resource_digest, before_version, after_version
+             FROM console_audit_events
+             WHERE event_type = 'memory.delete_commit' AND outcome = 'success'
+             ORDER BY id DESC LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(event_type, "memory.delete_commit");
+    let expected_digest = Sha256::digest(updated_memory_ref.as_bytes());
+    let expected_digest = expected_digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(resource_digest.as_deref(), Some(expected_digest.as_str()));
+    assert_eq!(before_version, Some(4));
+    assert_eq!(after_version, None);
     let (status, missing) = api
         .post(
             "/api/v1/console/memories/get",
@@ -727,7 +757,7 @@ async fn memory_api_audit_failure_rolls_back_mutations_and_consumes_commit_token
         )
         .await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{delete_failed}");
-    assert_eq!(api.audit_count("memory.operation_commit", "success"), 0);
+    assert_eq!(api.audit_count("memory.delete_commit", "success"), 0);
     api.set_audit_failure(false);
     let (status, after_delete) = api
         .post(
@@ -762,7 +792,7 @@ async fn memory_api_audit_failure_rolls_back_mutations_and_consumes_commit_token
         )
         .await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{commit_failed}");
-    assert_eq!(api.audit_count("memory.operation_commit", "success"), 0);
+    assert_eq!(api.audit_count("memory.clear_target_commit", "success"), 0);
     api.set_audit_failure(false);
     let (status, after_commit) = api
         .post(
@@ -819,7 +849,7 @@ async fn memory_api_prepare_commit_is_actor_bound_one_shot_and_snapshot_safe() {
     assert_eq!(status, StatusCode::OK, "{committed}");
     assert_eq!(committed["data"]["affected_count"], 1);
     assert_eq!(committed["data"]["operation"], "clear_target");
-    assert_eq!(api.audit_count("memory.operation_commit", "success"), 1);
+    assert_eq!(api.audit_count("memory.clear_target_commit", "success"), 1);
     let (status, active_after_commit) = api
         .post(
             "/api/v1/console/memories/list",
