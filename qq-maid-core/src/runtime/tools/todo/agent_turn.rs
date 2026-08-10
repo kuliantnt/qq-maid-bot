@@ -54,8 +54,18 @@ impl DomainTurnPostprocessor for TodoTurnPostprocessor {
         projected_outcome: Option<&mut AgentTurnOutcome>,
         output: &mut RespondOutput,
         state_session: &mut SessionRecord,
-        _reply_source: AgentReplySource,
+        reply_source: AgentReplySource,
     ) -> Box<dyn DomainTurnDiagnostics> {
+        // 自然语言 Agent 的非空模型正文是唯一主体；composer 此时不会发布
+        // RelatedList，因此本轮由领域投影建立的列表快照不能继续留在 session 中。
+        // 空模型正文会走确定性 fallback，RelatedList 会随回退正文真实出站，此时
+        // 才保留快照。这里复用 typed 的 composer 分支，不扫描模型正文内容。
+        let model_primary_hides_related_list =
+            matches!(reply_source, AgentReplySource::NaturalLanguageAgent)
+                && !output.model_reply_empty
+                && projected_outcome.as_deref().is_some_and(|outcome| {
+                    outcome.has_related_list() && outcome.can_use_model_reply_as_primary()
+                });
         let (validation, guard_applied) = if let Some(validation) = projected_outcome
             .as_deref()
             .and_then(success_validation_from_agent_outcome)
@@ -86,10 +96,11 @@ impl DomainTurnPostprocessor for TodoTurnPostprocessor {
             }
         };
 
-        // `aggregate_todo_tool_results` 已用同一批真实条目建立 RelatedList 与快照，
-        // 这就是跨轮编号的结构化展示契约。自然语言 Agent 可以改写列表正文，不能
-        // 再通过扫描模型字符串决定快照是否存在；只有成功验真失败时才撤销本轮列表。
-        if guard_applied && let Some(outcome) = projected_outcome {
+        // `aggregate_todo_tool_results` 已用同一批真实条目建立 RelatedList 与快照。
+        // 只有该结构化列表实际由 composer 发布时，快照才拥有跨轮编号的展示契约。
+        if (guard_applied || model_primary_hides_related_list)
+            && let Some(outcome) = projected_outcome
+        {
             let clears_list_snapshot = outcome.has_related_list();
             outcome.visible_entity_snapshot = None;
             if clears_list_snapshot {

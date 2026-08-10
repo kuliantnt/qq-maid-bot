@@ -302,13 +302,11 @@ impl AgentTurnOutcome {
 
     /// 判断 Agent 最终生成失败后是否仍可安全回退到已投影结果。
     ///
-    /// 普通失败至少要有一段可信正文且不能含有未适配结果；完整结果直接回退，
-    /// 混合 Internal 或未完成调用时保留已形成的可信结果并追加明确警告。不可确定
-    /// 展示的 Internal 结果不会被伪造成成功，也不应让已经确认的 Weather 等事实被丢掉。
+    /// 普通失败至少要有一段可信正文；含有未适配结果时由兼容 renderer 保留可信
+    /// 部分并追加明确警告。不可确定展示的 Internal 结果不会被伪造成成功，也不应
+    /// 让已经确认的 Weather 或 Todo 写入事实被丢掉。
     pub(crate) fn can_render_agent_failure_fallback(&self) -> bool {
-        !self.has_unhandled_outcome()
-            && !self.outcomes.is_empty()
-            && self.has_renderable_deterministic_body()
+        !self.outcomes.is_empty() && self.has_renderable_deterministic_body()
     }
 
     /// 自然语言 Agent 是否可以把模型正文作为本轮唯一主体。

@@ -200,7 +200,7 @@ async fn multiple_successful_todo_writes_share_one_background_snapshot() {
 }
 
 #[tokio::test]
-async fn only_list_todos_success_preserves_structured_snapshot_without_write_claim() {
+async fn only_list_todos_without_structured_model_list_does_not_preserve_snapshot() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_call_json("list_todos", r#"{"status":"pending"}"#, "当前待办列表")
@@ -237,15 +237,15 @@ async fn only_list_todos_success_preserves_structured_snapshot_without_write_cla
         .unwrap();
 
     assert_eq!(response.text.as_deref(), Some("当前待办列表"));
-    assert!(response.visible_entity_snapshot.is_some());
+    assert!(response.visible_entity_snapshot.is_none());
     assert!(
         service
             .session_store
             .get_or_create_active(&private_test_meta())
             .unwrap()
             .last_todo_query
-            .is_some(),
-        "Todo projection 已建立结构化展示契约，不能因模型改写正文而丢失快照"
+            .is_none(),
+        "模型正文未发布结构化列表时不能登记隐藏快照"
     );
 
     let diagnostics = response.diagnostics.unwrap();
@@ -260,26 +260,21 @@ async fn only_list_todos_success_preserves_structured_snapshot_without_write_cla
         .respond(private_message("完成第一条待办"))
         .await
         .unwrap();
-    assert_eq!(completed.text.as_deref(), Some("已完成第一条"));
+    assert_ne!(completed.text.as_deref(), Some("已完成第一条"));
     assert!(
-        service.task_store.list_pending(&owner).unwrap().is_empty(),
-        "自然语言改写后的列表仍应支持下一轮按可见编号操作"
+        !service.task_store.list_pending(&owner).unwrap().is_empty(),
+        "未发布编号列表时，下一轮不能操作用户未见过的待办"
     );
 }
 
 #[tokio::test]
-async fn model_rendered_todo_list_preserves_visible_snapshot() {
+async fn natural_language_model_list_without_structured_publication_does_not_preserve_snapshot() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_call_json(
             "list_todos",
             r#"{"status":"pending"}"#,
             "🚧 当前进行中 · 共 1 项\n1. 只读查询不算写入",
-        )
-        .with_tool_call_json(
-            "complete_todos",
-            r#"{"numbers":[1],"selection_text":null,"reference":null}"#,
-            "已完成第一条",
         );
     let service = test_service_with_provider_and_tool_calling(inspector, true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
@@ -312,25 +307,15 @@ async fn model_rendered_todo_list_preserves_visible_snapshot() {
         response.text.as_deref(),
         Some("🚧 当前进行中 · 共 1 项\n· 只读查询不算写入")
     );
-    assert!(response.visible_entity_snapshot.is_some());
+    assert!(response.visible_entity_snapshot.is_none());
     assert!(
         service
             .session_store
             .get_or_create_active(&private_test_meta())
             .unwrap()
             .last_todo_query
-            .is_some(),
-        "模型已展示完整列表时应保留刚刚展示的编号快照"
-    );
-
-    let completed = service
-        .respond(private_message("完成第一条待办"))
-        .await
-        .unwrap();
-    assert_eq!(completed.text.as_deref(), Some("已完成第一条"));
-    assert!(
-        service.task_store.list_pending(&owner).unwrap().is_empty(),
-        "后续编号操作应命中刚刚展示的列表快照"
+            .is_none(),
+        "模型正文即使包含列表文本，也没有 typed 的结构化列表发布契约"
     );
 }
 

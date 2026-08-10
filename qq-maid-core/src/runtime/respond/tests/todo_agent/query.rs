@@ -492,7 +492,7 @@ async fn explicit_todo_command_aliases_and_filters_stay_deterministic() {
 }
 
 #[tokio::test]
-async fn natural_language_todo_queries_enter_tool_loop_instead_of_shortcut() {
+async fn natural_language_todo_queries_without_structured_list_do_not_publish_snapshot() {
     let list_args = r#"{"status":"pending","due_date":null,"date_range_text":null,"time_filter":null,"keyword":null,"recurring":null}"#;
     // MockProvider 的 tool action 按次消费，多轮自然语言查询要预置同样次数的 list_todos。
     let inspector = MockProvider::new()
@@ -510,8 +510,8 @@ async fn natural_language_todo_queries_enter_tool_loop_instead_of_shortcut() {
         let text = response.text.as_deref().unwrap();
         assert_eq!(text, "查询完成", "{input}");
         assert!(!text.contains("自然语言待办"), "{input}");
-        assert!(response.visible_entity_snapshot.is_some(), "{input}");
-        assert!(active_private_session(&service).last_todo_query.is_some());
+        assert!(response.visible_entity_snapshot.is_none(), "{input}");
+        assert!(active_private_session(&service).last_todo_query.is_none());
     }
     assert_eq!(inspector.tool_call_count(), 3);
 }
