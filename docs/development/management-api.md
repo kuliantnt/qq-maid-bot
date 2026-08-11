@@ -293,7 +293,7 @@ Memory 管理 API 只在 `WEB_CONSOLE_ENABLED=true` 时注册，所有接口均�
 
 target、account、group、subject 和 memory 使用带 `v1` 前缀的 SHA-256 opaque reference。target 摘要同时返回服务端计算的目标级 capabilities；群画像的 `can_disable_group_profile` 来自持久化 profile preference，而不是客户端会话缓存。服务端从已存在的合法 v3 Memory 目标发现 reference，并在每次写入前重新回查；客户端不能解析或拼接 reference。未知目标、目标外记录、legacy 记录和 target mismatch 对外统一为 `not_found` 或安全的校验错误，不返回探测差异。
 
-成功的 list/get/mutation DTO 可包含 `memory_ref`、`version`、安全 target 摘要、正文、kind/category、visibility、status、pinned、时间、safe source type 和 capabilities；不包含 `scope_key`、scope ID、user/group/account raw ID、owner、source_text、source_ref、内部 row key 或 token。成功返回正文是 API 契约的一部分，但错误、日志、审计和 confirmation storage 不保存正文。永久删除审计只保存 `memory_ref` 的不可逆 `resource_digest` 和 expected version。
+成功的 list/get/mutation DTO 可包含 `memory_ref`、`version`、安全 target 摘要、正文、kind/category、visibility、status、pinned、时间、safe source type 和 capabilities；不包含 `scope_key`、scope ID、user/group/account raw ID、owner、source_text、source_ref、内部 row key 或 token。成功返回正文是 API 契约的一部分，但错误、日志、审计和 confirmation storage 不保存正文。永久删除的 prepare/commit 审计只保存 `memory_ref` 的不可逆 `resource_digest` 和请求版本。
 
 ### revision、生命周期与确认
 
@@ -301,7 +301,7 @@ target、account、group、subject 和 memory 使用带 `v1` 前缀的 SHA-256 o
 
 `clear_target` 的定义是事务内归档目标范围内当前 active Memory，历史保留并可恢复，返回真实受影响数量。`disable_group_profile` 复用现有群画像 opt-out：同一事务写入 profile preference=false 并归档 active 群画像；没有为了 API 发明重新启用语义，也不会自动恢复 archived 历史。
 
-`clear_target`、`disable_group_profile` 和 `delete_memory` 走 prepare/commit。确认绑定管理员 actor、当前管理 Session 摘要、operation、target、active revision 快照、画像状态和 5 分钟 TTL；单条删除只保存 opaque `memory_ref` 与 `expected_version`，commit 时重新回查完整记录并执行 CAS，不把正文、source detail 或 raw identity 放入 confirmation storage。服务端只保存 token 摘要，不保存 token 原文。commit 在互斥锁内一次性消费 token，再重新校验 Session、Origin、CSRF、operation、target、TTL 和快照；跨 Session/actor、过期、replay、operation mismatch 或快照变化均 fail closed。commit 审计 action 按操作区分为 `memory.clear_target_commit`、`memory.disable_group_profile_commit` 和 `memory.delete_commit`。confirmation 不绑定具体 CSRF token，CSRF 由两次 HTTP 请求分别复用现有认证流程校验。
+`clear_target`、`disable_group_profile` 和 `delete_memory` 走 prepare/commit。批量操作的确认条目保存目标绑定、active revision 快照和画像状态，以便事务内执行完整 CAS；单条删除则只保存 opaque `memory_ref` 与 `expected_version`，commit 时重新回查完整记录并执行 CAS，不把正文、source detail、raw identity 或整个 target 快照放入 delete confirmation storage。服务端只保存 token 摘要，不保存 token 原文。prepare 和 commit 审计按删除对象记录不可逆 `resource_digest` 与请求版本；批量操作只记录目标摘要。commit 在互斥锁内一次性消费 token，再重新校验 Session、Origin、CSRF、operation、target、TTL 和快照；跨 Session/actor、过期、replay、operation mismatch 或快照变化均 fail closed。commit 审计 action 按操作区分为 `memory.clear_target_commit`、`memory.disable_group_profile_commit` 和 `memory.delete_commit`。confirmation 不绑定具体 CSRF token，CSRF 由两次 HTTP 请求分别复用现有认证流程校验。
 
 ### Memory keyword
 

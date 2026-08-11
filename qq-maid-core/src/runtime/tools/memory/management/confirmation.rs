@@ -11,9 +11,9 @@ use super::{
         token_digest, validate_confirmation_token,
     },
     types::{
-        CONFIRMATION_PREFIX, CONFIRMATION_TTL_SECONDS, ConfirmationEntry, DeleteMemoryConfirmation,
-        MAX_CONFIRMATIONS, ManagementActor, ManagementOperation, MemoryCommitAudit,
-        MemoryManagementError, MemoryOperationResult, PreparedMemoryOperation,
+        CONFIRMATION_PREFIX, CONFIRMATION_TTL_SECONDS, ConfirmationEntry, ConfirmationPayload,
+        DeleteMemoryConfirmation, MAX_CONFIRMATIONS, ManagementActor, ManagementOperation,
+        MemoryCommitAudit, MemoryManagementError, MemoryOperationResult, PreparedMemoryOperation,
     },
 };
 
@@ -33,7 +33,7 @@ pub(super) fn prepare(
             "disable_group_profile requires a group profile target".to_owned(),
         ));
     }
-    let delete = match operation {
+    let (payload, affected_count, profile_enabled) = match operation {
         ManagementOperation::DeleteMemory => {
             let Some((memory_ref, expected_version)) = memory else {
                 return Err(MemoryManagementError::Validation(
@@ -49,45 +49,51 @@ pub(super) fn prepare(
             }
             let profile_enabled = service
                 .store
-                .management_snapshot(&target.target)
-                .map_err(MemoryManagementError::from)?
-                .profile_enabled
-                .unwrap_or(true);
+                .management_profile_enabled(&target.target)
+                .map_err(MemoryManagementError::from)?;
             if record.memory_kind == MemoryKind::GroupProfile && !profile_enabled {
                 return Err(MemoryManagementError::ProfileDisabled);
             }
-            Some(DeleteMemoryConfirmation {
-                memory_ref: memory_ref.to_owned(),
-                expected_version,
-            })
+            (
+                ConfirmationPayload::Delete(DeleteMemoryConfirmation {
+                    memory_ref: memory_ref.to_owned(),
+                    expected_version,
+                }),
+                1,
+                profile_enabled,
+            )
         }
-        _ => {
+        ManagementOperation::ClearTarget | ManagementOperation::DisableGroupProfile => {
             if memory.is_some() {
                 return Err(MemoryManagementError::Validation(
                     "memory_ref and expected_version are only valid for delete_memory".to_owned(),
                 ));
             }
-            None
+            let snapshot = service
+                .store
+                .management_snapshot(&target.target)
+                .map_err(MemoryManagementError::from)?;
+            let profile_enabled = snapshot.profile_enabled.unwrap_or(true);
+            (
+                ConfirmationPayload::Bulk {
+                    target: target.target.clone(),
+                    snapshot: snapshot.clone(),
+                },
+                snapshot.active.len(),
+                profile_enabled,
+            )
         }
     };
-    let snapshot = service
-        .store
-        .management_snapshot(&target.target)
-        .map_err(MemoryManagementError::from)?;
-    target.summary.capabilities =
-        operation_capabilities(&target.target, snapshot.profile_enabled.unwrap_or(true));
+    target.summary.capabilities = operation_capabilities(&target.target, profile_enabled);
     let expires_at = now_seconds().saturating_add(CONFIRMATION_TTL_SECONDS);
     let token = format!("{CONFIRMATION_PREFIX}{}", Uuid::new_v4());
     let digest = token_digest(&token);
-    let affected_count = delete.as_ref().map_or(snapshot.active.len(), |_| 1);
     let entry = ConfirmationEntry {
         actor_id: actor.admin_id,
         session_digest: actor.session_digest,
         operation,
         target_ref: target.summary.target_ref.clone(),
-        target: target.target,
-        snapshot: snapshot.clone(),
-        delete,
+        payload,
         expires_at,
     };
     let mut confirmations = service
@@ -116,7 +122,7 @@ pub(super) fn commit(
     operation: &str,
     target_ref: &str,
     confirmation_token: &str,
-    audit: impl Fn(&Transaction<'_>, MemoryCommitAudit<'_>) -> Result<(), MemoryManagementError>,
+    audit: impl Fn(&Transaction<'_>, MemoryCommitAudit) -> Result<(), MemoryManagementError>,
 ) -> Result<MemoryOperationResult, MemoryManagementError> {
     let operation = ManagementOperation::parse(operation)?;
     validate_confirmation_token(confirmation_token)?;
@@ -142,113 +148,155 @@ pub(super) fn commit(
         confirmations.remove(&digest);
         entry
     };
-    let mut target = service.resolve_target_ref(target_ref)?;
-    if target.target != entry.target {
-        return Err(MemoryManagementError::Conflict(
-            "memory target changed after confirmation was prepared".to_owned(),
-        ));
-    }
-    let (affected_count, profile_enabled, memory_ref, deleted) = match operation {
-        ManagementOperation::ClearTarget => {
-            let mutation = service
-                .store
-                .management_clear_if_unchanged_with_audit(
-                    &target.target,
-                    &entry.snapshot.active,
-                    |tx, version| {
-                        audit(
-                            tx,
-                            MemoryCommitAudit {
-                                before_version: None,
-                                after_version: version,
-                                memory_ref: None,
-                            },
-                        )
-                        .map_err(|error| super::super::MemoryError::audit_failed(error.message()))
-                    },
-                )
-                .map_err(MemoryManagementError::from)?;
-            (
-                mutation.affected_count,
-                mutation.profile_enabled,
-                None,
-                None,
-            )
-        }
-        ManagementOperation::DisableGroupProfile => {
-            let mutation = service
-                .store
-                .management_disable_group_profile_if_unchanged_with_audit(
-                    &target.target,
-                    entry.snapshot.profile_enabled.unwrap_or(true),
-                    &entry.snapshot.active,
-                    |tx, version| {
-                        audit(
-                            tx,
-                            MemoryCommitAudit {
-                                before_version: None,
-                                after_version: version,
-                                memory_ref: None,
-                            },
-                        )
-                        .map_err(|error| super::super::MemoryError::audit_failed(error.message()))
-                    },
-                )
-                .map_err(MemoryManagementError::from)?;
-            (
-                mutation.affected_count,
-                mutation.profile_enabled,
-                None,
-                None,
-            )
-        }
-        ManagementOperation::DeleteMemory => {
-            let delete = entry
-                .delete
-                .as_ref()
-                .ok_or(MemoryManagementError::Internal)?;
-            let current = service.resolve_memory_ref(&target, &delete.memory_ref)?;
-            ensure_expected_version(&current, delete.expected_version)?;
-            if current.status != MemoryStatus::Active {
-                return Err(MemoryManagementError::Conflict(
-                    "only active memory can be permanently deleted".to_owned(),
-                ));
-            }
-            let profile_enabled = service
-                .store
-                .management_snapshot(&target.target)
-                .map_err(MemoryManagementError::from)?
-                .profile_enabled
-                .unwrap_or(true);
-            if current.memory_kind == MemoryKind::GroupProfile && !profile_enabled {
-                return Err(MemoryManagementError::ProfileDisabled);
-            }
-            let profile_enabled =
-                service.delete_confirmed_with_audit(&target.target, &current, |tx, _| {
-                    audit(
-                        tx,
-                        MemoryCommitAudit {
-                            before_version: Some(delete.expected_version),
-                            after_version: None,
-                            memory_ref: Some(delete.memory_ref.as_str()),
+    let delete_audit = match &entry.payload {
+        ConfirmationPayload::Delete(delete) => Some(MemoryCommitAudit {
+            before_version: Some(delete.expected_version),
+            after_version: None,
+            memory_ref: Some(delete.memory_ref.clone()),
+        }),
+        ConfirmationPayload::Bulk { .. } => None,
+    };
+    let result = (|| {
+        let mut target = service.resolve_target_ref(target_ref)?;
+        let payload = entry.payload;
+        let (affected_count, profile_enabled, memory_ref, deleted) = match operation {
+            ManagementOperation::ClearTarget => {
+                let ConfirmationPayload::Bulk {
+                    target: expected_target,
+                    snapshot,
+                } = payload
+                else {
+                    return Err(MemoryManagementError::Internal);
+                };
+                if target.target != expected_target {
+                    return Err(MemoryManagementError::Conflict(
+                        "memory target changed after confirmation was prepared".to_owned(),
+                    ));
+                }
+                let mutation = service
+                    .store
+                    .management_clear_if_unchanged_with_audit(
+                        &target.target,
+                        &snapshot.active,
+                        |tx, version| {
+                            audit(
+                                tx,
+                                MemoryCommitAudit {
+                                    before_version: None,
+                                    after_version: version,
+                                    memory_ref: None,
+                                },
+                            )
+                            .map_err(|error| {
+                                super::super::MemoryError::audit_failed(error.message())
+                            })
                         },
                     )
-                })?;
-            (
-                1,
-                profile_enabled,
-                Some(delete.memory_ref.clone()),
-                Some(true),
-            )
+                    .map_err(MemoryManagementError::from)?;
+                (
+                    mutation.affected_count,
+                    mutation.profile_enabled,
+                    None,
+                    None,
+                )
+            }
+            ManagementOperation::DisableGroupProfile => {
+                let ConfirmationPayload::Bulk {
+                    target: expected_target,
+                    snapshot,
+                } = payload
+                else {
+                    return Err(MemoryManagementError::Internal);
+                };
+                if target.target != expected_target {
+                    return Err(MemoryManagementError::Conflict(
+                        "memory target changed after confirmation was prepared".to_owned(),
+                    ));
+                }
+                let mutation = service
+                    .store
+                    .management_disable_group_profile_if_unchanged_with_audit(
+                        &target.target,
+                        snapshot.profile_enabled.unwrap_or(true),
+                        &snapshot.active,
+                        |tx, version| {
+                            audit(
+                                tx,
+                                MemoryCommitAudit {
+                                    before_version: None,
+                                    after_version: version,
+                                    memory_ref: None,
+                                },
+                            )
+                            .map_err(|error| {
+                                super::super::MemoryError::audit_failed(error.message())
+                            })
+                        },
+                    )
+                    .map_err(MemoryManagementError::from)?;
+                (
+                    mutation.affected_count,
+                    mutation.profile_enabled,
+                    None,
+                    None,
+                )
+            }
+            ManagementOperation::DeleteMemory => {
+                let ConfirmationPayload::Delete(delete) = payload else {
+                    return Err(MemoryManagementError::Internal);
+                };
+                let current = service.resolve_memory_ref(&target, &delete.memory_ref)?;
+                ensure_expected_version(&current, delete.expected_version)?;
+                if current.status != MemoryStatus::Active {
+                    return Err(MemoryManagementError::Conflict(
+                        "only active memory can be permanently deleted".to_owned(),
+                    ));
+                }
+                let profile_enabled = service
+                    .store
+                    .management_profile_enabled(&target.target)
+                    .map_err(MemoryManagementError::from)?;
+                if current.memory_kind == MemoryKind::GroupProfile && !profile_enabled {
+                    return Err(MemoryManagementError::ProfileDisabled);
+                }
+                let profile_enabled =
+                    service.delete_confirmed_with_audit(&target.target, &current, |tx, _| {
+                        audit(
+                            tx,
+                            MemoryCommitAudit {
+                                before_version: Some(delete.expected_version),
+                                after_version: None,
+                                memory_ref: Some(delete.memory_ref.clone()),
+                            },
+                        )
+                    })?;
+                (
+                    1,
+                    profile_enabled,
+                    Some(delete.memory_ref.clone()),
+                    Some(true),
+                )
+            }
+        };
+        target.summary.capabilities = operation_capabilities(&target.target, profile_enabled);
+        Ok(MemoryOperationResult {
+            operation: operation.as_str().to_owned(),
+            target: target.summary,
+            affected_count,
+            capabilities: operation_capabilities(&target.target, profile_enabled),
+            memory_ref,
+            deleted,
+        })
+    })();
+    result.map_err(|error| {
+        if let Some(metadata) = delete_audit
+            && !matches!(&error, MemoryManagementError::AuditUnavailable)
+        {
+            return MemoryManagementError::WithAudit {
+                source: Box::new(error),
+                metadata,
+            };
         }
-    };
-    target.summary.capabilities = operation_capabilities(&target.target, profile_enabled);
-    Ok(MemoryOperationResult {
-        operation: operation.as_str().to_owned(),
-        target: target.summary,
-        affected_count,
-        capabilities: operation_capabilities(&target.target, profile_enabled),
-        memory_ref,
-        deleted,
+        error
     })
 }

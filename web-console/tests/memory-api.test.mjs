@@ -9,7 +9,6 @@ import {
   archiveMemory,
   commitMemoryOperation,
   createMemory,
-  deleteMemory,
   getMemory,
   listMemoryTargets,
   listMemories,
@@ -232,7 +231,19 @@ test("Memory 删除使用 opaque ref、CAS 和 CSRF，并验证服务端成功�
         memory_ref: MEMORY_REF,
       } });
   }, async (calls) => {
-    await deleteMemory({ targetRef: TARGET_REF, memoryRef: MEMORY_REF, expectedVersion: 7 });
+    const prepared = await prepareMemoryOperation({
+      operation: "delete_memory",
+      targetRef: TARGET_REF,
+      memoryRef: MEMORY_REF,
+      expectedVersion: 7,
+    });
+    const deleted = await commitMemoryOperation({
+      operation: prepared.operation,
+      targetRef: TARGET_REF,
+      confirmationToken: prepared.confirmationToken,
+    });
+    assert.equal(deleted.deleted, true);
+    assert.equal(deleted.memoryRef, MEMORY_REF);
     assert.equal(calls[0].input, "/api/v1/console/memories/operations/prepare");
     assert.equal(calls[1].input, "/api/v1/console/memories/operations/commit");
     assert.equal(calls[0].init.headers["X-CSRF-Token"], "csrf-memory-delete");
@@ -241,9 +252,20 @@ test("Memory 删除使用 opaque ref、CAS 和 CSRF，并验证服务端成功�
 });
 
 test("Memory 删除返回不匹配结果时失败", async () => {
-  await withFetchMock(async () => jsonResponse({ ok: true, data: { deleted: true, memory_ref: "memory:v1:other" } }), async () => {
+  await withFetchMock(async () => jsonResponse({ ok: true, data: {
+    operation: "delete_memory",
+    target: targetSummary(),
+    affected_count: 0,
+    capabilities: targetSummary().capabilities,
+    deleted: false,
+    memory_ref: MEMORY_REF,
+  } }), async () => {
     await assert.rejects(
-      deleteMemory({ targetRef: TARGET_REF, memoryRef: MEMORY_REF, expectedVersion: 1 }),
+      commitMemoryOperation({
+        operation: "delete_memory",
+        targetRef: TARGET_REF,
+        confirmationToken: "memory_confirmation:v1:delete",
+      }),
       (error) => error instanceof ConsoleApiError && error.code === "invalid_response",
     );
   });

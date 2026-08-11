@@ -398,7 +398,7 @@ impl MemoryManagementService {
         audit: F,
     ) -> Result<types::MemoryOperationResult, MemoryManagementError>
     where
-        F: Fn(&Transaction<'_>, types::MemoryCommitAudit<'_>) -> Result<(), MemoryManagementError>,
+        F: Fn(&Transaction<'_>, types::MemoryCommitAudit) -> Result<(), MemoryManagementError>,
     {
         commit_confirmation(
             self,

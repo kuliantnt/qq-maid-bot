@@ -134,7 +134,7 @@ pub(super) async fn create(
             &context,
             "memory.create",
             Some(&target_ref),
-            None,
+            MemoryCommitAudit::default(),
             service_result,
         )
     })();
@@ -178,7 +178,10 @@ pub(super) async fn update(
             &context,
             "memory.update",
             Some(&target_ref),
-            Some(expected_version),
+            MemoryCommitAudit {
+                before_version: Some(expected_version),
+                ..MemoryCommitAudit::default()
+            },
             service_result,
         )
     })();
@@ -221,7 +224,10 @@ pub(super) async fn archive(
             &context,
             "memory.archive",
             Some(&target_ref),
-            Some(expected_version),
+            MemoryCommitAudit {
+                before_version: Some(expected_version),
+                ..MemoryCommitAudit::default()
+            },
             service_result,
         )
     })();
@@ -264,7 +270,10 @@ pub(super) async fn restore(
             &context,
             "memory.restore",
             Some(&target_ref),
-            Some(expected_version),
+            MemoryCommitAudit {
+                before_version: Some(expected_version),
+                ..MemoryCommitAudit::default()
+            },
             service_result,
         )
     })();
@@ -284,6 +293,14 @@ pub(super) async fn prepare_operation(
         let request = json_payload(payload, &context)?;
         let (operation, target_ref, memory) = request.into_parts()?;
         let action = memory_operation_action("prepare", &operation);
+        let metadata = memory.as_ref().map_or_else(
+            MemoryCommitAudit::default,
+            |(memory_ref, expected_version)| MemoryCommitAudit {
+                before_version: Some(*expected_version),
+                after_version: None,
+                memory_ref: Some(memory_ref.clone()),
+            },
+        );
         let actor = management_actor(&context);
         let result = service(&state)?
             .prepare(
@@ -300,8 +317,7 @@ pub(super) async fn prepare_operation(
             &context,
             action,
             Some(&target_ref),
-            None,
-            None,
+            metadata,
             &result,
         )?;
         result
@@ -328,7 +344,7 @@ pub(super) async fn commit_operation(
             &operation,
             &target_ref,
             &confirmation_token,
-            |transaction, metadata: MemoryCommitAudit<'_>| {
+            |transaction, metadata: MemoryCommitAudit| {
                 audit_success_in_transaction(
                     &state,
                     &context,
@@ -344,7 +360,7 @@ pub(super) async fn commit_operation(
             &context,
             action,
             Some(&target_ref),
-            None,
+            MemoryCommitAudit::default(),
             service_result,
         )
     })();
@@ -388,14 +404,14 @@ fn audit_success_in_transaction(
     transaction: &Transaction<'_>,
     action: &str,
     target_ref: Option<&str>,
-    metadata: MemoryCommitAudit<'_>,
+    metadata: MemoryCommitAudit,
 ) -> Result<(), MemoryManagementError> {
     let Some(auth) = state.admin_auth.as_ref() else {
         tracing::error!(action, "Memory 管理审计写入失败：管理员认证不可用");
         return Err(MemoryManagementError::AuditUnavailable);
     };
     let target_digest = target_ref.and_then(safe_target_digest);
-    let resource_digest = metadata.memory_ref.and_then(safe_memory_digest);
+    let resource_digest = metadata.memory_ref.as_deref().and_then(safe_memory_digest);
     auth.audit_management_in_transaction(
         transaction,
         ManagementAudit {
@@ -422,23 +438,16 @@ fn finish_mutation<T>(
     context: &ApiRequestContext,
     action: &str,
     target_ref: Option<&str>,
-    before_version: Option<u64>,
+    metadata: MemoryCommitAudit,
     service_result: Result<T, MemoryManagementError>,
 ) -> Result<T, ApiError> {
     match service_result {
         Ok(value) => Ok(value),
         Err(error @ MemoryManagementError::AuditUnavailable) => Err(map_memory_error(error)),
         Err(error) => {
+            let metadata = error.audit_metadata().unwrap_or(metadata);
             let result = Err(map_memory_error(error));
-            audit_action(
-                state,
-                context,
-                action,
-                target_ref,
-                before_version,
-                None,
-                &result,
-            )?;
+            audit_action(state, context, action, target_ref, metadata, &result)?;
             result
         }
     }
@@ -449,8 +458,7 @@ fn audit_action<T>(
     context: &ApiRequestContext,
     action: &str,
     target_ref: Option<&str>,
-    before_version: Option<u64>,
-    after_version: Option<u64>,
+    metadata: MemoryCommitAudit,
     result: &Result<T, ApiError>,
 ) -> Result<(), ApiError> {
     let Some(auth) = state.admin_auth.as_ref() else {
@@ -460,6 +468,7 @@ fn audit_action<T>(
         ));
     };
     let target_digest = target_ref.and_then(safe_target_digest);
+    let resource_digest = metadata.memory_ref.as_deref().and_then(safe_memory_digest);
     let outcome = if result.is_ok() { "success" } else { "denied" };
     let error_code = result.as_ref().err().map(|error| error.code());
     auth.audit_management(ManagementAudit {
@@ -468,9 +477,9 @@ fn audit_action<T>(
         action,
         result: outcome,
         target_digest: target_digest.as_deref(),
-        resource_digest: None,
-        before_version,
-        after_version,
+        resource_digest: resource_digest.as_deref(),
+        before_version: metadata.before_version,
+        after_version: metadata.after_version,
         safe_error_code: error_code,
     })
     .map_err(|error| {

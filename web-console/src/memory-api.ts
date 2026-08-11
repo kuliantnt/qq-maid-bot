@@ -111,27 +111,6 @@ export async function restoreMemory(input: MemoryVersionedInput): Promise<Memory
   return parseMemoryMutation(payload.data, input.targetRef);
 }
 
-/**
- * 物理删除必须经过服务端 prepare/commit；该便捷函数不绕过确认协议。
- */
-export async function deleteMemory(input: MemoryVersionedInput): Promise<{ deleted: true; memoryRef: string }> {
-  const confirmation = await prepareMemoryOperation({
-    operation: "delete_memory",
-    targetRef: input.targetRef,
-    memoryRef: input.memoryRef,
-    expectedVersion: input.expectedVersion,
-  });
-  const result = await commitMemoryOperation({
-    operation: confirmation.operation,
-    targetRef: input.targetRef,
-    confirmationToken: confirmation.confirmationToken,
-  });
-  if (result.deleted !== true || result.memoryRef !== input.memoryRef) {
-    throw new ConsoleApiError("Memory 删除接口返回了无法确认的结果", "invalid_response");
-  }
-  return { deleted: true, memoryRef: input.memoryRef };
-}
-
 export async function prepareMemoryOperation(input: {
   readonly operation: MemoryOperation;
   readonly targetRef: string;

@@ -449,7 +449,9 @@ fn delete_confirmation_reloads_record_and_is_one_shot() {
         let confirmations = service.confirmations.lock().unwrap();
         let digest = super::refs::token_digest(&prepared.confirmation_token);
         let entry = confirmations.get(&digest).unwrap();
-        let delete = entry.delete.as_ref().unwrap();
+        let super::types::ConfirmationPayload::Delete(delete) = &entry.payload else {
+            panic!("delete confirmation stored a bulk payload");
+        };
         assert_eq!(delete.memory_ref, original_ref);
         assert_eq!(delete.expected_version, original.revision);
     }
@@ -464,15 +466,21 @@ fn delete_confirmation_reloads_record_and_is_one_shot() {
             },
         )
         .unwrap();
-    assert!(matches!(
-        service.commit(
+    let error = service
+        .commit(
             actor,
             "delete_memory",
             &target_ref,
             &prepared.confirmation_token,
-        ),
-        Err(MemoryManagementError::Conflict(_))
-    ));
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "conflict");
+    let metadata = error
+        .audit_metadata()
+        .expect("delete conflict should retain safe audit metadata");
+    assert_eq!(metadata.memory_ref.as_deref(), Some(original_ref.as_str()));
+    assert_eq!(metadata.before_version, Some(original.revision));
+    assert_eq!(metadata.after_version, None);
     assert!(matches!(
         service.commit(
             actor,

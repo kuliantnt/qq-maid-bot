@@ -264,6 +264,32 @@ impl TestApi {
             )
             .unwrap()
     }
+
+    fn latest_audit_metadata(
+        &self,
+        action: &str,
+        outcome: &str,
+    ) -> (Option<String>, Option<i64>, Option<i64>, Option<String>) {
+        self.database
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT resource_digest, before_version, after_version, safe_error_code
+                 FROM console_audit_events
+                 WHERE event_type = ?1 AND outcome = ?2
+                 ORDER BY id DESC LIMIT 1",
+                params![action, outcome],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .unwrap()
+    }
 }
 
 fn personal_scope(user: &str) -> String {
@@ -573,6 +599,17 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
     assert_eq!(status, StatusCode::CONFLICT, "{stale_delete}");
     assert_eq!(stale_delete["error"]["code"], "conflict");
     assert_eq!(api.audit_count("memory.delete_prepare", "denied"), 1);
+    let (resource_digest, before_version, after_version, error_code) =
+        api.latest_audit_metadata("memory.delete_prepare", "denied");
+    let delete_digest = Sha256::digest(updated_memory_ref.as_bytes());
+    let delete_digest = delete_digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(resource_digest.as_deref(), Some(delete_digest.as_str()));
+    assert_eq!(before_version, Some(3));
+    assert_eq!(after_version, None);
+    assert_eq!(error_code.as_deref(), Some("conflict"));
 
     let (status, prepared_delete) = api
         .post(
@@ -586,6 +623,12 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{prepared_delete}");
+    let (resource_digest, before_version, after_version, error_code) =
+        api.latest_audit_metadata("memory.delete_prepare", "success");
+    assert_eq!(resource_digest.as_deref(), Some(delete_digest.as_str()));
+    assert_eq!(before_version, Some(4));
+    assert_eq!(after_version, None);
+    assert_eq!(error_code, None);
     let delete_token = prepared_delete["data"]["confirmation_token"]
         .as_str()
         .unwrap()
@@ -655,6 +698,77 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(empty_patch["error"]["code"], "validation_error");
+}
+
+#[tokio::test]
+async fn memory_api_delete_commit_conflict_audits_resource_metadata() {
+    let api = TestApi::new();
+    let (status, initial) = api
+        .post(
+            "/api/v1/console/memories/list",
+            json!({"target_ref": api.target_ref, "status": "active"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{initial}");
+    let memory_ref = initial["data"]["items"][0]["memory_ref"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, prepared) = api
+        .post(
+            "/api/v1/console/memories/operations/prepare",
+            json!({
+                "operation": "delete_memory",
+                "target_ref": api.target_ref,
+                "memory_ref": memory_ref,
+                "expected_version": 1
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let token = prepared["data"]["confirmation_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, archived) = api
+        .post(
+            "/api/v1/console/memories/archive",
+            json!({
+                "target_ref": api.target_ref,
+                "memory_ref": memory_ref,
+                "expected_version": 1
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{archived}");
+
+    let (status, conflict) = api
+        .post(
+            "/api/v1/console/memories/operations/commit",
+            json!({
+                "operation": "delete_memory",
+                "target_ref": api.target_ref,
+                "confirmation_token": token
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(conflict["error"]["code"], "conflict");
+    assert_eq!(api.audit_count("memory.delete_commit", "denied"), 1);
+
+    let (resource_digest, before_version, after_version, error_code) =
+        api.latest_audit_metadata("memory.delete_commit", "denied");
+    let expected_digest = Sha256::digest(memory_ref.as_bytes());
+    let expected_digest = expected_digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(resource_digest.as_deref(), Some(expected_digest.as_str()));
+    assert_eq!(before_version, Some(1));
+    assert_eq!(after_version, None);
+    assert_eq!(error_code.as_deref(), Some("conflict"));
 }
 
 #[tokio::test]

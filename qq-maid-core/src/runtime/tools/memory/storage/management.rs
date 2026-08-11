@@ -253,6 +253,40 @@ impl MemoryStore {
         })
     }
 
+    /// 只读取目标级群画像开关；单条删除确认不需要扫描整个 target 的 active 记录。
+    pub(crate) fn management_profile_enabled(
+        &self,
+        target: &MemoryTarget,
+    ) -> Result<bool, MemoryError> {
+        #[cfg(test)]
+        if self
+            .management_snapshot_failure
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(MemoryError::io(
+                "management snapshot failure injected for test",
+            ));
+        }
+        let target = target.clean()?;
+        if target.memory_kind != MemoryKind::GroupProfile {
+            return Ok(true);
+        }
+        let subject_id = target
+            .subject_id
+            .as_deref()
+            .ok_or_else(|| MemoryError::bad_request("subject_id is required"))?;
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT profile_enabled FROM memory_profile_preferences
+             WHERE group_scope_id = ?1 AND subject_id = ?2",
+            params![target.scope_id, subject_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()
+        .map(|value| value.unwrap_or(true))
+        .map_err(MemoryError::from_sql)
+    }
+
     /// 清空的领域语义是 active → archived；ID 与 revision 快照不完全相同则整笔事务失败。
     pub(crate) fn management_clear_if_unchanged_with_audit<F>(
         &self,
