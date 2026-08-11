@@ -10,7 +10,7 @@ import {
   initialTargetPager,
   pageAfterDelete,
 } from "../dist/views/todo/todo-paging.js";
-import { disposeTodo, filterResetDefaults, initializeTodo, loadTodoForEdit, refreshTodos } from "../dist/views/todo/todo.js";
+import { changeTodoStatus, disposeTodo, filterResetDefaults, initializeTodo, loadTodoForEdit, openEditor, refreshTodos } from "../dist/views/todo/todo.js";
 import { todoDeadlineFields, todoDeadlineFromParts } from "../dist/views/todo/todo-form.js";
 import { clearDomGlobals, createFakeDom, flushMicrotasks, installDomGlobals, jsonResponse } from "./helpers/fake-dom.mjs";
 
@@ -258,6 +258,72 @@ test("Todo 列表刷新失败会清空旧卡片和分页", async () => {
   assert.equal(document.getElementById("todo-list").children[0].textContent, "Todo 列表加载失败，请重试。");
   assert.equal(document.getElementById("todo-pagination").children.length, 0);
   assert.equal(document.getElementById("todo-result").textContent, "Todo 服务暂不可用");
+});
+
+test("Todo 详情请求在会话清理后返回不会弹出编辑器", async () => {
+  setupTodoPage();
+  globalThis.fetch = async (input) => {
+    if (String(input).endsWith("/todo/targets")) return jsonResponse(targetPageResponse(1, 1, [targetOption("target-a")]));
+    return jsonResponse({ ok: true, data: { items: [], page: 1, page_size: 50, total: 0, total_pages: 0 } });
+  };
+  await initializeTodo();
+  let resolveTodo;
+  const pending = new Promise((resolve) => { resolveTodo = resolve; });
+  let promptCalls = 0;
+  const editing = openEditor(todoItem(), () => pending, () => {
+    promptCalls += 1;
+    return null;
+  });
+  await flushMicrotasks();
+  disposeTodo();
+  resolveTodo(todoItem());
+  await editing;
+  assert.equal(promptCalls, 0);
+});
+
+test("Todo 会话清理会关闭创建 dialog、清空错误并恢复提交按钮", () => {
+  setupTodoPage();
+  const dialog = document.getElementById("todo-create-dialog");
+  let closeCalls = 0;
+  dialog.open = true;
+  dialog.close = () => {
+    closeCalls += 1;
+    dialog.open = false;
+  };
+  const error = document.getElementById("todo-create-error");
+  error.textContent = "旧创建错误";
+  disposeTodo();
+  assert.equal(closeCalls, 1);
+  assert.equal(dialog.open, false);
+  assert.equal(error.textContent, "");
+});
+
+test("Todo 状态更新在会话清理后不会刷新新会话列表", async () => {
+  setupTodoPage();
+  let resolveUpdate;
+  const pendingUpdate = new Promise((resolve) => { resolveUpdate = resolve; });
+  let updateCalls = 0;
+  let listCalls = 0;
+  globalThis.fetch = async (input) => {
+    const path = String(input);
+    if (path.endsWith("/todo/targets")) return jsonResponse(targetPageResponse(1, 1, [targetOption("target-a")]));
+    if (path.endsWith("/todo/update")) {
+      updateCalls += 1;
+      await pendingUpdate;
+      return jsonResponse({ ok: true, data: todoItem() });
+    }
+    listCalls += 1;
+    return jsonResponse({ ok: true, data: { items: [], page: 1, page_size: 50, total: 0, total_pages: 0 } });
+  };
+  await initializeTodo();
+  const initialListCalls = listCalls;
+  const updating = changeTodoStatus(todoItem(), "completed");
+  await flushMicrotasks();
+  disposeTodo();
+  resolveUpdate();
+  await updating;
+  assert.equal(updateCalls, 1);
+  assert.equal(listCalls, initialListCalls);
 });
 
 test("getTodo 失败时通过 showResult 回调显示错误且不抛出", async () => {
