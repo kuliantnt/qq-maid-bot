@@ -4,6 +4,10 @@ import { todoCard } from "./todo-card.js";
 import { submitTodo, todoDeadlineFields } from "./todo-form.js";
 export { todoRecurrenceKind } from "./todo-form.js";
 let todos = [];
+let initialized = false;
+let lifecycleGeneration = 0;
+let listRequestGeneration = 0;
+let targetRequestGeneration = 0;
 let page = 1;
 let pager = initialTargetPager();
 let targetLoading = false;
@@ -25,9 +29,43 @@ export function filterResetDefaults() {
     };
 }
 export async function initializeTodo() {
+    if (initialized)
+        return;
+    initialized = true;
+    const lifecycle = lifecycleGeneration;
     bindTodoControls();
-    await loadMoreTargets();
+    await loadMoreTargets(lifecycle);
+    if (!isCurrentTodoLifecycle(lifecycle))
+        return;
     await refreshTodos("refresh");
+}
+export function disposeTodo() {
+    initialized = false;
+    lifecycleGeneration += 1;
+    listRequestGeneration += 1;
+    targetRequestGeneration += 1;
+    todos = [];
+    page = 1;
+    pager = initialTargetPager();
+    targetLoading = false;
+    detachElement(createLoadMore);
+    detachElement(filterLoadMore);
+    createLoadMore = null;
+    filterLoadMore = null;
+    for (const [id, value] of Object.entries(filterResetDefaults())) {
+        const field = document.getElementById(id);
+        if (field instanceof HTMLInputElement || field instanceof HTMLSelectElement)
+            field.value = value;
+    }
+    const form = document.getElementById("todo-create-form");
+    if (typeof HTMLFormElement !== "undefined" && form instanceof HTMLFormElement)
+        form.reset();
+    document.getElementById("todo-create-target")?.replaceChildren();
+    document.getElementById("todo-target-filter")?.replaceChildren();
+    document.getElementById("todo-list")?.replaceChildren();
+    document.getElementById("todo-pagination")?.replaceChildren();
+    syncAdvancedFilterState();
+    showResult("", false);
 }
 function bindTodoControls() {
     const refresh = document.getElementById("todo-refresh");
@@ -93,7 +131,12 @@ function syncAdvancedFilterState() {
     toggle.textContent = active ? "高级筛选 · 已启用" : "高级筛选";
 }
 export async function refreshTodos(trigger = "refresh") {
+    if (!initialized)
+        return;
+    const lifecycle = lifecycleGeneration;
+    const request = ++listRequestGeneration;
     page = initialRefreshPage(trigger, page);
+    renderTodoLoading();
     try {
         const status = valueOf("todo-status-filter");
         const keyword = valueOf("todo-keyword-filter").trim();
@@ -119,6 +162,8 @@ export async function refreshTodos(trigger = "refresh") {
             ...(scopeType ? { scope_type: scopeType } : {}),
             ...(dateStart && dateEnd ? { date_start: dateStart, date_end: dateEnd } : {}),
         });
+        if (!isCurrentTodoRequest(lifecycle, request))
+            return;
         if (page > result.totalPages && page > 1) {
             page = pageAfterDelete(page, result.totalPages);
             return refreshTodos("refresh");
@@ -129,22 +174,42 @@ export async function refreshTodos(trigger = "refresh") {
         showResult(`${result.total} 项 Todo`, false);
     }
     catch (cause) {
+        if (!isCurrentTodoRequest(lifecycle, request))
+            return;
+        todos = [];
+        renderTodoError();
         showResult(cause instanceof Error ? cause.message : "Todo 刷新失败", true);
     }
 }
-async function loadMoreTargets() {
+function isCurrentTodoLifecycle(generation) {
+    return initialized && generation === lifecycleGeneration;
+}
+function isCurrentTodoRequest(lifecycle, request) {
+    return isCurrentTodoLifecycle(lifecycle) && request === listRequestGeneration;
+}
+function isCurrentTargetRequest(lifecycle, request) {
+    return isCurrentTodoLifecycle(lifecycle) && request === targetRequestGeneration;
+}
+async function loadMoreTargets(lifecycle = lifecycleGeneration) {
     if (targetLoading || (pager.page > 0 && !hasMoreTargetPages(pager)))
         return;
+    const request = ++targetRequestGeneration;
     targetLoading = true;
     try {
-        pager = appendTargetPage(pager, await listTodoTargets(pager.page + 1, TARGET_PAGE_SIZE));
+        const result = await listTodoTargets(pager.page + 1, TARGET_PAGE_SIZE);
+        if (!isCurrentTargetRequest(lifecycle, request))
+            return;
+        pager = appendTargetPage(pager, result);
         renderTargets();
     }
     catch (cause) {
+        if (!isCurrentTargetRequest(lifecycle, request))
+            return;
         showResult(cause instanceof Error ? cause.message : "目标加载失败", true);
     }
     finally {
-        targetLoading = false;
+        if (isCurrentTargetRequest(lifecycle, request))
+            targetLoading = false;
     }
 }
 function renderTargets() {
@@ -202,6 +267,26 @@ export function renderTodos() {
     }
     for (const todo of todos)
         list.append(todoCard(todo));
+}
+function renderTodoLoading() {
+    const list = document.getElementById("todo-list");
+    if (!(list instanceof HTMLElement))
+        return;
+    list.replaceChildren(Object.assign(document.createElement("p"), {
+        className: "hint",
+        textContent: "正在加载 Todo…",
+    }));
+    renderPagination(0, 0);
+}
+function renderTodoError() {
+    const list = document.getElementById("todo-list");
+    if (!(list instanceof HTMLElement))
+        return;
+    list.replaceChildren(Object.assign(document.createElement("p"), {
+        className: "hint",
+        textContent: "Todo 列表加载失败，请重试。",
+    }));
+    renderPagination(0, 0);
 }
 export async function changeTodoStatus(todo, status) {
     try {
@@ -296,6 +381,9 @@ export function actionButton(label, action, variant = "secondary") {
     button.textContent = label;
     button.onclick = action;
     return button;
+}
+function detachElement(element) {
+    element?.parentElement?.removeChild(element);
 }
 export function valueOf(id) {
     const element = document.getElementById(id);

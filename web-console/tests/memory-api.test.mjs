@@ -284,7 +284,7 @@ test("Memory parser 保留 409 冲突，不把失败伪装成成功", async () =
   });
 });
 
-test("Memory 登出会清空创建草稿和固定状态", () => {
+test("Memory 登出会清空创建草稿、固定状态和筛选条件", () => {
   class FakeElement {
     constructor() {
       this.value = "";
@@ -310,12 +310,42 @@ test("Memory 登出会清空创建草稿和固定状态", () => {
   visibility.value = "private";
   const pinned = new FakeInput();
   pinned.checked = true;
+  const kind = new FakeSelect();
+  kind.value = "group_profile";
+  const status = new FakeSelect();
+  status.value = "archived";
+  const category = new FakeSelect();
+  category.value = "note";
+  const filterVisibility = new FakeSelect();
+  filterVisibility.value = "private";
+  const filterPinned = new FakeSelect();
+  filterPinned.value = "true";
+  const keyword = new FakeInput();
+  keyword.value = "旧筛选";
+  const platform = new FakeInput();
+  platform.value = "qq_official";
+  const account = new FakeSelect();
+  account.value = "memory_account:v1:old";
+  const group = new FakeSelect();
+  group.value = "memory_group:v1:old";
+  const user = new FakeSelect();
+  user.value = "memory_subject:v1:old";
   const elements = new Map([
     ["memory-create-form", form],
     ["memory-create-content", content],
     ["memory-create-target", target],
     ["memory-create-visibility", visibility],
     ["memory-create-pinned", pinned],
+    ["memory-kind-filter", kind],
+    ["memory-status-filter", status],
+    ["memory-type-filter", category],
+    ["memory-visibility-filter", filterVisibility],
+    ["memory-pinned-filter", filterPinned],
+    ["memory-query-filter", keyword],
+    ["memory-platform-filter", platform],
+    ["memory-account-filter", account],
+    ["memory-group-filter", group],
+    ["memory-user-filter", user],
   ]);
   const previous = {
     document: globalThis.document,
@@ -338,6 +368,16 @@ test("Memory 登出会清空创建草稿和固定状态", () => {
     assert.equal(target.value, "");
     assert.equal(visibility.value, "");
     assert.equal(pinned.checked, false);
+    assert.equal(kind.value, "all");
+    assert.equal(status.value, "active");
+    assert.equal(category.value, "");
+    assert.equal(filterVisibility.value, "all");
+    assert.equal(filterPinned.value, "all");
+    assert.equal(keyword.value, "");
+    assert.equal(platform.value, "");
+    assert.equal(account.value, "");
+    assert.equal(group.value, "");
+    assert.equal(user.value, "");
   } finally {
     for (const [name, value] of Object.entries(previous)) {
       if (value === undefined) delete globalThis[name];

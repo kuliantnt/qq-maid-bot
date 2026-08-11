@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
@@ -10,8 +10,9 @@ import {
   initialTargetPager,
   pageAfterDelete,
 } from "../dist/views/todo/todo-paging.js";
-import { filterResetDefaults, loadTodoForEdit } from "../dist/views/todo/todo.js";
+import { disposeTodo, filterResetDefaults, initializeTodo, loadTodoForEdit, refreshTodos } from "../dist/views/todo/todo.js";
 import { todoDeadlineFields, todoDeadlineFromParts } from "../dist/views/todo/todo-form.js";
+import { clearDomGlobals, createFakeDom, flushMicrotasks, installDomGlobals, jsonResponse } from "./helpers/fake-dom.mjs";
 
 function targetOption(targetRef, overrides = {}) {
   return {
@@ -51,6 +52,85 @@ function targetPageResponse(page, totalPages, items = []) {
     request_id: "test-request",
   };
 }
+
+function todoItem() {
+  return {
+    id: "todo-old",
+    title: "旧 Todo",
+    detail: null,
+    due_date: null,
+    due_at: null,
+    reminder_at: null,
+    time_precision: "none",
+    recurrence_kind: "none",
+    recurrence_interval_days: 0,
+    recurrence_interval: 0,
+    recurrence_unit: "day",
+    status: "pending",
+    created_at: "2026-08-10T10:00:00",
+    updated_at: "2026-08-10T10:00:00",
+    completed_at: null,
+    target: {
+      target_ref: "target-a",
+      platform: "onebot",
+      scope_type: "private",
+      user_id: "user-1",
+      group_id: null,
+      account_id: "bot-1",
+      reminder_supported: true,
+      diagnostic: null,
+    },
+  };
+}
+
+function setupTodoPage() {
+  const fake = createFakeDom();
+  installDomGlobals(fake);
+  globalThis.HTMLFormElement = fake.FakeHTMLElement;
+  globalThis.HTMLDialogElement = fake.FakeHTMLElement;
+  globalThis.HTMLTextAreaElement = fake.FakeHTMLElement;
+  globalThis.Option = class TestOption extends fake.FakeHTMLOptionElement {
+    constructor(text, value) {
+      super("option");
+      this.textContent = text;
+      this.value = value;
+    }
+  };
+  const selectIds = new Set([
+    "todo-status-filter", "todo-time-filter", "todo-recurring-filter", "todo-target-filter",
+    "todo-platform-filter", "todo-account-filter", "todo-user-filter", "todo-scope-filter",
+  ]);
+  const buttonIds = new Set([
+    "todo-refresh", "todo-filter-submit", "todo-filter-reset", "todo-advanced-toggle",
+    "todo-create-open", "todo-create-close",
+  ]);
+  for (const id of [
+    "todo-refresh", "todo-filter-submit", "todo-filter-reset", "todo-advanced-toggle",
+    "todo-create-open", "todo-create-close", "todo-advanced-filter", "todo-create-dialog",
+    "todo-create-form", "todo-create-target", "todo-target-filter", "todo-list", "todo-pagination",
+    "todo-result", "todo-create-error",
+    ...selectIds,
+  ]) {
+    const tag = id === "todo-create-target" || selectIds.has(id) ? "select" : buttonIds.has(id) ? "button" : "div";
+    const element = fake.document.registerStaticId(id, tag);
+    if (id === "todo-create-form") element.reset = () => undefined;
+  }
+  return fake;
+}
+
+function cleanupTodoPage() {
+  if (globalThis.document && globalThis.HTMLElement && globalThis.HTMLTextAreaElement) disposeTodo();
+  delete globalThis.Option;
+  delete globalThis.HTMLFormElement;
+  delete globalThis.HTMLDialogElement;
+  delete globalThis.HTMLTextAreaElement;
+  clearDomGlobals();
+}
+
+afterEach(() => {
+  cleanupTodoPage();
+  delete globalThis.fetch;
+});
 
 async function withFetchMock(response, fn) {
   const calls = [];
@@ -119,6 +199,65 @@ test("删除当前页最后一项后回退到有效页", () => {
   assert.equal(pageAfterDelete(2, 2), 2);
   assert.equal(pageAfterDelete(2, 0), 1);
   assert.equal(pageAfterDelete(1, 0), 1);
+});
+
+test("Todo 会话清理会清空列表、分页和 target，并在重新初始化时重新加载第一页", async () => {
+  setupTodoPage();
+  const targetRequests = [];
+  let listRequest = 0;
+  globalThis.fetch = async (input, init) => {
+    const path = String(input);
+    const body = JSON.parse(String(init.body));
+    if (path.endsWith("/targets")) {
+      targetRequests.push(body.page);
+      return jsonResponse(targetPageResponse(1, 2, [targetOption("target-a")]));
+    }
+    listRequest += 1;
+    return jsonResponse({
+      ok: true,
+      data: { items: [todoItem()], page: 1, page_size: 50, total: 2, total_pages: 2 },
+    });
+  };
+
+  await initializeTodo();
+  await flushMicrotasks();
+  assert.deepEqual(targetRequests, [1]);
+  assert.equal(listRequest, 1);
+  assert.equal(document.getElementById("todo-list").children[0].children[0].children[0].textContent, "旧 Todo");
+  assert.equal(document.getElementById("todo-pagination").children.length, 3);
+
+  disposeTodo();
+  assert.equal(document.getElementById("todo-list").children.length, 0);
+  assert.equal(document.getElementById("todo-pagination").children.length, 0);
+  assert.equal(document.getElementById("todo-create-target").children.length, 0);
+  assert.equal(document.getElementById("todo-target-filter").children.length, 0);
+
+  await initializeTodo();
+  await flushMicrotasks();
+  assert.deepEqual(targetRequests, [1, 1]);
+  assert.equal(listRequest, 2);
+});
+
+test("Todo 列表刷新失败会清空旧卡片和分页", async () => {
+  setupTodoPage();
+  let failList = false;
+  globalThis.fetch = async (input, init) => {
+    const path = String(input);
+    if (path.endsWith("/targets")) return jsonResponse(targetPageResponse(1, 1, [targetOption("target-a")]));
+    if (failList) return jsonResponse({ ok: false, error: { code: "request_failed", message: "Todo 服务暂不可用" } }, 503);
+    return jsonResponse({
+      ok: true,
+      data: { items: [todoItem()], page: 1, page_size: 50, total: 2, total_pages: 2 },
+    });
+  };
+
+  await initializeTodo();
+  await flushMicrotasks();
+  failList = true;
+  await refreshTodos("refresh");
+  assert.equal(document.getElementById("todo-list").children[0].textContent, "Todo 列表加载失败，请重试。");
+  assert.equal(document.getElementById("todo-pagination").children.length, 0);
+  assert.equal(document.getElementById("todo-result").textContent, "Todo 服务暂不可用");
 });
 
 test("getTodo 失败时通过 showResult 回调显示错误且不抛出", async () => {

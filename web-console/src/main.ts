@@ -27,7 +27,7 @@ import { initializeConfiguration } from "./views/configuration/configuration.js"
 import type { BootstrapStatus } from "./types.js";
 import { createThemeController } from "./theme.js";
 import { bindConsoleNavigation } from "./console-shell.js";
-import { initializeTodo } from "./views/todo/todo.js";
+import { disposeTodo, initializeTodo } from "./views/todo/todo.js";
 import { disposeKnowledge, initializeKnowledge } from "./views/knowledge/knowledge.js";
 import { disposeMemory, initializeMemory } from "./views/memory/memory.js";
 import { createBackgroundController, installBackgroundConsoleUnlock, unlockPreferencePatch, type BackgroundFile } from "./background.js";
@@ -344,24 +344,7 @@ function handleSessionExpired(): Promise<void> {
   if (sessionResetPromise) return sessionResetPromise;
   if (!consoleAuthenticated) return Promise.resolve();
 
-  consoleAuthenticated = false;
-  const resetGeneration = ++authGeneration;
-  refreshInFlight = false;
-  stopAutoRefresh();
-  disposeMemory();
-  disposeKnowledge();
-  backgroundController.dispose();
-  void clearFileBlobCache();
-  userDataController = null;
-  bootstrapStatus = null;
-  authMode = "login";
-  setCsrfToken("");
-  clearCredentialInput("auth-password", "auth-password-reveal");
-  clearCredentialInput("bootstrap-token", "bootstrap-token-reveal");
-  requiredElement("auth-shell", HTMLElement).hidden = false;
-  for (const item of document.querySelectorAll<HTMLElement>("[data-authenticated]")) item.hidden = true;
-  setText("auth-error", "登录会话已过期，请重新登录。");
-  statusError.textContent = "";
+  const resetGeneration = resetAuthenticatedUi("登录会话已过期，请重新登录。");
 
   sessionResetPromise = (async () => {
     try {
@@ -383,22 +366,41 @@ function handleSessionExpired(): Promise<void> {
 }
 
 async function logout(): Promise<void> {
-  consoleAuthenticated = false;
-  authGeneration += 1;
+  // 先启动请求捕获当前 CSRF，再立即失效本地会话；服务端注销慢时旧页面也不能继续操作。
+  const logoutRequest = logoutAdmin();
+  const resetGeneration = resetAuthenticatedUi("正在退出登录…");
   try {
-    await logoutAdmin();
+    await logoutRequest;
+  } catch (cause) {
+    if (authGeneration === resetGeneration && !consoleAuthenticated) {
+      setText("auth-error", cause instanceof Error ? cause.message : "退出请求失败，本地会话已清理。");
+    }
   } finally {
-    disposeMemory();
-    disposeKnowledge();
-    backgroundController.dispose();
-    void clearFileBlobCache();
-    userDataController = null;
-    stopAutoRefresh();
-    bootstrapStatus = null;
-    authMode = "login";
-    requiredElement("auth-password", HTMLInputElement).value = "";
-    await initialize();
+    if (authGeneration === resetGeneration && !consoleAuthenticated) await initialize();
   }
+}
+
+function resetAuthenticatedUi(message: string): number {
+  consoleAuthenticated = false;
+  const resetGeneration = ++authGeneration;
+  refreshInFlight = false;
+  stopAutoRefresh();
+  disposeTodo();
+  disposeMemory();
+  disposeKnowledge();
+  backgroundController.dispose();
+  void clearFileBlobCache();
+  userDataController = null;
+  bootstrapStatus = null;
+  authMode = "login";
+  setCsrfToken("");
+  clearCredentialInput("auth-password", "auth-password-reveal");
+  clearCredentialInput("bootstrap-token", "bootstrap-token-reveal");
+  requiredElement("auth-shell", HTMLElement).hidden = false;
+  for (const item of document.querySelectorAll<HTMLElement>("[data-authenticated]")) item.hidden = true;
+  setText("auth-error", message);
+  statusError.textContent = "";
+  return resetGeneration;
 }
 
 async function refreshStatus(generation = authGeneration): Promise<void> {

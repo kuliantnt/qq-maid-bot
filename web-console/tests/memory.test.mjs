@@ -199,9 +199,12 @@ test("Memory targets 只加载第一页，点击加载更多才请求下一页",
     assert.deepEqual(targetCalls(calls).map(({ body }) => body.page), [1]);
     const loadMore = document.getElementById("memory-target-load-more");
     assert.ok(loadMore);
+    const createTarget = document.getElementById("memory-create-target");
+    createTarget.value = "memory_target:v1:target-1";
     loadMore.onclick();
     await flushMicrotasks();
     assert.deepEqual(targetCalls(calls).map(({ body }) => body.page), [1, 2]);
+    assert.equal(createTarget.value, "memory_target:v1:target-1");
   });
 });
 

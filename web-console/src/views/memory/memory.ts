@@ -107,6 +107,10 @@ export function disposeMemory(): void {
   targetError = null;
   targetRequestGeneration += 1;
   currentPage = { total: 0, totalPages: 0 };
+  for (const [id, value] of Object.entries(memoryFilterDefaults())) {
+    const field = document.getElementById(id);
+    if (field instanceof HTMLInputElement || field instanceof HTMLSelectElement) field.value = value;
+  }
   resetMemoryCreateForm();
   document.getElementById("memory-list")?.replaceChildren();
   document.getElementById("memory-targets")?.replaceChildren();
@@ -411,6 +415,7 @@ function renderTargetControls(): void {
 
 function renderMemoryTargets(): void {
   const select = element("memory-create-target", HTMLSelectElement);
+  const previousTarget = select.value;
   const creatableTargets = targetOptions.filter(canCreateMemory);
   setMemoryCreateControlsDisabled(memoryListState !== "ready");
   const placeholder = targetLoading && targetOptions.length === 0
@@ -426,6 +431,7 @@ function renderMemoryTargets(): void {
   for (const target of creatableTargets) {
     select.append(new Option(targetLabel(target), target.targetRef));
   }
+  select.value = creatableTargets.some((target) => target.targetRef === previousTarget) ? previousTarget : "";
   select.disabled = memoryListState !== "ready" || creatableTargets.length === 0;
   updateCreateVisibilityOptions();
 }

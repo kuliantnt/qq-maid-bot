@@ -7,6 +7,10 @@ import type { TargetPager, TodoRefreshTrigger } from "./todo-paging.js";
 import type { TodoItem, TodoStatus, TodoTargetOption } from "../../types.js";
 
 let todos: TodoItem[] = [];
+let initialized = false;
+let lifecycleGeneration = 0;
+let listRequestGeneration = 0;
+let targetRequestGeneration = 0;
 let page = 1;
 let pager: TargetPager = initialTargetPager();
 let targetLoading = false;
@@ -30,9 +34,40 @@ export function filterResetDefaults(): Readonly<Record<string, string>> {
 }
 
 export async function initializeTodo(): Promise<void> {
+  if (initialized) return;
+  initialized = true;
+  const lifecycle = lifecycleGeneration;
   bindTodoControls();
-  await loadMoreTargets();
+  await loadMoreTargets(lifecycle);
+  if (!isCurrentTodoLifecycle(lifecycle)) return;
   await refreshTodos("refresh");
+}
+
+export function disposeTodo(): void {
+  initialized = false;
+  lifecycleGeneration += 1;
+  listRequestGeneration += 1;
+  targetRequestGeneration += 1;
+  todos = [];
+  page = 1;
+  pager = initialTargetPager();
+  targetLoading = false;
+  detachElement(createLoadMore);
+  detachElement(filterLoadMore);
+  createLoadMore = null;
+  filterLoadMore = null;
+  for (const [id, value] of Object.entries(filterResetDefaults())) {
+    const field = document.getElementById(id);
+    if (field instanceof HTMLInputElement || field instanceof HTMLSelectElement) field.value = value;
+  }
+  const form = document.getElementById("todo-create-form");
+  if (typeof HTMLFormElement !== "undefined" && form instanceof HTMLFormElement) form.reset();
+  document.getElementById("todo-create-target")?.replaceChildren();
+  document.getElementById("todo-target-filter")?.replaceChildren();
+  document.getElementById("todo-list")?.replaceChildren();
+  document.getElementById("todo-pagination")?.replaceChildren();
+  syncAdvancedFilterState();
+  showResult("", false);
 }
 
 function bindTodoControls(): void {
@@ -98,7 +133,11 @@ function syncAdvancedFilterState(): void {
 }
 
 export async function refreshTodos(trigger: TodoRefreshTrigger = "refresh"): Promise<void> {
+  if (!initialized) return;
+  const lifecycle = lifecycleGeneration;
+  const request = ++listRequestGeneration;
   page = initialRefreshPage(trigger, page);
+  renderTodoLoading();
   try {
     const status = valueOf("todo-status-filter");
     const keyword = valueOf("todo-keyword-filter").trim();
@@ -124,6 +163,7 @@ export async function refreshTodos(trigger: TodoRefreshTrigger = "refresh"): Pro
       ...(scopeType ? { scope_type: scopeType } : {}),
       ...(dateStart && dateEnd ? { date_start: dateStart, date_end: dateEnd } : {}),
     });
+    if (!isCurrentTodoRequest(lifecycle, request)) return;
     if (page > result.totalPages && page > 1) {
       page = pageAfterDelete(page, result.totalPages);
       return refreshTodos("refresh");
@@ -133,20 +173,39 @@ export async function refreshTodos(trigger: TodoRefreshTrigger = "refresh"): Pro
     renderPagination(result.page, result.totalPages);
     showResult(`${result.total} 项 Todo`, false);
   } catch (cause) {
+    if (!isCurrentTodoRequest(lifecycle, request)) return;
+    todos = [];
+    renderTodoError();
     showResult(cause instanceof Error ? cause.message : "Todo 刷新失败", true);
   }
 }
 
-async function loadMoreTargets(): Promise<void> {
+function isCurrentTodoLifecycle(generation: number): boolean {
+  return initialized && generation === lifecycleGeneration;
+}
+
+function isCurrentTodoRequest(lifecycle: number, request: number): boolean {
+  return isCurrentTodoLifecycle(lifecycle) && request === listRequestGeneration;
+}
+
+function isCurrentTargetRequest(lifecycle: number, request: number): boolean {
+  return isCurrentTodoLifecycle(lifecycle) && request === targetRequestGeneration;
+}
+
+async function loadMoreTargets(lifecycle = lifecycleGeneration): Promise<void> {
   if (targetLoading || (pager.page > 0 && !hasMoreTargetPages(pager))) return;
+  const request = ++targetRequestGeneration;
   targetLoading = true;
   try {
-    pager = appendTargetPage(pager, await listTodoTargets(pager.page + 1, TARGET_PAGE_SIZE));
+    const result = await listTodoTargets(pager.page + 1, TARGET_PAGE_SIZE);
+    if (!isCurrentTargetRequest(lifecycle, request)) return;
+    pager = appendTargetPage(pager, result);
     renderTargets();
   } catch (cause) {
+    if (!isCurrentTargetRequest(lifecycle, request)) return;
     showResult(cause instanceof Error ? cause.message : "目标加载失败", true);
   } finally {
-    targetLoading = false;
+    if (isCurrentTargetRequest(lifecycle, request)) targetLoading = false;
   }
 }
 
@@ -203,6 +262,26 @@ export function renderTodos(): void {
     return;
   }
   for (const todo of todos) list.append(todoCard(todo));
+}
+
+function renderTodoLoading(): void {
+  const list = document.getElementById("todo-list");
+  if (!(list instanceof HTMLElement)) return;
+  list.replaceChildren(Object.assign(document.createElement("p"), {
+    className: "hint",
+    textContent: "正在加载 Todo…",
+  }));
+  renderPagination(0, 0);
+}
+
+function renderTodoError(): void {
+  const list = document.getElementById("todo-list");
+  if (!(list instanceof HTMLElement)) return;
+  list.replaceChildren(Object.assign(document.createElement("p"), {
+    className: "hint",
+    textContent: "Todo 列表加载失败，请重试。",
+  }));
+  renderPagination(0, 0);
 }
 
 export async function changeTodoStatus(todo: TodoItem, status: TodoStatus): Promise<void> {
@@ -290,6 +369,10 @@ export function actionButton(label: string, action: () => void, variant = "secon
   button.textContent = label;
   button.onclick = action;
   return button;
+}
+
+function detachElement(element: HTMLElement | null): void {
+  element?.parentElement?.removeChild(element);
 }
 
 export function valueOf(id: string): string {
