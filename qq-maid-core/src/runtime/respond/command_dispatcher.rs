@@ -8,6 +8,7 @@ use crate::{error::LlmError, runtime::command::ParsedCommand};
 use super::{
     PlannedRespond, RespondRequest, RespondResponse, RustRespondService,
     chat_flow::PreparedChat,
+    codex_easter_egg,
     common::{command_response, session_error, suppressed_response},
     interaction_state::{
         command_bypasses_pending, prepare_message_context_for_model, respond_interaction_meta,
@@ -124,9 +125,15 @@ impl<'a> CommandDispatcher<'a> {
             )));
         }
 
-        // 未知 Slash 必须在读取 session 和进入 pending 前收口。只有一次性分类确认属于
-        // 已注册命令的输入，才允许继续沿用既有 pending 优先级和命令 handler。
+        // 正式命令始终优先；未注册命令只有命中显式白名单时才返回 Codex 彩蛋。
+        // 两类兜底都在读取 session 和进入 pending 前收口，避免娱乐反馈消费交互状态。
         let registered_slash_command = command_text.and_then(RegisteredSlashCommand::parse);
+        if registered_slash_command.is_none()
+            && let Some(response) =
+                command_text.and_then(|text| codex_easter_egg::try_respond(text, &req))
+        {
+            return Ok(DispatchOutcome::Respond(Box::new(response)));
+        }
         if command_text.is_some() && registered_slash_command.is_none() {
             let response = if req
                 .group_id

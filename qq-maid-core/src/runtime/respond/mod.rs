@@ -40,6 +40,7 @@ pub(crate) mod agent_composition;
 pub(crate) mod agent_outcome;
 mod agent_route;
 mod chat_flow;
+mod codex_easter_egg;
 mod command_dispatcher;
 pub(crate) mod command_render;
 pub(crate) mod common;
