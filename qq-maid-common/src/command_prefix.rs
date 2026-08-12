@@ -4,6 +4,8 @@
 
 use std::{error::Error, fmt};
 
+use crate::text::is_invisible_format;
+
 pub const DEFAULT_COMMAND_PREFIX: char = '/';
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,25 +148,6 @@ fn looks_like_command(remainder: &[char]) -> bool {
 
 fn is_cjk(character: char) -> bool {
     matches!(character, '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}')
-}
-
-fn is_invisible_format(character: char) -> bool {
-    matches!(
-        character,
-        '\u{00ad}'
-            | '\u{034f}'
-            | '\u{061c}'
-            | '\u{115f}'..='\u{1160}'
-            | '\u{17b4}'..='\u{17b5}'
-            | '\u{180b}'..='\u{180f}'
-            | '\u{200b}'..='\u{200f}'
-            | '\u{202a}'..='\u{202e}'
-            | '\u{2060}'..='\u{206f}'
-            | '\u{3164}'
-            | '\u{fe00}'..='\u{fe0f}'
-            | '\u{feff}'
-            | '\u{ffa0}'
-    )
 }
 
 #[cfg(test)]

@@ -241,6 +241,116 @@ async fn core_unknown_group_slash_is_silent_without_model_call() {
 }
 
 #[tokio::test]
+async fn core_codex_easter_egg_replies_in_unaddressed_group_without_model_call() {
+    let provider =
+        TestProvider::replying("不应调用").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let service = CoreHandle::new(state);
+
+    let classification = service
+        .classify_inbound(group_request("/status"))
+        .await
+        .unwrap();
+    assert_eq!(classification.kind, CoreInboundKind::Immediate);
+
+    let CoreRespondOutput::Complete(response) =
+        service.respond(group_request("/status")).await.unwrap()
+    else {
+        panic!("Codex easter egg should complete synchronously");
+    };
+    assert_eq!(response.text_content(), Some("状态：还能继续写。大概。"));
+    assert_eq!(response.command.as_deref(), Some("codex_easter_egg"));
+    assert!(!response.suppresses_reply());
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn core_codex_easter_egg_does_not_create_session_or_override_registered_command() {
+    let provider = TestProvider::replying("不应调用");
+    let state = test_state(provider.clone(), 5);
+    let session_store = state.stores.session_store.clone();
+    let service = CoreHandle::new(state);
+
+    let CoreRespondOutput::Complete(response) =
+        service.respond(private_request("/model")).await.unwrap()
+    else {
+        panic!("Codex easter egg should complete synchronously");
+    };
+    assert_eq!(response.text_content(), Some("模型选择困难症已启动。"));
+    assert_eq!(response.command.as_deref(), Some("codex_easter_egg"));
+
+    let meta = SessionMeta::new(
+        private_scope(),
+        Some("u1".to_owned()),
+        None,
+        None,
+        None,
+        "qq_official",
+    );
+    assert!(session_store.get_active(&meta).unwrap().is_none());
+
+    let CoreRespondOutput::Complete(registered) =
+        service.respond(private_request("/compact")).await.unwrap()
+    else {
+        panic!("registered compact command should complete synchronously");
+    };
+    assert_eq!(registered.command.as_deref(), Some("compact"));
+    assert_ne!(registered.command.as_deref(), Some("codex_easter_egg"));
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn core_review_easter_egg_uses_safe_mention_name_and_degrades_without_one() {
+    use qq_maid_common::identity_context::{
+        MentionConfidence, MentionIdentity, MessageActorContext,
+    };
+
+    let provider = TestProvider::replying("不应调用");
+    let state = test_state(provider.clone(), 5);
+    let service = CoreHandle::new(state);
+    let mut named = private_request("/review @小明");
+    named.mentions = vec![MentionIdentity {
+        raw_text: Some("@小明".to_owned()),
+        target: MessageActorContext {
+            display_name: Some("小明".to_owned()),
+            source: IdentitySource::TextWeak,
+            ..Default::default()
+        },
+        is_self: false,
+        confidence: MentionConfidence::TextWeak,
+    }];
+
+    let CoreRespondOutput::Complete(named_response) = service.respond(named).await.unwrap() else {
+        panic!("review easter egg should complete synchronously");
+    };
+    assert_eq!(
+        named_response.text_content(),
+        Some("审判官 @小明 已就位：LGTM（大概）")
+    );
+
+    let mut unnamed = private_request("/review");
+    unnamed.mentions = vec![MentionIdentity {
+        raw_text: None,
+        target: MessageActorContext {
+            user_id: Some("sensitive-user-id".to_owned()),
+            source: IdentitySource::Event,
+            ..Default::default()
+        },
+        is_self: false,
+        confidence: MentionConfidence::Event,
+    }];
+    let CoreRespondOutput::Complete(unnamed_response) = service.respond(unnamed).await.unwrap()
+    else {
+        panic!("review easter egg should degrade synchronously");
+    };
+    assert_eq!(unnamed_response.text_content(), Some("LGTM（大概）"));
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn core_unknown_private_slash_is_deterministic_without_session_or_model_call() {
     let provider = TestProvider::replying("不应调用");
     let state = test_state(provider.clone(), 5);
