@@ -112,6 +112,35 @@ async fn unknown_slash_does_not_consume_todo_delete_confirmation() {
 }
 
 #[tokio::test]
+async fn codex_easter_egg_does_not_consume_todo_delete_confirmation() {
+    let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(provider.clone(), true);
+    let owner = private_todo_owner();
+    let item = completed_todo(&service, &owner, "保留的已完成待办");
+    let pending = save_todo_pending(
+        &service,
+        &private_test_meta(),
+        todo_delete_pending(item.clone(), &owner.key),
+    );
+
+    let response = service.respond(private_message("/status")).await.unwrap();
+
+    assert_eq!(response.text.as_deref(), Some("状态：还能继续写。大概。"));
+    assert_eq!(response.command.as_deref(), Some("codex_easter_egg"));
+    assert_private_pending_unchanged(&service, &pending);
+    assert_eq!(
+        service
+            .task_store
+            .get_by_id(&owner, &item.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Completed
+    );
+    assert_provider_unused(&provider);
+}
+
+#[tokio::test]
 async fn unknown_slash_does_not_resume_todo_clarification_tool_loop() {
     let provider = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
