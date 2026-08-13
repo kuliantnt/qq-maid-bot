@@ -6,11 +6,15 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use qq_maid_common::markdown::{escape_inline, link};
+use qq_maid_common::text::sanitize_single_line_visible_text;
 use qq_maid_llm::provider::ToolExecutionResult;
 
 use crate::service::VisibleEntitySnapshot;
 
 use super::common::{CommandBody, join_body_text, structured_command_body};
+
+const PROVENANCE_BLOCK_MAX_CHARS: usize = 1_500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -751,10 +755,27 @@ fn render_provenance_sources(sources: &[ProvenanceSource]) -> CommandBody {
     for source in sources {
         let text_reference = source_text_reference(source);
         let markdown_reference = source_markdown_reference(source);
-        let text_line = append_source_snippet(text_reference, &source.snippet);
-        let markdown_line = append_source_snippet(markdown_reference, &source.snippet);
-        text_lines.push(format!("- {text_line}"));
-        markdown_lines.push(format!("- {markdown_line}"));
+        let snippet = sanitize_single_line_visible_text(&source.snippet);
+        let text_line = format!("- {}", append_source_snippet(text_reference, &snippet));
+        // 搜索来源来自外部后端；标题和摘要必须保持在当前列表项内，不能让其中的
+        // Markdown 或换行改变最终回复结构。
+        let markdown_line = format!(
+            "- {}",
+            append_source_snippet(markdown_reference, &escape_inline(&snippet))
+        );
+        // 文本和 Markdown 任一通道达到预算后都停止追加，保证不同平台不会因
+        // 渲染膨胀或多次搜索累计来源而越过统一的出站来源块上限。
+        if joined_lines_chars(&text_lines, &text_line) > PROVENANCE_BLOCK_MAX_CHARS
+            || joined_lines_chars(&markdown_lines, &markdown_line) > PROVENANCE_BLOCK_MAX_CHARS
+        {
+            break;
+        }
+        text_lines.push(text_line);
+        markdown_lines.push(markdown_line);
+    }
+
+    if text_lines.len() == 1 {
+        return CommandBody::plain("");
     }
 
     let mut body = structured_command_body(markdown_lines.join("\n"));
@@ -779,7 +800,9 @@ fn join_command_bodies(first: &CommandBody, second: &CommandBody) -> CommandBody
 }
 
 fn source_text_reference(source: &ProvenanceSource) -> String {
-    match (source.title.trim(), source.url.trim()) {
+    let title = sanitize_single_line_visible_text(&source.title);
+    let url = sanitize_single_line_visible_text(&source.url);
+    match (title.as_str(), url.as_str()) {
         (title, url) if !title.is_empty() && !url.is_empty() => {
             format!("{title}（{url}）")
         }
@@ -790,12 +813,12 @@ fn source_text_reference(source: &ProvenanceSource) -> String {
 }
 
 fn source_markdown_reference(source: &ProvenanceSource) -> String {
-    match (source.title.trim(), source.url.trim()) {
-        (title, url) if !title.is_empty() && !url.is_empty() => {
-            format!("[{title}]({url})")
-        }
-        (title, _) if !title.is_empty() => title.to_owned(),
-        (_, url) if !url.is_empty() => url.to_owned(),
+    let title = sanitize_single_line_visible_text(&source.title);
+    let url = sanitize_single_line_visible_text(&source.url);
+    match (title.as_str(), url.as_str()) {
+        (title, url) if !title.is_empty() && !url.is_empty() => link(title, url),
+        (title, _) if !title.is_empty() => escape_inline(title),
+        (_, url) if !url.is_empty() => link(url, url),
         _ => "未命名来源".to_owned(),
     }
 }
@@ -807,6 +830,12 @@ fn append_source_snippet(reference: String, snippet: &str) -> String {
     } else {
         format!("{reference}：{snippet}")
     }
+}
+
+fn joined_lines_chars(lines: &[String], next: &str) -> usize {
+    lines.iter().map(|line| line.chars().count()).sum::<usize>()
+        + lines.len()
+        + next.chars().count()
 }
 
 #[cfg(test)]

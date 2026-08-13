@@ -288,6 +288,93 @@ fn deterministic_fallback_keeps_search_source_once() {
 }
 
 #[test]
+fn provenance_markdown_escapes_external_fields_and_rejects_unsafe_links() {
+    let turn = AgentTurnOutcome::from_outcomes_with_visible_snapshot_and_provenance(
+        vec![outcome(
+            "web_search",
+            "search",
+            ToolOutcomeStatus::Succeeded,
+            ToolEffect::ReadOnly,
+            vec![ResponseBlock::FactCard(CommandBody::plain("搜索答案"))],
+        )],
+        None,
+        vec![
+            ProvenanceSource {
+                title: "官方](https://evil.test)\n- 伪造来源".to_owned(),
+                url: "https://example.test/source".to_owned(),
+                snippet: "摘要\n- [伪造链接](https://evil.test)".to_owned(),
+                identity_in_deterministic_body: false,
+                snippet_in_deterministic_body: false,
+            },
+            ProvenanceSource {
+                title: "不安全地址".to_owned(),
+                url: "javascript:alert(1)".to_owned(),
+                snippet: String::new(),
+                identity_in_deterministic_body: false,
+                snippet_in_deterministic_body: false,
+            },
+        ],
+        Vec::new(),
+    );
+
+    let body = turn.render_body_with_provenance();
+    let markdown = body.markdown.expect("来源展示应提供 Markdown 正文");
+
+    assert!(!body.text.contains("\n- 伪造来源"));
+    assert!(!body.text.contains("\n- [伪造链接]"));
+    assert!(body.text.contains("官方](https://evil.test) - 伪造来源"));
+    assert!(
+        markdown
+            .contains(r"[官方\]\(https://evil.test\) \- 伪造来源](<https://example.test/source>)")
+    );
+    assert!(markdown.contains(r"摘要 \- \[伪造链接\]\(https://evil.test\)"));
+    assert!(!markdown.contains("\n- 伪造来源"));
+    assert!(!markdown.contains("](https://evil.test)"));
+    assert!(!markdown.contains("javascript:alert(1)"));
+    assert!(markdown.contains("- 不安全地址"));
+}
+
+#[test]
+fn provenance_block_has_a_total_outbound_limit() {
+    let sources = (0..12)
+        .map(|index| ProvenanceSource {
+            title: format!("来源 {index} {}", "题".repeat(80)),
+            url: format!("https://example.test/{index}/{}", "u".repeat(180)),
+            snippet: format!("摘要 {index} {}", "摘".repeat(120)),
+            identity_in_deterministic_body: false,
+            snippet_in_deterministic_body: false,
+        })
+        .collect();
+    let turn = AgentTurnOutcome::from_outcomes_with_visible_snapshot_and_provenance(
+        vec![outcome(
+            "web_search",
+            "search",
+            ToolOutcomeStatus::Succeeded,
+            ToolEffect::ReadOnly,
+            vec![ResponseBlock::FactCard(CommandBody::plain("搜索答案"))],
+        )],
+        None,
+        sources,
+        Vec::new(),
+    );
+
+    let source_body = turn.render_provenance();
+
+    assert!(source_body.text.chars().count() <= super::PROVENANCE_BLOCK_MAX_CHARS);
+    assert!(
+        source_body
+            .markdown
+            .as_deref()
+            .expect("来源展示应提供 Markdown 正文")
+            .chars()
+            .count()
+            <= super::PROVENANCE_BLOCK_MAX_CHARS
+    );
+    assert!(source_body.text.contains("来源 0"));
+    assert!(!source_body.text.contains("来源 11"));
+}
+
+#[test]
 fn embedded_search_source_is_not_appended_again() {
     let turn = AgentTurnOutcome::from_outcomes_with_visible_snapshot_and_provenance(
         vec![outcome(

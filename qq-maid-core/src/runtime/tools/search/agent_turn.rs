@@ -3,6 +3,9 @@
 //! 搜索领域在这里决定单次工具轨迹应展示、隐藏还是交给其他领域处理；通用
 //! `tools/agent_turn.rs` 只负责调度，不理解 `deduplicated` 等搜索结果字段。
 
+use qq_maid_common::text::{
+    sanitize_single_line_visible_text, truncate_chars_with_ellipsis_trimmed,
+};
 use qq_maid_llm::provider::{ToolExecutionAttempt, ToolExecutionResult};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -19,10 +22,13 @@ use crate::{
 };
 
 use super::{
-    WEB_SEARCH_TOOL_NAME, WebSearchRenderedSource, WebSearchSourceLocation,
+    WEB_SEARCH_TOOL_NAME, WEB_SEARCH_TOOL_SOURCE_LIMIT, WEB_SEARCH_TOOL_SOURCE_SNIPPET_MAX_CHARS,
+    WEB_SEARCH_TOOL_SOURCE_TITLE_MAX_CHARS, WebSearchRenderedSource, WebSearchSourceLocation,
     format_web_search_error_reply, format_web_search_research_error_reply,
     format_web_search_tool_reply_with_sources, json_string_field,
 };
+
+const WEB_SEARCH_PROVENANCE_URL_MAX_CHARS: usize = 500;
 
 pub(crate) enum SearchResultProjection {
     Hidden,
@@ -63,7 +69,12 @@ pub(crate) fn project_results(
             if index >= final_candidate_result_start
                 && outcome.status == ToolOutcomeStatus::Succeeded
             {
-                provenance.extend(provenance_from_output(&result.output));
+                let remaining = WEB_SEARCH_TOOL_SOURCE_LIMIT.saturating_sub(provenance.len());
+                provenance.extend(
+                    provenance_from_output(&result.output)
+                        .into_iter()
+                        .take(remaining),
+                );
             }
             projected.push((index, outcome));
         }
@@ -270,7 +281,7 @@ fn sources_from_value(value: Option<&Value>) -> Vec<(usize, ProvenanceSource)> {
         .filter_map(|(source_index, source)| {
             if let Some(text) = source
                 .as_str()
-                .map(str::trim)
+                .map(|text| sanitize_source_field(text, WEB_SEARCH_TOOL_SOURCE_TITLE_MAX_CHARS))
                 .filter(|text| !text.is_empty())
             {
                 return Some((
@@ -284,9 +295,17 @@ fn sources_from_value(value: Option<&Value>) -> Vec<(usize, ProvenanceSource)> {
                     },
                 ));
             }
-            let title = json_string_field(source, "title").unwrap_or_default();
-            let url = json_string_field(source, "url").unwrap_or_default();
-            let snippet = json_string_field(source, "snippet").unwrap_or_default();
+            // Tool 输出可能来自旧版本轨迹或测试注入，不能假定已经过当前搜索入口的
+            // 数量和字段裁剪。进入整轮 provenance 前再次建立统一出站边界。
+            let title = sanitize_source_field(
+                &json_string_field(source, "title").unwrap_or_default(),
+                WEB_SEARCH_TOOL_SOURCE_TITLE_MAX_CHARS,
+            );
+            let url = sanitize_source_url(&json_string_field(source, "url").unwrap_or_default());
+            let snippet = sanitize_source_field(
+                &json_string_field(source, "snippet").unwrap_or_default(),
+                WEB_SEARCH_TOOL_SOURCE_SNIPPET_MAX_CHARS,
+            );
             (!title.is_empty() || !url.is_empty() || !snippet.is_empty()).then_some((
                 source_index,
                 ProvenanceSource {
@@ -298,7 +317,21 @@ fn sources_from_value(value: Option<&Value>) -> Vec<(usize, ProvenanceSource)> {
                 },
             ))
         })
+        .take(WEB_SEARCH_TOOL_SOURCE_LIMIT)
         .collect()
+}
+
+fn sanitize_source_field(value: &str, max_chars: usize) -> String {
+    truncate_chars_with_ellipsis_trimmed(&sanitize_single_line_visible_text(value), max_chars)
+}
+
+fn sanitize_source_url(value: &str) -> String {
+    let url = sanitize_single_line_visible_text(value);
+    if url.chars().count() <= WEB_SEARCH_PROVENANCE_URL_MAX_CHARS {
+        url
+    } else {
+        String::new()
+    }
 }
 
 #[cfg(test)]
@@ -413,6 +446,66 @@ mod tests {
 
         assert!(!sources[0].identity_in_deterministic_body);
         assert!(sources[0].snippet_in_deterministic_body);
+    }
+
+    #[test]
+    fn provenance_sanitizes_and_truncates_external_source_fields() {
+        let sources = provenance_from_output(&json!({
+            "answer": "搜索答案",
+            "sources": [{
+                "title": format!("标题\n- 伪造状态\u{0000}{}", "题".repeat(120)),
+                "url": "https://example.test/source\n- 伪造来源",
+                "snippet": format!("摘要\t下一行\u{200b}{}", "摘".repeat(180))
+            }]
+        }));
+
+        assert_eq!(sources.len(), 1);
+        assert!(!sources[0].title.contains(['\n', '\r', '\t', '\u{0000}']));
+        assert!(!sources[0].url.contains(['\n', '\r', '\t']));
+        assert!(!sources[0].snippet.contains(['\n', '\r', '\t', '\u{200b}']));
+        assert!(sources[0].title.contains("标题 - 伪造状态"));
+        assert!(sources[0].url.contains("source - 伪造来源"));
+        assert!(sources[0].title.chars().count() <= WEB_SEARCH_TOOL_SOURCE_TITLE_MAX_CHARS);
+        assert!(sources[0].snippet.chars().count() <= WEB_SEARCH_TOOL_SOURCE_SNIPPET_MAX_CHARS);
+    }
+
+    #[test]
+    fn provenance_drops_oversized_url_instead_of_linking_to_a_truncated_address() {
+        let sources = provenance_from_output(&json!({
+            "answer": "搜索答案",
+            "sources": [{
+                "title": "仍可展示的来源标题",
+                "url": format!("https://example.test/{}", "u".repeat(600)),
+                "snippet": "来源摘要"
+            }]
+        }));
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].title, "仍可展示的来源标题");
+        assert!(sources[0].url.is_empty());
+        assert_eq!(sources[0].snippet, "来源摘要");
+    }
+
+    #[test]
+    fn provenance_limits_sources_across_multiple_searches() {
+        let results = (0..3)
+            .map(|search_index| {
+                web_search_result(json!({
+                    "answer": format!("搜索答案 {search_index}"),
+                    "sources": (0..3).map(|source_index| json!({
+                        "title": format!("来源 {search_index}-{source_index}"),
+                        "url": format!("https://example.test/{search_index}/{source_index}"),
+                        "snippet": "摘要"
+                    })).collect::<Vec<_>>()
+                }))
+            })
+            .collect::<Vec<_>>();
+
+        let projection = project_results(&results, &[], 0);
+
+        assert_eq!(projection.provenance.len(), WEB_SEARCH_TOOL_SOURCE_LIMIT);
+        assert_eq!(projection.provenance[0].title, "来源 0-0");
+        assert_eq!(projection.provenance[3].title, "来源 1-0");
     }
 
     #[test]
