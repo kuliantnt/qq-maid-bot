@@ -19,6 +19,7 @@ fn agent_tool_trace(
         executed_tools,
         tool_results,
         tool_attempts: Vec::new(),
+        final_candidate_tool_result_start: Some(0),
         tools_with_unknown_result: Vec::new(),
         streaming_fallback_used: false,
         stop_reason: Some(AgentStopReason::ToolUsed),
@@ -531,6 +532,7 @@ impl LlmProvider for MockProvider {
                                     retry_of: Some(0),
                                 },
                             ],
+                            final_candidate_tool_result_start: Some(0),
                             tools_with_unknown_result: Vec::new(),
                             streaming_fallback_used: false,
                             stop_reason: Some(AgentStopReason::ToolUsed),
@@ -607,6 +609,7 @@ impl LlmProvider for MockProvider {
                     }
                     let mut diagnostics = agent_tool_trace(executed_tools, tool_results);
                     diagnostics.model_rounds = 4;
+                    diagnostics.final_candidate_tool_result_start = None;
                     diagnostics.stop_reason = Some(AgentStopReason::Failed);
                     return Err(error.with_agent(diagnostics));
                 }
@@ -639,6 +642,7 @@ impl LlmProvider for MockProvider {
                     emitted_tools.extend(pending_tools);
                     let mut diagnostics = agent_tool_trace(emitted_tools, tool_results);
                     diagnostics.model_rounds = 4;
+                    diagnostics.final_candidate_tool_result_start = None;
                     diagnostics.stop_reason = Some(AgentStopReason::Failed);
                     return Err(error.with_agent(diagnostics));
                 }
@@ -675,6 +679,7 @@ impl LlmProvider for MockProvider {
                         .side_effecting_tools_started
                         .extend(unknown_tools);
                     diagnostics.model_rounds = 4;
+                    diagnostics.final_candidate_tool_result_start = None;
                     diagnostics.stop_reason = Some(AgentStopReason::Failed);
                     return Err(error.with_agent(diagnostics));
                 }
@@ -720,6 +725,7 @@ impl LlmProvider for MockProvider {
                             side_effecting_tools_started: Vec::new(),
                             tool_results: results,
                             tool_attempts: attempts,
+                            final_candidate_tool_result_start: Some(0),
                             tools_with_unknown_result: Vec::new(),
                             streaming_fallback_used: false,
                             stop_reason: Some(AgentStopReason::ToolUsed),
@@ -733,6 +739,7 @@ impl LlmProvider for MockProvider {
                         .collect::<Vec<_>>();
                     let mut diagnostics = agent_tool_trace(emitted_tools, results);
                     diagnostics.model_rounds = 4;
+                    diagnostics.final_candidate_tool_result_start = None;
                     diagnostics.stop_reason = Some(AgentStopReason::Failed);
                     return Err(error.with_agent(diagnostics));
                 }
@@ -788,6 +795,7 @@ impl LlmProvider for MockProvider {
                             side_effecting_tools_started: Vec::new(),
                             tool_results: Vec::new(),
                             tool_attempts: Vec::new(),
+                            final_candidate_tool_result_start: Some(0),
                             tools_with_unknown_result: Vec::new(),
                             streaming_fallback_used: false,
                             stop_reason: Some(AgentStopReason::Rejected),

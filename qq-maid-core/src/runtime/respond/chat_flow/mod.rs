@@ -15,7 +15,7 @@ use crate::{
         session::{SessionMeta, SessionRecord, is_shared_conversation_scope},
         tools::{
             StatusHint, ToolTurnDiagnostics, agent_turn_diagnostics,
-            knowledge::KnowledgeEvidenceStatus, tool_turn_error_code,
+            knowledge::KnowledgeEvidenceStatus, todo, tool_turn_error_code,
         },
     },
 };
@@ -44,12 +44,7 @@ const TOOL_LOOP_AMBIGUITY_PROMPT: &str = "\
 其他工具缺少必要信息时不要调用写工具，直接用自然语言追问并结束本轮回复。\
 字段归位：中文时间词如今天、明天、周四、上午、下午、晚上应进入时间字段或保留在原文，不要当成标题；\
 标题优先表达核心事项，补充目标放 detail，不能把主项和补充说明反转。\
-响应编排：工具执行前如需可见反馈，只能说“我帮你确认一下/试着处理”，不得提前说已完成、已记好或已成功。\
-最终展示契约：如果希望把某次成功只读工具返回的条目以稳定编号附加到出站回复，\
-请返回严格 JSON 对象 {\"reply\":\"用户可见的自然语言总结\",\"published_tool_call_ids\":[\"本轮工具结果的 call_id\"]}；\
-服务端会验证 call_id 并实际渲染对应的确定性编号列表，因此 reply 中不要重复列出这些条目。\
-数组只列出确实希望出站展示的成功结果，call_id 必须来自当前工具轨迹，不要列隐藏、失败或未展示的结果；\
-如果不需要附加可供后续“第一条/刚刚那条”引用的编号列表，直接返回普通自然语言正文，不要猜测 call_id 或伪造展示记录。";
+响应编排：工具执行前如需可见反馈，只能说“我帮你确认一下/试着处理”，不得提前说已完成、已记好或已成功。";
 const GROUP_TOOL_WHITELIST_PROMPT: &str = "\
 群聊工具边界：当前群聊只允许调用本场景配置白名单中的工具；\
 不要声称已经执行未开放的工具，也不要声称写入了未实际修改的持久化状态。";
@@ -144,9 +139,13 @@ impl RustRespondService {
 
         let is_shared_conversation = is_shared_conversation_scope(&meta.scope);
         let system_prompts = self.prompt_config.load_system_prompts()?;
+        let policy = self.resolve_agent_policy(&req)?;
         let system_prompts = if respond_route.uses_agent_runtime() {
             let mut prompts = system_prompts;
             prompts.push(TOOL_LOOP_AMBIGUITY_PROMPT.to_owned());
+            if let Some(prompt) = todo::agent_display_contract_prompt(&policy.enabled_tools) {
+                prompts.push(prompt.to_owned());
+            }
             if is_shared_conversation {
                 prompts.push(GROUP_TOOL_WHITELIST_PROMPT.to_owned());
             }
@@ -154,7 +153,6 @@ impl RustRespondService {
         } else {
             system_prompts
         };
-        let policy = self.resolve_agent_policy(&req)?;
         if !policy.enabled {
             let reply = "当前场景普通 AI 聊天未启用。";
             self.session_store
@@ -863,5 +861,6 @@ mod prompt_protection_tests {
         assert!(TOOL_LOOP_AMBIGUITY_PROMPT.contains("跨轮恢复"));
         assert!(!TOOL_LOOP_AMBIGUITY_PROMPT.contains("edit_todo"));
         assert!(!TOOL_LOOP_AMBIGUITY_PROMPT.contains("reminder_at"));
+        assert!(!TOOL_LOOP_AMBIGUITY_PROMPT.contains("published_tool_call_ids"));
     }
 }

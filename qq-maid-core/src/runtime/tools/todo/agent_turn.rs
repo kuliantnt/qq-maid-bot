@@ -31,6 +31,22 @@ use crate::{
     util::metrics::LlmMetrics,
 };
 
+const TODO_AGENT_DISPLAY_CONTRACT_PROMPT: &str = "\
+Todo 列表最终展示契约：此契约仅适用于本轮成功的 list_todos 调用。\
+如果希望由服务端把某次 list_todos 返回的条目以稳定编号附加到出站回复，\
+请返回严格 JSON 对象 {\"reply\":\"用户可见的自然语言总结\",\"published_tool_call_ids\":[\"本轮 list_todos 的 call_id\"]}；\
+服务端会验证 call_id 并实际渲染对应的确定性 Todo 编号列表，因此 reply 中不要重复列出这些条目。\
+数组只能列出确实希望展示的成功 list_todos 结果，不要列隐藏、失败或未展示的结果。\
+其他工具不支持这个展示契约，必须在 reply 中保留用户需要看到的内容；\
+如果不需要附加可供后续“第一条/刚刚那条”引用的 Todo 编号列表，直接返回普通自然语言正文，不要猜测 call_id 或伪造展示记录。";
+
+pub(super) fn display_contract_prompt(enabled_tools: &[String]) -> Option<&'static str> {
+    enabled_tools
+        .iter()
+        .any(|tool| tool == todo::LIST_TODOS_TOOL_NAME)
+        .then_some(TODO_AGENT_DISPLAY_CONTRACT_PROMPT)
+}
+
 /// 捕获投影前的 Todo 会话上下文和模型原始回复，避免通用 Tool Turn 调度层
 /// 感知验真候选细节，也避免事实卡或工具回执干扰成功声明判定。
 pub(crate) struct TodoTurnPostprocessor {
@@ -504,5 +520,20 @@ impl DomainTurnDiagnostics for TodoAgentDiagnostics {
             return Some("todo_success_not_verified");
         }
         (use_agent_runtime && !self.validation.passed()).then_some("todo_success_not_verified")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_contract_is_only_advertised_with_todo_list_enabled() {
+        let prompt = display_contract_prompt(&[todo::LIST_TODOS_TOOL_NAME.to_owned()])
+            .expect("list_todos should enable its display contract");
+
+        assert!(prompt.contains("仅适用于本轮成功的 list_todos"));
+        assert!(prompt.contains("其他工具不支持这个展示契约"));
+        assert!(display_contract_prompt(&["web_search".to_owned()]).is_none());
     }
 }

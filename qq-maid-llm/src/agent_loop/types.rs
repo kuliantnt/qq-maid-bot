@@ -95,6 +95,13 @@ pub struct AgentRunDiagnostics {
     /// 与 `tool_results` 按结果下标对应的内部尝试关系；不序列化到公共诊断 JSON。
     #[serde(skip)]
     pub tool_attempts: Vec<ToolExecutionAttempt>,
+    /// 最终成功候选写入 `tool_results` 前的全局下标；最终候选未成功时为空。
+    ///
+    /// 候选链诊断会累计保留失败候选的只读结果，但这些结果没有回填给后续候选，
+    /// 因此 Core 只能把该下标之后的来源附到最终模型正文。字段不进入公共诊断 JSON，
+    /// 只作为 LLM 与 Core 之间的响应合成边界。
+    #[serde(skip)]
+    pub final_candidate_tool_result_start: Option<usize>,
     /// 已开始但尚未形成可信结果的工具名。
     ///
     /// Core 取消或超时等待预算耗尽时，该字段明确表示副作用结果仍不确定，
@@ -223,6 +230,7 @@ impl AgentRunHandle {
         ) {
             state.diagnostics.stop_reason = None;
         }
+        state.diagnostics.final_candidate_tool_result_start = None;
         let baseline = AgentAttemptBaseline::from_diagnostics(&state.diagnostics);
         state.pending_attempt = Some(baseline);
         Ok(baseline)
@@ -248,6 +256,7 @@ impl AgentRunHandle {
         ) {
             state.diagnostics.stop_reason = None;
         }
+        state.diagnostics.final_candidate_tool_result_start = None;
         let baseline = AgentAttemptBaseline::from_diagnostics(&state.diagnostics);
         state.pending_attempt = Some(baseline);
         Ok(baseline)
@@ -263,6 +272,13 @@ impl AgentRunHandle {
             .pending_attempt
             .take()
             .unwrap_or_else(|| AgentAttemptBaseline::from_diagnostics(&state.diagnostics))
+    }
+
+    /// 记录最终回复实际来自哪个候选，供 Core 排除失败候选的只读来源。
+    pub(crate) fn mark_candidate_succeeded(&self, baseline: AgentAttemptBaseline) {
+        self.update(|diagnostics| {
+            diagnostics.final_candidate_tool_result_start = Some(baseline.tool_results);
+        });
     }
 
     /// 在线性化边界内记录一次模型请求已经发起。

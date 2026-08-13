@@ -372,6 +372,7 @@ async fn execute_deterministic_todo(
         side_effecting_tools_started: vec![plan.action.tool_name().to_owned()],
         tool_results: vec![result.clone()],
         tool_attempts: vec![attempt],
+        final_candidate_tool_result_start: None,
         tools_with_unknown_result: Vec::new(),
         streaming_fallback_used: false,
         stop_reason: Some(if succeeded {

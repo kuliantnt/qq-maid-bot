@@ -529,6 +529,7 @@ async fn cross_candidate_retry_indexes_are_offset_to_global() {
     assert_eq!(*calls_b.lock().unwrap(), 2);
     assert_eq!(outcome.agent.tool_results.len(), 3);
     assert_eq!(outcome.agent.tool_attempts.len(), 3);
+    assert_eq!(outcome.agent.final_candidate_tool_result_start, Some(1));
 
     // 候选 A 的全局下标保持不变。
     assert_eq!(outcome.agent.tool_attempts[0].result_index, 0);

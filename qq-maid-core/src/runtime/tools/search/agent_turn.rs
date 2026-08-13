@@ -41,6 +41,7 @@ pub(crate) struct SearchTurnProjection {
 pub(crate) fn project_results(
     results: &[ToolExecutionResult],
     attempts: &[ToolExecutionAttempt],
+    final_candidate_result_start: usize,
 ) -> SearchTurnProjection {
     let mut consumed_result_indexes = HashSet::new();
     let mut projected = Vec::new();
@@ -57,7 +58,11 @@ pub(crate) fn project_results(
             continue;
         }
         if let SearchResultProjection::Visible(outcome) = projection {
-            if outcome.status == ToolOutcomeStatus::Succeeded {
+            // 失败候选的只读结果仍留在请求级 diagnostics 中，但没有回填给最终
+            // 候选。它们可以参与故障诊断，不能作为最终模型正文的引用来源。
+            if index >= final_candidate_result_start
+                && outcome.status == ToolOutcomeStatus::Succeeded
+            {
                 provenance.extend(provenance_from_output(&result.output));
             }
             projected.push((index, outcome));
@@ -408,6 +413,32 @@ mod tests {
 
         assert!(!sources[0].identity_in_deterministic_body);
         assert!(sources[0].snippet_in_deterministic_body);
+    }
+
+    #[test]
+    fn provenance_only_uses_results_seen_by_final_candidate() {
+        let results = vec![
+            web_search_result(json!({
+                "answer": "候选 A 的搜索答案",
+                "sources": [{
+                    "title": "候选 A 来源",
+                    "url": "https://example.test/candidate-a"
+                }]
+            })),
+            web_search_result(json!({
+                "answer": "候选 B 的搜索答案",
+                "sources": [{
+                    "title": "候选 B 来源",
+                    "url": "https://example.test/candidate-b"
+                }]
+            })),
+        ];
+
+        let projection = project_results(&results, &[], 1);
+
+        assert_eq!(projection.provenance.len(), 1);
+        assert_eq!(projection.provenance[0].title, "候选 B 来源");
+        assert_eq!(projection.outcomes.len(), 2);
     }
 
     #[test]

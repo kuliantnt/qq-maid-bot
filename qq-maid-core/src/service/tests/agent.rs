@@ -620,6 +620,8 @@ async fn core_agent_buffered_draft_incomplete_falls_back_to_second_candidate_wit
     );
     let projected = &deltas[0];
     assert_eq!(projected, FINAL);
+    assert!(!projected.contains("第一候选独有来源"));
+    assert!(!projected.contains("https://example.test/failed-candidate"));
     assert_eq!(response.text_content(), Some(projected.as_str()));
     // Completed 只出现一次，且之后不再产生事件。
     assert_eq!(completed, 1);
