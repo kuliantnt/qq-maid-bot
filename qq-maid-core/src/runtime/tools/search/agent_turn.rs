@@ -242,9 +242,6 @@ fn provenance_from_output(output: &Value) -> Vec<ProvenanceSource> {
                 &formatted.rendered_sources,
             );
             extend_unique_provenance(&mut provenance, sources);
-            if provenance.len() == WEB_SEARCH_TOOL_SOURCE_LIMIT {
-                break;
-            }
         }
         return provenance;
     }
@@ -255,25 +252,20 @@ fn provenance_from_output(output: &Value) -> Vec<ProvenanceSource> {
     provenance
 }
 
-/// 来源预算按唯一来源消耗；重复项只合并正文展示标记，并继续扫描后续候选来回填上限。
+/// 来源预算按唯一来源消耗；重复项只合并正文展示标记。达到上限后仍需继续识别
+/// 重复项，避免遗漏后续确定性正文已经展示过的来源状态。
 fn extend_unique_provenance(
     provenance: &mut Vec<ProvenanceSource>,
     sources: impl IntoIterator<Item = ProvenanceSource>,
 ) {
     for source in sources {
-        if provenance.len() >= WEB_SEARCH_TOOL_SOURCE_LIMIT {
-            break;
-        }
         if let Some(existing) = provenance
             .iter_mut()
             .find(|existing| existing.has_same_identity(&source))
         {
             existing.merge_rendered_markers(&source);
-        } else {
+        } else if provenance.len() < WEB_SEARCH_TOOL_SOURCE_LIMIT {
             provenance.push(source);
-            if provenance.len() == WEB_SEARCH_TOOL_SOURCE_LIMIT {
-                break;
-            }
         }
     }
 }
@@ -571,6 +563,80 @@ mod tests {
                 "https://example.test/unique-3",
             ]
         );
+    }
+
+    #[test]
+    fn duplicate_after_full_budget_still_merges_rendered_markers_across_searches() {
+        let first = web_search_result(json!({
+            "answer": "第一轮搜索答案",
+            "sources": (0..WEB_SEARCH_TOOL_SOURCE_LIMIT).map(|index| json!({
+                "title": format!("来源 {index}"),
+                "url": format!("https://example.test/source-{index}")
+            })).collect::<Vec<_>>()
+        }));
+        let duplicate = web_search_result(json!({
+            "sources": [{
+                "title": "同一来源的新标题",
+                "url": "https://example.test/source-0"
+            }]
+        }));
+
+        let projection = project_results(&[first, duplicate], &[], 0);
+
+        assert_eq!(projection.provenance.len(), WEB_SEARCH_TOOL_SOURCE_LIMIT);
+        assert!(projection.provenance[0].identity_in_deterministic_body);
+    }
+
+    #[test]
+    fn duplicate_after_full_budget_still_merges_rendered_markers_in_research() {
+        let output = json!({
+            "mode": "multi_entity_research",
+            "results": [{
+                "entity": "项目甲",
+                "status": "success",
+                "facts": "项目甲事实",
+                "sources": [{
+                    "title": "来源 A",
+                    "url": "https://example.test/source-a"
+                }, {
+                    "title": "共享来源的旧标题",
+                    "url": "https://example.test/shared"
+                }]
+            }, {
+                "entity": "项目乙",
+                "status": "success",
+                "facts": "项目乙事实",
+                "sources": [{
+                    "title": "来源 B",
+                    "url": "https://example.test/source-b"
+                }]
+            }, {
+                "entity": "项目丙",
+                "status": "success",
+                "facts": "项目丙事实",
+                "sources": [{
+                    "title": "来源 C",
+                    "url": "https://example.test/source-c"
+                }]
+            }, {
+                "entity": "项目丁",
+                "status": "success",
+                "facts": "项目丁事实",
+                "sources": [{
+                    "title": "共享来源的新标题",
+                    "url": "https://example.test/shared"
+                }]
+            }]
+        });
+
+        let sources = provenance_from_output(&output);
+
+        assert_eq!(sources.len(), WEB_SEARCH_TOOL_SOURCE_LIMIT);
+        let shared = sources
+            .iter()
+            .find(|source| source.url == "https://example.test/shared")
+            .expect("共享来源应保留在来源预算内");
+        assert!(shared.identity_in_deterministic_body);
     }
 
     #[test]
