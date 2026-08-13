@@ -257,6 +257,7 @@ fn project_tool_turn(
         meta,
         &output.agent.tool_results,
         &output.agent.tool_attempts,
+        &output.display_contract.published_tool_call_ids,
     )?;
     let visible_entity_snapshot = todo_projection.visible_entity_snapshot;
     let search_projection =

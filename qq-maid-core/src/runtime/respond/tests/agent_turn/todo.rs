@@ -326,7 +326,7 @@ async fn structured_model_list_publication_preserves_snapshot_for_next_turn() {
         .with_tool_call_json(
             "list_todos",
             r#"{"status":"pending"}"#,
-            r#"{"reply":"🚧 当前进行中 · 共 1 项\n1. 可继续引用的待办","published_tool_call_ids":["mock-call-0"]}"#,
+            r#"{"reply":"我整理好了当前待办","published_tool_call_ids":["mock-call-0"]}"#,
         )
         .with_tool_call_json(
             "complete_todos",
@@ -347,7 +347,7 @@ async fn structured_model_list_publication_preserves_snapshot_for_next_turn() {
 
     assert_eq!(
         response.text.as_deref(),
-        Some("🚧 当前进行中 · 共 1 项\n· 可继续引用的待办")
+        Some("我整理好了当前待办\n\n🚧 当前进行中 · 共 1 项\n1. 可继续引用的待办")
     );
     assert!(response.visible_entity_snapshot.is_some());
     assert!(
@@ -366,6 +366,169 @@ async fn structured_model_list_publication_preserves_snapshot_for_next_turn() {
         .unwrap();
 
     assert!(service.task_store.list_pending(&owner).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn structured_publication_binds_snapshot_to_the_published_list_result() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results_and_attempts(
+            vec![
+                raw_tool_result(
+                    "list_todos",
+                    serde_json::json!({
+                        "ok": true,
+                        "status": "pending",
+                        "keyword": "alpha",
+                        "items": [],
+                        "count": 1
+                    }),
+                    true,
+                ),
+                raw_tool_result(
+                    "list_todos",
+                    serde_json::json!({
+                        "ok": true,
+                        "status": "pending",
+                        "keyword": "beta",
+                        "items": [],
+                        "count": 1
+                    }),
+                    true,
+                ),
+            ],
+            vec![
+                ToolExecutionAttempt {
+                    result_index: 0,
+                    call_id: "list-alpha".to_owned(),
+                    round: 0,
+                    retry_of: None,
+                },
+                ToolExecutionAttempt {
+                    result_index: 1,
+                    call_id: "list-beta".to_owned(),
+                    round: 0,
+                    retry_of: None,
+                },
+            ],
+            r#"{"reply":"我整理了指定列表","published_tool_call_ids":["list-alpha"]}"#,
+        )
+        .with_tool_call_json(
+            "complete_todos",
+            r#"{"numbers":[1],"selection_text":null,"reference":null}"#,
+            "已完成第一条",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let alpha = service
+        .task_store
+        .create(&owner, todo_draft("alpha item"))
+        .unwrap();
+    let beta = service
+        .task_store
+        .create(&owner, todo_draft("beta item"))
+        .unwrap();
+
+    let response = service
+        .respond(private_message("检查待办状态"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("alpha item"));
+    assert!(!text.contains("beta item"));
+    let snapshot = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap()
+        .last_todo_query
+        .expect("published list should preserve its own snapshot");
+    assert_eq!(snapshot.result_ids, vec![alpha.id.clone()]);
+
+    service
+        .respond(private_message("完成第一条待办"))
+        .await
+        .unwrap();
+
+    let pending = service.task_store.list_pending(&owner).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, beta.id);
+}
+
+#[tokio::test]
+async fn multiple_structured_published_lists_clear_ambiguous_snapshot() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results_and_attempts(
+            vec![
+                raw_tool_result(
+                    "list_todos",
+                    serde_json::json!({
+                        "ok": true,
+                        "status": "pending",
+                        "keyword": "alpha",
+                        "items": [],
+                        "count": 1
+                    }),
+                    true,
+                ),
+                raw_tool_result(
+                    "list_todos",
+                    serde_json::json!({
+                        "ok": true,
+                        "status": "pending",
+                        "keyword": "beta",
+                        "items": [],
+                        "count": 1
+                    }),
+                    true,
+                ),
+            ],
+            vec![
+                ToolExecutionAttempt {
+                    result_index: 0,
+                    call_id: "list-alpha".to_owned(),
+                    round: 0,
+                    retry_of: None,
+                },
+                ToolExecutionAttempt {
+                    result_index: 1,
+                    call_id: "list-beta".to_owned(),
+                    round: 0,
+                    retry_of: None,
+                },
+            ],
+            r#"{"reply":"我整理了两个列表","published_tool_call_ids":["list-alpha","list-beta"]}"#,
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    service
+        .task_store
+        .create(&owner, todo_draft("alpha item"))
+        .unwrap();
+    service
+        .task_store
+        .create(&owner, todo_draft("beta item"))
+        .unwrap();
+
+    let response = service
+        .respond(private_message("检查待办状态"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("alpha item"));
+    assert!(text.contains("beta item"));
+    assert!(response.visible_entity_snapshot.is_none());
+    assert!(
+        service
+            .session_store
+            .get_or_create_active(&private_test_meta())
+            .unwrap()
+            .last_todo_query
+            .is_none(),
+        "同时发布多个列表时不能为下一轮选择一个不明确的第一条"
+    );
 }
 
 #[tokio::test]

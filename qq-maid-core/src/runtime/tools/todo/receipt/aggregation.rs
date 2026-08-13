@@ -14,7 +14,7 @@ use crate::{
         respond::agent_outcome::{
             ResponseBlock, ToolEffect, ToolExecutionOutcome, ToolOutcomeStatus,
         },
-        session::{SessionMeta, SessionRecord},
+        session::{LastTodoQuery, SessionMeta, SessionRecord},
         tools::{
             agent_turn::is_retry_superseded_result,
             todo::{
@@ -32,6 +32,11 @@ use super::LIST_TODOS_TOOL_NAME;
 pub(crate) struct TodoTurnAggregation {
     pub consumed_result_indexes: HashSet<usize>,
     pub outcomes: Vec<(usize, ToolExecutionOutcome)>,
+    /// 每个成功且可展示的 `list_todos` 结果对应的快照。
+    ///
+    /// 同一轮可能有多个列表查询，不能只依赖 session 中最后一次写入的快照，
+    /// 否则模型只发布前一个列表时，下一轮“第一条”会错误命中后一个列表。
+    pub list_snapshots: Vec<(usize, LastTodoQuery)>,
 }
 
 impl TodoTurnAggregation {
@@ -90,6 +95,7 @@ pub(crate) fn aggregate_todo_tool_results(
         .collect::<Vec<_>>();
     let consumed_result_indexes = todo_indexes.iter().copied().collect::<HashSet<_>>();
     let mut outcomes = Vec::new();
+    let mut list_snapshots = Vec::new();
     for index in todo_indexes.iter().copied() {
         let result = &results[index];
         if todo_validation_failure_was_corrected(index, results, attempts) {
@@ -121,6 +127,16 @@ pub(crate) fn aggregate_todo_tool_results(
             result,
             pending_query.as_ref(),
         )? {
+            if result.name == LIST_TODOS_TOOL_NAME
+                && outcome.status == ToolOutcomeStatus::Succeeded
+                && outcome
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, ResponseBlock::RelatedList(_)))
+                && let Some(snapshot) = session.last_todo_query.clone()
+            {
+                list_snapshots.push((index, snapshot));
+            }
             outcomes.push((index, outcome));
         }
     }
@@ -128,6 +144,7 @@ pub(crate) fn aggregate_todo_tool_results(
     Ok(TodoTurnAggregation {
         consumed_result_indexes,
         outcomes,
+        list_snapshots,
     })
 }
 
