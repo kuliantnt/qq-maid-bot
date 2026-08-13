@@ -69,12 +69,7 @@ pub(crate) fn project_results(
             if index >= final_candidate_result_start
                 && outcome.status == ToolOutcomeStatus::Succeeded
             {
-                let remaining = WEB_SEARCH_TOOL_SOURCE_LIMIT.saturating_sub(provenance.len());
-                provenance.extend(
-                    provenance_from_output(&result.output)
-                        .into_iter()
-                        .take(remaining),
-                );
+                extend_unique_provenance(&mut provenance, provenance_from_output(&result.output));
             }
             projected.push((index, outcome));
         }
@@ -232,47 +227,62 @@ fn provenance_from_output(output: &Value) -> Vec<ProvenanceSource> {
     // 1500 字符上限裁掉，也不会因最终正文的偶然子串而误判。
     let formatted = format_web_search_tool_reply_with_sources(output);
     if json_string_field(output, "mode").as_deref() == Some("multi_entity_research") {
-        return output
+        let mut provenance = Vec::new();
+        for (result_index, item) in output
             .get("results")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .enumerate()
             .filter(|(_, item)| json_string_field(item, "status").as_deref() == Some("success"))
-            .flat_map(|(result_index, item)| {
-                let mut sources = sources_from_value(item.get("sources"));
-                apply_rendered_source_markers(
-                    &mut sources,
-                    Some(result_index),
-                    &formatted.rendered_sources,
-                );
-                sources.into_iter().map(|(_, source)| source)
-            })
-            .collect();
+        {
+            let sources = provenance_sources_from_value(
+                item.get("sources"),
+                Some(result_index),
+                &formatted.rendered_sources,
+            );
+            extend_unique_provenance(&mut provenance, sources);
+            if provenance.len() == WEB_SEARCH_TOOL_SOURCE_LIMIT {
+                break;
+            }
+        }
+        return provenance;
     }
-    let mut sources = sources_from_value(output.get("sources"));
-    apply_rendered_source_markers(&mut sources, None, &formatted.rendered_sources);
-    sources.into_iter().map(|(_, source)| source).collect()
+    let sources =
+        provenance_sources_from_value(output.get("sources"), None, &formatted.rendered_sources);
+    let mut provenance = Vec::new();
+    extend_unique_provenance(&mut provenance, sources);
+    provenance
 }
 
-fn apply_rendered_source_markers(
-    sources: &mut [(usize, ProvenanceSource)],
-    result_index: Option<usize>,
-    markers: &[WebSearchRenderedSource],
+/// 来源预算按唯一来源消耗；重复项只合并正文展示标记，并继续扫描后续候选来回填上限。
+fn extend_unique_provenance(
+    provenance: &mut Vec<ProvenanceSource>,
+    sources: impl IntoIterator<Item = ProvenanceSource>,
 ) {
-    for (source_index, source) in sources {
-        let location = WebSearchSourceLocation {
-            result_index,
-            source_index: *source_index,
-        };
-        if let Some(marker) = markers.iter().find(|marker| marker.location == location) {
-            source.identity_in_deterministic_body = marker.identity_rendered;
-            source.snippet_in_deterministic_body = marker.snippet_rendered;
+    for source in sources {
+        if provenance.len() >= WEB_SEARCH_TOOL_SOURCE_LIMIT {
+            break;
+        }
+        if let Some(existing) = provenance
+            .iter_mut()
+            .find(|existing| existing.has_same_identity(&source))
+        {
+            existing.merge_rendered_markers(&source);
+        } else {
+            provenance.push(source);
+            if provenance.len() == WEB_SEARCH_TOOL_SOURCE_LIMIT {
+                break;
+            }
         }
     }
 }
 
-fn sources_from_value(value: Option<&Value>) -> Vec<(usize, ProvenanceSource)> {
+fn provenance_sources_from_value<'a>(
+    value: Option<&'a Value>,
+    result_index: Option<usize>,
+    markers: &'a [WebSearchRenderedSource],
+) -> impl Iterator<Item = ProvenanceSource> + 'a {
     value
         .and_then(Value::as_array)
         .into_iter()
@@ -317,8 +327,17 @@ fn sources_from_value(value: Option<&Value>) -> Vec<(usize, ProvenanceSource)> {
                 },
             ))
         })
-        .take(WEB_SEARCH_TOOL_SOURCE_LIMIT)
-        .collect()
+        .map(move |(source_index, mut source)| {
+            let location = WebSearchSourceLocation {
+                result_index,
+                source_index,
+            };
+            if let Some(marker) = markers.iter().find(|marker| marker.location == location) {
+                source.identity_in_deterministic_body = marker.identity_rendered;
+                source.snippet_in_deterministic_body = marker.snippet_rendered;
+            }
+            source
+        })
 }
 
 fn sanitize_source_field(value: &str, max_chars: usize) -> String {
@@ -506,6 +525,52 @@ mod tests {
         assert_eq!(projection.provenance.len(), WEB_SEARCH_TOOL_SOURCE_LIMIT);
         assert_eq!(projection.provenance[0].title, "来源 0-0");
         assert_eq!(projection.provenance[3].title, "来源 1-0");
+    }
+
+    #[test]
+    fn duplicate_urls_do_not_consume_provenance_budget() {
+        let result = web_search_result(json!({
+            "answer": "搜索答案",
+            "sources": [{
+                "title": "重复来源 1",
+                "url": "https://example.test/duplicate"
+            }, {
+                "title": "重复来源 2",
+                "url": "https://example.test/duplicate"
+            }, {
+                "title": "重复来源 3",
+                "url": "https://example.test/duplicate"
+            }, {
+                "title": "重复来源 4",
+                "url": "https://example.test/duplicate"
+            }, {
+                "title": "唯一来源 1",
+                "url": "https://example.test/unique-1"
+            }, {
+                "title": "唯一来源 2",
+                "url": "https://example.test/unique-2"
+            }, {
+                "title": "唯一来源 3",
+                "url": "https://example.test/unique-3"
+            }]
+        }));
+
+        let projection = project_results(&[result], &[], 0);
+
+        assert_eq!(projection.provenance.len(), WEB_SEARCH_TOOL_SOURCE_LIMIT);
+        assert_eq!(
+            projection
+                .provenance
+                .iter()
+                .map(|source| source.url.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "https://example.test/duplicate",
+                "https://example.test/unique-1",
+                "https://example.test/unique-2",
+                "https://example.test/unique-3",
+            ]
+        );
     }
 
     #[test]

@@ -98,6 +98,22 @@ pub(crate) struct ProvenanceSource {
     pub snippet_in_deterministic_body: bool,
 }
 
+impl ProvenanceSource {
+    /// URL 可用时以 URL 标识同一来源；无 URL 的兼容来源必须全部展示字段一致。
+    pub(crate) fn has_same_identity(&self, other: &Self) -> bool {
+        if !self.url.is_empty() && !other.url.is_empty() {
+            self.url == other.url
+        } else {
+            self.title == other.title && self.url == other.url && self.snippet == other.snippet
+        }
+    }
+
+    pub(crate) fn merge_rendered_markers(&mut self, other: &Self) {
+        self.identity_in_deterministic_body |= other.identity_in_deterministic_body;
+        self.snippet_in_deterministic_body |= other.snippet_in_deterministic_body;
+    }
+}
+
 impl OutcomePresentation {
     fn as_str(self) -> &'static str {
         match self {
@@ -715,18 +731,11 @@ fn structured_error_code(output: &Value) -> Option<String> {
 fn deduplicate_provenance(sources: Vec<ProvenanceSource>) -> Vec<ProvenanceSource> {
     let mut unique: Vec<ProvenanceSource> = Vec::new();
     for source in sources {
-        let duplicate = unique.iter_mut().find(|existing| {
-            if !source.url.is_empty() && !existing.url.is_empty() {
-                source.url == existing.url
-            } else {
-                source.title == existing.title
-                    && source.url == existing.url
-                    && source.snippet == existing.snippet
-            }
-        });
+        let duplicate = unique
+            .iter_mut()
+            .find(|existing| existing.has_same_identity(&source));
         if let Some(existing) = duplicate {
-            existing.identity_in_deterministic_body |= source.identity_in_deterministic_body;
-            existing.snippet_in_deterministic_body |= source.snippet_in_deterministic_body;
+            existing.merge_rendered_markers(&source);
         } else {
             unique.push(source);
         }
