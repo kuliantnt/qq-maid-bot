@@ -24,8 +24,9 @@ async fn weather_success_and_todo_success_are_both_rendered_in_order() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert_eq!(text, "杭州小雨，已新增带伞待办");
-    assert!(!text.contains("✅ 已新增待办"));
+    assert!(text.contains("🌦 杭州天气"));
+    assert!(text.contains("✅ 已新增待办"));
+    assert!(!text.contains("杭州小雨，已新增带伞待办"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], "succeeded");
     assert_eq!(diagnostics["error_code"], Value::Null);
@@ -252,8 +253,9 @@ async fn weather_and_real_todo_create_keep_both_trusted_results() {
         .unwrap();
 
     let text = response.text.as_deref().unwrap();
-    assert_eq!(text, "天气已查询，也已记录买菜提醒。");
-    assert!(!text.contains("✅ 已新增待办"));
+    assert!(text.contains("🌦 杭州天气"));
+    assert!(text.contains("✅ 已新增待办"));
+    assert!(!text.contains("天气已查询，也已记录买菜提醒。"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["error_code"], Value::Null);
     assert_eq!(diagnostics["todo_success_claimed"], true);
@@ -292,8 +294,9 @@ async fn conditional_weather_and_todo_request_uses_tool_loop() {
     assert_ne!(response.command.as_deref(), Some("todo_due_date"));
     let text = response.text.as_deref().unwrap();
     assert!(!text.contains("这一天暂无未完成待办"));
-    assert_eq!(text, "明天可能有雨，已新增带伞待办");
-    assert!(!text.contains("✅ 已新增待办"));
+    assert!(text.contains("🌦 杭州天气"));
+    assert!(text.contains("✅ 已新增待办"));
+    assert!(!text.contains("明天可能有雨，已新增带伞待办"));
 }
 
 #[tokio::test]

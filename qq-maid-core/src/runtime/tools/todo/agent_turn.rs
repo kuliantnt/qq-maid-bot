@@ -165,10 +165,16 @@ pub(crate) fn project_results(
     published_tool_call_ids: &[String],
 ) -> Result<DomainResultProjection, LlmError> {
     let owner = TaskStore::owner(meta.user_id.as_deref(), &meta.scope_key);
-    let mut aggregation =
-        todo::flow::aggregate_todo_tool_results(task_store, session, &owner, results, attempts)?;
     let published_list_indexes =
         published_todo_list_result_indexes_from_trace(results, attempts, published_tool_call_ids);
+    let mut aggregation = todo::flow::aggregate_todo_tool_results(
+        task_store,
+        session,
+        &owner,
+        results,
+        attempts,
+        &published_list_indexes,
+    )?;
     let projected_published_list_indexes = published_list_indexes
         .iter()
         .copied()

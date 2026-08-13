@@ -317,7 +317,7 @@ fn embedded_search_source_is_not_appended_again() {
 }
 
 #[test]
-fn mutation_success_still_replaces_model_reply() {
+fn mutation_success_requires_deterministic_reply() {
     let turn = AgentTurnOutcome::from_outcomes(vec![outcome(
         "create_todo",
         "todo",
@@ -329,7 +329,7 @@ fn mutation_success_still_replaces_model_reply() {
     )]);
 
     assert!(turn.can_render_deterministic_reply());
-    assert!(turn.can_use_model_reply_as_primary());
+    assert!(!turn.can_use_model_reply_as_primary());
 }
 
 #[test]

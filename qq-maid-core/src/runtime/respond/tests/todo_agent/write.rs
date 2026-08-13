@@ -7,7 +7,7 @@ use crate::runtime::tools::todo::{TodoItemDraft, TodoStore, TodoTimePrecision};
 use super::super::support::*;
 
 #[tokio::test]
-async fn todo_create_keeps_model_reply_as_primary() {
+async fn todo_create_uses_verified_receipt() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_call_json(
@@ -23,9 +23,9 @@ async fn todo_create_keeps_model_reply_as_primary() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert_eq!(text, "已新增待办");
+    assert!(text.contains("✅ 已新增待办"));
     assert!(
-        !response
+        response
             .markdown
             .as_deref()
             .unwrap_or_default()
@@ -71,7 +71,7 @@ async fn todo_edit_receipt_shows_final_detail_card() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert_eq!(text, "已修改待办");
+    assert!(text.contains("✏️ 已修改待办"));
     assert_eq!(
         service.task_store.list_pending(&owner).unwrap()[0]
             .detail
@@ -118,7 +118,7 @@ async fn todo_edit_receipt_clears_detail_after_successful_tool_result() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert_eq!(text, "第一条详情已清除");
+    assert!(text.contains("✏️ 已修改待办"));
     assert_eq!(
         service.task_store.list_pending(&owner).unwrap()[0].detail,
         None
@@ -180,7 +180,7 @@ async fn todo_tool_loop_clears_third_and_fourth_details() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert_eq!(text, "第三条和第四条详情已清除");
+    assert_eq!(text.matches("✏️ 已修改待办").count(), 2);
     assert_eq!(
         service
             .task_store
@@ -213,7 +213,7 @@ async fn todo_tool_loop_clears_third_and_fourth_details() {
 }
 
 #[tokio::test]
-async fn todo_complete_keeps_model_reply_as_primary() {
+async fn todo_complete_uses_verified_receipt() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_call_json(
@@ -250,7 +250,7 @@ async fn todo_complete_keeps_model_reply_as_primary() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert_eq!(text, "已完成待办");
+    assert!(text.contains("✅ 已完成待办"));
 }
 
 #[tokio::test]
@@ -388,7 +388,7 @@ async fn todo_internal_list_before_write_is_not_user_visible_query() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert_eq!(text, "已完成第一条");
+    assert!(text.contains("✅ 已完成待办"));
     assert!(!text.contains("🚧 当前进行中 · 共 1 项"));
     assert!(!text.contains("先完成\n状态：未完成"));
     let diagnostics = response.diagnostics.unwrap();

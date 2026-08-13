@@ -51,8 +51,8 @@ pub(crate) fn compose_tool_turn_output(
             if outcome.can_use_model_reply_as_primary() && !output.model_reply_empty {
                 append_model_reply_with_supplement(output, outcome);
             } else {
-                // 正常成功时模型正文是唯一主体；模型为空、失败或工具状态需要
-                // 确定性解释时，才使用已经完成且可信的领域 renderer 降级。
+                // 只读成功时模型正文可以作为主体；模型为空、失败或本轮包含副作用
+                // 时，使用已经完成且可信的领域 renderer，确保回执逐项对应真实结果。
                 let reason = if output.model_reply_empty {
                     AgentFallbackReason::ModelReplyUnavailable
                 } else {
@@ -141,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    fn natural_language_success_keeps_model_as_only_body() {
+    fn natural_language_mutation_keeps_deterministic_receipt() {
         let turn = AgentTurnOutcome::from_outcomes(vec![outcome(
             ToolOutcomeStatus::Succeeded,
             ToolEffect::Created,
@@ -151,8 +151,8 @@ mod tests {
 
         compose_tool_turn_output(&mut output, &turn, AgentReplySource::NaturalLanguageAgent);
 
-        assert_eq!(output.text, "模型总结");
-        assert!(!output.text.contains("确定性回执"));
+        assert_eq!(output.text, "确定性回执");
+        assert!(!output.text.contains("模型总结"));
     }
 
     #[test]

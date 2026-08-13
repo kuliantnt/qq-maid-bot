@@ -258,8 +258,9 @@ async fn mixed_train_and_todo_request_is_not_captured_by_todo_date_query() {
     assert_ne!(response.command.as_deref(), Some("todo_due_date"));
     let text = response.text.as_deref().unwrap();
     assert!(!text.contains("这一天暂无未完成待办"));
-    assert_eq!(text, "G1 可查，已新增待办");
-    assert!(!text.contains("✅ 已新增待办"));
+    assert!(text.contains("🚄 G1 列车时刻"));
+    assert!(text.contains("✅ 已新增待办"));
+    assert!(!text.contains("G1 可查，已新增待办"));
     let train_requests = train_inspector.requests();
     assert_eq!(train_requests.len(), 1);
     assert_eq!(train_requests[0].train_code, "G1");
@@ -772,7 +773,7 @@ async fn tool_loop_created_todo_survives_chat_history_save_and_records_last_acti
         .await
         .unwrap();
     let first_text = first.text.unwrap();
-    assert!(!first_text.contains("✅ 已新增待办"));
+    assert!(first_text.contains("✅ 已新增待办"));
     assert!(!first_text.trim().is_empty());
     assert!(!first_text.contains("🚧 当前进行中 · 共 1 项"));
     let first_diagnostics = first.diagnostics.unwrap();
@@ -825,8 +826,8 @@ async fn private_scheduled_task_phrase_is_handled_by_agent_tool_loop() {
         .unwrap();
 
     let text = response.text.as_deref().unwrap();
-    assert_eq!(text, "任务已处理");
-    assert!(!text.contains("✅ 已新增待办"));
+    assert!(text.contains("✅ 已新增待办"));
+    assert!(!text.contains("任务已处理"));
     assert_eq!(inspector.tool_call_count(), 1);
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(
@@ -851,7 +852,7 @@ async fn private_todo_create_phrase_is_handled_by_agent_tool_loop() {
 
     assert_eq!(response.command.as_deref(), Some("todo_create"));
     let text = response.text.unwrap();
-    assert!(!text.contains("✅ 已新增待办"));
+    assert!(text.contains("✅ 已新增待办"));
     assert!(!text.trim().is_empty());
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(

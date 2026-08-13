@@ -181,8 +181,8 @@ async fn multiple_successful_todo_writes_share_one_background_snapshot() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert_eq!(text, "已新增最后一条");
-    assert!(!text.contains("✅ 已新增待办"));
+    assert_eq!(text.matches("✅ 已新增待办").count(), 2);
+    assert!(!text.contains("已新增最后一条"));
     assert_eq!(text.matches("🚧 当前进行中").count(), 0);
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], "succeeded");
@@ -197,6 +197,29 @@ async fn multiple_successful_todo_writes_share_one_background_snapshot() {
         .last_todo_query
         .expect("missing background refreshed snapshot");
     assert_eq!(snapshot.result_ids.len(), 2);
+}
+
+#[tokio::test]
+async fn missing_todo_write_does_not_use_model_success_summary() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "create_todo",
+            r#"{"content":"只实际新增一条","title":null,"detail":null,"due_date":null,"due_at":null,"time_precision":null}"#,
+            "两条都已成功新增",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+
+    let response = service
+        .respond(private_message("新增两条待办"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("✅ 已新增待办"));
+    assert!(!text.contains("两条都已成功新增"));
+    assert_eq!(service.task_store.list_pending(&owner).unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -366,6 +389,71 @@ async fn structured_model_list_publication_preserves_snapshot_for_next_turn() {
         .unwrap();
 
     assert!(service.task_store.list_pending(&owner).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn explicitly_published_list_survives_a_following_todo_write() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results_and_attempts(
+            vec![
+                raw_tool_result(
+                    "list_todos",
+                    serde_json::json!({
+                        "ok": true,
+                        "status": "pending",
+                        "items": [],
+                        "count": 1
+                    }),
+                    true,
+                ),
+                raw_tool_result(
+                    "create_todo",
+                    serde_json::json!({
+                        "ok": true,
+                        "created_items": [{"title": "新增条目"}]
+                    }),
+                    true,
+                ),
+            ],
+            vec![
+                ToolExecutionAttempt {
+                    result_index: 0,
+                    call_id: "list-before-write".to_owned(),
+                    round: 0,
+                    retry_of: None,
+                },
+                ToolExecutionAttempt {
+                    result_index: 1,
+                    call_id: "create-after-list".to_owned(),
+                    round: 0,
+                    retry_of: None,
+                },
+            ],
+            r#"{"reply":"已处理","published_tool_call_ids":["list-before-write"]}"#,
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let visible = service
+        .task_store
+        .create(&owner, todo_draft("写操作前的列表条目"))
+        .unwrap();
+
+    let response = service
+        .respond(private_message("先列出待办，再新增一条"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("写操作前的列表条目"));
+    assert!(text.contains("✅ 已新增待办"));
+    let snapshot = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap()
+        .last_todo_query
+        .expect("显式发布的列表应保留跨轮编号快照");
+    assert_eq!(snapshot.result_ids, vec![visible.id]);
 }
 
 #[tokio::test]

@@ -3,7 +3,7 @@ use qq_maid_llm::provider::ToolCallingProtocol;
 use super::support::*;
 
 #[tokio::test]
-async fn todo_complete_model_reply_refreshes_pending_snapshot() {
+async fn todo_complete_receipt_refreshes_pending_snapshot() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_call_json(
@@ -22,13 +22,12 @@ async fn todo_complete_model_reply_refreshes_pending_snapshot() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert_eq!(text, "已完成第一条");
-    assert!(!text.contains("✅ 已完成待办"));
+    assert!(text.contains("✅ 已完成待办"));
     assert_refreshed_pending_snapshot(&service, &owner, 6);
 }
 
 #[tokio::test]
-async fn todo_complete_model_reply_refreshes_pending_snapshot_at_ten_item_limit() {
+async fn todo_complete_receipt_refreshes_pending_snapshot_at_ten_item_limit() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_call_json(
@@ -47,7 +46,6 @@ async fn todo_complete_model_reply_refreshes_pending_snapshot_at_ten_item_limit(
         .unwrap();
 
     let text = response.text.unwrap();
-    assert_eq!(text, "已完成第一条");
-    assert!(!text.contains("✅ 已完成待办"));
+    assert!(text.contains("✅ 已完成待办"));
     assert_refreshed_pending_snapshot(&service, &owner, 10);
 }

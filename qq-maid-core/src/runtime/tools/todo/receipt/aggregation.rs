@@ -87,6 +87,7 @@ pub(crate) fn aggregate_todo_tool_results(
     owner: &TodoOwner,
     results: &[ToolExecutionResult],
     attempts: &[ToolExecutionAttempt],
+    published_list_indexes: &[usize],
 ) -> Result<TodoTurnAggregation, LlmError> {
     let todo_indexes = results
         .iter()
@@ -117,7 +118,9 @@ pub(crate) fn aggregate_todo_tool_results(
         } else {
             None
         };
-        if result.name == LIST_TODOS_TOOL_NAME && !is_user_visible_list_query(results, index) {
+        if result.name == LIST_TODOS_TOOL_NAME
+            && !is_user_visible_list_query(results, index, published_list_indexes)
+        {
             continue;
         }
         if let Some(outcome) = super::tool_outcome_from_todo_result(
@@ -198,7 +201,16 @@ fn is_todo_tool_result(result: &ToolExecutionResult) -> bool {
         || super::todo_write_operation(&result.name).is_some()
 }
 
-fn is_user_visible_list_query(results: &[ToolExecutionResult], index: usize) -> bool {
+fn is_user_visible_list_query(
+    results: &[ToolExecutionResult],
+    index: usize,
+    published_list_indexes: &[usize],
+) -> bool {
+    // 显式发布契约优先于“后续有写操作即内部查询”的启发式；模型既然选择了
+    // 这个真实 call id 出站，列表正文和编号快照就不能在聚合阶段提前丢弃。
+    if published_list_indexes.contains(&index) {
+        return true;
+    }
     // 失败的列表调用本身就是用户可见的真实失败；后续独立写操作不能把它当作
     // 内部查询吞掉。成功列表仍可作为写操作前的内部定位查询而不单独展示。
     if !results[index].succeeded {

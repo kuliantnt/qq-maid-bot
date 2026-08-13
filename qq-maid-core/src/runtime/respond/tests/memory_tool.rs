@@ -50,7 +50,7 @@ async fn private_explicit_memory_intent_exposes_tool_and_writes_directly() {
 
     assert_eq!(response.command.as_deref(), Some("memory"));
     let text = response.text.unwrap();
-    assert_eq!(text, "模型声称已经记住");
+    assert!(text.contains("🧠 已记住"));
 
     let request = inspector.tool_requests().remove(0);
     let metadata = request.tools.metadata();
@@ -121,9 +121,11 @@ async fn non_fixed_explicit_phrases_can_call_save_memory() {
         let service = test_service_with_provider_and_tool_calling(provider, true);
 
         let response = service.respond(private_message(source)).await.unwrap();
-        assert_eq!(
-            response.text.as_deref(),
-            Some("模型声称已经记住"),
+        assert!(
+            response
+                .text
+                .as_deref()
+                .is_some_and(|text| text.contains("🧠 已记住")),
             "{source}"
         );
         let user = actor("u1", "u1", None, false);
@@ -163,7 +165,12 @@ async fn default_group_route_exposes_memory_only() {
         .respond(message("以后在这个群称呼我初墨"))
         .await
         .unwrap();
-    assert_eq!(response.text.as_deref(), Some("模型声称已经记住"));
+    assert!(
+        response
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("🧠 已记住"))
+    );
     let request = inspector.tool_requests().remove(0);
     let exposed = request
         .tools
@@ -218,7 +225,12 @@ async fn group_profile_tool_uses_current_actor_and_group() {
     );
 
     let response = service.respond(message("在这个群叫我棒冰")).await.unwrap();
-    assert_eq!(response.text.as_deref(), Some("模型声称已经记住"));
+    assert!(
+        response
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("🧠 已记住"))
+    );
 
     let user = actor("u1", "u1", Some("g1"), false);
     assert_eq!(
@@ -505,7 +517,12 @@ async fn onebot_group_tool_uses_account_namespaced_memory_scope() {
     request.conversation_id = Some("g1".to_owned());
 
     let response = service.respond(request).await.unwrap();
-    assert_eq!(response.text.as_deref(), Some("模型声称已经记住"));
+    assert!(
+        response
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("🧠 已记住"))
+    );
 
     let personal = "platform:onebot11:account:bot-a:private:u1";
     let group = "platform:onebot11:account:bot-a:group:g1";

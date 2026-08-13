@@ -117,6 +117,11 @@ impl ToolEffect {
     }
 
     fn is_completed_side_effect(self) -> bool {
+        self.is_side_effect()
+    }
+
+    /// 只读结果可以由模型整合；其余 effect 都必须保留服务端的确定性回执。
+    fn is_side_effect(self) -> bool {
         !matches!(self, Self::ReadOnly)
     }
 }
@@ -327,12 +332,18 @@ impl AgentTurnOutcome {
 
     /// 自然语言 Agent 是否可以把模型正文作为本轮唯一主体。
     ///
-    /// 成功的写操作也走这里；Todo 成功验真由 Todo postprocessor 在合成前执行。
-    /// 只有真实失败（`empty_result` 是“查询完成但无证据”的兼容状态）才回到确定性
-    /// 错误/回执，避免模型把失败工具说成成功。Internal/Skipped 表示去重或调用上限
-    /// 等无需单独展示的内部跳过状态，不应覆盖同轮已经生成的有效模型正文。
+    /// 只读结果可以由模型整合；任何可能改变持久化或外部状态的结果都必须回到
+    /// 确定性回执。否则模型漏调一项写操作时，仍可能用一段“全部已完成”的总结
+    /// 覆盖真实工具轨迹。Internal/Skipped 的只读状态仍可保留同轮有效模型正文。
     pub(crate) fn can_use_model_reply_as_primary(&self) -> bool {
         if self.has_incomplete_result() || self.has_unhandled_outcome() {
+            return false;
+        }
+        if self
+            .outcomes
+            .iter()
+            .any(|outcome| outcome.effect.is_side_effect())
+        {
             return false;
         }
         self.outcomes.iter().all(|outcome| {
@@ -362,8 +373,8 @@ impl AgentTurnOutcome {
 
     /// 自然语言 Agent 成功时允许追加到模型正文后的用户可见补充内容。
     ///
-    /// 只追加搜索来源；Todo 列表、写操作回执、天气事实卡等仍由模型总结，避免
-    /// 模型已经列出结果时再次附加确定性正文。
+    /// 这里只追加只读搜索来源；副作用回执和 Todo 列表会在需要时由确定性正文
+    /// 接管，不能让模型总结覆盖真实工具结果。
     pub(crate) fn render_natural_language_supplement(&self) -> CommandBody {
         self.render_provenance()
     }
