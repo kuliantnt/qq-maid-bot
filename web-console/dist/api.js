@@ -11,16 +11,22 @@ export class ConsoleApiError extends Error {
 }
 let csrfToken = "";
 let unauthorizedHandler = null;
+// 每次认证状态切换都推进代次；请求只允许通知发起时所属代次的 401，避免旧请求清理新会话。
+let authGeneration = 0;
 export function setCsrfToken(value) {
     csrfToken = value;
+    authGeneration += 1;
 }
 /** 统一通知页面会话失效，避免各个页面分别吞掉 401 后继续显示已认证状态。 */
 export function setUnauthorizedHandler(handler) {
     unauthorizedHandler = handler;
 }
-function notifyUnauthorized(status) {
-    if (status === 401)
-        unauthorizedHandler?.();
+function notifyUnauthorized(status, requestGeneration) {
+    if (status !== 401 || requestGeneration !== authGeneration)
+        return;
+    // 先失效当前代次，再调用页面层回调，确保并发返回的同代次旧 401 不会重复触发重置。
+    authGeneration += 1;
+    unauthorizedHandler?.();
 }
 export async function fetchSession() {
     const payload = record(await fetchJson(AUTH_ROUTES.session, {
@@ -121,6 +127,7 @@ export async function listUserFiles() {
     });
 }
 export async function uploadUserFile(file) {
+    const requestGeneration = authGeneration;
     const response = await fetch(USER_DATA_ROUTES.filesUpload, {
         method: "POST",
         credentials: "same-origin",
@@ -128,20 +135,21 @@ export async function uploadUserFile(file) {
         body: (() => { const form = new FormData(); form.append("file", file); return form; })(),
     });
     if (!response.ok) {
-        notifyUnauthorized(response.status);
+        notifyUnauthorized(response.status, requestGeneration);
         throw new ConsoleApiError(`文件上传失败（HTTP ${response.status}）`, "request_failed", response.status);
     }
     const payload = record(await response.json());
     return parseUserFile(payload.data);
 }
 export async function readUserFile(file) {
+    const requestGeneration = authGeneration;
     const response = await fetch(file.url, {
         method: "POST",
         credentials: "same-origin",
         headers: { "X-CSRF-Token": csrfToken },
     });
     if (!response.ok) {
-        notifyUnauthorized(response.status);
+        notifyUnauthorized(response.status, requestGeneration);
         throw new ConsoleApiError(`文件读取失败（HTTP ${response.status}）`, "request_failed", response.status);
     }
     return response.blob();
@@ -170,6 +178,7 @@ export async function listKnowledgeFiles(params) {
     return parseKnowledgeFilePage(payload.data);
 }
 export async function uploadKnowledgeFile(file) {
+    const requestGeneration = authGeneration;
     const form = new FormData();
     form.append("file", file);
     const response = await fetch(KNOWLEDGE_ROUTES.upload, {
@@ -179,19 +188,20 @@ export async function uploadKnowledgeFile(file) {
         body: form,
     });
     if (!response.ok)
-        throw await responseError(response);
+        throw await responseError(response, requestGeneration);
     return parseKnowledgeFileItem(record(await response.json()).data);
 }
 export async function downloadKnowledgeFile(item) {
     if (item.file_id === null)
         throw new ConsoleApiError("知识库文件缺少标识", "invalid_response");
+    const requestGeneration = authGeneration;
     const response = await fetch(KNOWLEDGE_ROUTES.get(item.file_id), {
         method: "POST",
         credentials: "same-origin",
         headers: { "X-CSRF-Token": csrfToken },
     });
     if (!response.ok)
-        throw await responseError(response);
+        throw await responseError(response, requestGeneration);
     return {
         blob: await response.blob(),
         filename: filenameFromContentDisposition(response.headers.get("Content-Disposition")) ?? item.filename,
@@ -429,6 +439,7 @@ function parseTodoTargetPage(value) {
     };
 }
 async function fetchJson(input, init) {
+    const requestGeneration = authGeneration;
     let response;
     try {
         response = await fetch(input, { credentials: "same-origin", ...init });
@@ -446,7 +457,7 @@ async function fetchJson(input, init) {
             message = string(error.message, message);
         }
         catch { /* 保留稳定的 HTTP 错误摘要。 */ }
-        notifyUnauthorized(response.status);
+        notifyUnauthorized(response.status, requestGeneration);
         throw new ConsoleApiError(message, code, response.status);
     }
     try {
@@ -457,6 +468,7 @@ async function fetchJson(input, init) {
     }
 }
 export async function mutatingJson(input, method, body, allowEmpty = false) {
+    const requestGeneration = authGeneration;
     const response = await fetch(input, {
         method,
         credentials: "same-origin",
@@ -479,12 +491,12 @@ export async function mutatingJson(input, method, body, allowEmpty = false) {
             message = string(error.message, message);
         }
         catch { /* 保留稳定错误。 */ }
-        notifyUnauthorized(response.status);
+        notifyUnauthorized(response.status, requestGeneration);
         throw new ConsoleApiError(message, code, response.status);
     }
     return await response.json();
 }
-async function responseError(response) {
+async function responseError(response, requestGeneration) {
     let code = "request_failed";
     let message = `管理接口请求失败（HTTP ${response.status}）`;
     try {
@@ -494,7 +506,7 @@ async function responseError(response) {
         message = string(error.message, message);
     }
     catch { /* 保留稳定错误。 */ }
-    notifyUnauthorized(response.status);
+    notifyUnauthorized(response.status, requestGeneration);
     return new ConsoleApiError(message, code, response.status);
 }
 function parseRuntime(value) {
