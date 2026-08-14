@@ -1,8 +1,8 @@
 //! 联网搜索 Tool。
 //!
 //! 该 Tool 复用 `qq-maid-llm` 的统一 WebSearchExecutor，把 Provider 原生搜索与 Tavily
-//! 纳入服务端白名单 ToolRegistry。`/查` 只作为显式触发入口，仍在 respond/search_flow.rs
-//! 负责参数兼容、session 记录和用户可见错误文案。
+//! 纳入服务端白名单 ToolRegistry。`/查` 只作为显式触发入口，仍在 respond/search_flow/mod.rs
+//! 负责参数兼容、session 记录和入口编排；搜索结果、来源与错误文案由本领域门面统一提供。
 
 use std::{future::Future, pin::Pin, time::Duration};
 
@@ -67,6 +67,7 @@ impl Default for WebSearchTimeouts {
 }
 
 pub(crate) mod agent_turn;
+mod format;
 mod ops;
 mod output;
 pub(crate) mod status;
@@ -80,6 +81,15 @@ use validation::{
     parse_context_size, parse_max_results, parse_query, parse_time_range, parse_topic,
     request_from_arguments,
 };
+
+pub(crate) use format::{
+    WebSearchRenderedSource, WebSearchSourceLocation, format_web_search_command_reply,
+    format_web_search_error_reply, format_web_search_research_error_reply,
+    format_web_search_tool_reply_with_sources, json_string_field,
+};
+
+#[cfg(test)]
+pub(crate) use format::format_web_search_tool_reply;
 
 pub(crate) type WebSearchDeltaHandler<'a> = Box<
     dyn FnMut(String) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send>> + Send + 'a,

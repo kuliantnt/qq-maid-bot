@@ -16,7 +16,7 @@ use crate::{
 };
 
 // Tool 名常量；metadata 必须返回与 Agent Chat 路由完全一致的 name。
-pub(super) const LIST_TODOS_TOOL_NAME: &str = "list_todos";
+pub(crate) const LIST_TODOS_TOOL_NAME: &str = "list_todos";
 pub(super) const GET_TODO_TOOL_NAME: &str = "get_todo";
 pub(super) const CREATE_TODO_TOOL_NAME: &str = "create_todo";
 pub(super) const COMPLETE_TODOS_TOOL_NAME: &str = "complete_todos";

@@ -1,5 +1,8 @@
 use super::*;
 
+mod actions;
+use actions::MockToolAction;
+
 fn agent_tool_trace(
     emitted_tools: Vec<String>,
     tool_results: Vec<ToolExecutionResult>,
@@ -16,6 +19,7 @@ fn agent_tool_trace(
         executed_tools,
         tool_results,
         tool_attempts: Vec::new(),
+        final_candidate_tool_result_start: Some(0),
         tools_with_unknown_result: Vec::new(),
         streaming_fallback_used: false,
         stop_reason: Some(AgentStopReason::ToolUsed),
@@ -46,42 +50,6 @@ pub(crate) struct MockProvider {
     dream_delay: Option<std::time::Duration>,
     search_query_rewrite_replies: Arc<Mutex<Vec<Result<String, LlmError>>>>,
     title_delay: Option<std::time::Duration>,
-}
-
-#[derive(Clone)]
-enum MockToolAction {
-    CreateTodo {
-        content: String,
-    },
-    ExecuteTool {
-        name: String,
-        arguments: String,
-        reply: String,
-    },
-    ExecuteTodoListRetry {
-        arguments: String,
-        reply: String,
-    },
-    ExecuteTools {
-        calls: Vec<(String, String)>,
-        reply: String,
-    },
-    ExecuteToolsThenFail {
-        calls: Vec<(String, String)>,
-        error: LlmError,
-    },
-    ReturnToolResults {
-        results: Vec<ToolExecutionResult>,
-        attempts: Vec<ToolExecutionAttempt>,
-        reply: String,
-    },
-    ReplyWithoutTool {
-        reply: String,
-    },
-    RejectedToolCall {
-        name: String,
-        reply: String,
-    },
 }
 
 impl MockProvider {
@@ -190,142 +158,6 @@ impl MockProvider {
 
     pub(crate) fn with_stream_enabled(mut self, enabled: bool) -> Self {
         self.stream_enabled = enabled;
-        self
-    }
-
-    pub(crate) fn with_create_todo_tool_call(self, content: impl Into<String>) -> Self {
-        self.tool_actions
-            .lock()
-            .unwrap()
-            .push(MockToolAction::CreateTodo {
-                content: content.into(),
-            });
-        self
-    }
-
-    pub(crate) fn with_tool_call_json(
-        self,
-        name: impl Into<String>,
-        arguments: impl Into<String>,
-        reply: impl Into<String>,
-    ) -> Self {
-        self.tool_actions
-            .lock()
-            .unwrap()
-            .push(MockToolAction::ExecuteTool {
-                name: name.into(),
-                arguments: arguments.into(),
-                reply: reply.into(),
-            });
-        self
-    }
-
-    pub(crate) fn with_todo_list_retry(
-        self,
-        arguments: impl Into<String>,
-        reply: impl Into<String>,
-    ) -> Self {
-        self.tool_actions
-            .lock()
-            .unwrap()
-            .push(MockToolAction::ExecuteTodoListRetry {
-                arguments: arguments.into(),
-                reply: reply.into(),
-            });
-        self
-    }
-
-    pub(crate) fn with_tool_calls_json(
-        self,
-        calls: Vec<(&str, &str)>,
-        reply: impl Into<String>,
-    ) -> Self {
-        self.tool_actions
-            .lock()
-            .unwrap()
-            .push(MockToolAction::ExecuteTools {
-                calls: calls
-                    .into_iter()
-                    .map(|(name, arguments)| (name.to_owned(), arguments.to_owned()))
-                    .collect(),
-                reply: reply.into(),
-            });
-        self
-    }
-
-    pub(crate) fn with_tool_calls_then_error(
-        self,
-        calls: Vec<(&str, &str)>,
-        error: LlmError,
-    ) -> Self {
-        self.tool_actions
-            .lock()
-            .unwrap()
-            .push(MockToolAction::ExecuteToolsThenFail {
-                calls: calls
-                    .into_iter()
-                    .map(|(name, arguments)| (name.to_owned(), arguments.to_owned()))
-                    .collect(),
-                error,
-            });
-        self
-    }
-
-    pub(crate) fn with_raw_tool_results(
-        self,
-        results: Vec<ToolExecutionResult>,
-        reply: impl Into<String>,
-    ) -> Self {
-        self.tool_actions
-            .lock()
-            .unwrap()
-            .push(MockToolAction::ReturnToolResults {
-                results,
-                attempts: Vec::new(),
-                reply: reply.into(),
-            });
-        self
-    }
-
-    pub(crate) fn with_raw_tool_results_and_attempts(
-        self,
-        results: Vec<ToolExecutionResult>,
-        attempts: Vec<ToolExecutionAttempt>,
-        reply: impl Into<String>,
-    ) -> Self {
-        self.tool_actions
-            .lock()
-            .unwrap()
-            .push(MockToolAction::ReturnToolResults {
-                results,
-                attempts,
-                reply: reply.into(),
-            });
-        self
-    }
-
-    pub(crate) fn with_tool_loop_reply_without_tool(self, reply: impl Into<String>) -> Self {
-        self.tool_actions
-            .lock()
-            .unwrap()
-            .push(MockToolAction::ReplyWithoutTool {
-                reply: reply.into(),
-            });
-        self
-    }
-
-    pub(crate) fn with_rejected_tool_call(
-        self,
-        name: impl Into<String>,
-        reply: impl Into<String>,
-    ) -> Self {
-        self.tool_actions
-            .lock()
-            .unwrap()
-            .push(MockToolAction::RejectedToolCall {
-                name: name.into(),
-                reply: reply.into(),
-            });
         self
     }
 
@@ -700,6 +532,7 @@ impl LlmProvider for MockProvider {
                                     retry_of: Some(0),
                                 },
                             ],
+                            final_candidate_tool_result_start: Some(0),
                             tools_with_unknown_result: Vec::new(),
                             streaming_fallback_used: false,
                             stop_reason: Some(AgentStopReason::ToolUsed),
@@ -776,6 +609,77 @@ impl LlmProvider for MockProvider {
                     }
                     let mut diagnostics = agent_tool_trace(executed_tools, tool_results);
                     diagnostics.model_rounds = 4;
+                    diagnostics.final_candidate_tool_result_start = None;
+                    diagnostics.stop_reason = Some(AgentStopReason::Failed);
+                    return Err(error.with_agent(diagnostics));
+                }
+                MockToolAction::ExecuteToolsThenFailWithPendingCall {
+                    calls,
+                    pending_tools,
+                    error,
+                } => {
+                    let mut executed_tools = Vec::new();
+                    let mut tool_results = Vec::new();
+                    for (name, arguments) in calls {
+                        let output = req
+                            .tools
+                            .execute_json(&req.tool_context, &name, &arguments)
+                            .await?;
+                        let output = serde_json::from_str::<Value>(&output).unwrap_or_else(|_| {
+                            json!({
+                                "raw": output,
+                            })
+                        });
+                        let succeeded = output.get("ok").and_then(Value::as_bool) != Some(false);
+                        executed_tools.push(name.clone());
+                        tool_results.push(qq_maid_llm::provider::ToolExecutionResult {
+                            name,
+                            output,
+                            succeeded,
+                        });
+                    }
+                    let mut emitted_tools = executed_tools.clone();
+                    emitted_tools.extend(pending_tools);
+                    let mut diagnostics = agent_tool_trace(emitted_tools, tool_results);
+                    diagnostics.model_rounds = 4;
+                    diagnostics.final_candidate_tool_result_start = None;
+                    diagnostics.stop_reason = Some(AgentStopReason::Failed);
+                    return Err(error.with_agent(diagnostics));
+                }
+                MockToolAction::ExecuteToolsThenFailWithUnknownResult {
+                    calls,
+                    unknown_tools,
+                    error,
+                } => {
+                    let mut executed_tools = Vec::new();
+                    let mut tool_results = Vec::new();
+                    for (name, arguments) in calls {
+                        let output = req
+                            .tools
+                            .execute_json(&req.tool_context, &name, &arguments)
+                            .await?;
+                        let output = serde_json::from_str::<Value>(&output).unwrap_or_else(|_| {
+                            json!({
+                                "raw": output,
+                            })
+                        });
+                        let succeeded = output.get("ok").and_then(Value::as_bool) != Some(false);
+                        executed_tools.push(name.clone());
+                        tool_results.push(qq_maid_llm::provider::ToolExecutionResult {
+                            name,
+                            output,
+                            succeeded,
+                        });
+                    }
+                    let mut emitted_tools = executed_tools.clone();
+                    emitted_tools.extend(unknown_tools.iter().cloned());
+                    let mut diagnostics = agent_tool_trace(emitted_tools, tool_results);
+                    diagnostics.tools_with_unknown_result = unknown_tools.clone();
+                    diagnostics
+                        .side_effecting_tools_started
+                        .extend(unknown_tools);
+                    diagnostics.model_rounds = 4;
+                    diagnostics.final_candidate_tool_result_start = None;
                     diagnostics.stop_reason = Some(AgentStopReason::Failed);
                     return Err(error.with_agent(diagnostics));
                 }
@@ -821,11 +725,23 @@ impl LlmProvider for MockProvider {
                             side_effecting_tools_started: Vec::new(),
                             tool_results: results,
                             tool_attempts: attempts,
+                            final_candidate_tool_result_start: Some(0),
                             tools_with_unknown_result: Vec::new(),
                             streaming_fallback_used: false,
                             stop_reason: Some(AgentStopReason::ToolUsed),
                         },
                     });
+                }
+                MockToolAction::ReturnToolResultsThenFail { results, error } => {
+                    let emitted_tools = results
+                        .iter()
+                        .map(|result| result.name.clone())
+                        .collect::<Vec<_>>();
+                    let mut diagnostics = agent_tool_trace(emitted_tools, results);
+                    diagnostics.model_rounds = 4;
+                    diagnostics.final_candidate_tool_result_start = None;
+                    diagnostics.stop_reason = Some(AgentStopReason::Failed);
+                    return Err(error.with_agent(diagnostics));
                 }
                 MockToolAction::ReplyWithoutTool { reply } => {
                     return Ok(ChatOutcome {
@@ -879,6 +795,7 @@ impl LlmProvider for MockProvider {
                             side_effecting_tools_started: Vec::new(),
                             tool_results: Vec::new(),
                             tool_attempts: Vec::new(),
+                            final_candidate_tool_result_start: Some(0),
                             tools_with_unknown_result: Vec::new(),
                             streaming_fallback_used: false,
                             stop_reason: Some(AgentStopReason::Rejected),

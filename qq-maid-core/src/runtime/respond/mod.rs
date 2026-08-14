@@ -36,6 +36,7 @@ use crate::{
 mod types;
 pub use types::{RespondPurpose, RespondRequest, RespondResponse};
 
+pub(crate) mod agent_composition;
 pub(crate) mod agent_outcome;
 mod agent_route;
 mod chat_flow;

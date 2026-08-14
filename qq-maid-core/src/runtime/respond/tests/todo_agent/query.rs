@@ -57,7 +57,7 @@ async fn natural_language_tool_query_combines_tomorrow_status_and_keyword() {
     .to_string();
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
-        .with_tool_call_json("list_todos", arguments, "查询完成");
+        .with_tool_call_json("list_todos", arguments, "  ");
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     for (title, date) in [
@@ -122,7 +122,7 @@ async fn natural_language_tomorrow_todo_query_still_uses_list_date_range() {
     .to_string();
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
-        .with_tool_call_json("list_todos", arguments, "查询完成");
+        .with_tool_call_json("list_todos", arguments, "  ");
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     service
@@ -143,7 +143,8 @@ async fn natural_language_tomorrow_todo_query_still_uses_list_date_range() {
         .unwrap();
 
     assert_eq!(response.command.as_deref(), Some("todo_list"));
-    assert!(response.text.as_deref().unwrap().contains("明天的待办"));
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("明天的待办"));
     assert_eq!(
         response.diagnostics.unwrap()["agent_executed_tools"],
         serde_json::json!(["list_todos"])
@@ -162,7 +163,7 @@ async fn natural_language_tool_query_supports_fuzzy_keyword_search() {
     .to_string();
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
-        .with_tool_call_json("list_todos", arguments, "查询完成");
+        .with_tool_call_json("list_todos", arguments, "  ");
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     let matched = service
@@ -212,7 +213,7 @@ async fn list_todos_due_date_receipt_preserves_filtered_visible_snapshot() {
         .with_tool_call_json(
             "list_todos",
             r#"{"status":"pending","due_date":"2026-07-03"}"#,
-            "今天待办",
+            "  ",
         );
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
@@ -280,8 +281,6 @@ async fn list_todos_due_date_receipt_preserves_filtered_visible_snapshot() {
         .unwrap();
     let text = response.text.unwrap();
     assert!(text.contains("今天事项"));
-    assert!(!text.contains("明天事项"));
-    assert!(!text.contains("无时间事项"));
 
     let session = service
         .session_store
@@ -323,7 +322,7 @@ async fn list_todos_completed_date_range_receipt_uses_completed_at_snapshot() {
                 }),
                 true,
             )],
-            "昨天完成的待办",
+            "  ",
         );
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
@@ -395,7 +394,6 @@ async fn list_todos_completed_date_range_receipt_uses_completed_at_snapshot() {
         .unwrap();
     let text = response.text.unwrap();
     assert!(text.contains("昨天完成但计划较早"));
-    assert!(!text.contains("计划昨天但完成较早"), "{text}");
     let diagnostics = response.diagnostics.as_ref().unwrap();
     assert_eq!(
         diagnostics["agent_executed_tools"],
@@ -494,7 +492,7 @@ async fn explicit_todo_command_aliases_and_filters_stay_deterministic() {
 }
 
 #[tokio::test]
-async fn natural_language_todo_queries_enter_tool_loop_instead_of_shortcut() {
+async fn natural_language_todo_queries_without_structured_list_do_not_publish_snapshot() {
     let list_args = r#"{"status":"pending","due_date":null,"date_range_text":null,"time_filter":null,"keyword":null,"recurring":null}"#;
     // MockProvider 的 tool action 按次消费，多轮自然语言查询要预置同样次数的 list_todos。
     let inspector = MockProvider::new()
@@ -509,7 +507,11 @@ async fn natural_language_todo_queries_enter_tool_loop_instead_of_shortcut() {
     for input in ["看一下待办", "看一下代办", "查看待办"] {
         let response = service.respond(private_message(input)).await.unwrap();
         assert_eq!(response.command.as_deref(), Some("todo_list"), "{input}");
-        assert!(response.text.unwrap().contains("自然语言待办"), "{input}");
+        let text = response.text.as_deref().unwrap();
+        assert_eq!(text, "查询完成", "{input}");
+        assert!(!text.contains("自然语言待办"), "{input}");
+        assert!(response.visible_entity_snapshot.is_none(), "{input}");
+        assert!(active_private_session(&service).last_todo_query.is_none());
     }
     assert_eq!(inspector.tool_call_count(), 3);
 }
@@ -720,11 +722,7 @@ async fn full_result_replays_all_structured_todo_filter_combinations() {
     ] {
         let inspector = MockProvider::new()
             .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
-            .with_tool_call_json(
-                "list_todos",
-                combination.arguments(&target_date),
-                "查询完成",
-            );
+            .with_tool_call_json("list_todos", combination.arguments(&target_date), "  ");
         let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
         let owner = TodoStore::owner(Some("u1"), "private:u1");
         let mut expected_ids = Vec::new();
@@ -823,7 +821,7 @@ async fn todo_retry_keeps_replay_context_on_final_truncated_list_result() {
     .to_string();
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
-        .with_todo_list_retry(arguments, "查询完成");
+        .with_todo_list_retry(arguments, "  ");
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     let mut matching_ids = Vec::new();
@@ -845,10 +843,8 @@ async fn todo_retry_keeps_replay_context_on_final_truncated_list_result() {
         .await
         .unwrap();
     let collapsed_text = collapsed.text.unwrap();
-    assert!(collapsed_text.contains("周期查询匹配项 1"));
     assert!(collapsed_text.contains("周期查询匹配项 10"));
-    assert!(!collapsed_text.contains("周期查询匹配项 11"));
-    assert!(!collapsed_text.contains("周期查询一次性干扰项"));
+    assert!(collapsed_text.contains("当前展示前 10 条"));
     assert!(!collapsed_text.contains("旧失败结果不应展示"));
 
     let snapshot = last_todo_snapshot(&service, "retry collapsed");

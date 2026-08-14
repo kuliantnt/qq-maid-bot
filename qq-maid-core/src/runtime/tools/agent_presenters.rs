@@ -3,30 +3,20 @@
 //! 通用 Agent 编排层不理解具体业务字段；这里按工具名把已注册业务 Tool 的
 //! 安全结构化输出转换为可信响应块，避免模型最终文案覆盖或丢弃真实工具结果。
 
-use chrono::NaiveDate;
 use qq_maid_common::time_context::{format_local_time_for_display, format_rss_time_for_display};
 use qq_maid_llm::provider::ToolExecutionResult;
 use serde_json::Value;
 
-use crate::{
-    error::LlmError,
-    runtime::{
-        respond::{
-            agent_outcome::{
-                OutcomePresentation, ResponseBlock, ToolEffect, ToolExecutionOutcome,
-                ToolOutcomeStatus,
-            },
-            common::{CommandBody, truncate_chars},
-            train_flow::{format_train_error_reply, format_train_schedule_reply},
-            weather_flow::{format_forecast_day_label, weather_code_label},
-        },
-        tools::train::{TrainSchedule, TrainStop},
+use crate::runtime::respond::{
+    agent_outcome::{
+        OutcomePresentation, ResponseBlock, ToolEffect, ToolExecutionOutcome, ToolOutcomeStatus,
     },
+    common::{CommandBody, truncate_chars},
+    weather_flow::{format_forecast_day_label, weather_code_label},
 };
 
 const RSS_TOOL_NAME: &str = "get_rss_recent_items";
 const RSS_MANAGE_TOOL_NAME: &str = "manage_rss_subscriptions";
-const TRAIN_TOOL_NAME: &str = "get_train_schedule";
 const WEATHER_TOOL_NAME: &str = "get_weather";
 const KNOWLEDGE_SEARCH_TOOL_NAME: &str = "knowledge_search";
 const RSS_FACT_MAX_CHARS: usize = 1200;
@@ -92,40 +82,6 @@ fn rss_manage_outcome(result: &ToolExecutionResult) -> ToolExecutionOutcome {
         error_code,
         command: Some("rss".to_owned()),
     }
-}
-
-pub(crate) fn tool_outcome_from_train_result(
-    result: &ToolExecutionResult,
-) -> Option<ToolExecutionOutcome> {
-    if result.name != TRAIN_TOOL_NAME {
-        return None;
-    }
-
-    let status = ToolOutcomeStatus::from_tool_result(result);
-    let error_code = structured_error_code(&result.output);
-    let block = match status {
-        ToolOutcomeStatus::Succeeded => train_schedule_from_output(&result.output)
-            .map(|schedule| ResponseBlock::FactCard(format_train_schedule_reply(&schedule)))
-            .unwrap_or_else(|| ResponseBlock::Error(train_error_body(Some("provider_error")))),
-        ToolOutcomeStatus::Skipped => ResponseBlock::Warning(train_skip_body(&result.output)),
-        ToolOutcomeStatus::RequiresClarification => {
-            ResponseBlock::Clarification(CommandBody::plain("请说明要查询哪个车次。"))
-        }
-        ToolOutcomeStatus::PendingConfirmation | ToolOutcomeStatus::Failed => {
-            ResponseBlock::Error(train_error_body(error_code.as_deref()))
-        }
-    };
-
-    Some(ToolExecutionOutcome {
-        tool_name: result.name.clone(),
-        domain: "train".to_owned(),
-        status,
-        effect: ToolEffect::ReadOnly,
-        presentation: OutcomePresentation::Trusted,
-        blocks: vec![block],
-        error_code,
-        command: Some("train".to_owned()),
-    })
 }
 
 pub(crate) fn tool_outcome_from_weather_result(
@@ -449,80 +405,6 @@ fn rss_skip_body(output: &Value) -> CommandBody {
         }
         Some(reason) => format!("RSS 查询已跳过：{reason}。"),
         None => "RSS 查询已跳过。".to_owned(),
-    };
-    CommandBody::plain(text)
-}
-
-fn train_schedule_from_output(output: &Value) -> Option<TrainSchedule> {
-    let travel_date =
-        NaiveDate::parse_from_str(&string_field(output, "travel_date")?, "%Y-%m-%d").ok()?;
-    let stops = output
-        .get("stops")
-        .and_then(Value::as_array)?
-        .iter()
-        .filter_map(train_stop_from_output)
-        .collect::<Vec<_>>();
-    if stops.is_empty() {
-        return None;
-    }
-    Some(TrainSchedule {
-        train_code: string_field(output, "train_code")?,
-        travel_date,
-        start_station: string_field(output, "start_station")?,
-        end_station: string_field(output, "end_station")?,
-        stops,
-        full_train_code: string_field(output, "full_train_code"),
-        corporation: string_field(output, "corporation"),
-        train_style: string_field(output, "train_style"),
-        dept_train: string_field(output, "dept_train"),
-    })
-}
-
-fn train_stop_from_output(output: &Value) -> Option<TrainStop> {
-    Some(TrainStop {
-        station_no: output
-            .get("station_no")
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())?,
-        station_name: string_field(output, "station_name")?,
-        arrive_time: optional_string_field(output, "arrive_time"),
-        departure_time: optional_string_field(output, "departure_time"),
-        stopover_minutes: output
-            .get("stopover_minutes")
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok()),
-        day_difference: output
-            .get("day_difference")
-            .and_then(Value::as_i64)
-            .and_then(|value| i32::try_from(value).ok())
-            .unwrap_or(0),
-        day_difference_reliable: output
-            .get("day_difference_reliable")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        station_train_code: string_field(output, "station_train_code")
-            .unwrap_or_else(|| string_field(output, "train_code").unwrap_or_default()),
-    })
-}
-
-fn train_error_body(error_code: Option<&str>) -> CommandBody {
-    let code = error_code.unwrap_or("provider_error");
-    if code == "bad_tool_arguments" {
-        return CommandBody::plain(
-            "【火车】\n\n火车查询参数不完整，请提供车次；日期支持今天、明天、后天或 YYYY-MM-DD。",
-        );
-    }
-    let err = LlmError::new(code, "train tool failed", "train");
-    CommandBody::plain(format_train_error_reply(&err))
-}
-
-fn train_skip_body(output: &Value) -> CommandBody {
-    let text = match string_field(output, "reason").as_deref() {
-        Some("dependency_previous_call_failed") => {
-            "火车查询因前序工具失败已跳过；根因以上方失败信息为准。".to_owned()
-        }
-        Some(reason) => format!("火车查询已跳过：{reason}。"),
-        None => "火车查询已跳过。".to_owned(),
     };
     CommandBody::plain(text)
 }

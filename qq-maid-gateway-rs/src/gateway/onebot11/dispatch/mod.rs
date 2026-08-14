@@ -386,7 +386,7 @@ impl OneBotInboundDispatcher {
 }
 
 enum CompletionError {
-    Failed(CoreRespondFailure),
+    Failed(Box<CoreRespondFailure>),
     Ended,
 }
 
@@ -402,7 +402,7 @@ async fn complete_response(
                     CoreResponseEvent::Status(_) | CoreResponseEvent::TextDelta(_) => {}
                     CoreResponseEvent::Completed(response) => return Ok(response),
                     CoreResponseEvent::Failed(failure) => {
-                        return Err(CompletionError::Failed(failure));
+                        return Err(CompletionError::Failed(Box::new(failure)));
                     }
                 }
             }

@@ -45,6 +45,38 @@ async fn private_agent_executes_knowledge_search_and_answers_from_evidence() {
 }
 
 #[tokio::test]
+async fn knowledge_search_final_failure_propagates_original_error() {
+    let provider = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_calls_then_error(
+            vec![(
+                KNOWLEDGE_SEARCH_TOOL_NAME,
+                r#"{"query":"RAG-504 是什么错误","max_results":null}"#,
+            )],
+            crate::error::LlmError::new(
+                "context_budget_exceeded",
+                "final answer generation failed",
+                "tool_loop",
+            ),
+        );
+    let (service, base) = test_service_with_provider_tool_calling_and_base(provider);
+    sync_test_knowledge(
+        &service,
+        &base,
+        "operations/errors.md",
+        "# 错误码\n\n## RAG-504\n\nRAG-504 表示上游请求超时。",
+    );
+
+    let error = service
+        .respond(private_message("项目里的 RAG-504 是什么错误？"))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, "context_budget_exceeded");
+    assert_eq!(error.stage, "tool_loop");
+}
+
+#[tokio::test]
 async fn tool_mode_smalltalk_does_not_search_or_inject_knowledge() {
     let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let inspector = provider.clone();

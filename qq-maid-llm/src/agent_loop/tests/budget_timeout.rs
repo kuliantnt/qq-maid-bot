@@ -684,6 +684,7 @@ async fn candidate_stream_and_non_stream_timeouts_allow_next_candidate_with_budg
 
     assert_eq!(outcome.reply, "candidate B");
     assert_eq!(outcome.agent.model_rounds, 2);
+    assert_eq!(outcome.agent.final_candidate_tool_result_start, Some(0));
     assert!(outcome.agent.streaming_fallback_used);
     assert_eq!(
         outcome.agent.stop_reason,

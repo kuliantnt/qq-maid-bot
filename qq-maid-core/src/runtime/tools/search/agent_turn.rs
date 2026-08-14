@@ -3,6 +3,9 @@
 //! 搜索领域在这里决定单次工具轨迹应展示、隐藏还是交给其他领域处理；通用
 //! `tools/agent_turn.rs` 只负责调度，不理解 `deduplicated` 等搜索结果字段。
 
+use qq_maid_common::text::{
+    sanitize_single_line_visible_text, truncate_chars_with_ellipsis_trimmed,
+};
 use qq_maid_llm::provider::{ToolExecutionAttempt, ToolExecutionResult};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -11,17 +14,21 @@ use crate::{
     error::LlmError,
     runtime::respond::{
         agent_outcome::{
-            OutcomePresentation, ResponseBlock, ToolEffect, ToolExecutionOutcome, ToolOutcomeStatus,
+            OutcomePresentation, ProvenanceSource, ResponseBlock, ToolEffect, ToolExecutionOutcome,
+            ToolOutcomeStatus,
         },
         common::{CommandBody, structured_command_body},
-        search_flow::{
-            format_web_search_error_reply, format_web_search_research_error_reply,
-            format_web_search_tool_reply,
-        },
     },
 };
 
-use super::WEB_SEARCH_TOOL_NAME;
+use super::{
+    WEB_SEARCH_TOOL_NAME, WEB_SEARCH_TOOL_SOURCE_LIMIT, WEB_SEARCH_TOOL_SOURCE_SNIPPET_MAX_CHARS,
+    WEB_SEARCH_TOOL_SOURCE_TITLE_MAX_CHARS, WebSearchRenderedSource, WebSearchSourceLocation,
+    format_web_search_error_reply, format_web_search_research_error_reply,
+    format_web_search_tool_reply_with_sources, json_string_field,
+};
+
+const WEB_SEARCH_PROVENANCE_URL_MAX_CHARS: usize = 500;
 
 pub(crate) enum SearchResultProjection {
     Hidden,
@@ -31,6 +38,7 @@ pub(crate) enum SearchResultProjection {
 pub(crate) struct SearchTurnProjection {
     pub(crate) consumed_result_indexes: HashSet<usize>,
     pub(crate) outcomes: Vec<(usize, ToolExecutionOutcome)>,
+    pub(crate) provenance: Vec<ProvenanceSource>,
 }
 
 /// 搜索结果必须按整轮投影，才能区分“全部失败”和“部分成功”。
@@ -39,9 +47,11 @@ pub(crate) struct SearchTurnProjection {
 pub(crate) fn project_results(
     results: &[ToolExecutionResult],
     attempts: &[ToolExecutionAttempt],
+    final_candidate_result_start: usize,
 ) -> SearchTurnProjection {
     let mut consumed_result_indexes = HashSet::new();
     let mut projected = Vec::new();
+    let mut provenance = Vec::new();
     for (index, result) in results.iter().enumerate() {
         let Some(projection) = project_result(result) else {
             continue;
@@ -54,6 +64,13 @@ pub(crate) fn project_results(
             continue;
         }
         if let SearchResultProjection::Visible(outcome) = projection {
+            // 失败候选的只读结果仍留在请求级 diagnostics 中，但没有回填给最终
+            // 候选。它们可以参与故障诊断，不能作为最终模型正文的引用来源。
+            if index >= final_candidate_result_start
+                && outcome.status == ToolOutcomeStatus::Succeeded
+            {
+                extend_unique_provenance(&mut provenance, provenance_from_output(&result.output));
+            }
             projected.push((index, outcome));
         }
     }
@@ -80,6 +97,7 @@ pub(crate) fn project_results(
     SearchTurnProjection {
         consumed_result_indexes,
         outcomes: projected,
+        provenance,
     }
 }
 
@@ -106,9 +124,10 @@ fn visible_outcome(result: &ToolExecutionResult) -> ToolExecutionOutcome {
         error_code = Some("empty_result".to_owned());
     }
     let block = match status {
-        ToolOutcomeStatus::Succeeded => ResponseBlock::FactCard(structured_command_body(
-            format_web_search_tool_reply(&result.output),
-        )),
+        ToolOutcomeStatus::Succeeded => {
+            let formatted = format_web_search_tool_reply_with_sources(&result.output);
+            ResponseBlock::FactCard(structured_command_body(formatted.body))
+        }
         ToolOutcomeStatus::Skipped => ResponseBlock::Warning(skip_body(&result.output)),
         ToolOutcomeStatus::RequiresClarification => {
             ResponseBlock::Clarification(CommandBody::plain("请说明要联网查询什么内容。"))
@@ -142,28 +161,28 @@ fn error_body(output: &Value, projected_error_code: Option<&str>) -> CommandBody
         .unwrap_or("web_search");
     let err = LlmError::new(code, "web search tool failed", stage);
     let reply = format_web_search_error_reply(&err);
-    if string_field(output, "mode").as_deref() == Some("multi_entity_research") {
+    if json_string_field(output, "mode").as_deref() == Some("multi_entity_research") {
         return structured_command_body(format_web_search_research_error_reply(output, &reply));
     }
     structured_command_body(reply)
 }
 
 fn output_has_evidence(output: &Value) -> bool {
-    if string_field(output, "mode").as_deref() == Some("multi_entity_research") {
+    if json_string_field(output, "mode").as_deref() == Some("multi_entity_research") {
         return output
             .get("results")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .any(|item| {
-                string_field(item, "status").as_deref() == Some("success")
-                    && (string_field(item, "facts").is_some()
-                        || string_field(item, "summary").is_some()
-                        || string_field(item, "answer").is_some()
+                json_string_field(item, "status").as_deref() == Some("success")
+                    && (json_string_field(item, "facts").is_some()
+                        || json_string_field(item, "summary").is_some()
+                        || json_string_field(item, "answer").is_some()
                         || sources_have_evidence(item.get("sources")))
             });
     }
-    string_field(output, "answer").is_some() || sources_have_evidence(output.get("sources"))
+    json_string_field(output, "answer").is_some() || sources_have_evidence(output.get("sources"))
 }
 
 fn sources_have_evidence(value: Option<&Value>) -> bool {
@@ -173,14 +192,14 @@ fn sources_have_evidence(value: Option<&Value>) -> bool {
         .flatten()
         .any(|source| {
             source.as_str().is_some_and(|text| !text.trim().is_empty())
-                || string_field(source, "title").is_some()
-                || string_field(source, "url").is_some()
-                || string_field(source, "snippet").is_some()
+                || json_string_field(source, "title").is_some()
+                || json_string_field(source, "url").is_some()
+                || json_string_field(source, "snippet").is_some()
         })
 }
 
 fn skip_body(output: &Value) -> CommandBody {
-    let text = match string_field(output, "reason").as_deref() {
+    let text = match json_string_field(output, "reason").as_deref() {
         Some("dependency_previous_call_failed") => {
             "联网查询因前序工具失败已跳过；根因以上方失败信息为准。".to_owned()
         }
@@ -203,13 +222,127 @@ fn structured_error_code(output: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn string_field(output: &Value, key: &str) -> Option<String> {
-    output
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
+fn provenance_from_output(output: &Value) -> Vec<ProvenanceSource> {
+    // 来源是否已展示由 formatter 在组装字段时返回；后部条目的来源行即使被
+    // 1500 字符上限裁掉，也不会因最终正文的偶然子串而误判。
+    let formatted = format_web_search_tool_reply_with_sources(output);
+    if json_string_field(output, "mode").as_deref() == Some("multi_entity_research") {
+        let mut provenance = Vec::new();
+        for (result_index, item) in output
+            .get("results")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter(|(_, item)| json_string_field(item, "status").as_deref() == Some("success"))
+        {
+            let sources = provenance_sources_from_value(
+                item.get("sources"),
+                Some(result_index),
+                &formatted.rendered_sources,
+            );
+            extend_unique_provenance(&mut provenance, sources);
+        }
+        return provenance;
+    }
+    let sources =
+        provenance_sources_from_value(output.get("sources"), None, &formatted.rendered_sources);
+    let mut provenance = Vec::new();
+    extend_unique_provenance(&mut provenance, sources);
+    provenance
+}
+
+/// 来源预算按唯一来源消耗；重复项只合并正文展示标记。达到上限后仍需继续识别
+/// 重复项，避免遗漏后续确定性正文已经展示过的来源状态。
+fn extend_unique_provenance(
+    provenance: &mut Vec<ProvenanceSource>,
+    sources: impl IntoIterator<Item = ProvenanceSource>,
+) {
+    for source in sources {
+        if let Some(existing) = provenance
+            .iter_mut()
+            .find(|existing| existing.has_same_identity(&source))
+        {
+            existing.merge_rendered_markers(&source);
+        } else if provenance.len() < WEB_SEARCH_TOOL_SOURCE_LIMIT {
+            provenance.push(source);
+        }
+    }
+}
+
+fn provenance_sources_from_value<'a>(
+    value: Option<&'a Value>,
+    result_index: Option<usize>,
+    markers: &'a [WebSearchRenderedSource],
+) -> impl Iterator<Item = ProvenanceSource> + 'a {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(source_index, source)| {
+            if let Some(text) = source
+                .as_str()
+                .map(|text| sanitize_source_field(text, WEB_SEARCH_TOOL_SOURCE_TITLE_MAX_CHARS))
+                .filter(|text| !text.is_empty())
+            {
+                return Some((
+                    source_index,
+                    ProvenanceSource {
+                        title: text.to_owned(),
+                        url: String::new(),
+                        snippet: String::new(),
+                        identity_in_deterministic_body: false,
+                        snippet_in_deterministic_body: false,
+                    },
+                ));
+            }
+            // Tool 输出可能来自旧版本轨迹或测试注入，不能假定已经过当前搜索入口的
+            // 数量和字段裁剪。进入整轮 provenance 前再次建立统一出站边界。
+            let title = sanitize_source_field(
+                &json_string_field(source, "title").unwrap_or_default(),
+                WEB_SEARCH_TOOL_SOURCE_TITLE_MAX_CHARS,
+            );
+            let url = sanitize_source_url(&json_string_field(source, "url").unwrap_or_default());
+            let snippet = sanitize_source_field(
+                &json_string_field(source, "snippet").unwrap_or_default(),
+                WEB_SEARCH_TOOL_SOURCE_SNIPPET_MAX_CHARS,
+            );
+            (!title.is_empty() || !url.is_empty() || !snippet.is_empty()).then_some((
+                source_index,
+                ProvenanceSource {
+                    title,
+                    url,
+                    snippet,
+                    identity_in_deterministic_body: false,
+                    snippet_in_deterministic_body: false,
+                },
+            ))
+        })
+        .map(move |(source_index, mut source)| {
+            let location = WebSearchSourceLocation {
+                result_index,
+                source_index,
+            };
+            if let Some(marker) = markers.iter().find(|marker| marker.location == location) {
+                source.identity_in_deterministic_body = marker.identity_rendered;
+                source.snippet_in_deterministic_body = marker.snippet_rendered;
+            }
+            source
+        })
+}
+
+fn sanitize_source_field(value: &str, max_chars: usize) -> String {
+    truncate_chars_with_ellipsis_trimmed(&sanitize_single_line_visible_text(value), max_chars)
+}
+
+fn sanitize_source_url(value: &str) -> String {
+    let url = sanitize_single_line_visible_text(value);
+    if url.chars().count() <= WEB_SEARCH_PROVENANCE_URL_MAX_CHARS {
+        url
+    } else {
+        String::new()
+    }
 }
 
 #[cfg(test)]
@@ -288,6 +421,280 @@ mod tests {
         assert!(text.contains("来源标题"));
         assert!(text.contains("来源摘要"));
         assert!(!text.contains("没查到明确结果"));
+    }
+
+    #[test]
+    fn provenance_marks_source_fields_embedded_by_single_search_formatter() {
+        let sources = provenance_from_output(&json!({
+            "answer": "",
+            "sources": [{
+                "title": "来源标题",
+                "url": "https://example.test/source",
+                "snippet": "来源摘要"
+            }, {
+                "title": "第二来源",
+                "url": "https://example.test/second",
+                "snippet": "第二摘要"
+            }]
+        }));
+
+        assert!(sources[0].identity_in_deterministic_body);
+        assert!(sources[0].snippet_in_deterministic_body);
+        assert!(!sources[1].identity_in_deterministic_body);
+        assert!(!sources[1].snippet_in_deterministic_body);
+    }
+
+    #[test]
+    fn provenance_marks_matching_answer_snippet_without_hiding_source_identity() {
+        let sources = provenance_from_output(&json!({
+            "answer": "与摘要相同的答案",
+            "sources": [{
+                "title": "来源标题",
+                "url": "https://example.test/source",
+                "snippet": "与摘要相同的答案"
+            }]
+        }));
+
+        assert!(!sources[0].identity_in_deterministic_body);
+        assert!(sources[0].snippet_in_deterministic_body);
+    }
+
+    #[test]
+    fn provenance_sanitizes_and_truncates_external_source_fields() {
+        let sources = provenance_from_output(&json!({
+            "answer": "搜索答案",
+            "sources": [{
+                "title": format!("标题\n- 伪造状态\u{0000}{}", "题".repeat(120)),
+                "url": "https://example.test/source\n- 伪造来源",
+                "snippet": format!("摘要\t下一行\u{200b}{}", "摘".repeat(180))
+            }]
+        }));
+
+        assert_eq!(sources.len(), 1);
+        assert!(!sources[0].title.contains(['\n', '\r', '\t', '\u{0000}']));
+        assert!(!sources[0].url.contains(['\n', '\r', '\t']));
+        assert!(!sources[0].snippet.contains(['\n', '\r', '\t', '\u{200b}']));
+        assert!(sources[0].title.contains("标题 - 伪造状态"));
+        assert!(sources[0].url.contains("source - 伪造来源"));
+        assert!(sources[0].title.chars().count() <= WEB_SEARCH_TOOL_SOURCE_TITLE_MAX_CHARS);
+        assert!(sources[0].snippet.chars().count() <= WEB_SEARCH_TOOL_SOURCE_SNIPPET_MAX_CHARS);
+    }
+
+    #[test]
+    fn provenance_drops_oversized_url_instead_of_linking_to_a_truncated_address() {
+        let sources = provenance_from_output(&json!({
+            "answer": "搜索答案",
+            "sources": [{
+                "title": "仍可展示的来源标题",
+                "url": format!("https://example.test/{}", "u".repeat(600)),
+                "snippet": "来源摘要"
+            }]
+        }));
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].title, "仍可展示的来源标题");
+        assert!(sources[0].url.is_empty());
+        assert_eq!(sources[0].snippet, "来源摘要");
+    }
+
+    #[test]
+    fn provenance_limits_sources_across_multiple_searches() {
+        let results = (0..3)
+            .map(|search_index| {
+                web_search_result(json!({
+                    "answer": format!("搜索答案 {search_index}"),
+                    "sources": (0..3).map(|source_index| json!({
+                        "title": format!("来源 {search_index}-{source_index}"),
+                        "url": format!("https://example.test/{search_index}/{source_index}"),
+                        "snippet": "摘要"
+                    })).collect::<Vec<_>>()
+                }))
+            })
+            .collect::<Vec<_>>();
+
+        let projection = project_results(&results, &[], 0);
+
+        assert_eq!(projection.provenance.len(), WEB_SEARCH_TOOL_SOURCE_LIMIT);
+        assert_eq!(projection.provenance[0].title, "来源 0-0");
+        assert_eq!(projection.provenance[3].title, "来源 1-0");
+    }
+
+    #[test]
+    fn duplicate_urls_do_not_consume_provenance_budget() {
+        let result = web_search_result(json!({
+            "answer": "搜索答案",
+            "sources": [{
+                "title": "重复来源 1",
+                "url": "https://example.test/duplicate"
+            }, {
+                "title": "重复来源 2",
+                "url": "https://example.test/duplicate"
+            }, {
+                "title": "重复来源 3",
+                "url": "https://example.test/duplicate"
+            }, {
+                "title": "重复来源 4",
+                "url": "https://example.test/duplicate"
+            }, {
+                "title": "唯一来源 1",
+                "url": "https://example.test/unique-1"
+            }, {
+                "title": "唯一来源 2",
+                "url": "https://example.test/unique-2"
+            }, {
+                "title": "唯一来源 3",
+                "url": "https://example.test/unique-3"
+            }]
+        }));
+
+        let projection = project_results(&[result], &[], 0);
+
+        assert_eq!(projection.provenance.len(), WEB_SEARCH_TOOL_SOURCE_LIMIT);
+        assert_eq!(
+            projection
+                .provenance
+                .iter()
+                .map(|source| source.url.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "https://example.test/duplicate",
+                "https://example.test/unique-1",
+                "https://example.test/unique-2",
+                "https://example.test/unique-3",
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_after_full_budget_still_merges_rendered_markers_across_searches() {
+        let first = web_search_result(json!({
+            "answer": "第一轮搜索答案",
+            "sources": (0..WEB_SEARCH_TOOL_SOURCE_LIMIT).map(|index| json!({
+                "title": format!("来源 {index}"),
+                "url": format!("https://example.test/source-{index}")
+            })).collect::<Vec<_>>()
+        }));
+        let duplicate = web_search_result(json!({
+            "sources": [{
+                "title": "同一来源的新标题",
+                "url": "https://example.test/source-0"
+            }]
+        }));
+
+        let projection = project_results(&[first, duplicate], &[], 0);
+
+        assert_eq!(projection.provenance.len(), WEB_SEARCH_TOOL_SOURCE_LIMIT);
+        assert!(projection.provenance[0].identity_in_deterministic_body);
+    }
+
+    #[test]
+    fn duplicate_after_full_budget_still_merges_rendered_markers_in_research() {
+        let output = json!({
+            "mode": "multi_entity_research",
+            "results": [{
+                "entity": "项目甲",
+                "status": "success",
+                "facts": "项目甲事实",
+                "sources": [{
+                    "title": "来源 A",
+                    "url": "https://example.test/source-a"
+                }, {
+                    "title": "共享来源的旧标题",
+                    "url": "https://example.test/shared"
+                }]
+            }, {
+                "entity": "项目乙",
+                "status": "success",
+                "facts": "项目乙事实",
+                "sources": [{
+                    "title": "来源 B",
+                    "url": "https://example.test/source-b"
+                }]
+            }, {
+                "entity": "项目丙",
+                "status": "success",
+                "facts": "项目丙事实",
+                "sources": [{
+                    "title": "来源 C",
+                    "url": "https://example.test/source-c"
+                }]
+            }, {
+                "entity": "项目丁",
+                "status": "success",
+                "facts": "项目丁事实",
+                "sources": [{
+                    "title": "共享来源的新标题",
+                    "url": "https://example.test/shared"
+                }]
+            }]
+        });
+
+        let sources = provenance_from_output(&output);
+
+        assert_eq!(sources.len(), WEB_SEARCH_TOOL_SOURCE_LIMIT);
+        let shared = sources
+            .iter()
+            .find(|source| source.url == "https://example.test/shared")
+            .expect("共享来源应保留在来源预算内");
+        assert!(shared.identity_in_deterministic_body);
+    }
+
+    #[test]
+    fn provenance_only_uses_results_seen_by_final_candidate() {
+        let results = vec![
+            web_search_result(json!({
+                "answer": "候选 A 的搜索答案",
+                "sources": [{
+                    "title": "候选 A 来源",
+                    "url": "https://example.test/candidate-a"
+                }]
+            })),
+            web_search_result(json!({
+                "answer": "候选 B 的搜索答案",
+                "sources": [{
+                    "title": "候选 B 来源",
+                    "url": "https://example.test/candidate-b"
+                }]
+            })),
+        ];
+
+        let projection = project_results(&results, &[], 1);
+
+        assert_eq!(projection.provenance.len(), 1);
+        assert_eq!(projection.provenance[0].title, "候选 B 来源");
+        assert_eq!(projection.outcomes.len(), 2);
+    }
+
+    #[test]
+    fn truncated_research_source_is_not_marked_as_rendered() {
+        let output = json!({
+            "mode": "multi_entity_research",
+            "successful": 2,
+            "failed": 0,
+            "results": [{
+                "entity": "项目甲",
+                "status": "success",
+                "facts": "前序事实".repeat(350),
+                "sources": []
+            }, {
+                "entity": "项目乙",
+                "status": "success",
+                "facts": "尾部事实仍然可见".repeat(4),
+                "sources": [{
+                    "title": "项目乙官方来源",
+                    "url": "https://example.test/project-b",
+                    "snippet": "项目乙来源摘要"
+                }]
+            }]
+        });
+
+        let text = web_search_fact_text(output.clone());
+        let sources = provenance_from_output(&output);
+
+        assert!(text.contains("尾部事实仍然可见"));
+        assert!(!text.contains("https://example.test/project-b"));
+        assert!(!sources[0].identity_in_deterministic_body);
+        assert!(!sources[0].snippet_in_deterministic_body);
     }
 
     #[test]

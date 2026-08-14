@@ -182,9 +182,8 @@ async fn multiple_successful_todo_writes_share_one_background_snapshot() {
 
     let text = response.text.unwrap();
     assert_eq!(text.matches("✅ 已新增待办").count(), 2);
+    assert!(!text.contains("已新增最后一条"));
     assert_eq!(text.matches("🚧 当前进行中").count(), 0);
-    assert!(text.contains("第一条新增"));
-    assert!(text.contains("第二条新增"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], "succeeded");
     assert_eq!(diagnostics["tool_outcomes"].as_array().unwrap().len(), 2);
@@ -201,10 +200,38 @@ async fn multiple_successful_todo_writes_share_one_background_snapshot() {
 }
 
 #[tokio::test]
-async fn only_list_todos_success_does_not_claim_todo_write_success() {
+async fn missing_todo_write_does_not_use_model_success_summary() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
-        .with_tool_call_json("list_todos", r#"{"status":"pending"}"#, "当前待办列表");
+        .with_tool_call_json(
+            "create_todo",
+            r#"{"content":"只实际新增一条","title":null,"detail":null,"due_date":null,"due_at":null,"time_precision":null}"#,
+            "两条都已成功新增",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+
+    let response = service
+        .respond(private_message("新增两条待办"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("✅ 已新增待办"));
+    assert!(!text.contains("两条都已成功新增"));
+    assert_eq!(service.task_store.list_pending(&owner).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn only_list_todos_without_structured_model_list_does_not_preserve_snapshot() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json("list_todos", r#"{"status":"pending"}"#, "当前待办列表")
+        .with_tool_call_json(
+            "complete_todos",
+            r#"{"numbers":[1],"selection_text":null,"reference":null}"#,
+            "已完成第一条",
+        );
     let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
     let owner = TodoStore::owner(Some("u1"), "private:u1");
     service
@@ -232,13 +259,17 @@ async fn only_list_todos_success_does_not_claim_todo_write_success() {
         .await
         .unwrap();
 
-    let visible_snapshot = response
-        .visible_entity_snapshot
-        .as_ref()
-        .expect("visible list response should carry snapshot");
-    assert_eq!(visible_snapshot.items.len(), 1);
-    assert_eq!(visible_snapshot.items[0].visible_number, 1);
-    assert_eq!(visible_snapshot.items[0].domain, "todo");
+    assert_eq!(response.text.as_deref(), Some("当前待办列表"));
+    assert!(response.visible_entity_snapshot.is_none());
+    assert!(
+        service
+            .session_store
+            .get_or_create_active(&private_test_meta())
+            .unwrap()
+            .last_todo_query
+            .is_none(),
+        "模型正文未发布结构化列表时不能登记隐藏快照"
+    );
 
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], "succeeded");
@@ -247,6 +278,345 @@ async fn only_list_todos_success_does_not_claim_todo_write_success() {
     assert_eq!(diagnostics["tool_outcomes"][0]["domain"], "todo");
     assert_eq!(diagnostics["tool_outcomes"][0]["effect"], "read_only");
     assert_eq!(diagnostics["tool_outcomes"][0]["status"], "succeeded");
+
+    let completed = service
+        .respond(private_message("完成第一条待办"))
+        .await
+        .unwrap();
+    assert_ne!(completed.text.as_deref(), Some("已完成第一条"));
+    assert!(
+        !service.task_store.list_pending(&owner).unwrap().is_empty(),
+        "未发布编号列表时，下一轮不能操作用户未见过的待办"
+    );
+}
+
+#[tokio::test]
+async fn natural_language_model_list_without_structured_publication_does_not_preserve_snapshot() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "list_todos",
+            r#"{"status":"pending"}"#,
+            "🚧 当前进行中 · 共 1 项\n1. 只读查询不算写入",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    service
+        .task_store
+        .create(
+            &owner,
+            TodoItemDraft {
+                title: "只读查询不算写入".to_owned(),
+                detail: None,
+                raw_text: None,
+                due_date: None,
+                due_at: None,
+                reminder_at: None,
+                time_precision: TodoTimePrecision::None,
+                recurrence_kind: crate::runtime::tools::todo::TodoRecurrenceKind::None,
+                recurrence_interval_days: 0,
+                recurrence_interval: 0,
+                recurrence_unit: crate::runtime::tools::todo::TodoRecurrenceUnit::Day,
+            },
+        )
+        .unwrap();
+
+    let response = service
+        .respond(private_message("检查待办状态"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.text.as_deref(),
+        Some("🚧 当前进行中 · 共 1 项\n· 只读查询不算写入")
+    );
+    assert!(response.visible_entity_snapshot.is_none());
+    assert!(
+        service
+            .session_store
+            .get_or_create_active(&private_test_meta())
+            .unwrap()
+            .last_todo_query
+            .is_none(),
+        "模型正文即使包含列表文本，也没有 typed 的结构化列表发布契约"
+    );
+}
+
+#[tokio::test]
+async fn structured_model_list_publication_preserves_snapshot_for_next_turn() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "list_todos",
+            r#"{"status":"pending"}"#,
+            r#"{"reply":"我整理好了当前待办","published_tool_call_ids":["mock-call-0"]}"#,
+        )
+        .with_tool_call_json(
+            "complete_todos",
+            r#"{"numbers":[1],"selection_text":null,"reference":null}"#,
+            "已完成第一条",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    service
+        .task_store
+        .create(&owner, todo_draft("可继续引用的待办"))
+        .unwrap();
+
+    let response = service
+        .respond(private_message("检查待办状态"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.text.as_deref(),
+        Some("我整理好了当前待办\n\n🚧 当前进行中 · 共 1 项\n1. 可继续引用的待办")
+    );
+    assert!(response.visible_entity_snapshot.is_some());
+    assert!(
+        service
+            .session_store
+            .get_or_create_active(&private_test_meta())
+            .unwrap()
+            .last_todo_query
+            .is_some(),
+        "只有结构化契约确认正文发布了列表，才能保留跨轮编号快照"
+    );
+
+    service
+        .respond(private_message("完成第一条待办"))
+        .await
+        .unwrap();
+
+    assert!(service.task_store.list_pending(&owner).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn explicitly_published_list_survives_a_following_todo_write() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results_and_attempts(
+            vec![
+                raw_tool_result(
+                    "list_todos",
+                    serde_json::json!({
+                        "ok": true,
+                        "status": "pending",
+                        "items": [],
+                        "count": 1
+                    }),
+                    true,
+                ),
+                raw_tool_result(
+                    "create_todo",
+                    serde_json::json!({
+                        "ok": true,
+                        "created_items": [{"title": "新增条目"}]
+                    }),
+                    true,
+                ),
+            ],
+            vec![
+                ToolExecutionAttempt {
+                    result_index: 0,
+                    call_id: "list-before-write".to_owned(),
+                    round: 0,
+                    retry_of: None,
+                },
+                ToolExecutionAttempt {
+                    result_index: 1,
+                    call_id: "create-after-list".to_owned(),
+                    round: 0,
+                    retry_of: None,
+                },
+            ],
+            r#"{"reply":"已处理","published_tool_call_ids":["list-before-write"]}"#,
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let visible = service
+        .task_store
+        .create(&owner, todo_draft("写操作前的列表条目"))
+        .unwrap();
+
+    let response = service
+        .respond(private_message("先列出待办，再新增一条"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("写操作前的列表条目"));
+    assert!(text.contains("✅ 已新增待办"));
+    let snapshot = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap()
+        .last_todo_query
+        .expect("显式发布的列表应保留跨轮编号快照");
+    assert_eq!(snapshot.result_ids, vec![visible.id]);
+}
+
+#[tokio::test]
+async fn structured_publication_binds_snapshot_to_the_published_list_result() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results_and_attempts(
+            vec![
+                raw_tool_result(
+                    "list_todos",
+                    serde_json::json!({
+                        "ok": true,
+                        "status": "pending",
+                        "keyword": "alpha",
+                        "items": [],
+                        "count": 1
+                    }),
+                    true,
+                ),
+                raw_tool_result(
+                    "list_todos",
+                    serde_json::json!({
+                        "ok": true,
+                        "status": "pending",
+                        "keyword": "beta",
+                        "items": [],
+                        "count": 1
+                    }),
+                    true,
+                ),
+            ],
+            vec![
+                ToolExecutionAttempt {
+                    result_index: 0,
+                    call_id: "list-alpha".to_owned(),
+                    round: 0,
+                    retry_of: None,
+                },
+                ToolExecutionAttempt {
+                    result_index: 1,
+                    call_id: "list-beta".to_owned(),
+                    round: 0,
+                    retry_of: None,
+                },
+            ],
+            r#"{"reply":"我整理了指定列表","published_tool_call_ids":["list-alpha"]}"#,
+        )
+        .with_tool_call_json(
+            "complete_todos",
+            r#"{"numbers":[1],"selection_text":null,"reference":null}"#,
+            "已完成第一条",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    let alpha = service
+        .task_store
+        .create(&owner, todo_draft("alpha item"))
+        .unwrap();
+    let beta = service
+        .task_store
+        .create(&owner, todo_draft("beta item"))
+        .unwrap();
+
+    let response = service
+        .respond(private_message("检查待办状态"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("alpha item"));
+    assert!(!text.contains("beta item"));
+    let snapshot = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap()
+        .last_todo_query
+        .expect("published list should preserve its own snapshot");
+    assert_eq!(snapshot.result_ids, vec![alpha.id.clone()]);
+
+    service
+        .respond(private_message("完成第一条待办"))
+        .await
+        .unwrap();
+
+    let pending = service.task_store.list_pending(&owner).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, beta.id);
+}
+
+#[tokio::test]
+async fn multiple_structured_published_lists_clear_ambiguous_snapshot() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results_and_attempts(
+            vec![
+                raw_tool_result(
+                    "list_todos",
+                    serde_json::json!({
+                        "ok": true,
+                        "status": "pending",
+                        "keyword": "alpha",
+                        "items": [],
+                        "count": 1
+                    }),
+                    true,
+                ),
+                raw_tool_result(
+                    "list_todos",
+                    serde_json::json!({
+                        "ok": true,
+                        "status": "pending",
+                        "keyword": "beta",
+                        "items": [],
+                        "count": 1
+                    }),
+                    true,
+                ),
+            ],
+            vec![
+                ToolExecutionAttempt {
+                    result_index: 0,
+                    call_id: "list-alpha".to_owned(),
+                    round: 0,
+                    retry_of: None,
+                },
+                ToolExecutionAttempt {
+                    result_index: 1,
+                    call_id: "list-beta".to_owned(),
+                    round: 0,
+                    retry_of: None,
+                },
+            ],
+            r#"{"reply":"我整理了两个列表","published_tool_call_ids":["list-alpha","list-beta"]}"#,
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+    let owner = TodoStore::owner(Some("u1"), "private:u1");
+    service
+        .task_store
+        .create(&owner, todo_draft("alpha item"))
+        .unwrap();
+    service
+        .task_store
+        .create(&owner, todo_draft("beta item"))
+        .unwrap();
+
+    let response = service
+        .respond(private_message("检查待办状态"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("alpha item"));
+    assert!(text.contains("beta item"));
+    assert!(response.visible_entity_snapshot.is_none());
+    assert!(
+        service
+            .session_store
+            .get_or_create_active(&private_test_meta())
+            .unwrap()
+            .last_todo_query
+            .is_none(),
+        "同时发布多个列表时不能为下一轮选择一个不明确的第一条"
+    );
 }
 
 #[tokio::test]

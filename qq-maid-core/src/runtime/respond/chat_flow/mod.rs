@@ -15,13 +15,14 @@ use crate::{
         session::{SessionMeta, SessionRecord, is_shared_conversation_scope},
         tools::{
             StatusHint, ToolTurnDiagnostics, agent_turn_diagnostics,
-            knowledge::KnowledgeEvidenceStatus, tool_turn_error_code,
+            knowledge::KnowledgeEvidenceStatus, todo, tool_turn_error_code,
         },
     },
 };
 
 use super::{
     RespondPurpose, RespondRequest, RespondResponse, RustRespondService,
+    agent_composition::AgentReplySource,
     agent_outcome::AgentTurnOutcome,
     agent_route::AgentRouteDecision,
     common::{command_response, empty_respond_request, merge_metadata, session_error},
@@ -138,9 +139,13 @@ impl RustRespondService {
 
         let is_shared_conversation = is_shared_conversation_scope(&meta.scope);
         let system_prompts = self.prompt_config.load_system_prompts()?;
+        let policy = self.resolve_agent_policy(&req)?;
         let system_prompts = if respond_route.uses_agent_runtime() {
             let mut prompts = system_prompts;
             prompts.push(TOOL_LOOP_AMBIGUITY_PROMPT.to_owned());
+            if let Some(prompt) = todo::agent_display_contract_prompt(&policy.enabled_tools) {
+                prompts.push(prompt.to_owned());
+            }
             if is_shared_conversation {
                 prompts.push(GROUP_TOOL_WHITELIST_PROMPT.to_owned());
             }
@@ -148,7 +153,6 @@ impl RustRespondService {
         } else {
             system_prompts
         };
-        let policy = self.resolve_agent_policy(&req)?;
         if !policy.enabled {
             let reply = "当前场景普通 AI 聊天未启用。";
             self.session_store
@@ -282,7 +286,7 @@ impl RustRespondService {
                             .map(|agent| &agent.executed_tools),
                         "Tool 执行已验真，但 Agent 最终回复失败，改用领域回退"
                     );
-                    agent_finalization_error = Some(err.as_info());
+                    agent_finalization_error = Some(err);
                     output
                 }
             };
@@ -313,7 +317,19 @@ impl RustRespondService {
                 &interaction_meta,
                 output,
                 &req,
+                AgentReplySource::NaturalLanguageAgent,
             )?;
+            if agent_finalization_error.is_some()
+                && !postprocess.outcome.can_render_agent_failure_fallback()
+            {
+                // Knowledge 等 Internal 结果需要模型整理；只有整轮均有可信正文时
+                // 才允许从最终生成错误回退，不能仅凭“存在 Tool Result”包装成空回复
+                // 或伪成功提示。Tool Loop 不完整但已形成可信结果的情况由 composer
+                // 追加明确警告后保留，避免丢掉已确认的事实。
+                return Err(agent_finalization_error
+                    .take()
+                    .expect("checked finalization error must exist"));
+            }
             (
                 postprocess.output,
                 Some(postprocess.outcome),
@@ -414,6 +430,9 @@ impl RustRespondService {
             "agent_tool_results": agent_tool_results,
             "agent_turn_status": agent_diagnostics["agent_turn_status"].clone(),
             "tool_outcomes": agent_diagnostics["tool_outcomes"].clone(),
+            "incomplete": agent_diagnostics["incomplete"].clone(),
+            "tool_loop_incomplete": agent_diagnostics["tool_loop_incomplete"].clone(),
+            "tools_with_unknown_result": agent_diagnostics["tools_with_unknown_result"].clone(),
             "tool_retry_count": tool_retry_count,
             "error_code": if let Some(error_code) = agent_turn_outcome
                 .as_ref()
@@ -842,5 +861,6 @@ mod prompt_protection_tests {
         assert!(TOOL_LOOP_AMBIGUITY_PROMPT.contains("跨轮恢复"));
         assert!(!TOOL_LOOP_AMBIGUITY_PROMPT.contains("edit_todo"));
         assert!(!TOOL_LOOP_AMBIGUITY_PROMPT.contains("reminder_at"));
+        assert!(!TOOL_LOOP_AMBIGUITY_PROMPT.contains("published_tool_call_ids"));
     }
 }

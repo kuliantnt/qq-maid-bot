@@ -53,6 +53,20 @@ pub(crate) fn structured_command_body(markdown: impl Into<String>) -> CommandBod
     CommandBody::dual(to_chat_text(&markdown), markdown)
 }
 
+/// 按统一的空白与段落规则拼接两段回复正文。
+///
+/// Tool outcome 的确定性回退和 Agent 最终正文补充都依赖同一套规则；集中在
+/// respond 通用层，避免两个调用点后续对空白或分隔符产生漂移。
+pub(crate) fn join_body_text(first: &str, second: &str) -> String {
+    match (first.trim(), second.trim()) {
+        (first, second) if !first.is_empty() && !second.is_empty() => {
+            format!("{first}\n\n{second}")
+        }
+        (first, _) if !first.is_empty() => first.to_owned(),
+        (_, second) => second.to_owned(),
+    }
+}
+
 pub(crate) const GROUP_ADMIN_REQUIRED_REPLY: &str = "这个群管理操作只允许群主或管理员执行。";
 
 pub(super) fn group_management_allowed(req: &RespondRequest) -> bool {

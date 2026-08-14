@@ -5,11 +5,17 @@
 //! - 将 HTTP 请求、JSON 解析和错误分类收敛在这里；
 //! - 上层 `/火车` flow 只依赖 trait，不直接感知 12306 接口细节。
 
+mod agent_turn;
+mod format;
 pub(crate) mod status;
 mod tool;
 
+pub(crate) use agent_turn::tool_outcome_from_result;
+pub(crate) use format::{format_train_error_reply, format_train_schedule_reply};
 pub use tool::TrainScheduleTool;
 pub(crate) use tool::route;
+
+pub(crate) const TRAIN_TOOL_NAME: &str = "get_train_schedule";
 
 use std::{sync::Arc, time::Duration};
 

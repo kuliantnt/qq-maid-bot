@@ -179,7 +179,7 @@ pub trait LlmProvider: Send + Sync {
             run_handle,
         } = req;
         let run_handle = run_handle.unwrap_or_default();
-        run_handle.ensure_candidate_attempt()?;
+        let attempt_baseline = run_handle.ensure_candidate_attempt()?;
         let session = match self
             .begin_agent_session(AgentSessionRequest {
                 chat: &chat,
@@ -216,6 +216,7 @@ pub trait LlmProvider: Send + Sync {
                 match result {
                     Ok(mut outcome) => {
                         run_handle.set_stop_reason(AgentStopReason::DirectAnswer);
+                        run_handle.mark_candidate_succeeded(attempt_baseline);
                         outcome.agent = run_handle.snapshot();
                         Ok(outcome)
                     }
