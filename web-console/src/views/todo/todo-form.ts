@@ -1,5 +1,5 @@
 import { createTodo } from "../../api.js";
-import { refreshTodos, showResult, valueOf, numberValue } from "./todo.js";
+import { captureTodoLifecycle, isCurrentTodoLifecycle, refreshTodos, showResult, valueOf, numberValue } from "./todo.js";
 
 export interface TodoDeadlineFields {
   dueDate: string | null;
@@ -30,6 +30,8 @@ export function todoDeadlineFromParts(dateValue: string, timeValue: string): Tod
 }
 
 export async function submitTodo(form: HTMLFormElement, dialog: HTMLDialogElement): Promise<void> {
+  const lifecycle = captureTodoLifecycle();
+  if (!isCurrentTodoLifecycle(lifecycle)) return;
   const title = valueOf("todo-create-title").trim();
   const targetRef = valueOf("todo-create-target");
   const recurrenceSelection = valueOf("todo-create-recurrence-kind");
@@ -64,16 +66,19 @@ export async function submitTodo(form: HTMLFormElement, dialog: HTMLDialogElemen
       recurrence_interval: recurrenceKind === "none" ? null : numberValue("todo-create-recurrence-interval"),
       recurrence_unit: recurrenceUnit,
     });
+    if (!isCurrentTodoLifecycle(lifecycle)) return;
     form.reset();
     dialog.close();
     await refreshTodos("refresh");
+    if (!isCurrentTodoLifecycle(lifecycle)) return;
     showResult("Todo 已创建", false);
   } catch (cause) {
+    if (!isCurrentTodoLifecycle(lifecycle)) return;
     // 创建失败保留用户已填写内容，仅展示明确错误，不关闭弹窗。
     if (error) error.textContent = cause instanceof Error ? cause.message : "Todo 创建失败";
     showResult(cause instanceof Error ? cause.message : "Todo 创建失败", true);
   } finally {
-    if (button) button.disabled = false;
+    if (button && isCurrentTodoLifecycle(lifecycle)) button.disabled = false;
   }
 }
 

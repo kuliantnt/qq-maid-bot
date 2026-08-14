@@ -14,7 +14,8 @@ mod tests;
 use rusqlite::Transaction;
 
 use super::{
-    MemoryCategory, MemoryError, MemoryRecord, MemorySourceType, MemoryStatus, MemoryStore,
+    MemoryCategory, MemoryError, MemoryKind, MemoryRecord, MemorySourceType, MemoryStatus,
+    MemoryStore,
     ops::validate_visibility,
     storage::{ManagementListQuery, PersistMemoryRequest},
 };
@@ -23,8 +24,8 @@ use self::{
     confirmation::{commit as commit_confirmation, prepare as prepare_confirmation},
     refs::{
         ResolvedTarget, ensure_expected_version, memory_item, memory_ref_for, normalize_keyword,
-        record_matches_target, resolved_target, target_matches_filter, validate_content,
-        validate_list_filter, validate_ref, validate_target_filter,
+        operation_capabilities, record_matches_target, resolved_target, target_matches_filter,
+        validate_content, validate_list_filter, validate_ref, validate_target_filter,
     },
     types::{
         MemoryManagementItem, MemoryManagementMutationResult, MemoryManagementPage,
@@ -32,8 +33,11 @@ use self::{
     },
 };
 
+#[cfg(test)]
+use self::types::MemoryDeleteResult;
+
 pub(crate) use self::types::{
-    ManagementActor, MemoryCreateInput, MemoryListFilter, MemoryManagementError,
+    ManagementActor, MemoryCommitAudit, MemoryCreateInput, MemoryListFilter, MemoryManagementError,
     MemoryManagementService, MemoryTargetFilter, MemoryUpdatePatch,
 };
 
@@ -58,13 +62,14 @@ impl MemoryManagementService {
         let mut filtered = targets
             .into_iter()
             .filter(|target| target_matches_filter(target, &filter))
-            .map(|target| target.summary)
             .collect::<Vec<_>>();
         let total_count = filtered.len();
         let start = offset.min(total_count);
         let end = start.saturating_add(limit).min(total_count);
+        let mut page = filtered.drain(start..end).collect::<Vec<_>>();
+        self.apply_capabilities(&mut page)?;
         Ok(MemoryTargetPage {
-            items: filtered.drain(start..end).collect(),
+            items: page.into_iter().map(|target| target.summary).collect(),
             total_count,
         })
     }
@@ -269,7 +274,7 @@ impl MemoryManagementService {
             })
             .map_err(MemoryManagementError::from)?;
         Ok(MemoryManagementMutationResult {
-            memory: memory_item(&target, archived.record, archived.profile_enabled)?,
+            memory: self.present_record(&target, archived.record, archived.profile_enabled)?,
             archived_count: 1,
         })
     }
@@ -304,9 +309,61 @@ impl MemoryManagementService {
             })
             .map_err(MemoryManagementError::from)?;
         Ok(MemoryManagementMutationResult {
-            memory: memory_item(&target, restored.record, restored.profile_enabled)?,
+            memory: self.present_record(&target, restored.record, restored.profile_enabled)?,
             archived_count: 0,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delete(
+        &self,
+        target_ref: &str,
+        memory_ref: &str,
+        expected_version: u64,
+    ) -> Result<MemoryDeleteResult, MemoryManagementError> {
+        self.delete_with_audit(target_ref, memory_ref, expected_version, |_, _| Ok(()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delete_with_audit<F>(
+        &self,
+        target_ref: &str,
+        memory_ref: &str,
+        expected_version: u64,
+        audit: F,
+    ) -> Result<MemoryDeleteResult, MemoryManagementError>
+    where
+        F: Fn(&Transaction<'_>, Option<u64>) -> Result<(), MemoryManagementError>,
+    {
+        let target = self.resolve_target_ref(target_ref)?;
+        let current = self.resolve_memory_ref(&target, memory_ref)?;
+        ensure_expected_version(&current, expected_version)?;
+        self.store
+            .management_delete_if_unchanged_with_audit(&target.target, &current, |tx, version| {
+                audit(tx, version).map_err(|error| MemoryError::audit_failed(error.message()))
+            })
+            .map_err(MemoryManagementError::from)?;
+        Ok(MemoryDeleteResult {
+            memory_ref: memory_ref.to_owned(),
+            deleted: true,
+        })
+    }
+
+    /// 提交已绑定确认快照的永久删除；调用方必须先完成 target 与记录回查。
+    pub(super) fn delete_confirmed_with_audit<F>(
+        &self,
+        target: &super::MemoryTarget,
+        expected: &MemoryRecord,
+        audit: F,
+    ) -> Result<bool, MemoryManagementError>
+    where
+        F: Fn(&Transaction<'_>, Option<u64>) -> Result<(), MemoryManagementError>,
+    {
+        self.store
+            .management_delete_if_unchanged_with_audit(target, expected, |tx, version| {
+                audit(tx, version).map_err(|error| MemoryError::audit_failed(error.message()))
+            })
+            .map_err(MemoryManagementError::from)
     }
 
     pub(crate) fn prepare(
@@ -314,8 +371,9 @@ impl MemoryManagementService {
         actor: ManagementActor,
         operation: &str,
         target_ref: &str,
+        memory: Option<(&str, u64)>,
     ) -> Result<PreparedMemoryOperation, MemoryManagementError> {
-        prepare_confirmation(self, actor, operation, target_ref)
+        prepare_confirmation(self, actor, operation, target_ref, memory)
     }
 
     #[cfg(test)]
@@ -340,7 +398,7 @@ impl MemoryManagementService {
         audit: F,
     ) -> Result<types::MemoryOperationResult, MemoryManagementError>
     where
-        F: Fn(&Transaction<'_>, Option<u64>) -> Result<(), MemoryManagementError>,
+        F: Fn(&Transaction<'_>, types::MemoryCommitAudit) -> Result<(), MemoryManagementError>,
     {
         commit_confirmation(
             self,
@@ -353,13 +411,33 @@ impl MemoryManagementService {
     }
 
     fn visible_targets(&self) -> Result<Vec<ResolvedTarget>, MemoryManagementError> {
-        Ok(self
+        let candidates = self
             .store
             .management_target_candidates()
-            .map_err(MemoryManagementError::from)?
+            .map_err(MemoryManagementError::from)?;
+        Ok(candidates
             .into_iter()
-            .filter_map(|target| resolved_target(target).ok())
+            .filter_map(|candidate| resolved_target(candidate).ok())
             .collect())
+    }
+
+    fn apply_capabilities(
+        &self,
+        targets: &mut [ResolvedTarget],
+    ) -> Result<(), MemoryManagementError> {
+        for target in targets {
+            let profile_enabled = if target.target.memory_kind() == MemoryKind::GroupProfile {
+                self.store
+                    .management_snapshot(&target.target)
+                    .map_err(MemoryManagementError::from)?
+                    .profile_enabled
+                    .unwrap_or(true)
+            } else {
+                true
+            };
+            target.summary.capabilities = operation_capabilities(&target.target, profile_enabled);
+        }
+        Ok(())
     }
 
     pub(super) fn resolve_target_ref(
@@ -428,7 +506,7 @@ impl MemoryManagementService {
     ) -> Result<MemoryManagementMutationResult, MemoryManagementError> {
         let archived_count = result.archived_ids.len();
         Ok(MemoryManagementMutationResult {
-            memory: memory_item(target, result.record, result.profile_enabled)?,
+            memory: self.present_record(target, result.record, result.profile_enabled)?,
             archived_count,
         })
     }
@@ -444,7 +522,18 @@ impl MemoryManagementService {
             .map_err(MemoryManagementError::from)?
             .profile_enabled
             .unwrap_or(true);
-        memory_item(target, record, profile_enabled)
+        self.present_record(target, record, profile_enabled)
+    }
+
+    fn present_record(
+        &self,
+        target: &ResolvedTarget,
+        record: MemoryRecord,
+        profile_enabled: bool,
+    ) -> Result<MemoryManagementItem, MemoryManagementError> {
+        let mut target = target.clone();
+        target.summary.capabilities = operation_capabilities(&target.target, profile_enabled);
+        memory_item(&target, record, profile_enabled)
     }
 
     fn present_page(

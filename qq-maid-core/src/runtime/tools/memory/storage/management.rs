@@ -253,6 +253,40 @@ impl MemoryStore {
         })
     }
 
+    /// 只读取目标级群画像开关；单条删除确认不需要扫描整个 target 的 active 记录。
+    pub(crate) fn management_profile_enabled(
+        &self,
+        target: &MemoryTarget,
+    ) -> Result<bool, MemoryError> {
+        #[cfg(test)]
+        if self
+            .management_snapshot_failure
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(MemoryError::io(
+                "management snapshot failure injected for test",
+            ));
+        }
+        let target = target.clean()?;
+        if target.memory_kind != MemoryKind::GroupProfile {
+            return Ok(true);
+        }
+        let subject_id = target
+            .subject_id
+            .as_deref()
+            .ok_or_else(|| MemoryError::bad_request("subject_id is required"))?;
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT profile_enabled FROM memory_profile_preferences
+             WHERE group_scope_id = ?1 AND subject_id = ?2",
+            params![target.scope_id, subject_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()
+        .map(|value| value.unwrap_or(true))
+        .map_err(MemoryError::from_sql)
+    }
+
     /// 清空的领域语义是 active → archived；ID 与 revision 快照不完全相同则整笔事务失败。
     pub(crate) fn management_clear_if_unchanged_with_audit<F>(
         &self,
@@ -438,6 +472,54 @@ impl MemoryStore {
                 record,
                 profile_enabled,
             })
+        })
+    }
+
+    /// 管理员永久删除只允许 active 记录；完整快照校验、DELETE 和审计共享同一事务。
+    pub(crate) fn management_delete_if_unchanged_with_audit<F>(
+        &self,
+        target: &MemoryTarget,
+        expected: &MemoryRecord,
+        audit: F,
+    ) -> Result<bool, MemoryError>
+    where
+        F: FnOnce(&Transaction<'_>, Option<u64>) -> Result<(), MemoryError>,
+    {
+        let target = target.clean()?;
+        if expected.status != MemoryStatus::Active {
+            return Err(MemoryError::changed(
+                "memory is no longer in the prepared active state",
+            ));
+        }
+        self.with_immediate_transaction(|tx| {
+            super::v3::ensure_record_unchanged_for_management(tx, &target, &expected.id, expected)?;
+            let profile_enabled = profile_enabled_for_management_in_transaction(tx, &target)?;
+            if expected.memory_kind == MemoryKind::GroupProfile && !profile_enabled {
+                return Err(MemoryError::profile_opted_out());
+            }
+            let changed = tx
+                .execute(
+                    "DELETE FROM memories
+                     WHERE id = ?1 AND scope_type = ?2 AND scope_id = ?3
+                       AND memory_kind = ?4 AND subject_id IS ?5
+                       AND status = 'active' AND revision = ?6",
+                    params![
+                        expected.id,
+                        target.scope_type.as_str(),
+                        target.scope_id,
+                        target.memory_kind.as_str(),
+                        target.subject_id,
+                        sqlite_revision(expected.revision)?,
+                    ],
+                )
+                .map_err(MemoryError::from_sql)?;
+            if changed != 1 {
+                return Err(MemoryError::changed(
+                    "memory changed after confirmation was prepared",
+                ));
+            }
+            audit(tx, None)?;
+            Ok(profile_enabled)
         })
     }
 }

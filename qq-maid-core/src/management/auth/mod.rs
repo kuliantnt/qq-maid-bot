@@ -74,6 +74,14 @@ pub const CONSOLE_AUDIT_SCHEMA_V2: SqliteMigration = SqliteMigration {
             ON console_audit_events(request_id);",
 };
 
+/// 管理审计 v3：为需要区分单条资源的操作增加不可逆资源摘要。
+///
+/// 该字段只允许 opaque reference 的 SHA-256 摘要，不保存正文、来源细节或 raw identity。
+pub const CONSOLE_AUDIT_SCHEMA_V3: SqliteMigration = SqliteMigration {
+    name: "console_audit_schema_v3_resource_digest",
+    sql: "ALTER TABLE console_audit_events ADD COLUMN resource_digest TEXT;",
+};
+
 #[derive(Debug, thiserror::Error)]
 #[error("{code}: {message}")]
 pub struct AdminAuthError {
@@ -127,6 +135,7 @@ pub struct ManagementAudit<'a> {
     pub action: &'a str,
     pub result: &'a str,
     pub target_digest: Option<&'a str>,
+    pub resource_digest: Option<&'a str>,
     pub before_version: Option<u64>,
     pub after_version: Option<u64>,
     pub safe_error_code: Option<&'a str>,

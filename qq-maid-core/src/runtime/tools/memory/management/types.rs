@@ -40,6 +40,8 @@ pub(crate) struct MemoryTargetSummary {
     pub(crate) group_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subject_ref: Option<String>,
+    /// 目标级操作能力；群画像的停用能力来自持久化 profile preference。
+    pub(crate) capabilities: MemoryOperationCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -47,6 +49,7 @@ pub(crate) struct MemoryCapabilities {
     pub(crate) can_update: bool,
     pub(crate) can_archive: bool,
     pub(crate) can_restore: bool,
+    pub(crate) can_delete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -71,6 +74,13 @@ pub(crate) struct MemoryManagementItem {
 pub(crate) struct MemoryManagementMutationResult {
     pub(crate) memory: MemoryManagementItem,
     pub(crate) archived_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[cfg(test)]
+pub(crate) struct MemoryDeleteResult {
+    pub(crate) memory_ref: String,
+    pub(crate) deleted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -100,6 +110,11 @@ pub(crate) struct MemoryOperationResult {
     pub(crate) target: MemoryTargetSummary,
     pub(crate) affected_count: usize,
     pub(crate) capabilities: MemoryOperationCapabilities,
+    /// 仅永久删除返回被删除的 opaque reference；不返回内部记录 ID 或正文。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) memory_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) deleted: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -169,6 +184,11 @@ pub(crate) enum MemoryManagementError {
     PermissionDenied,
     ProfileDisabled,
     AuditUnavailable,
+    /// 携带删除对象的安全审计元数据；只保存 opaque ref 和请求版本，不保存记录快照。
+    WithAudit {
+        source: Box<MemoryManagementError>,
+        metadata: MemoryCommitAudit,
+    },
     Internal,
 }
 
@@ -181,6 +201,7 @@ impl MemoryManagementError {
             Self::PermissionDenied => "permission_denied",
             Self::ProfileDisabled => "profile_disabled",
             Self::AuditUnavailable => "audit_unavailable",
+            Self::WithAudit { source, .. } => source.code(),
             Self::Internal => "internal_error",
         }
     }
@@ -192,7 +213,15 @@ impl MemoryManagementError {
             Self::PermissionDenied => "memory management is not permitted",
             Self::ProfileDisabled => "group profile is disabled",
             Self::AuditUnavailable => "management audit is unavailable",
+            Self::WithAudit { source, .. } => source.message(),
             Self::Internal => "memory management failed",
+        }
+    }
+
+    pub(crate) fn audit_metadata(&self) -> Option<MemoryCommitAudit> {
+        match self {
+            Self::WithAudit { metadata, .. } => Some(metadata.clone()),
+            _ => None,
         }
     }
 }
@@ -223,15 +252,40 @@ pub(super) struct ConfirmationEntry {
     pub(super) session_digest: [u8; 32],
     pub(super) operation: ManagementOperation,
     pub(super) target_ref: String,
-    pub(super) target: MemoryTarget,
-    pub(super) snapshot: ManagementTargetSnapshot,
+    pub(super) payload: ConfirmationPayload,
     pub(super) expires_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum ConfirmationPayload {
+    /// 批量操作需要冻结目标和 active revision 集合，供事务内做完整 CAS。
+    Bulk {
+        target: MemoryTarget,
+        snapshot: ManagementTargetSnapshot,
+    },
+    /// 单条删除只保存 opaque reference 和 revision，不随目标记录数增长。
+    Delete(DeleteMemoryConfirmation),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DeleteMemoryConfirmation {
+    pub(super) memory_ref: String,
+    pub(super) expected_version: u64,
+}
+
+/// 高影响操作审计所需的最小、无正文元数据。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MemoryCommitAudit {
+    pub(crate) before_version: Option<u64>,
+    pub(crate) after_version: Option<u64>,
+    pub(crate) memory_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ManagementOperation {
     ClearTarget,
     DisableGroupProfile,
+    DeleteMemory,
 }
 
 impl ManagementOperation {
@@ -239,6 +293,7 @@ impl ManagementOperation {
         match value.trim() {
             "clear_target" => Ok(Self::ClearTarget),
             "disable_group_profile" => Ok(Self::DisableGroupProfile),
+            "delete_memory" => Ok(Self::DeleteMemory),
             _ => Err(MemoryManagementError::Validation(
                 "operation is not supported".to_owned(),
             )),
@@ -249,6 +304,7 @@ impl ManagementOperation {
         match self {
             Self::ClearTarget => "clear_target",
             Self::DisableGroupProfile => "disable_group_profile",
+            Self::DeleteMemory => "delete_memory",
         }
     }
 }

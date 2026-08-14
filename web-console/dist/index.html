@@ -193,6 +193,62 @@
       </section>
       </div>
 
+      <div class="console-page" data-console-page="memory" hidden>
+        <header class="product-page-heading">
+          <div>
+            <p class="eyebrow">MEMORY / CONTROL PLANE</p>
+            <h2>Memory 管理</h2>
+            <p class="product-page-lede">按服务端授权范围查看个人记忆、群内用户画像和群组记忆；变更结果以真实 API 返回为准。</p>
+          </div>
+          <span class="readonly-tag">受控写入</span>
+        </header>
+        <section id="memory-page" class="panel memory-panel" aria-labelledby="memory-heading">
+          <header class="section-heading">
+            <div>
+              <p class="section-kicker">MEMORY / V3 DOMAIN</p>
+              <h2 id="memory-heading">记忆资源</h2>
+            </div>
+            <div class="memory-page-actions">
+              <button id="memory-refresh" class="secondary" type="button">刷新</button>
+            </div>
+          </header>
+          <div class="memory-toolbar">
+            <label>范围<select id="memory-kind-filter"><option value="all">全部范围</option><option value="personal">个人记忆</option><option value="group_profile">群内用户画像</option><option value="group">群组记忆</option></select></label>
+            <label>状态<select id="memory-status-filter"><option value="active">活动中</option><option value="archived">已归档</option><option value="all">全部</option></select></label>
+            <label>类型<select id="memory-type-filter"></select></label>
+            <label>固定<select id="memory-pinned-filter"><option value="all">全部</option><option value="true">仅固定</option><option value="false">未固定</option></select></label>
+            <label class="memory-query">关键词<input id="memory-query-filter" type="search" placeholder="搜索记忆内容"></label>
+            <button id="memory-filter-submit" type="button">应用筛选</button>
+            <button id="memory-filter-reset" class="secondary" type="button">重置</button>
+          </div>
+          <div class="memory-advanced-filter">
+            <label>平台<input id="memory-platform-filter" placeholder="qq_official"></label>
+            <label>账号引用<select id="memory-account-filter"><option value="">全部账号</option></select></label>
+            <label>群组引用<select id="memory-group-filter"><option value="">全部群组</option></select></label>
+            <label>用户引用<select id="memory-user-filter"><option value="">全部用户</option></select></label>
+            <label>可见性<select id="memory-visibility-filter"><option value="all">全部</option><option value="private">仅本人</option><option value="context_only">当前上下文</option><option value="group_members">群成员</option><option value="public">公开</option></select></label>
+          </div>
+          <p id="memory-result" class="status-message" role="status" aria-live="polite"></p>
+          <section class="memory-create-panel" aria-labelledby="memory-create-heading">
+            <div class="memory-subheading"><h3 id="memory-create-heading">创建记忆</h3><span>仅使用服务端已发现的 target 引用</span></div>
+            <form id="memory-create-form" class="memory-create-form">
+              <label>授权范围<select id="memory-create-target" required><option value="">加载范围中…</option></select></label>
+              <label>分类<select id="memory-create-type"><option value="note">普通记录</option><option value="preference">偏好</option><option value="identity">身份</option><option value="relation">关系</option><option value="instruction">指令</option></select></label>
+              <label>可见性<select id="memory-create-visibility" disabled><option value="">选择范围后加载</option></select></label>
+              <label class="memory-create-content">内容<textarea id="memory-create-content" rows="2" maxlength="16384" required placeholder="填写需要保存的记忆"></textarea></label>
+              <label class="memory-pinned-toggle"><input id="memory-create-pinned" type="checkbox"> 固定</label>
+              <button type="submit">创建</button>
+            </form>
+          </section>
+          <section class="memory-targets-panel" aria-labelledby="memory-targets-heading">
+            <div class="memory-subheading"><h3 id="memory-targets-heading">范围操作</h3><span>清空与停止画像需要二次确认</span></div>
+            <div id="memory-targets" class="memory-targets"></div>
+          </section>
+          <div id="memory-list" class="memory-list" aria-live="polite"><p class="hint">正在加载 Memory…</p></div>
+          <div id="memory-pagination" class="memory-pagination"></div>
+        </section>
+      </div>
+
       <div class="console-page" data-console-page="todo" hidden>
         <header class="product-page-heading">
           <div>

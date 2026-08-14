@@ -15,6 +15,7 @@ use qq_maid_llm::provider::{
 };
 use rusqlite::params;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 
 use crate::{
@@ -263,6 +264,32 @@ impl TestApi {
             )
             .unwrap()
     }
+
+    fn latest_audit_metadata(
+        &self,
+        action: &str,
+        outcome: &str,
+    ) -> (Option<String>, Option<i64>, Option<i64>, Option<String>) {
+        self.database
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT resource_digest, before_version, after_version, safe_error_code
+                 FROM console_audit_events
+                 WHERE event_type = ?1 AND outcome = ?2
+                 ORDER BY id DESC LIMIT 1",
+                params![action, outcome],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .unwrap()
+    }
 }
 
 fn personal_scope(user: &str) -> String {
@@ -448,6 +475,10 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
     assert_eq!(created["data"]["memory"]["version"], 1);
     assert_eq!(created["data"]["memory"]["content"], "管理员创建的内容");
     assert_eq!(created["data"]["memory"]["source_type"], "manual_import");
+    assert_eq!(
+        created["data"]["memory"]["capabilities"]["can_delete"],
+        true
+    );
     assert!(
         created["data"]["memory"]
             .get("created_by_user_id")
@@ -529,6 +560,10 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
     assert_eq!(status, StatusCode::OK, "{archived}");
     assert_eq!(archived["data"]["memory"]["status"], "archived");
     assert_eq!(archived["data"]["memory"]["version"], 3);
+    assert_eq!(
+        archived["data"]["memory"]["capabilities"]["can_delete"],
+        false
+    );
     assert_eq!(api.audit_count("memory.archive", "success"), 1);
 
     let (status, restored) = api
@@ -544,7 +579,111 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
     assert_eq!(status, StatusCode::OK, "{restored}");
     assert_eq!(restored["data"]["memory"]["status"], "active");
     assert_eq!(restored["data"]["memory"]["version"], 4);
+    assert_eq!(
+        restored["data"]["memory"]["capabilities"]["can_delete"],
+        true
+    );
     assert_eq!(api.audit_count("memory.restore", "success"), 1);
+
+    let (status, stale_delete) = api
+        .post(
+            "/api/v1/console/memories/operations/prepare",
+            json!({
+                "operation": "delete_memory",
+                "target_ref": api.target_ref,
+                "memory_ref": updated_memory_ref,
+                "expected_version": 3
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale_delete}");
+    assert_eq!(stale_delete["error"]["code"], "conflict");
+    assert_eq!(api.audit_count("memory.delete_prepare", "denied"), 1);
+    let (resource_digest, before_version, after_version, error_code) =
+        api.latest_audit_metadata("memory.delete_prepare", "denied");
+    let delete_digest = Sha256::digest(updated_memory_ref.as_bytes());
+    let delete_digest = delete_digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(resource_digest.as_deref(), Some(delete_digest.as_str()));
+    assert_eq!(before_version, Some(3));
+    assert_eq!(after_version, None);
+    assert_eq!(error_code.as_deref(), Some("conflict"));
+
+    let (status, prepared_delete) = api
+        .post(
+            "/api/v1/console/memories/operations/prepare",
+            json!({
+                "operation": "delete_memory",
+                "target_ref": api.target_ref,
+                "memory_ref": updated_memory_ref,
+                "expected_version": 4
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{prepared_delete}");
+    let (resource_digest, before_version, after_version, error_code) =
+        api.latest_audit_metadata("memory.delete_prepare", "success");
+    assert_eq!(resource_digest.as_deref(), Some(delete_digest.as_str()));
+    assert_eq!(before_version, Some(4));
+    assert_eq!(after_version, None);
+    assert_eq!(error_code, None);
+    let delete_token = prepared_delete["data"]["confirmation_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, deleted) = api
+        .post(
+            "/api/v1/console/memories/operations/commit",
+            json!({
+                "operation": "delete_memory",
+                "target_ref": api.target_ref,
+                "confirmation_token": delete_token
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["data"]["deleted"], true);
+    assert_eq!(deleted["data"]["memory_ref"], updated_memory_ref);
+    assert_eq!(deleted["data"]["operation"], "delete_memory");
+    assert_eq!(api.audit_count("memory.delete_commit", "success"), 1);
+    let (event_type, resource_digest, before_version, after_version) = api
+        .database
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT event_type, resource_digest, before_version, after_version
+             FROM console_audit_events
+             WHERE event_type = 'memory.delete_commit' AND outcome = 'success'
+             ORDER BY id DESC LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(event_type, "memory.delete_commit");
+    let expected_digest = Sha256::digest(updated_memory_ref.as_bytes());
+    let expected_digest = expected_digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(resource_digest.as_deref(), Some(expected_digest.as_str()));
+    assert_eq!(before_version, Some(4));
+    assert_eq!(after_version, None);
+    let (status, missing) = api
+        .post(
+            "/api/v1/console/memories/get",
+            json!({"target_ref": api.target_ref, "memory_ref": updated_memory_ref}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
 
     let (status, empty_patch) = api
         .post(
@@ -559,6 +698,77 @@ async fn memory_api_crud_returns_real_versions_and_keeps_history() {
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(empty_patch["error"]["code"], "validation_error");
+}
+
+#[tokio::test]
+async fn memory_api_delete_commit_conflict_audits_resource_metadata() {
+    let api = TestApi::new();
+    let (status, initial) = api
+        .post(
+            "/api/v1/console/memories/list",
+            json!({"target_ref": api.target_ref, "status": "active"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{initial}");
+    let memory_ref = initial["data"]["items"][0]["memory_ref"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, prepared) = api
+        .post(
+            "/api/v1/console/memories/operations/prepare",
+            json!({
+                "operation": "delete_memory",
+                "target_ref": api.target_ref,
+                "memory_ref": memory_ref,
+                "expected_version": 1
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let token = prepared["data"]["confirmation_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, archived) = api
+        .post(
+            "/api/v1/console/memories/archive",
+            json!({
+                "target_ref": api.target_ref,
+                "memory_ref": memory_ref,
+                "expected_version": 1
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{archived}");
+
+    let (status, conflict) = api
+        .post(
+            "/api/v1/console/memories/operations/commit",
+            json!({
+                "operation": "delete_memory",
+                "target_ref": api.target_ref,
+                "confirmation_token": token
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(conflict["error"]["code"], "conflict");
+    assert_eq!(api.audit_count("memory.delete_commit", "denied"), 1);
+
+    let (resource_digest, before_version, after_version, error_code) =
+        api.latest_audit_metadata("memory.delete_commit", "denied");
+    let expected_digest = Sha256::digest(memory_ref.as_bytes());
+    let expected_digest = expected_digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(resource_digest.as_deref(), Some(expected_digest.as_str()));
+    assert_eq!(before_version, Some(1));
+    assert_eq!(after_version, None);
+    assert_eq!(error_code.as_deref(), Some("conflict"));
 }
 
 #[tokio::test]
@@ -633,6 +843,45 @@ async fn memory_api_audit_failure_rolls_back_mutations_and_consumes_commit_token
     assert_eq!(unchanged["data"]["version"], 1);
     assert_eq!(unchanged["data"]["content"], "初始 % 内容");
 
+    let (status, prepared_delete) = api
+        .post(
+            "/api/v1/console/memories/operations/prepare",
+            json!({
+                "operation": "delete_memory",
+                "target_ref": api.target_ref,
+                "memory_ref": initial_memory_ref,
+                "expected_version": 1
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{prepared_delete}");
+    let delete_token = prepared_delete["data"]["confirmation_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    api.set_audit_failure(true);
+    let (status, delete_failed) = api
+        .post(
+            "/api/v1/console/memories/operations/commit",
+            json!({
+                "operation": "delete_memory",
+                "target_ref": api.target_ref,
+                "confirmation_token": delete_token
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{delete_failed}");
+    assert_eq!(api.audit_count("memory.delete_commit", "success"), 0);
+    api.set_audit_failure(false);
+    let (status, after_delete) = api
+        .post(
+            "/api/v1/console/memories/get",
+            json!({"target_ref": api.target_ref, "memory_ref": initial_memory_ref}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{after_delete}");
+    assert_eq!(after_delete["data"]["content"], "初始 % 内容");
+
     let (status, prepared) = api
         .post(
             "/api/v1/console/memories/operations/prepare",
@@ -657,7 +906,7 @@ async fn memory_api_audit_failure_rolls_back_mutations_and_consumes_commit_token
         )
         .await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{commit_failed}");
-    assert_eq!(api.audit_count("memory.operation_commit", "success"), 0);
+    assert_eq!(api.audit_count("memory.clear_target_commit", "success"), 0);
     api.set_audit_failure(false);
     let (status, after_commit) = api
         .post(
@@ -714,7 +963,7 @@ async fn memory_api_prepare_commit_is_actor_bound_one_shot_and_snapshot_safe() {
     assert_eq!(status, StatusCode::OK, "{committed}");
     assert_eq!(committed["data"]["affected_count"], 1);
     assert_eq!(committed["data"]["operation"], "clear_target");
-    assert_eq!(api.audit_count("memory.operation_commit", "success"), 1);
+    assert_eq!(api.audit_count("memory.clear_target_commit", "success"), 1);
     let (status, active_after_commit) = api
         .post(
             "/api/v1/console/memories/list",
@@ -777,6 +1026,17 @@ async fn memory_api_prepare_commit_is_actor_bound_one_shot_and_snapshot_safe() {
         disabled["data"]["capabilities"]["can_disable_group_profile"],
         false
     );
+    let (status, targets) = api
+        .post("/api/v1/console/memories/targets", json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{targets}");
+    let target = targets["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["target_ref"] == profile_ref)
+        .expect("disabled group profile remains discoverable");
+    assert_eq!(target["capabilities"]["can_disable_group_profile"], false);
 }
 
 #[tokio::test]

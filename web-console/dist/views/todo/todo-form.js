@@ -1,5 +1,5 @@
 import { createTodo } from "../../api.js";
-import { refreshTodos, showResult, valueOf, numberValue } from "./todo.js";
+import { captureTodoLifecycle, isCurrentTodoLifecycle, refreshTodos, showResult, valueOf, numberValue } from "./todo.js";
 /**
  * 将单个截止日期时间输入投影为后端兼容字段，并确保 due_date 与 due_at 始终同一天。
  * 编辑历史“仅日期”待办时仍接受 YYYY-MM-DD，避免无意补成当天零点。
@@ -23,6 +23,9 @@ export function todoDeadlineFromParts(dateValue, timeValue) {
     return todoDeadlineFields(dueTime ? `${dueDate}T${dueTime}` : dueDate);
 }
 export async function submitTodo(form, dialog) {
+    const lifecycle = captureTodoLifecycle();
+    if (!isCurrentTodoLifecycle(lifecycle))
+        return;
     const title = valueOf("todo-create-title").trim();
     const targetRef = valueOf("todo-create-target");
     const recurrenceSelection = valueOf("todo-create-recurrence-kind");
@@ -60,19 +63,25 @@ export async function submitTodo(form, dialog) {
             recurrence_interval: recurrenceKind === "none" ? null : numberValue("todo-create-recurrence-interval"),
             recurrence_unit: recurrenceUnit,
         });
+        if (!isCurrentTodoLifecycle(lifecycle))
+            return;
         form.reset();
         dialog.close();
         await refreshTodos("refresh");
+        if (!isCurrentTodoLifecycle(lifecycle))
+            return;
         showResult("Todo 已创建", false);
     }
     catch (cause) {
+        if (!isCurrentTodoLifecycle(lifecycle))
+            return;
         // 创建失败保留用户已填写内容，仅展示明确错误，不关闭弹窗。
         if (error)
             error.textContent = cause instanceof Error ? cause.message : "Todo 创建失败";
         showResult(cause instanceof Error ? cause.message : "Todo 创建失败", true);
     }
     finally {
-        if (button)
+        if (button && isCurrentTodoLifecycle(lifecycle))
             button.disabled = false;
     }
 }

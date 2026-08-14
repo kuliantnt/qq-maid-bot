@@ -188,14 +188,34 @@ impl VersionedMemoryRequest {
 pub(super) struct PrepareOperationRequest {
     pub(super) operation: String,
     pub(super) target_ref: String,
+    pub(super) memory_ref: Option<String>,
+    pub(super) expected_version: Option<Value>,
 }
 
+type PrepareOperationParts = (String, String, Option<(String, u64)>);
+
 impl PrepareOperationRequest {
-    pub(super) fn into_parts(self) -> Result<(String, String), ApiError> {
-        Ok((
-            required_text(self.operation, "operation", 64)?,
-            required_text(self.target_ref, "target_ref", 96)?,
-        ))
+    pub(super) fn into_parts(self) -> Result<PrepareOperationParts, ApiError> {
+        let memory_ref = self
+            .memory_ref
+            .map(|value| required_text(value, "memory_ref", 96))
+            .transpose()?;
+        let expected_version = self.expected_version.map(parse_version).transpose()?;
+        match (memory_ref, expected_version) {
+            (Some(memory_ref), Some(expected_version)) => Ok((
+                required_text(self.operation, "operation", 64)?,
+                required_text(self.target_ref, "target_ref", 96)?,
+                Some((memory_ref, expected_version)),
+            )),
+            (None, None) => Ok((
+                required_text(self.operation, "operation", 64)?,
+                required_text(self.target_ref, "target_ref", 96)?,
+                None,
+            )),
+            _ => Err(ApiError::validation(
+                "memory_ref and expected_version must be provided together",
+            )),
+        }
     }
 }
 

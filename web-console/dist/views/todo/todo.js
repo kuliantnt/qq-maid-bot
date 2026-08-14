@@ -4,6 +4,10 @@ import { todoCard } from "./todo-card.js";
 import { submitTodo, todoDeadlineFields } from "./todo-form.js";
 export { todoRecurrenceKind } from "./todo-form.js";
 let todos = [];
+let initialized = false;
+let lifecycleGeneration = 0;
+let listRequestGeneration = 0;
+let targetRequestGeneration = 0;
 let page = 1;
 let pager = initialTargetPager();
 let targetLoading = false;
@@ -24,10 +28,57 @@ export function filterResetDefaults() {
         "todo-date-end": "",
     };
 }
+export function captureTodoLifecycle() {
+    return lifecycleGeneration;
+}
 export async function initializeTodo() {
+    if (initialized)
+        return;
+    initialized = true;
+    const lifecycle = lifecycleGeneration;
     bindTodoControls();
-    await loadMoreTargets();
+    await loadMoreTargets(lifecycle);
+    if (!isCurrentTodoLifecycle(lifecycle))
+        return;
     await refreshTodos("refresh");
+}
+export function disposeTodo() {
+    initialized = false;
+    lifecycleGeneration += 1;
+    listRequestGeneration += 1;
+    targetRequestGeneration += 1;
+    todos = [];
+    page = 1;
+    pager = initialTargetPager();
+    targetLoading = false;
+    detachElement(createLoadMore);
+    detachElement(filterLoadMore);
+    createLoadMore = null;
+    filterLoadMore = null;
+    for (const [id, value] of Object.entries(filterResetDefaults())) {
+        const field = document.getElementById(id);
+        if (field instanceof HTMLInputElement || field instanceof HTMLSelectElement)
+            field.value = value;
+    }
+    const form = document.getElementById("todo-create-form");
+    if (typeof HTMLFormElement !== "undefined" && form instanceof HTMLFormElement) {
+        form.reset();
+        const submit = form.querySelector("button[type=submit]");
+        if (submit)
+            submit.disabled = false;
+    }
+    const dialog = document.getElementById("todo-create-dialog");
+    if (typeof HTMLDialogElement !== "undefined" && dialog instanceof HTMLDialogElement && dialog.open)
+        dialog.close();
+    const createError = document.getElementById("todo-create-error");
+    if (createError instanceof HTMLElement)
+        createError.textContent = "";
+    document.getElementById("todo-create-target")?.replaceChildren();
+    document.getElementById("todo-target-filter")?.replaceChildren();
+    document.getElementById("todo-list")?.replaceChildren();
+    document.getElementById("todo-pagination")?.replaceChildren();
+    syncAdvancedFilterState();
+    showResult("", false);
 }
 function bindTodoControls() {
     const refresh = document.getElementById("todo-refresh");
@@ -93,7 +144,12 @@ function syncAdvancedFilterState() {
     toggle.textContent = active ? "高级筛选 · 已启用" : "高级筛选";
 }
 export async function refreshTodos(trigger = "refresh") {
+    if (!initialized)
+        return;
+    const lifecycle = lifecycleGeneration;
+    const request = ++listRequestGeneration;
     page = initialRefreshPage(trigger, page);
+    renderTodoLoading();
     try {
         const status = valueOf("todo-status-filter");
         const keyword = valueOf("todo-keyword-filter").trim();
@@ -119,6 +175,8 @@ export async function refreshTodos(trigger = "refresh") {
             ...(scopeType ? { scope_type: scopeType } : {}),
             ...(dateStart && dateEnd ? { date_start: dateStart, date_end: dateEnd } : {}),
         });
+        if (!isCurrentTodoRequest(lifecycle, request))
+            return;
         if (page > result.totalPages && page > 1) {
             page = pageAfterDelete(page, result.totalPages);
             return refreshTodos("refresh");
@@ -129,22 +187,42 @@ export async function refreshTodos(trigger = "refresh") {
         showResult(`${result.total} 项 Todo`, false);
     }
     catch (cause) {
+        if (!isCurrentTodoRequest(lifecycle, request))
+            return;
+        todos = [];
+        renderTodoError();
         showResult(cause instanceof Error ? cause.message : "Todo 刷新失败", true);
     }
 }
-async function loadMoreTargets() {
+export function isCurrentTodoLifecycle(generation) {
+    return initialized && generation === lifecycleGeneration;
+}
+function isCurrentTodoRequest(lifecycle, request) {
+    return isCurrentTodoLifecycle(lifecycle) && request === listRequestGeneration;
+}
+function isCurrentTargetRequest(lifecycle, request) {
+    return isCurrentTodoLifecycle(lifecycle) && request === targetRequestGeneration;
+}
+async function loadMoreTargets(lifecycle = lifecycleGeneration) {
     if (targetLoading || (pager.page > 0 && !hasMoreTargetPages(pager)))
         return;
+    const request = ++targetRequestGeneration;
     targetLoading = true;
     try {
-        pager = appendTargetPage(pager, await listTodoTargets(pager.page + 1, TARGET_PAGE_SIZE));
+        const result = await listTodoTargets(pager.page + 1, TARGET_PAGE_SIZE);
+        if (!isCurrentTargetRequest(lifecycle, request))
+            return;
+        pager = appendTargetPage(pager, result);
         renderTargets();
     }
     catch (cause) {
+        if (!isCurrentTargetRequest(lifecycle, request))
+            return;
         showResult(cause instanceof Error ? cause.message : "目标加载失败", true);
     }
     finally {
-        targetLoading = false;
+        if (isCurrentTargetRequest(lifecycle, request))
+            targetLoading = false;
     }
 }
 function renderTargets() {
@@ -203,59 +281,104 @@ export function renderTodos() {
     for (const todo of todos)
         list.append(todoCard(todo));
 }
+function renderTodoLoading() {
+    const list = document.getElementById("todo-list");
+    if (!(list instanceof HTMLElement))
+        return;
+    list.replaceChildren(Object.assign(document.createElement("p"), {
+        className: "hint",
+        textContent: "正在加载 Todo…",
+    }));
+    renderPagination(0, 0);
+}
+function renderTodoError() {
+    const list = document.getElementById("todo-list");
+    if (!(list instanceof HTMLElement))
+        return;
+    list.replaceChildren(Object.assign(document.createElement("p"), {
+        className: "hint",
+        textContent: "Todo 列表加载失败，请重试。",
+    }));
+    renderPagination(0, 0);
+}
 export async function changeTodoStatus(todo, status) {
+    const lifecycle = captureTodoLifecycle();
+    if (!isCurrentTodoLifecycle(lifecycle))
+        return;
     try {
         await updateTodo(todo.id, { status });
+        if (!isCurrentTodoLifecycle(lifecycle))
+            return;
         await refreshTodos("refresh");
+        if (!isCurrentTodoLifecycle(lifecycle))
+            return;
     }
     catch (cause) {
+        if (!isCurrentTodoLifecycle(lifecycle))
+            return;
         showResult(cause instanceof Error ? cause.message : "Todo 更新失败", true);
     }
 }
-export async function loadTodoForEdit(id, get = getTodo, onError = (message) => showResult(message, true)) {
+export async function loadTodoForEdit(id, get = getTodo, onError = (message) => showResult(message, true), lifecycle) {
+    const guarded = lifecycle !== undefined;
+    if (guarded && !isCurrentTodoLifecycle(lifecycle))
+        return null;
     try {
-        return await get(id);
+        const todo = await get(id);
+        if (guarded && !isCurrentTodoLifecycle(lifecycle))
+            return null;
+        return todo;
     }
     catch (cause) {
-        onError(cause instanceof Error ? cause.message : "Todo 加载失败");
+        if (!guarded || isCurrentTodoLifecycle(lifecycle))
+            onError(cause instanceof Error ? cause.message : "Todo 加载失败");
         return null;
     }
 }
-export async function openEditor(todo) {
-    const latest = await loadTodoForEdit(todo.id);
-    if (latest === null)
+export async function openEditor(todo, get = getTodo, prompt = (message, defaultValue) => window.prompt(message, defaultValue)) {
+    const lifecycle = captureTodoLifecycle();
+    const latest = await loadTodoForEdit(todo.id, get, undefined, lifecycle);
+    if (!isCurrentTodoLifecycle(lifecycle) || latest === null)
         return;
-    const title = window.prompt("Todo 标题", latest.title);
-    if (title === null || !title.trim())
+    const title = prompt("Todo 标题", latest.title);
+    if (!isCurrentTodoLifecycle(lifecycle) || title === null || !title.trim())
         return;
-    const detail = window.prompt("Todo 详情（留空清除）", latest.detail ?? "");
-    if (detail === null)
+    const detail = prompt("Todo 详情（留空清除）", latest.detail ?? "");
+    if (!isCurrentTodoLifecycle(lifecycle) || detail === null)
         return;
-    const deadlineValue = window.prompt("截止日期时间 YYYY-MM-DD HH:MM（留空清除）", latest.dueAt ?? latest.dueDate ?? "");
-    if (deadlineValue === null)
+    const deadlineValue = prompt("截止日期时间 YYYY-MM-DD HH:MM（留空清除）", latest.dueAt ?? latest.dueDate ?? "");
+    if (!isCurrentTodoLifecycle(lifecycle) || deadlineValue === null)
         return;
     const deadline = todoDeadlineFields(deadlineValue);
-    const reminderAt = window.prompt("提醒时间 RFC3339/本地时间（留空清除）", latest.reminderAt ?? "");
-    if (reminderAt === null)
+    const reminderAt = prompt("提醒时间 RFC3339/本地时间（留空清除）", latest.reminderAt ?? "");
+    if (!isCurrentTodoLifecycle(lifecycle) || reminderAt === null)
         return;
-    const recurrenceKind = window.prompt("重复类型：none/daily/every_n_days/weekly/every_n_weeks/monthly/every_n_months/yearly/every_n_years/every_n_minutes/every_n_hours", latest.recurrenceKind);
-    if (recurrenceKind === null)
+    const recurrenceKind = prompt("重复类型：none/daily/every_n_days/weekly/every_n_weeks/monthly/every_n_months/yearly/every_n_years/every_n_minutes/every_n_hours", latest.recurrenceKind);
+    if (!isCurrentTodoLifecycle(lifecycle) || recurrenceKind === null)
         return;
-    const recurrenceInterval = window.prompt("重复间隔", String(latest.recurrenceInterval || ""));
-    if (recurrenceInterval === null)
+    const recurrenceInterval = prompt("重复间隔", String(latest.recurrenceInterval || ""));
+    if (!isCurrentTodoLifecycle(lifecycle) || recurrenceInterval === null)
         return;
-    const recurrenceUnit = window.prompt("重复单位：day/week/month", latest.recurrenceUnit);
-    if (recurrenceUnit === null)
+    const recurrenceUnit = prompt("重复单位：day/week/month", latest.recurrenceUnit);
+    if (!isCurrentTodoLifecycle(lifecycle) || recurrenceUnit === null)
         return;
     try {
+        if (!isCurrentTodoLifecycle(lifecycle))
+            return;
         await updateTodo(latest.id, {
             title: title.trim(), detail: detail.trim() || null, due_date: deadline.dueDate, due_at: deadline.dueAt,
             reminder_at: reminderAt.trim() || null, time_precision: deadline.timePrecision, recurrence_kind: recurrenceKind,
             recurrence_interval: recurrenceInterval.trim() ? Number(recurrenceInterval) : null, recurrence_unit: recurrenceUnit,
         });
+        if (!isCurrentTodoLifecycle(lifecycle))
+            return;
         await refreshTodos("refresh");
+        if (!isCurrentTodoLifecycle(lifecycle))
+            return;
     }
     catch (cause) {
+        if (!isCurrentTodoLifecycle(lifecycle))
+            return;
         showResult(cause instanceof Error ? cause.message : "Todo 更新失败", true);
     }
 }
@@ -279,13 +402,24 @@ function renderPagination(current, totalPages) {
     } }));
 }
 export async function removeTodo(todo) {
+    const lifecycle = captureTodoLifecycle();
+    if (!isCurrentTodoLifecycle(lifecycle))
+        return;
     if (!window.confirm(`确定删除 Todo「${todo.title}」吗？`))
+        return;
+    if (!isCurrentTodoLifecycle(lifecycle))
         return;
     try {
         await deleteTodo(todo.id);
+        if (!isCurrentTodoLifecycle(lifecycle))
+            return;
         await refreshTodos("refresh");
+        if (!isCurrentTodoLifecycle(lifecycle))
+            return;
     }
     catch (cause) {
+        if (!isCurrentTodoLifecycle(lifecycle))
+            return;
         showResult(cause instanceof Error ? cause.message : "Todo 删除失败", true);
     }
 }
@@ -296,6 +430,9 @@ export function actionButton(label, action, variant = "secondary") {
     button.textContent = label;
     button.onclick = action;
     return button;
+}
+function detachElement(element) {
+    element?.parentElement?.removeChild(element);
 }
 export function valueOf(id) {
     const element = document.getElementById(id);
