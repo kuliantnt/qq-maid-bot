@@ -97,11 +97,14 @@ async fn full_group_queue_rolls_back_reservation_and_accepts_same_event_after_re
     });
     let (command_tx, command_rx) = mpsc::channel(16);
     let (reject_tx, reject_rx) = mpsc::channel(16);
-    let auth = AccessTokenManager::new(
+    // 拒绝通知会由后台 worker 触发发送；预置 token，避免单测 shutdown 时访问真实鉴权端点。
+    let auth = AccessTokenManager::new_with_cached_token_for_test(
         qq_maid_common::http_client::client(),
         config.app_id.clone().unwrap(),
         config.app_secret.clone().unwrap(),
         config.token_refresh_margin,
+        "test-access-token",
+        Duration::from_secs(3600),
     );
     let api = QqApiClient::new(
         qq_maid_common::http_client::client(),

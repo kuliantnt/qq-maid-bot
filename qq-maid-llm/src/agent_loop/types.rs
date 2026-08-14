@@ -5,6 +5,7 @@
 //! 不含任何协议形态（Responses `input` / Chat Completions `messages`）。
 
 use std::{
+    collections::HashMap,
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -94,6 +95,13 @@ pub struct AgentRunDiagnostics {
     /// 与 `tool_results` 按结果下标对应的内部尝试关系；不序列化到公共诊断 JSON。
     #[serde(skip)]
     pub tool_attempts: Vec<ToolExecutionAttempt>,
+    /// 最终成功候选写入 `tool_results` 前的全局下标；最终候选未成功时为空。
+    ///
+    /// 候选链诊断会累计保留失败候选的只读结果，但这些结果没有回填给后续候选，
+    /// 因此 Core 只能把该下标之后的来源附到最终模型正文。字段不进入公共诊断 JSON，
+    /// 只作为 LLM 与 Core 之间的响应合成边界。
+    #[serde(skip)]
+    pub final_candidate_tool_result_start: Option<usize>,
     /// 已开始但尚未形成可信结果的工具名。
     ///
     /// Core 取消或超时等待预算耗尽时，该字段明确表示副作用结果仍不确定，
@@ -104,6 +112,36 @@ pub struct AgentRunDiagnostics {
     /// 当前/最终 Agent 停止原因；候选链执行期间可暂存上一候选终止原因，下一候选开始时清理。
     /// 请求级不可逆终止由 `AgentRunHandle` 内部独立维护；运行中快照为 None。
     pub stop_reason: Option<AgentStopReason>,
+}
+
+impl AgentRunDiagnostics {
+    /// 判断模型发出的 Tool Call 是否有尚未启动的调用缺口。
+    ///
+    /// `tools_with_unknown_result` 表示已经越过副作用启动边界、但还没有可信结果
+    /// 的调用；它们不是“尚未执行”。因此这里把“可信结果”和“状态未知”都计入
+    /// 已经处理的调用，避免同一工具同时被渲染成“未执行”和“状态未知”，误导用户
+    /// 自动重试；只读缓存命中也不会被误判成未执行。
+    pub fn has_incomplete_tool_loop(&self) -> bool {
+        let mut accounted_calls = HashMap::<&str, usize>::new();
+        for result in &self.tool_results {
+            *accounted_calls.entry(result.name.as_str()).or_default() += 1;
+        }
+        for tool in &self.tools_with_unknown_result {
+            *accounted_calls.entry(tool.as_str()).or_default() += 1;
+        }
+
+        let mut emitted_calls = accounted_calls;
+        self.emitted_tools.iter().any(|tool| {
+            let Some(count) = emitted_calls.get_mut(tool.as_str()) else {
+                return true;
+            };
+            if *count == 0 {
+                return true;
+            }
+            *count -= 1;
+            false
+        })
+    }
 }
 
 /// Agent Runtime 与 Core 共享的轨迹快照和取消边界。
@@ -192,6 +230,7 @@ impl AgentRunHandle {
         ) {
             state.diagnostics.stop_reason = None;
         }
+        state.diagnostics.final_candidate_tool_result_start = None;
         let baseline = AgentAttemptBaseline::from_diagnostics(&state.diagnostics);
         state.pending_attempt = Some(baseline);
         Ok(baseline)
@@ -217,6 +256,7 @@ impl AgentRunHandle {
         ) {
             state.diagnostics.stop_reason = None;
         }
+        state.diagnostics.final_candidate_tool_result_start = None;
         let baseline = AgentAttemptBaseline::from_diagnostics(&state.diagnostics);
         state.pending_attempt = Some(baseline);
         Ok(baseline)
@@ -232,6 +272,13 @@ impl AgentRunHandle {
             .pending_attempt
             .take()
             .unwrap_or_else(|| AgentAttemptBaseline::from_diagnostics(&state.diagnostics))
+    }
+
+    /// 记录最终回复实际来自哪个候选，供 Core 排除失败候选的只读来源。
+    pub(crate) fn mark_candidate_succeeded(&self, baseline: AgentAttemptBaseline) {
+        self.update(|diagnostics| {
+            diagnostics.final_candidate_tool_result_start = Some(baseline.tool_results);
+        });
     }
 
     /// 在线性化边界内记录一次模型请求已经发起。
@@ -556,6 +603,78 @@ pub type AgentTextDeltaFuture =
 /// 该 sink 只能接收已经确认属于最终回答的文本；Provider 在仍允许工具调用的轮次
 /// 必须先缓存模型 delta，确认没有 tool call 后再释放，避免外显工具轮草稿。
 pub type AgentTextDeltaSink = Arc<dyn Fn(String) -> AgentTextDeltaFuture + Send + Sync + 'static>;
+
+#[cfg(test)]
+mod tests {
+    use super::AgentRunDiagnostics;
+
+    #[test]
+    fn started_unknown_tool_is_not_reported_as_unstarted() {
+        let diagnostics = AgentRunDiagnostics {
+            emitted_tools: vec!["write_tool".to_owned()],
+            executed_tools: vec!["write_tool".to_owned()],
+            tools_with_unknown_result: vec!["write_tool".to_owned()],
+            ..AgentRunDiagnostics::default()
+        };
+
+        assert!(!diagnostics.has_incomplete_tool_loop());
+    }
+
+    #[test]
+    fn emitted_tool_without_start_is_reported_as_incomplete() {
+        let diagnostics = AgentRunDiagnostics {
+            emitted_tools: vec!["read_tool".to_owned(), "write_tool".to_owned()],
+            executed_tools: vec!["read_tool".to_owned()],
+            tool_results: vec![super::ToolExecutionResult {
+                name: "read_tool".to_owned(),
+                output: serde_json::Value::Null,
+                succeeded: true,
+            }],
+            ..AgentRunDiagnostics::default()
+        };
+
+        assert!(diagnostics.has_incomplete_tool_loop());
+    }
+
+    #[test]
+    fn cached_tool_result_is_accounted_for_without_real_execution() {
+        let diagnostics = AgentRunDiagnostics {
+            emitted_tools: vec!["search".to_owned(), "search".to_owned()],
+            executed_tools: vec!["search".to_owned()],
+            tool_results: vec![
+                super::ToolExecutionResult {
+                    name: "search".to_owned(),
+                    output: serde_json::Value::Null,
+                    succeeded: true,
+                },
+                super::ToolExecutionResult {
+                    name: "search".to_owned(),
+                    output: serde_json::Value::Null,
+                    succeeded: true,
+                },
+            ],
+            ..AgentRunDiagnostics::default()
+        };
+
+        assert!(!diagnostics.has_incomplete_tool_loop());
+    }
+
+    #[test]
+    fn mismatched_unknown_name_does_not_cover_an_unstarted_call() {
+        let diagnostics = AgentRunDiagnostics {
+            emitted_tools: vec!["read_tool".to_owned(), "write_tool".to_owned()],
+            tool_results: vec![super::ToolExecutionResult {
+                name: "read_tool".to_owned(),
+                output: serde_json::Value::Null,
+                succeeded: true,
+            }],
+            tools_with_unknown_result: vec!["other_write".to_owned()],
+            ..AgentRunDiagnostics::default()
+        };
+
+        assert!(diagnostics.has_incomplete_tool_loop());
+    }
+}
 
 /// 创建 [`AgentStepSession`] 的请求。
 #[derive(Clone, Copy)]

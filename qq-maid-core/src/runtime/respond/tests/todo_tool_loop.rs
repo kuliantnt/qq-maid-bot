@@ -375,8 +375,8 @@ async fn natural_language_undo_restores_most_recently_completed_todo() {
             "{input}"
         );
         let text = response.text.unwrap();
-        assert!(text.contains("已恢复待办"), "{input}");
-        assert!(text.contains("买牛奶"), "{input}");
+        assert!(text.contains("↩️ 已恢复待办"), "{input}");
+        assert!(!text.contains("已恢复刚才完成的待办"), "{input}");
         assert_eq!(inspector.tool_call_count(), 2, "{input}");
     }
 }
@@ -391,7 +391,7 @@ async fn group_tool_loop_todo_visible_snapshot_uses_actor_interaction_session() 
                 output: json!({"ok": true, "status": "pending"}),
                 succeeded: true,
             }],
-            "已列出待办",
+            "  ",
         )
         .with_tool_call_json(
             "complete_todos",

@@ -3,7 +3,7 @@
 use crate::runtime::tools::status::{StatusAction, StatusHint, StatusSubject};
 
 pub(crate) fn status_hint_for_tool_name(tool_name: &str) -> Option<StatusHint> {
-    (tool_name == "get_train_schedule")
+    (tool_name == super::TRAIN_TOOL_NAME)
         .then_some(StatusHint::new(StatusSubject::Train, StatusAction::Query))
 }
 

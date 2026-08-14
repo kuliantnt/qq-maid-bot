@@ -9,7 +9,7 @@ use qq_maid_llm::{
     provider::types::{ChatMessage, ChatRequest, ReasoningEffort},
     web_search::WebSearchOutcome,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::{
     error::LlmError,
@@ -19,6 +19,7 @@ use crate::{
         tools::{
             WEB_SEARCH_QUERY_MAX_LENGTH, WEB_SEARCH_TOOL_NAME, WebSearchDeltaHandler,
             WebSearchTool, WebSearchToolRequest,
+            search::{format_web_search_command_reply, format_web_search_error_reply},
         },
     },
 };
@@ -39,41 +40,6 @@ const WEB_SEARCH_RUNNING_DELTA: &str = "正在联网查询中…\n\n";
 const WEB_SEARCH_REWRITE_PURPOSE: &str = "search_query_rewrite";
 const WEB_SEARCH_REWRITE_MAX_OUTPUT_TOKENS: u64 = 96;
 const WEB_SEARCH_REWRITE_CONTEXT_MAX_CHARS: usize = 1200;
-// 搜索结果为空时的回复
-const WEB_SEARCH_EMPTY_RESULT_REPLY: &str = "【联网查询】
-
-没查到明确结果。可以换一个关键词再试。";
-// 模型工具参数错误只说明本次调用未执行，不能误导为上游或网络故障。
-const WEB_SEARCH_ARGUMENT_ERROR_REPLY: &str = "【联网查询】
-
-本次联网查询的参数无效，查询未执行。请换一种说法再试。";
-// 联网查询未配置时的回复
-const WEB_SEARCH_CONFIG_ERROR_REPLY: &str = "【联网查询】
-
-联网查询还没有配置好，请检查 tools.web_search 后端、搜索 route 和对应 Provider 配置。";
-const WEB_SEARCH_DISABLED_REPLY: &str = "【联网查询】
-
-联网查询已在 tools.web_search 配置中关闭。";
-const WEB_SEARCH_TAVILY_KEY_MISSING_REPLY: &str = "【联网查询】
-
-已选择 Tavily，但还没有配置 TAVILY_API_KEY。请在配置中心完成设置后重启。";
-const WEB_SEARCH_TAVILY_AUTH_REPLY: &str = "【联网查询】
-
-Tavily API Key 无效或已失效，请在配置中心检查后重启。";
-const WEB_SEARCH_RATE_LIMIT_REPLY: &str = "【联网查询】
-
-联网查询请求过于频繁，已被上游限流，请稍后再试。";
-const WEB_SEARCH_QUOTA_REPLY: &str = "【联网查询】
-
-Tavily 查询额度已用尽或账户不可用，请检查账户额度。";
-// 联网查询超时时的回复
-const WEB_SEARCH_TIMEOUT_REPLY: &str = "【联网查询】
-
-联网查询超时了，请稍后再试。";
-// 上游服务异常时的回复
-const WEB_SEARCH_UPSTREAM_ERROR_REPLY: &str = "【联网查询】
-
-联网查询服务暂时不可用，可能是上游接口、代理或网络配置异常。请稍后再试。";
 
 #[derive(Debug, Clone)]
 struct WebSearchToolOutput {
@@ -186,11 +152,7 @@ impl RustRespondService {
             }
         };
 
-        let reply = if output.answer.trim().is_empty() {
-            WEB_SEARCH_EMPTY_RESULT_REPLY.to_owned()
-        } else {
-            format_web_search_command_reply(&output.answer)
-        };
+        let reply = format_web_search_command_reply(&output.answer);
         self.session_store
             .append_exchange(session, &command_text, &reply)
             .map_err(session_error)?;
@@ -683,187 +645,6 @@ fn parse_compact_web_search_command(text: &str) -> Option<ParsedCommand> {
     }
 
     None
-}
-
-pub(crate) fn format_web_search_command_reply(answer: &str) -> String {
-    let mut text = answer.trim().to_owned();
-    if text.is_empty() {
-        text = "没查到明确结果。可以换一个关键词再试。".to_owned();
-    }
-    if !text.starts_with("【联网查询】") {
-        text = format!("【联网查询】\n\n{text}");
-    }
-    truncate_chars(&text, 1500)
-}
-
-/// 将 `web_search` Tool 的两类结构化输出转换为简洁的可信结果卡片。
-///
-/// 单次搜索继续展示顶层 `answer`；多目标调研没有该字段，需要逐项提取事实、摘要
-/// 和来源。只有这些可展示字段全部为空时，才复用既有空结果提示。
-pub(crate) fn format_web_search_tool_reply(output: &Value) -> String {
-    if json_string_field(output, "mode").as_deref() == Some("multi_entity_research") {
-        return format_web_search_research_reply(output);
-    }
-
-    if let Some(answer) = json_string_field(output, "answer") {
-        return format_web_search_command_reply(&answer);
-    }
-
-    let source = output
-        .get("sources")
-        .and_then(Value::as_array)
-        .and_then(|sources| sources.iter().find_map(format_web_search_research_source));
-    match source {
-        Some(source) => format_web_search_command_reply(&format!("来源：{source}")),
-        None => format_web_search_command_reply(""),
-    }
-}
-
-fn format_web_search_research_reply(output: &Value) -> String {
-    let (successful, failed) = multi_entity_research_counts(output);
-    let items = output
-        .get("results")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    let mut rendered = Vec::new();
-
-    for (index, item) in items.iter().enumerate() {
-        if json_string_field(item, "status").as_deref() != Some("success") {
-            continue;
-        }
-        let facts = json_string_field(item, "facts")
-            .or_else(|| json_string_field(item, "summary"))
-            .or_else(|| json_string_field(item, "answer"));
-        let source = item
-            .get("sources")
-            .and_then(Value::as_array)
-            .and_then(|sources| sources.iter().find_map(format_web_search_research_source));
-        if facts.is_none() && source.is_none() {
-            continue;
-        }
-
-        let entity =
-            json_string_field(item, "entity").unwrap_or_else(|| format!("目标 {}", index + 1));
-        let mut line = format!("- **{entity}**");
-        if let Some(facts) = facts {
-            line.push('：');
-            line.push_str(&facts);
-        }
-        if let Some(source) = source {
-            line.push_str("\n  - 来源：");
-            line.push_str(&source);
-        }
-        rendered.push(line);
-    }
-
-    let title = multi_entity_research_title(successful, failed);
-    if rendered.is_empty() {
-        return format!("{title}\n\n没查到明确结果。可以换一个关键词再试。");
-    }
-
-    truncate_chars(
-        &format!("{title}\n\n多目标调研结果：\n\n{}", rendered.join("\n")),
-        1500,
-    )
-}
-
-pub(crate) fn format_web_search_research_error_reply(output: &Value, error: &str) -> String {
-    let (successful, failed) = multi_entity_research_counts(output);
-    let title = multi_entity_research_title(successful, failed);
-    let body = error.strip_prefix("【联网查询】\n\n").unwrap_or(error);
-    format!("{title}\n\n{body}")
-}
-
-fn multi_entity_research_title(successful: usize, failed: usize) -> String {
-    if failed == 0 {
-        "【联网查询】".to_owned()
-    } else {
-        format!("【联网查询（成功 {successful}，失败 {failed}）】")
-    }
-}
-
-fn multi_entity_research_counts(output: &Value) -> (usize, usize) {
-    let top_level_counts = output
-        .get("successful")
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .zip(
-            output
-                .get("failed")
-                .and_then(Value::as_u64)
-                .and_then(|value| usize::try_from(value).ok()),
-        );
-    if let Some(counts) = top_level_counts {
-        return counts;
-    }
-
-    let mut successful = 0;
-    let mut failed = 0;
-    for item in output
-        .get("results")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        match json_string_field(item, "status").as_deref() {
-            Some("success") => successful += 1,
-            Some("failed" | "timeout") => failed += 1,
-            _ => {}
-        }
-    }
-    (successful, failed)
-}
-
-fn format_web_search_research_source(source: &Value) -> Option<String> {
-    if let Some(source) = source
-        .as_str()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return Some(source.to_owned());
-    }
-
-    let title = json_string_field(source, "title");
-    let url = json_string_field(source, "url");
-    let snippet = json_string_field(source, "snippet");
-    let reference = match (title, url) {
-        (Some(title), Some(url)) => Some(format!("[{title}]({url})")),
-        (Some(title), None) => Some(title),
-        (None, Some(url)) => Some(url),
-        (None, None) => None,
-    };
-
-    match (reference, snippet) {
-        (Some(reference), Some(snippet)) => Some(format!("{reference}：{snippet}")),
-        (Some(reference), None) => Some(reference),
-        (None, Some(snippet)) => Some(snippet),
-        (None, None) => None,
-    }
-}
-
-fn json_string_field(value: &Value, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
-pub(crate) fn format_web_search_error_reply(err: &LlmError) -> String {
-    match err.code.as_str() {
-        "config" => WEB_SEARCH_CONFIG_ERROR_REPLY.to_owned(),
-        "web_search_disabled" => WEB_SEARCH_DISABLED_REPLY.to_owned(),
-        "web_search_not_configured" => WEB_SEARCH_TAVILY_KEY_MISSING_REPLY.to_owned(),
-        "tavily_auth_error" => WEB_SEARCH_TAVILY_AUTH_REPLY.to_owned(),
-        "rate_limited" => WEB_SEARCH_RATE_LIMIT_REPLY.to_owned(),
-        "quota_exhausted" => WEB_SEARCH_QUOTA_REPLY.to_owned(),
-        "empty_result" => WEB_SEARCH_EMPTY_RESULT_REPLY.to_owned(),
-        "invalid_arguments" | "bad_tool_arguments" => WEB_SEARCH_ARGUMENT_ERROR_REPLY.to_owned(),
-        "timeout" => WEB_SEARCH_TIMEOUT_REPLY.to_owned(),
-        _ => WEB_SEARCH_UPSTREAM_ERROR_REPLY.to_owned(),
-    }
 }
 
 fn web_search_output_from_outcome(outcome: WebSearchOutcome) -> WebSearchToolOutput {

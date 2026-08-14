@@ -3,7 +3,7 @@ use qq_maid_llm::provider::ToolCallingProtocol;
 use super::support::*;
 
 #[tokio::test]
-async fn todo_complete_receipt_is_lightweight_and_refreshes_pending_snapshot() {
+async fn todo_complete_receipt_refreshes_pending_snapshot() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_call_json(
@@ -22,9 +22,7 @@ async fn todo_complete_receipt_is_lightweight_and_refreshes_pending_snapshot() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("✅ 已完成待办 · 1条"));
-    assert!(!text.contains("🚧 当前进行中 · 共 6 项"));
-    assert!(!text.contains("还有 1 项进行中待办"));
+    assert!(text.contains("✅ 已完成待办"));
     assert_refreshed_pending_snapshot(&service, &owner, 6);
 }
 
@@ -48,7 +46,6 @@ async fn todo_complete_receipt_refreshes_pending_snapshot_at_ten_item_limit() {
         .unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("✅ 已完成待办 · 1条"));
-    assert!(!text.contains("🚧 当前进行中 · 共 11 项"));
+    assert!(text.contains("✅ 已完成待办"));
     assert_refreshed_pending_snapshot(&service, &owner, 10);
 }

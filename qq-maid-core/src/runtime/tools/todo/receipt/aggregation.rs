@@ -1,0 +1,223 @@
+//! Todo Tool 结果的整轮聚合。
+//!
+//! 这里负责筛选 Todo 结果、处理重试覆盖和刷新可见快照；单个结果的确定性回执
+//! 仍由 `receipt` 门面中的投影与 receipt helper 负责。
+
+use std::collections::HashSet;
+
+use qq_maid_llm::provider::{ToolExecutionAttempt, ToolExecutionResult};
+use serde_json::Value;
+
+use crate::{
+    error::LlmError,
+    runtime::{
+        respond::agent_outcome::{
+            ResponseBlock, ToolEffect, ToolExecutionOutcome, ToolOutcomeStatus,
+        },
+        session::{LastTodoQuery, SessionMeta, SessionRecord},
+        tools::{
+            agent_turn::is_retry_superseded_result,
+            todo::{
+                TodoOwner, TodoStore, todo_last_action_visible_entity_snapshot,
+                todo_visible_entity_snapshot,
+            },
+        },
+    },
+    service::VisibleEntitySnapshot,
+};
+
+use super::super::scope::TodoToolScope;
+use super::LIST_TODOS_TOOL_NAME;
+
+pub(crate) struct TodoTurnAggregation {
+    pub consumed_result_indexes: HashSet<usize>,
+    pub outcomes: Vec<(usize, ToolExecutionOutcome)>,
+    /// 每个成功且可展示的 `list_todos` 结果对应的快照。
+    ///
+    /// 同一轮可能有多个列表查询，不能只依赖 session 中最后一次写入的快照，
+    /// 否则模型只发布前一个列表时，下一轮“第一条”会错误命中后一个列表。
+    pub list_snapshots: Vec<(usize, LastTodoQuery)>,
+}
+
+impl TodoTurnAggregation {
+    pub(crate) fn visible_entity_snapshot(
+        &self,
+        session: &SessionRecord,
+        meta: &SessionMeta,
+    ) -> Option<VisibleEntitySnapshot> {
+        if self.turn_shows_visible_list() {
+            return todo_visible_entity_snapshot(session, Some(meta));
+        }
+        if self.has_successful_single_action() {
+            return todo_last_action_visible_entity_snapshot(session, Some(meta));
+        }
+        None
+    }
+
+    fn turn_shows_visible_list(&self) -> bool {
+        self.outcomes.iter().any(|(_, item)| {
+            item.domain == "todo"
+                && item.status == ToolOutcomeStatus::Succeeded
+                && item
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, ResponseBlock::RelatedList(_)))
+        })
+    }
+
+    fn has_successful_single_action(&self) -> bool {
+        self.outcomes
+            .iter()
+            .filter(|(_, item)| {
+                item.domain == "todo"
+                    && item.status == ToolOutcomeStatus::Succeeded
+                    && matches!(
+                        item.effect,
+                        ToolEffect::Created | ToolEffect::Updated | ToolEffect::Completed
+                    )
+            })
+            .count()
+            == 1
+    }
+}
+
+pub(crate) fn aggregate_todo_tool_results(
+    todo_store: &TodoStore,
+    session: &mut SessionRecord,
+    owner: &TodoOwner,
+    results: &[ToolExecutionResult],
+    attempts: &[ToolExecutionAttempt],
+    published_list_indexes: &[usize],
+) -> Result<TodoTurnAggregation, LlmError> {
+    let todo_indexes = results
+        .iter()
+        .enumerate()
+        .filter_map(|(index, result)| is_todo_tool_result(result).then_some(index))
+        .collect::<Vec<_>>();
+    let consumed_result_indexes = todo_indexes.iter().copied().collect::<HashSet<_>>();
+    let mut outcomes = Vec::new();
+    let mut list_snapshots = Vec::new();
+    for index in todo_indexes.iter().copied() {
+        let result = &results[index];
+        if todo_validation_failure_was_corrected(index, results, attempts) {
+            // 原始失败继续保留在 Agent diagnostics 中；这里只避免把模型已经自纠的
+            // 参数错误投影给用户，成功回执仍必须来自后续真实 Todo Tool 结果。
+            continue;
+        }
+        let pending_query = if result.name == LIST_TODOS_TOOL_NAME {
+            if is_retry_superseded_result(index, attempts) {
+                None
+            } else {
+                attempts
+                    .iter()
+                    .find(|attempt| attempt.result_index == index)
+                    .and_then(|attempt| {
+                        TodoToolScope::consume_internal_query(session, &owner.key, &attempt.call_id)
+                    })
+            }
+        } else {
+            None
+        };
+        if result.name == LIST_TODOS_TOOL_NAME
+            && !is_user_visible_list_query(results, index, published_list_indexes)
+        {
+            continue;
+        }
+        if let Some(outcome) = super::tool_outcome_from_todo_result(
+            todo_store,
+            session,
+            owner,
+            result,
+            pending_query.as_ref(),
+        )? {
+            if result.name == LIST_TODOS_TOOL_NAME
+                && outcome.status == ToolOutcomeStatus::Succeeded
+                && outcome
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, ResponseBlock::RelatedList(_)))
+                && let Some(snapshot) = session.last_todo_query.clone()
+            {
+                list_snapshots.push((index, snapshot));
+            }
+            outcomes.push((index, outcome));
+        }
+    }
+    super::refresh_todo_snapshot_for_turn(todo_store, session, owner, &outcomes)?;
+    Ok(TodoTurnAggregation {
+        consumed_result_indexes,
+        outcomes,
+        list_snapshots,
+    })
+}
+
+fn todo_validation_failure_was_corrected(
+    result_index: usize,
+    results: &[ToolExecutionResult],
+    attempts: &[ToolExecutionAttempt],
+) -> bool {
+    let result = &results[result_index];
+    if result.succeeded || !is_tool_argument_failure(&result.output) {
+        return false;
+    }
+    if is_retry_superseded_result(result_index, attempts) {
+        return true;
+    }
+    let Some(failed_round) = tool_result_round(result_index, attempts) else {
+        return false;
+    };
+    results
+        .iter()
+        .enumerate()
+        .skip(result_index + 1)
+        .any(|(later_index, later)| {
+            later.succeeded
+                && later.name == result.name
+                && tool_result_round(later_index, attempts)
+                    .is_some_and(|later_round| later_round > failed_round)
+        })
+}
+
+fn tool_result_round(result_index: usize, attempts: &[ToolExecutionAttempt]) -> Option<usize> {
+    attempts
+        .iter()
+        .find(|attempt| attempt.result_index == result_index)
+        .map(|attempt| attempt.round)
+}
+
+fn is_tool_argument_failure(output: &Value) -> bool {
+    let code = output
+        .get("error_code")
+        .and_then(Value::as_str)
+        .or_else(|| output.pointer("/error/code").and_then(Value::as_str));
+    let kind = output.pointer("/error/kind").and_then(Value::as_str);
+    matches!(code, Some("bad_tool_arguments" | "invalid_arguments"))
+        || kind == Some("invalid_arguments")
+}
+
+fn is_todo_tool_result(result: &ToolExecutionResult) -> bool {
+    result.name == LIST_TODOS_TOOL_NAME
+        || result.name == super::GET_TODO_TOOL_NAME
+        || super::todo_write_operation(&result.name).is_some()
+}
+
+fn is_user_visible_list_query(
+    results: &[ToolExecutionResult],
+    index: usize,
+    published_list_indexes: &[usize],
+) -> bool {
+    // 显式发布契约优先于“后续有写操作即内部查询”的启发式；模型既然选择了
+    // 这个真实 call id 出站，列表正文和编号快照就不能在聚合阶段提前丢弃。
+    if published_list_indexes.contains(&index) {
+        return true;
+    }
+    // 失败的列表调用本身就是用户可见的真实失败；后续独立写操作不能把它当作
+    // 内部查询吞掉。成功列表仍可作为写操作前的内部定位查询而不单独展示。
+    if !results[index].succeeded {
+        return true;
+    }
+    !results.iter().skip(index + 1).any(|result| {
+        result.name == super::GET_TODO_TOOL_NAME
+            || super::todo_write_operation(&result.name).is_some()
+    })
+}

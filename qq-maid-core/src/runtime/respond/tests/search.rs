@@ -45,7 +45,7 @@ fn web_search_errors_have_actionable_user_replies() {
 
     for (code, expected) in cases {
         let error = LlmError::new(code, "test error", "test");
-        let reply = crate::runtime::respond::search_flow::format_web_search_error_reply(&error);
+        let reply = crate::runtime::tools::search::format_web_search_error_reply(&error);
         assert!(
             reply.contains(expected),
             "unexpected reply for {code}: {reply}"
@@ -159,9 +159,10 @@ async fn model_web_search_call_does_not_depend_on_text_status_intent() {
         .await
         .unwrap();
 
-    assert!(response.text.as_deref().is_some_and(
-        |text| text.contains("web answer: 台风巴威") && text.contains("根据联网结果回答")
-    ));
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("根据联网结果回答"));
+    assert!(text.contains("记录来源"));
+    assert!(!text.contains("web answer: 台风巴威"));
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].query, "台风巴威");

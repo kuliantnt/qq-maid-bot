@@ -14,6 +14,18 @@ pub fn sanitize_visible_text(text: &str) -> String {
         .collect()
 }
 
+/// 清理用户可见文本并折叠为单行。
+///
+/// 换行和制表符先替换为空格，避免去除控制字符后把相邻单词意外粘连；随后移除
+/// 其余控制字符与不可见格式字符，并把连续空白折叠为一个普通空格。
+pub fn sanitize_single_line_visible_text(text: &str) -> String {
+    let single_line = text.replace(['\r', '\n', '\t'], " ");
+    sanitize_visible_text(&single_line)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// 判断字符是否属于会影响文本展示、但自身不可见的 Unicode 格式字符。
 pub fn is_invisible_format(character: char) -> bool {
     matches!(
@@ -80,6 +92,13 @@ mod tests {
         assert!(is_invisible_format('\u{202e}'));
         assert!(is_invisible_format('\u{2066}'));
         assert!(is_invisible_format('\u{fe0f}'));
+    }
+
+    #[test]
+    fn sanitize_single_line_visible_text_folds_whitespace_without_joining_words() {
+        let text = " 前\n中\t后\u{0000}段\u{200b}  末 ";
+
+        assert_eq!(sanitize_single_line_visible_text(text), "前 中 后段 末");
     }
 
     #[test]

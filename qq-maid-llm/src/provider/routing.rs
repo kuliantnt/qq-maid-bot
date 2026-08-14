@@ -275,7 +275,7 @@ impl LlmProvider for ModelRouteProvider {
                     AgentStopReason::Timeout,
                 ));
             }
-            run_handle.begin_candidate_attempt()?;
+            let candidate_baseline = run_handle.begin_candidate_attempt()?;
             let provider_kind = candidate
                 .provider
                 .as_ref()
@@ -363,6 +363,9 @@ impl LlmProvider for ModelRouteProvider {
                         .stop_reason
                         .unwrap_or(AgentStopReason::DirectAnswer);
                     run_handle.set_stop_reason(reason);
+                    // runner 也会记录该边界；路由作为候选 owner 再统一确认一次，
+                    // 覆盖未适配 Tool Calling 或自定义 Provider 的成功返回路径。
+                    run_handle.mark_candidate_succeeded(candidate_baseline);
                     outcome.agent = run_handle.snapshot();
                     outcome.fallback_used |= index > 0;
                     return Ok(outcome);

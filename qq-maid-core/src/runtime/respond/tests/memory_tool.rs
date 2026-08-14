@@ -51,9 +51,6 @@ async fn private_explicit_memory_intent_exposes_tool_and_writes_directly() {
     assert_eq!(response.command.as_deref(), Some("memory"));
     let text = response.text.unwrap();
     assert!(text.contains("🧠 已记住"));
-    assert!(text.contains("范围：个人记忆"));
-    assert!(text.contains("内容：你喜欢简短回复"));
-    assert!(!text.contains("模型声称"));
 
     let request = inspector.tool_requests().remove(0);
     let metadata = request.tools.metadata();
@@ -125,7 +122,10 @@ async fn non_fixed_explicit_phrases_can_call_save_memory() {
 
         let response = service.respond(private_message(source)).await.unwrap();
         assert!(
-            response.text.as_deref().unwrap().contains("🧠 已记住"),
+            response
+                .text
+                .as_deref()
+                .is_some_and(|text| text.contains("🧠 已记住")),
             "{source}"
         );
         let user = actor("u1", "u1", None, false);
@@ -169,8 +169,7 @@ async fn default_group_route_exposes_memory_only() {
         response
             .text
             .as_deref()
-            .unwrap()
-            .contains("范围：当前群画像")
+            .is_some_and(|text| text.contains("🧠 已记住"))
     );
     let request = inspector.tool_requests().remove(0);
     let exposed = request
@@ -226,7 +225,12 @@ async fn group_profile_tool_uses_current_actor_and_group() {
     );
 
     let response = service.respond(message("在这个群叫我棒冰")).await.unwrap();
-    assert!(response.text.unwrap().contains("范围：当前群画像"));
+    assert!(
+        response
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("🧠 已记住"))
+    );
 
     let user = actor("u1", "u1", Some("g1"), false);
     assert_eq!(
@@ -513,7 +517,12 @@ async fn onebot_group_tool_uses_account_namespaced_memory_scope() {
     request.conversation_id = Some("g1".to_owned());
 
     let response = service.respond(request).await.unwrap();
-    assert!(response.text.unwrap().contains("范围：当前群画像"));
+    assert!(
+        response
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("🧠 已记住"))
+    );
 
     let personal = "platform:onebot11:account:bot-a:private:u1";
     let group = "platform:onebot11:account:bot-a:group:g1";

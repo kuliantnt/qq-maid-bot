@@ -24,11 +24,9 @@ async fn weather_success_and_todo_success_are_both_rendered_in_order() {
         .unwrap();
 
     let text = response.text.unwrap();
-    let weather_pos = text.find("杭州天气").expect("missing weather fact card");
-    let todo_pos = text.find("✅ 已新增待办").expect("missing todo receipt");
-    assert!(weather_pos < todo_pos);
-    assert!(text.contains("当前 20:15"));
-    assert!(text.contains("出门带伞"));
+    assert!(text.contains("🌦 杭州天气"));
+    assert!(text.contains("✅ 已新增待办"));
+    assert!(!text.contains("杭州小雨，已新增带伞待办"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], "succeeded");
     assert_eq!(diagnostics["error_code"], Value::Null);
@@ -56,9 +54,109 @@ async fn readonly_weather_result_preserves_model_advice() {
 
     assert_eq!(inspector.tool_call_count(), 1);
     let text = response.text.as_deref().unwrap();
-    assert!(text.contains("杭州天气"));
-    assert!(text.contains("湿度偏高，户外运动建议降低强度"));
+    assert_eq!(text, "湿度偏高，户外运动建议降低强度，优先选清晨或室内。");
+    assert!(!text.contains("未来 3 天"));
     assert_eq!(response.command.as_deref(), Some("weather"));
+}
+
+#[tokio::test]
+async fn weather_result_uses_deterministic_fallback_when_final_model_fails() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_calls_then_error(
+            vec![("get_weather", r#"{"city":"杭州","forecast_days":3}"#)],
+            crate::error::LlmError::new(
+                "context_budget_exceeded",
+                "final answer generation failed",
+                "tool_loop",
+            ),
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("杭州天气怎么样"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("🌦 杭州天气"));
+    assert!(text.contains("未来 3 天"));
+    assert!(!text.contains("final answer generation failed"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["agent_finalization_fallback_used"], true);
+    assert_eq!(
+        diagnostics["agent_finalization_error_code"],
+        "context_budget_exceeded"
+    );
+    assert_eq!(diagnostics["agent_turn_status"], "succeeded");
+    assert_eq!(diagnostics["error_code"], Value::Null);
+}
+
+#[tokio::test]
+async fn incomplete_tool_loop_keeps_weather_result_without_claiming_completion() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_calls_then_error_with_pending_call(
+            vec![("get_weather", r#"{"city":"杭州","forecast_days":3}"#)],
+            vec!["web_search"],
+            crate::error::LlmError::new(
+                "tool_calls_disabled",
+                "provider returned another tool call while finalizing",
+                "tool_loop",
+            ),
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("杭州天气怎么样，并继续核对天气"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("🌦 杭州天气"));
+    assert!(text.contains("Tool Loop 未完整结束"));
+    assert!(text.contains("不能视为完整成功"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["agent_turn_status"], "partial_success");
+    assert_eq!(diagnostics["incomplete"], true);
+    assert_eq!(diagnostics["tool_loop_incomplete"], true);
+    assert_eq!(diagnostics["error_code"], "agent_turn_incomplete");
+}
+
+#[tokio::test]
+async fn unknown_side_effect_keeps_known_weather_result_and_marks_unknown_status() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_calls_then_error_with_unknown_result(
+            vec![("get_weather", r#"{"city":"杭州","forecast_days":3}"#)],
+            vec!["create_todo"],
+            crate::error::LlmError::new(
+                "tool_execution_failed",
+                "side effect result is unknown",
+                "tool_loop",
+            ),
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("查杭州天气，并记录买菜待办"))
+        .await
+        .unwrap();
+
+    let text = response.text.unwrap();
+    assert!(text.contains("🌦 杭州天气"));
+    assert!(text.contains("部分工具执行结果未知"));
+    assert!(text.contains("create_todo：执行状态未知"));
+    assert!(!text.contains("部分工具调用未执行"));
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["agent_turn_status"], "partial_success");
+    assert_eq!(diagnostics["incomplete"], true);
+    assert_eq!(diagnostics["tool_loop_incomplete"], false);
+    assert_eq!(diagnostics["error_code"], "agent_turn_incomplete");
+    assert_eq!(
+        diagnostics["tools_with_unknown_result"],
+        serde_json::json!(["create_todo"])
+    );
 }
 
 #[tokio::test]
@@ -123,11 +221,8 @@ async fn weather_only_outcome_preserves_non_todo_analysis_reply() {
         .unwrap();
 
     let text = response.text.as_deref().unwrap();
-    assert!(text.contains("杭州天气"), "{text}");
-    assert!(
-        text.contains("杭州明天晴，已完成分析，建议携带雨具。"),
-        "{text}"
-    );
+    assert_eq!(text, "杭州明天晴，已完成分析，建议携带雨具。");
+    assert!(!text.contains("未来 3 天"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["error_code"], Value::Null);
     assert_eq!(diagnostics["todo_success_claimed"], false);
@@ -158,9 +253,9 @@ async fn weather_and_real_todo_create_keep_both_trusted_results() {
         .unwrap();
 
     let text = response.text.as_deref().unwrap();
-    assert!(text.contains("杭州天气"), "{text}");
-    assert!(text.contains("✅ 已新增待办"), "{text}");
-    assert!(text.contains("买菜"), "{text}");
+    assert!(text.contains("🌦 杭州天气"));
+    assert!(text.contains("✅ 已新增待办"));
+    assert!(!text.contains("天气已查询，也已记录买菜提醒。"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["error_code"], Value::Null);
     assert_eq!(diagnostics["todo_success_claimed"], true);
@@ -199,8 +294,9 @@ async fn conditional_weather_and_todo_request_uses_tool_loop() {
     assert_ne!(response.command.as_deref(), Some("todo_due_date"));
     let text = response.text.as_deref().unwrap();
     assert!(!text.contains("这一天暂无未完成待办"));
-    assert!(text.contains("杭州天气"));
+    assert!(text.contains("🌦 杭州天气"));
     assert!(text.contains("✅ 已新增待办"));
+    assert!(!text.contains("明天可能有雨，已新增带伞待办"));
 }
 
 #[tokio::test]
@@ -340,7 +436,7 @@ async fn weather_failure_and_dependency_skipped_todo_keep_root_cause() {
 }
 
 #[tokio::test]
-async fn only_weather_tool_renders_fact_card() {
+async fn only_weather_tool_keeps_model_reply_as_primary() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
         .with_tool_call_json(
@@ -353,8 +449,8 @@ async fn only_weather_tool_renders_fact_card() {
     let response = service.respond(private_message("杭州天气")).await.unwrap();
 
     let text = response.text.unwrap();
-    assert!(text.contains("杭州天气"));
-    assert!(text.contains("未来 3 天"));
+    assert_eq!(text, "杭州天气如下");
+    assert!(!text.contains("未来 3 天"));
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], "succeeded");
     assert_eq!(diagnostics["todo_success_claimed"], false);

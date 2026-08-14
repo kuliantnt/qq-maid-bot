@@ -97,3 +97,147 @@ async fn unadapted_failure_with_todo_success_is_user_visible() {
     assert_eq!(diagnostics["error_code"], "unknown_failed");
     assert_eq!(diagnostics["tool_outcomes"][0]["presentation"], "unhandled");
 }
+
+#[tokio::test]
+async fn unadapted_result_with_todo_success_keeps_fallback_after_final_failure() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results_then_error(
+            vec![
+                raw_tool_result(
+                    "unknown_tool",
+                    serde_json::json!({
+                        "ok": true,
+                        "summary": "未知工具结果无法适配"
+                    }),
+                    true,
+                ),
+                raw_tool_result(
+                    "create_todo",
+                    serde_json::json!({
+                        "ok": true,
+                        "created": {
+                            "title": "最终失败仍要保留的待办",
+                            "detail": null,
+                            "display_time": "无时间"
+                        }
+                    }),
+                    true,
+                ),
+            ],
+            crate::error::LlmError::new(
+                "context_budget_exceeded",
+                "final answer generation failed",
+                "tool_loop",
+            ),
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("新增待办并执行未知工具"))
+        .await
+        .unwrap();
+
+    let text = response
+        .text
+        .expect("trusted Todo result should be rendered");
+    assert!(text.contains("最终失败仍要保留的待办"));
+    assert!(text.contains("部分工具结果未生成确定性展示"));
+    assert!(text.contains("unknown_tool"));
+    let diagnostics = response.diagnostics.expect("missing diagnostics");
+    assert_eq!(diagnostics["agent_finalization_fallback_used"], true);
+    assert_eq!(
+        diagnostics["agent_finalization_error_code"],
+        "context_budget_exceeded"
+    );
+    assert_eq!(diagnostics["error_code"], "tool_outcome_unhandled");
+}
+
+#[tokio::test]
+async fn internal_only_result_propagates_final_generation_error() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results_then_error(
+            vec![raw_tool_result(
+                "knowledge_search",
+                serde_json::json!({
+                    "ok": true,
+                    "status": "ok",
+                    "hits": [{"title": "内部证据", "content": "只供模型整理"}]
+                }),
+                true,
+            )],
+            crate::error::LlmError::new(
+                "context_budget_exceeded",
+                "final answer generation failed",
+                "tool_loop",
+            ),
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let error = service
+        .respond(private_message("从知识库整理一段回答"))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, "context_budget_exceeded");
+    assert_eq!(error.stage, "tool_loop");
+}
+
+#[tokio::test]
+async fn mixed_trusted_and_internal_results_keep_partial_fallback_after_generation_error() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results_then_error(
+            vec![
+                raw_tool_result(
+                    "get_weather",
+                    serde_json::json!({
+                        "ok": true,
+                        "location": {"name": "杭州"},
+                        "current": {
+                            "time": "2026-08-09T12:00:00+08:00",
+                            "weather_code": 1,
+                            "temperature_c": 30
+                        },
+                        "daily": []
+                    }),
+                    true,
+                ),
+                raw_tool_result(
+                    "knowledge_search",
+                    serde_json::json!({
+                        "ok": true,
+                        "status": "ok",
+                        "hits": [{"title": "内部证据", "content": "只供模型整理"}]
+                    }),
+                    true,
+                ),
+            ],
+            crate::error::LlmError::new(
+                "context_budget_exceeded",
+                "final answer generation failed",
+                "tool_loop",
+            ),
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("查杭州天气并结合知识库说明"))
+        .await
+        .unwrap();
+
+    let text = response
+        .text
+        .expect("mixed fallback should keep trusted result");
+    assert!(text.contains("🌦 杭州天气"));
+    assert!(text.contains("只包含可确定展示的部分结果"));
+    assert!(text.contains("最终回复生成失败"));
+    let diagnostics = response.diagnostics.expect("missing diagnostics");
+    assert_eq!(diagnostics["agent_finalization_fallback_used"], true);
+    assert_eq!(
+        diagnostics["agent_finalization_error_code"],
+        "context_budget_exceeded"
+    );
+    assert_eq!(diagnostics["agent_turn_status"], "partial_success");
+}

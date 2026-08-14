@@ -14,7 +14,10 @@ use crate::{
     runtime::tools::{
         KnowledgeSearchTool, RssManageSubscriptionsTool, RssRecentItemsTool, SaveMemoryTool,
         TaskStore, TodoScopedToolInputs, ToolTurnPostprocess, TrainScheduleTool,
-        WEB_SEARCH_TOOL_NAME, WeatherTool, WebSearchTimeouts, WebSearchTool, postprocess_tool_turn,
+        WEB_SEARCH_TOOL_NAME, WeatherTool, WebSearchTimeouts, WebSearchTool,
+        agent_turn::{
+            ToolTurnPostprocessContext, fallback_output_after_agent_failure, postprocess_tool_turn,
+        },
         replace_scoped_todo_tools_from_visible_snapshot, todo,
     },
     storage::notification::NotificationOutboxStore,
@@ -23,8 +26,8 @@ use qq_maid_llm::tool::{DEFAULT_TOOL_TIMEOUT, ToolMetadata, ToolRegistry};
 use qq_maid_llm::web_search::WebSearchBackend;
 
 use super::{
-    RespondExecutors, RespondRequest, RespondStores, agent_route::AgentToolMode,
-    llm_service::RespondOutput,
+    RespondExecutors, RespondRequest, RespondStores, agent_composition::AgentReplySource,
+    agent_route::AgentToolMode, llm_service::RespondOutput,
 };
 
 #[derive(Clone)]
@@ -174,15 +177,19 @@ impl ToolRuntime {
         interaction_meta: &SessionMeta,
         output: RespondOutput,
         req: &RespondRequest,
+        reply_source: AgentReplySource,
     ) -> Result<ToolTurnPostprocess, LlmError> {
         postprocess_tool_turn(
-            &self.session_store,
-            &self.task_store,
-            conversation_session,
-            meta,
-            interaction_meta,
+            ToolTurnPostprocessContext {
+                session_store: &self.session_store,
+                task_store: &self.task_store,
+                conversation_session,
+                meta,
+                interaction_meta,
+                req,
+                reply_source,
+            },
             output,
-            req,
         )
     }
 
@@ -191,7 +198,7 @@ impl ToolRuntime {
         err: &LlmError,
         model: &str,
     ) -> Option<RespondOutput> {
-        todo::agent_turn::fallback_output_after_agent_failure(err, model)
+        fallback_output_after_agent_failure(err, model)
     }
 
     fn replace_scoped_tools_from_request(

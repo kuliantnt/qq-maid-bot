@@ -306,7 +306,7 @@ pub(super) async fn run_agent_loop_with_timeouts(
                     metrics: recorder.finish(&provider, &model, false),
                     usage,
                     fallback_used,
-                    agent: finish_diagnostics(
+                    agent: finish_success_diagnostics(
                         &run_handle,
                         &executor,
                         &emitted_tools,
@@ -579,6 +579,19 @@ fn finish_diagnostics(
 ) -> AgentRunDiagnostics {
     sync_diagnostics(run_handle, executor, emitted_tools, baseline);
     run_handle.set_stop_reason(stop_reason);
+    run_handle.snapshot()
+}
+
+fn finish_success_diagnostics(
+    run_handle: &AgentRunHandle,
+    executor: &ToolLoopExecutor<'_>,
+    emitted_tools: &[String],
+    stop_reason: AgentStopReason,
+    baseline: AgentAttemptBaseline,
+) -> AgentRunDiagnostics {
+    sync_diagnostics(run_handle, executor, emitted_tools, baseline);
+    run_handle.set_stop_reason(stop_reason);
+    run_handle.mark_candidate_succeeded(baseline);
     run_handle.snapshot()
 }
 

@@ -481,6 +481,7 @@ impl LlmProvider for TestProvider {
                     side_effecting_tools_started: Vec::new(),
                     tool_results: vec![tool_result],
                     tool_attempts: Vec::new(),
+                    final_candidate_tool_result_start: Some(0),
                     tools_with_unknown_result: Vec::new(),
                     streaming_fallback_used: false,
                     stop_reason: Some(AgentStopReason::ToolUsed),
@@ -501,8 +502,19 @@ impl LlmProvider for TestProvider {
                             "tool",
                         )
                     })?;
-                let output = serde_json::from_str::<Value>(&serialized)
+                let mut output = serde_json::from_str::<Value>(&serialized)
                     .unwrap_or_else(|_| json!({"raw": serialized}));
+                // 候选降级回归需要真实来源，才能确认最终回复不会错误附带失败
+                // 候选独有的搜索引用。
+                if let Some(object) = output.as_object_mut() {
+                    object.insert(
+                        "sources".to_owned(),
+                        json!([{
+                            "title": "第一候选独有来源",
+                            "url": "https://example.test/failed-candidate"
+                        }]),
+                    );
+                }
                 let succeeded = output.get("ok").and_then(Value::as_bool) != Some(false);
                 let tool_result = ToolExecutionResult {
                     name: "web_search".to_owned(),
@@ -529,6 +541,7 @@ impl LlmProvider for TestProvider {
                     side_effecting_tools_started: Vec::new(),
                     tool_results: vec![tool_result],
                     tool_attempts: Vec::new(),
+                    final_candidate_tool_result_start: None,
                     tools_with_unknown_result: Vec::new(),
                     streaming_fallback_used: false,
                     stop_reason: Some(AgentStopReason::ToolUsed),
@@ -654,7 +667,9 @@ impl LlmProvider for RouteFallbackTestProvider {
         self.second_tool_calls.fetch_add(1, Ordering::SeqCst);
         let mut outcome = self.second.chat_with_tools(req).await?;
         outcome.fallback_used = true;
-        outcome.agent = first_err.agent.map(|agent| *agent).unwrap_or_default();
+        let mut diagnostics = first_err.agent.map(|agent| *agent).unwrap_or_default();
+        diagnostics.final_candidate_tool_result_start = Some(diagnostics.tool_results.len());
+        outcome.agent = diagnostics;
         Ok(outcome)
     }
 

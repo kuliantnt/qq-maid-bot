@@ -204,6 +204,34 @@ async fn todo_fake_success_with_followup_instruction_is_still_blocked() {
 }
 
 #[tokio::test]
+async fn todo_guard_does_not_publish_list_snapshot_hidden_by_guard_reply() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "list_todos",
+            r#"{"status":"pending","due_date":null,"date_range_text":null,"time_filter":null,"keyword":null,"recurring":null}"#,
+            "已完成第一条待办",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+    create_private_todo(&service, "不能成为隐藏编号的待办");
+
+    let response = service
+        .respond(private_message("完成第一条待办"))
+        .await
+        .unwrap();
+
+    let text = response.text.as_deref().unwrap();
+    assert!(text.contains("这次没有确认改动成功"));
+    assert!(!text.contains("不能成为隐藏编号的待办"));
+    assert!(response.visible_entity_snapshot.is_none());
+    assert!(active_private_session(&service).last_todo_query.is_none());
+    assert_eq!(
+        response.diagnostics.unwrap()["error_code"],
+        "todo_success_not_verified"
+    );
+}
+
+#[tokio::test]
 async fn todo_mixed_unsupported_and_fake_success_reply_is_still_blocked() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)

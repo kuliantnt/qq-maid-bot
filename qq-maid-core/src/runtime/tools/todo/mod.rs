@@ -56,6 +56,7 @@ use qq_maid_llm::tool::DynTool;
 
 use crate::{runtime::session::SessionStore, storage::notification::NotificationOutboxStore};
 
+pub(crate) use common::LIST_TODOS_TOOL_NAME;
 pub(crate) use complete::CompleteTodoTool;
 pub(crate) use create::CreateTodoTool;
 pub(crate) use delete::DeleteTodoTool;
@@ -103,6 +104,11 @@ pub(crate) use visible_entity::{
     todo_item_visible_entity_snapshot, todo_last_action_visible_entity_snapshot,
     todo_visible_entity_snapshot, visible_snapshot_has_todo_items,
 };
+
+/// 仅在 Todo 列表工具实际开放时向模型宣传领域展示契约。
+pub(crate) fn agent_display_contract_prompt(enabled_tools: &[String]) -> Option<&'static str> {
+    agent_turn::display_contract_prompt(enabled_tools)
+}
 
 /// 构造 Todo 领域完整 Tool 集合。外层 Registry 只注册该集合，不需要知道具体
 /// Tool 类型、数量或各 Tool 的存储依赖。
