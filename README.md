@@ -17,7 +17,7 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.23.9`，项目处于 `23.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.24.0`，项目处于 `24.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
@@ -131,29 +131,14 @@ runtime/botctl.sh status
 
 开发调试、Windows 源码构建和测试命令见 Wiki [开发维护文档](https://github.com/kuliantnt/qq-maid-bot/wiki/开发维护文档) 或仓库 [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)。
 
-## 23.x 版本线更新
+## 24.x 版本线更新
 
-当前稳定版本为 `v0.23.9`。需要查看本版本线的详细变更和升级提示时，再展开下面的更新记录：
+当前稳定版本为 `v0.24.0`。需要查看本版本线的详细变更和配置迁移提示时，再展开下面的更新记录：
 
 <details>
-<summary>展开查看 23.x / 22.x 版本更新</summary>
+<summary>展开查看 24.x 版本更新</summary>
 
-- **Todo 提醒澄清与工具回执收口**（v0.23.9）：已定位待办但只给日期时可跨轮补充提醒时刻，孤立时间不再误改最近待办；Todo 工具的中间参数错误不会覆盖后续真实成功结果，Core、Gateway、LLM 大文件职责也完成拆分，并补充 Docker 人话版部署指南。
-- **群消息轻量入站与工具流降级收口**（v0.23.8）：QQ 官方群消息先完成轻量去重、触发判定与被忽略消息的引用观察，再进入按群串行的重型回复队列，并修复去重记录提前提交导致的丢消息；工具活动后的未验真文本严格缓冲，`response.incomplete` 等失败直接丢弃且不阻止候选降级，联网搜索结果数按配置硬上限收敛。
-- **启动诊断与联网查询稳定性**（v0.23.7，PR #650、#652）：启动配置预检补充安全的 Agent / Ops 文件诊断和完整错误链日志；联网查询正确处理模型传入的空 `time_range`，并收紧 Tool Loop 最终正文发送边界，避免错误回执与模型草稿重复出站。
-- **QQ 官方流式协议迁移与候选恢复**（v0.23.6，PR #649）：统一使用官方 `/stream_messages` 累计替换协议，修复候选正文改写时的 Rollover 丢正文与重复发送；补齐连续 `index`、固定 `msg_seq`、429/50002 限流重试和 `ext_info.ref_idx` 保留语义。
-- **知识库托管文件与 Agent 稳定性**（v0.23.5）：Web Console 新增知识库托管文件的上传、状态轮询、下载、删除和失败重试；知识库来源、异步索引和 SQLite 迁移边界明确，Web Search 参数错误支持 Agent 自纠，LLM 流式结束与回退预算也完成收口。
-- **多代理 Release 下载与 AI Radar 升级**（v0.23.4）：Linux / Windows 安装器支持官方源与多个代理候选的顺序回退，并在安装前校验归档结构和 SHA-256；`/radar` 新增 Codex Radar 预测、额度、模型 IQ 与社区评分等公开指标，数据读取与展示模块也完成领域化收口。
-- **控制台重构与运行稳定性收口**（v0.23.3）：PR #627 按业务场景重组配置中心并移除无调用方的 Provider 连接测试，PR #629 保留 LLM / 联网搜索的真实超时分类，PR #630 将配置与 Todo 页面模块化并优化交互，PR #631 恢复仅填写日期创建截止 Todo；前端契约文档统一迁移到根 `docs/`。
-- **控制台合并收口与主题语义化**（v0.23.2）：控制台背景状态统一为服务端权威并补全 Todo 管理页面，默认不再展示背景图、嵌入背景资源约 14.4 MB → 0.5 MB；配色重构为语义化主题 token 预设，修复静态缓存、导航状态机、自动保存与 Secret 并发保存等问题。
-- **上下文诊断与联网搜索韧性**（v0.23.1）：Tool Loop 增加分阶段上下文尺寸与内存诊断，私聊中的确定性 Todo 完成 / 恢复收敛为短上下文执行；联网搜索保留上游状态并按固定预算有限重试，避免不可重试失败重复请求。
-- **控制台用户数据与 Provider 路由扩展**（v0.23.0）：部署管理员可通过受保护 API 管理自己的控制台偏好和通用文件；自定义 Provider 复用统一图片请求、保留完整 `provider:model` 候选身份，并支持按 Provider 路由原生 Responses 搜索与认证失败后的候选切换。
-
-### 更早版本（22.x）
-
-- **Todo 管理 API 与 QQ 引用可靠性**（v0.22.2）：部署管理员可通过受保护的全局 API 管理真实平台 Todo 和发现提醒目标；QQ 官方一级图文引用、Tool Loop 图片预算与被忽略群消息的引用恢复更稳定，群成员详情补全改为默认关闭。
-- **主动推送成员提醒**（v0.22.1）：群聊个人 Todo 提醒会准确 @ 实际归属成员；QQ 官方使用 `<@user_id>` 协议，OneBot 11 使用原生 `at` segment，并对私聊、共享 Todo、无效成员 ID 和 RefIndex 脱敏保持安全边界。
-- **QQ 语音回复与 Provider 扩展**（v0.22.0）：QQ 官方私聊和群聊支持按会话开启千问 TTS 最终回复；Web 控制台补齐全局 TTS 配置卡片，同时新增 OpenCode Zen / Go Provider、未知 Slash 确定性收口和知识库 embedding 内存限制。
+- **Memory 管理与 Agent 回执收口**（v0.24.0）：部署管理员可在 Web Console 中分页筛选、创建、编辑、归档和恢复 Memory，高影响操作使用 opaque reference、版本校验与二次确认；自然语言 Agent 统一可信工具结果与最终正文，未完成工具轮次不再伪装成功，并新增不进入模型链路的 Codex Slash 彩蛋与完整中文星期展示。
 
 ### 配置方式变化
 

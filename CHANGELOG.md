@@ -2,6 +2,31 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.24.0] - 2026-08-14
+
+### Release Focus
+
+* **Memory 管理进入 Web Console**：将受保护的部署管理员 Memory 管理 API 与原生控制台页面打通，覆盖目标发现、分页筛选、创建、编辑、归档/恢复和高影响操作确认，同时保持 opaque reference、乐观并发校验和安全审计边界。
+* **Agent 工具结果与最终回复收口**：统一自然语言 Agent 的领域结果投影、模型最终正文和确定性回退，避免未完成工具轮次被包装为成功，也减少工具结果、来源和模型草稿重复展示。
+
+### Added
+
+* **受保护 Memory 管理 API**（PR #668）：新增部署管理员专用的 Memory 目标发现、列表、详情、创建、编辑、归档、恢复和操作确认接口；服务端使用 opaque target/memory reference、revision CAS、分页与关键词筛选，支持清空目标、停用群画像和永久删除等操作，并复用现有 Session、Origin/CSRF、限流、请求 ID 与管理审计。
+* **Memory Web Console 页面**（PR #669）：新增 Memory 管理页面、目标筛选、分页、创建、编辑、归档/恢复和高影响操作确认；前端 API 测试、交互测试与 Rust 内嵌的可复现 `dist/` 产物同步更新。
+* **Codex Slash 彩蛋**（PR #671）：在正式 Slash 命令之后、unknown 兜底之前增加显式白名单短文案；彩蛋不进入 LLM、Tool Loop、session 或 pending，`/review @用户` 仅展示安全的昵称或原始 at 文本。
+
+### Changed
+
+* **自然语言 Agent 回执语义**（PR #667）：正常成功时以模型最终正文作为唯一主体，确定性命令继续使用既有 Card / Receipt；搜索成功只追加来源，模型最终回复失败时才回退到完整可信结果。Todo、Weather 等领域保留真实结果验真、可见列表快照和流式单次投递边界。
+* **未完成 Tool Loop 的失败回退**（PR #667）：unknown、cancelled 或后续工具调用未完成时不再放行不可信的模型成功正文；已确认的领域结果会标记为 incomplete 并给出受控提示，最终模型失败时可按领域规则安全回退。
+* **Todo 日期星期展示**（PR #666）：日期、截止时间和提醒时间中的单字星期改为完整中文星期，并统一使用空格分隔，例如 `08-14 星期五`。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.24.0`；本次实际变更的 `qq-maid-common`、`qq-maid-core`、`qq-maid-gateway-rs`、`qq-maid-llm` 分别提升到 `0.1.5`、`0.1.24`、`0.1.18`、`0.1.13`。
+* 本版本包含已有 SQLite 自动迁移：`memory_management_schema_v5_revision` 为历史 Memory 初始化服务端 revision，`console_audit_schema_v2_management_metadata` 与 `console_audit_schema_v3_resource_digest` 为管理审计补充请求、版本和资源摘要字段。升级前请备份 `APP_DB_FILE`、配置和主密钥。
+* Memory 管理 API 与页面仅在 `WEB_CONSOLE_ENABLED=true` 时注册；管理端身份仍与平台用户、Todo owner 和 Memory owner 分离，不新增必填环境变量，也不恢复旧的 `/memory`、`/query` 或 `/v1/chat` 入口。永久删除仍需 prepare/commit 二次确认且不可恢复。
+
 ## [v0.23.9] - 2026-08-08
 
 ### Release Focus
