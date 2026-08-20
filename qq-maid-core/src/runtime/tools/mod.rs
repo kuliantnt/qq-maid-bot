@@ -9,6 +9,7 @@ pub mod knowledge;
 pub mod memory;
 pub mod ops;
 pub(crate) mod radar;
+pub(crate) mod roll;
 pub mod rss;
 pub(crate) mod search;
 pub(crate) mod status;

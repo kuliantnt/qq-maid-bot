@@ -17,6 +17,7 @@ async fn help_without_argument_returns_concise_overview() {
     assert!(!text.contains("`/rss test RSS地址`"));
     // 纯文本侧不能带反引号，否则 QQ 纯文本渲染会吞掉命令内容
     assert!(text.contains("✅ 待办：/todo"));
+    assert!(text.contains("🎲 娱乐：/roll"));
     assert!(text.contains("🩺 状态：私聊发送 /ping"));
     assert!(!text.contains('`'));
     assert!(markdown.starts_with("# 女仆长助手"));
@@ -79,6 +80,7 @@ async fn help_all_lists_public_commands_by_module() {
 
     for heading in [
         "💬 对话",
+        "🎲 娱乐",
         "✅ 待办",
         "📰 RSS / Atom",
         "🌤 天气",
@@ -97,6 +99,7 @@ async fn help_all_lists_public_commands_by_module() {
     }
     for command in [
         "/todo undo",
+        "/roll",
         "/todo daily status",
         "/rss recent",
         "/rss add",
