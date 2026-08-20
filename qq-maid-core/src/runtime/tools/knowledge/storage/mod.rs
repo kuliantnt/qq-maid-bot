@@ -941,14 +941,15 @@ fn decode_vector(bytes: &[u8]) -> Option<Vec<f32>> {
     if !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
         return None;
     }
+    let (chunks, remainder) = bytes.as_chunks::<{ std::mem::size_of::<f32>() }>();
+    debug_assert!(
+        remainder.is_empty(),
+        "validated vector bytes have no remainder"
+    );
     Some(
-        bytes
-            .chunks_exact(std::mem::size_of::<f32>())
-            .map(|chunk| {
-                let bytes: [u8; std::mem::size_of::<f32>()] =
-                    chunk.try_into().expect("chunks_exact keeps f32 width");
-                f32::from_le_bytes(bytes)
-            })
+        chunks
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect(),
     )
 }
