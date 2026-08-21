@@ -317,6 +317,90 @@ async fn core_roll_defaults_to_d20_and_is_consumed_without_model_or_session() {
 }
 
 #[tokio::test]
+async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
+    let provider = TestProvider::replying(
+        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"今晚适合出门","failure_meaning":"今晚适合宅家"}"#,
+    )
+    .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let session_store = state.stores.session_store.clone();
+    let service = CoreHandle::new(state);
+
+    let assert_dm_reply = |response: &CoreResponse| {
+        let text = response.text_content().expect("roll DM should return text");
+        assert!(text.contains("🎲 命运检定"));
+        assert!(text.contains("难度：容易（DC 10）"));
+        let roll = text
+            .lines()
+            .find_map(|line| line.strip_prefix("投掷："))
+            .and_then(|value| value.parse::<u8>().ok())
+            .expect("roll DM reply should contain a local D20 value");
+        assert!((1..=20).contains(&roll));
+        match roll {
+            20 => assert!(text.contains("✨ Natural 20！大成功")),
+            1 => assert!(text.contains("💀 Natural 1！大失败")),
+            10..=19 => assert!(text.contains("✅ 成功")),
+            _ => assert!(text.contains("❌ 失败")),
+        }
+        assert_eq!(response.command.as_deref(), Some("roll"));
+    };
+
+    let CoreRespondOutput::Complete(private_response) = service
+        .respond(private_request("/roll 晚上要不要出门"))
+        .await
+        .unwrap()
+    else {
+        panic!("private roll DM command should complete synchronously");
+    };
+    assert_dm_reply(&private_response);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].metadata["purpose"], "roll_dm_check");
+    assert_eq!(
+        requests[0].messages.last().unwrap().content,
+        "晚上要不要出门"
+    );
+    assert!(requests[0].messages.iter().all(|message| {
+        !message.content.contains("投掷：") && !message.content.contains("Natural 20")
+    }));
+
+    let CoreRespondOutput::Complete(group_response) = service
+        .respond(group_request("/roll 能不能说服老板让我早点下班"))
+        .await
+        .unwrap()
+    else {
+        panic!("group roll DM command should complete synchronously");
+    };
+    assert_dm_reply(&group_response);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+
+    let private_meta = SessionMeta::new_with_account(
+        private_scope(),
+        Some("u1".to_owned()),
+        None,
+        None,
+        None,
+        "qq_official",
+        Some("app-1".to_owned()),
+    );
+    let group_meta = SessionMeta::new_with_account(
+        "platform:qq_official:account:app-1:group:g1",
+        Some("u1".to_owned()),
+        Some("g1".to_owned()),
+        None,
+        None,
+        "qq_official",
+        Some("app-1".to_owned()),
+    );
+    assert!(session_store.get_active(&private_meta).unwrap().is_none());
+    assert!(session_store.get_active(&group_meta).unwrap().is_none());
+}
+
+#[tokio::test]
 async fn core_codex_easter_egg_does_not_create_session_or_override_registered_command() {
     let provider = TestProvider::replying("不应调用");
     let state = test_state(provider.clone(), 5);

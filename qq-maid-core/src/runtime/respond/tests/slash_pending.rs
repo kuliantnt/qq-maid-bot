@@ -112,6 +112,45 @@ async fn unknown_slash_does_not_consume_todo_delete_confirmation() {
 }
 
 #[tokio::test]
+async fn roll_dm_bypasses_pending_without_entering_tool_loop() {
+    let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(provider.clone(), true);
+    let owner = private_todo_owner();
+    let item = completed_todo(&service, &owner, "保留的已完成待办");
+    let pending = save_todo_pending(
+        &service,
+        &private_test_meta(),
+        todo_delete_pending(item.clone(), &owner.key),
+    );
+
+    let response = service
+        .respond(private_message("/roll 晚上要不要出门"))
+        .await
+        .unwrap();
+
+    assert!(
+        response
+            .text
+            .as_deref()
+            .is_some_and(|text| text.starts_with("AI DM 暂时无法判断本次检定难度"))
+    );
+    assert_eq!(response.command.as_deref(), Some("roll"));
+    assert_private_pending_unchanged(&service, &pending);
+    assert_eq!(
+        service
+            .task_store
+            .get_by_id(&owner, &item.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Completed
+    );
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(provider.tool_call_count(), 0);
+    assert!(provider.tool_requests().is_empty());
+}
+
+#[tokio::test]
 async fn codex_easter_egg_does_not_consume_todo_delete_confirmation() {
     let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(provider.clone(), true);
