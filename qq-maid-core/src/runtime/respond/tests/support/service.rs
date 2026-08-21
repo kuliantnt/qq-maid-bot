@@ -324,6 +324,9 @@ pub(crate) fn test_service_with_provider_base_title_query_weather_train_models_a
         knowledge_index,
         PromptConfig::new(prompt_dir),
         RespondServiceOptions {
+            request_timeout: std::time::Duration::from_secs(
+                crate::config::DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            ),
             memory_dream: tool_calling.memory_dream.unwrap_or(
                 crate::runtime::tools::memory::MemoryDreamConfig {
                     enabled: false,

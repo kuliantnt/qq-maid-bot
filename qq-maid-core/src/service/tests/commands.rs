@@ -293,6 +293,14 @@ async fn core_roll_defaults_to_d20_and_is_consumed_without_model_or_session() {
             .expect("roll reply should contain a D20 value");
         assert!((1..=20).contains(&value));
         assert_eq!(response.command.as_deref(), Some("roll"));
+        let diagnostics = response
+            .diagnostics
+            .as_ref()
+            .expect("local roll should expose diagnostics");
+        assert_eq!(diagnostics["roll_execution_kind"], "local");
+        assert_eq!(diagnostics["roll_provider"], "rust");
+        assert_eq!(diagnostics["roll_model"], "roll-local");
+        assert_eq!(diagnostics["roll_fallback_used"], false);
     };
     assert_d20_reply(&response);
 
@@ -314,6 +322,202 @@ async fn core_roll_defaults_to_d20_and_is_consumed_without_model_or_session() {
     assert!(session_store.get_active(&meta).unwrap().is_none());
     assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn core_roll_executes_dice_expression_without_model_tool_or_session() {
+    let provider =
+        TestProvider::replying("不应调用").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let session_store = state.stores.session_store.clone();
+    let service = CoreHandle::new(state);
+
+    let classification = service
+        .classify_inbound(private_request("/roll 2d6"))
+        .await
+        .unwrap();
+    assert_eq!(classification.kind, CoreInboundKind::Immediate);
+
+    let CoreRespondOutput::Complete(response) =
+        service.respond(private_request("/roll 2d6")).await.unwrap()
+    else {
+        panic!("dice expression should complete synchronously");
+    };
+    let text = response
+        .text_content()
+        .expect("dice expression should return text");
+    let calculation = text
+        .strip_prefix("🎲 2d6：")
+        .expect("2d6 reply should identify the expression");
+    let (values, total) = calculation
+        .split_once(" = ")
+        .expect("2d6 reply should contain a total");
+    let values = values
+        .split(" + ")
+        .map(|value| value.parse::<u8>().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 2);
+    assert!(values.iter().all(|value| (1..=6).contains(value)));
+    assert_eq!(
+        total.parse::<u16>().unwrap(),
+        values.iter().map(|value| u16::from(*value)).sum::<u16>()
+    );
+    assert_eq!(response.command.as_deref(), Some("roll"));
+
+    let CoreRespondOutput::Complete(unsupported_response) = service
+        .respond(private_request("/roll 1d20 + 3"))
+        .await
+        .unwrap()
+    else {
+        panic!("unsupported spaced modifier should complete synchronously");
+    };
+    assert_eq!(
+        unsupported_response.text_content(),
+        Some("暂不支持该骰子表达式。目前支持 dM 或 NdM（骰子个数和面数均为 1–100）。")
+    );
+
+    let meta = SessionMeta::new_with_account(
+        private_scope(),
+        Some("u1".to_owned()),
+        None,
+        None,
+        None,
+        "qq_official",
+        Some("app-1".to_owned()),
+    );
+    assert!(session_store.get_active(&meta).unwrap().is_none());
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
+    let provider = TestProvider::replying(
+        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"今晚适合出门","failure_meaning":"今晚适合宅家"}"#,
+    )
+    .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let session_store = state.stores.session_store.clone();
+    let service = CoreHandle::new(state);
+
+    let assert_dm_reply = |response: &CoreResponse| {
+        let text = response.text_content().expect("roll DM should return text");
+        assert!(text.contains("🎲 命运检定"));
+        assert!(text.contains("难度：容易（DC 10）"));
+        let roll = text
+            .lines()
+            .find_map(|line| line.strip_prefix("投掷："))
+            .and_then(|value| value.parse::<u8>().ok())
+            .expect("roll DM reply should contain a local D20 value");
+        assert!((1..=20).contains(&roll));
+        match roll {
+            20 => assert!(text.contains("✨ Natural 20！大成功")),
+            1 => assert!(text.contains("💀 Natural 1！大失败")),
+            10..=19 => assert!(text.contains("✅ 成功")),
+            _ => assert!(text.contains("❌ 失败")),
+        }
+        assert_eq!(response.command.as_deref(), Some("roll"));
+        let diagnostics = response
+            .diagnostics
+            .as_ref()
+            .expect("roll DM should expose diagnostics");
+        assert_eq!(diagnostics["roll_execution_kind"], "ai_dm_success");
+        assert_eq!(diagnostics["roll_provider"], "test-provider");
+        assert_eq!(diagnostics["roll_model"], "test-model");
+        assert_eq!(diagnostics["roll_total_latency_ms"], 1);
+        assert_eq!(diagnostics["roll_fallback_used"], false);
+    };
+
+    let CoreRespondOutput::Complete(private_response) = service
+        .respond(private_request("/roll 晚上要不要出门"))
+        .await
+        .unwrap()
+    else {
+        panic!("private roll DM command should complete synchronously");
+    };
+    assert_dm_reply(&private_response);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].metadata["purpose"], "roll_dm_check");
+    assert_eq!(
+        requests[0].messages.last().unwrap().content,
+        "晚上要不要出门"
+    );
+    assert!(requests[0].messages.iter().all(|message| {
+        !message.content.contains("投掷：") && !message.content.contains("Natural 20")
+    }));
+
+    let CoreRespondOutput::Complete(group_response) = service
+        .respond(group_request("/roll 能不能说服老板让我早点下班"))
+        .await
+        .unwrap()
+    else {
+        panic!("group roll DM command should complete synchronously");
+    };
+    assert_dm_reply(&group_response);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+
+    let private_meta = SessionMeta::new_with_account(
+        private_scope(),
+        Some("u1".to_owned()),
+        None,
+        None,
+        None,
+        "qq_official",
+        Some("app-1".to_owned()),
+    );
+    let group_meta = SessionMeta::new_with_account(
+        "platform:qq_official:account:app-1:group:g1",
+        Some("u1".to_owned()),
+        Some("g1".to_owned()),
+        None,
+        None,
+        "qq_official",
+        Some("app-1".to_owned()),
+    );
+    assert!(session_store.get_active(&private_meta).unwrap().is_none());
+    assert!(session_store.get_active(&group_meta).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn core_roll_dm_short_request_timeout_keeps_local_fallback() {
+    let provider = TestProvider::delayed(
+        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"出门","failure_meaning":"宅家"}"#,
+        Duration::from_secs(2),
+    );
+    let state = test_state(provider.clone(), 1);
+    let service = CoreHandle::new(state);
+    let started_at = std::time::Instant::now();
+
+    let CoreRespondOutput::Complete(response) = service
+        .respond(private_request("/roll 今晚出门吗"))
+        .await
+        .unwrap()
+    else {
+        panic!("timed out roll DM should complete with a local fallback");
+    };
+
+    assert!(started_at.elapsed() < Duration::from_millis(1500));
+    assert!(
+        response
+            .text_content()
+            .is_some_and(|text| text.contains("本次仅进行普通 D20 投掷"))
+    );
+    let diagnostics = response
+        .diagnostics
+        .as_ref()
+        .expect("fallback should expose diagnostics");
+    assert_eq!(diagnostics["roll_execution_kind"], "ai_dm_fallback");
+    assert_eq!(diagnostics["roll_provider"], "test-provider");
+    assert_eq!(diagnostics["roll_model"], "test-model");
+    assert!(diagnostics["roll_total_latency_ms"].as_u64().unwrap() >= 700);
+    assert_eq!(diagnostics["roll_fallback_reason"], "timeout");
+    assert_eq!(diagnostics["roll_fallback_stage"], "roll_dm");
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

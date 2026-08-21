@@ -118,11 +118,30 @@ async fn help_all_lists_public_commands_by_module() {
         assert!(text.contains(command), "missing help command: {command}");
     }
     let text_len = text.chars().count();
+    // 新增公开命令时允许帮助页适度增长，同时保留上限避免内容无边界膨胀。
     assert!(
-        text_len <= 1800,
-        "full help text has {text_len} characters, exceeding the 1800-character limit"
+        text_len <= 2000,
+        "full help text has {text_len} characters, exceeding the 2000-character limit"
     );
     assert_unimplemented_rss_commands_absent(&text);
+}
+
+#[tokio::test]
+async fn help_roll_describes_simple_dice_expressions_and_limits() {
+    let response = test_service().respond(message("/help roll")).await.unwrap();
+    let text = response.text.unwrap();
+    let markdown = response.markdown.unwrap();
+
+    for expected in ["dM", "NdM", "2d6", "d100", "1d20+3", "1–100", "暂不支持"] {
+        assert!(
+            text.contains(expected),
+            "missing roll help text: {expected}"
+        );
+        assert!(
+            markdown.contains(expected),
+            "missing roll help markdown: {expected}"
+        );
+    }
 }
 
 #[tokio::test]

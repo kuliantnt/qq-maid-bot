@@ -41,9 +41,14 @@ const HELP_MODULES: &[HelpModule] = &[
         key: "fun",
         aliases: &["娱乐", "roll", "掷骰"],
         title: "🎲 娱乐",
-        summary: "提供不经过模型的本地娱乐命令。",
-        commands: &["- `/roll`：掷 D20"],
-        notes: &["- 当前只支持无参数 `/roll`；骰子结果由程序运行时直接生成。"],
+        summary: "提供本地 D20 与轻量 AI DM 判定。",
+        commands: &[
+            "- `/roll [问题或骰子表达式]`：无参数时本地掷 D20；`d100`、`2d6` 等表达式本地结算；自然语言问题由 AI DM 先定难度",
+        ],
+        notes: &[
+            "- 骰值始终由程序本地生成；AI DM 看不到骰值，只负责在掷骰前设定判定方案。",
+            "- 骰子表达式支持 `dM` 或 `NdM`，骰子个数和面数均为 1–100；暂不支持 `1d20+3` 等修正值、角色属性或加值。",
+        ],
     },
     HelpModule {
         key: "todo",

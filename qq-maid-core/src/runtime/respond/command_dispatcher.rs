@@ -37,7 +37,7 @@ enum RegisteredSlashCommand {
     Weather(ParsedCommand),
     Train(train_flow::ParsedTrainCommand),
     Radar(ParsedCommand),
-    Roll,
+    Roll(crate::runtime::tools::roll::RollCommand),
     WebSearch(ParsedCommand),
     Rss,
     Todo,
@@ -71,8 +71,8 @@ impl RegisteredSlashCommand {
         if let Some(command) = crate::runtime::tools::radar::flow::parse_radar_command(text) {
             return Some(Self::Radar(command));
         }
-        if crate::runtime::tools::roll::parse_roll_command(text).is_some() {
-            return Some(Self::Roll);
+        if let Some(command) = crate::runtime::tools::roll::parse_roll_command(text) {
+            return Some(Self::Roll(command));
         }
         if let Some(command) = search_flow::parse_web_search_command(text) {
             return Some(Self::WebSearch(command));
@@ -156,17 +156,42 @@ impl<'a> CommandDispatcher<'a> {
             return Ok(DispatchOutcome::Respond(Box::new(response)));
         }
 
-        // `/roll` 是无状态娱乐命令：在读取 pending/session 前生成一次 D20 结果并收口，
-        // 避免消费交互状态或继续进入普通 Agent / Tool Loop。
-        if matches!(
-            registered_slash_command.as_ref(),
-            Some(RegisteredSlashCommand::Roll)
-        ) {
-            return Ok(DispatchOutcome::Respond(Box::new(command_response(
-                crate::runtime::tools::roll::roll_default_reply(),
-                None,
-                Some("roll"),
-            ))));
+        // `/roll` 在读取 pending/session 前收口；简单骰子表达式在本地执行，带问题版本只做
+        // 一次独立 DM 方案调用，二者都不读取会话历史、消费 pending 或进入普通 Agent / Tool Loop。
+        if let Some(RegisteredSlashCommand::Roll(command)) = registered_slash_command.as_ref() {
+            let model = if matches!(
+                command,
+                crate::runtime::tools::roll::RollCommand::DmCheck { .. }
+            ) {
+                match self.service.resolve_agent_policy(&req) {
+                    Ok(policy) => policy.resolve_auxiliary_model(None),
+                    Err(error) => {
+                        // Provider 自身仍持有启动时已校验的默认候选链；场景策略临时解析失败时
+                        // 使用该默认链，避免把显式娱乐命令错误送入普通聊天。
+                        tracing::warn!(
+                            error_code = error.code,
+                            error_stage = error.stage,
+                            "AI DM 场景模型解析失败，改用默认模型候选链"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let execution = crate::runtime::tools::roll::execute_roll_command(
+                &self.service.provider,
+                model,
+                command.clone(),
+                self.service.request_timeout,
+            )
+            .await;
+            let diagnostics = execution.diagnostics();
+            let mut response = command_response(execution.reply, None, Some("roll"));
+            response.metrics = execution.metrics;
+            response.usage = execution.usage;
+            response.diagnostics = Some(diagnostics);
+            return Ok(DispatchOutcome::Respond(Box::new(response)));
         }
 
         // pending、Todo 可见编号和 Memory 列表序号属于群内个人交互状态；
