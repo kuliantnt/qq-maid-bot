@@ -76,7 +76,7 @@ QQ_MAID_IMAGE=docker.io/kuliantnt/qq-maid-bot:latest
 
 > `latest` 就是「用最新版」的意思，最省事。想固定某个版本，就去
 > [Releases 页面](https://github.com/kuliantnt/qq-maid-bot/releases) 抄一个版本号，
-> 把 `latest` 换成它，例如 `:v0.24.0`。
+> 把 `latest` 换成它，例如 `:v0.24.1`。
 
 `runtime/config/.env` 不用动，里面已经写好了一行网页要用到的设置。
 
@@ -199,6 +199,6 @@ sudo systemctl restart docker
 | 网页打不开 | `runtime/config/.env` 里有没有 `LLM_SERVER_HOST=0.0.0.0`？启动命令有没有带 `-f docker/compose.console.yaml`？ |
 | 容器一直 `unhealthy` | 看上面「机器人没起来怎么查」 |
 | 想接微信 / OneBot 11 | 要额外加载对应配置文件，详见[完整版](./docker.md) |
-| 想要更稳的版本 | 固定版本号（如 `:v0.24.0`），或去 GHCR 页面复制 `@sha256:...` 完整 digest 替换 `QQ_MAID_IMAGE` |
+| 想要更稳的版本 | 固定版本号（如 `:v0.24.1`），或去 GHCR 页面复制 `@sha256:...` 完整 digest 替换 `QQ_MAID_IMAGE` |
 
 其他问题、备份、安全加固请看[完整版 Docker 部署](./docker.md)。

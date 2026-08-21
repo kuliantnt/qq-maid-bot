@@ -2,6 +2,25 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.24.1] - 2026-08-21
+
+### Release Focus
+
+* **默认 D20 娱乐命令**：新增不经过模型的本地 `/roll` 命令，私聊和群聊都可以直接掷出 1–20 的结果。
+
+### Added
+
+* **本地 D20 掷骰**（PR #676）：`/roll` 仅接受无参数形式，由 Core 进程直接生成结果并返回；命令不会调用 Provider、创建 session 或消费 pending 状态，`/help` 同步增加“娱乐”模块说明。
+
+### Changed
+
+* **知识库向量解码兼容新版 Clippy**：改用固定宽度字节块解码 `f32` 向量，保持既有小端格式和检索结果语义不变。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.24.1`，本次实际变更的 `qq-maid-core` 提升到 `0.1.25`；`qq-maid-common`、`qq-maid-gateway-rs` 和 `qq-maid-llm` 版本保持不变。
+* 本版本不新增 SQLite migration、配置迁移、必填环境变量或运行时入口；升级前仍建议按常规备份运行配置、数据库和主密钥。
+
 ## [v0.24.0] - 2026-08-14
 
 ### Release Focus
