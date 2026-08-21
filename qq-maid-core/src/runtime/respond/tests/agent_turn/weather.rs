@@ -459,3 +459,23 @@ async fn only_weather_tool_keeps_model_reply_as_primary() {
     assert_eq!(diagnostics["tool_outcomes"][0]["domain"], "weather");
     assert_eq!(diagnostics["tool_outcomes"][0]["presentation"], "trusted");
 }
+
+#[tokio::test]
+async fn plain_weather_shortcut_keeps_weather_tool_behavior() {
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_tool_call_json(
+            "get_weather",
+            r#"{"city":"明天","forecast_days":3}"#,
+            "明天天气如下",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector.clone(), true);
+
+    let response = service.respond(private_message("明天天气")).await.unwrap();
+
+    assert_eq!(response.text.as_deref(), Some("明天天气如下"));
+    assert_eq!(response.command.as_deref(), Some("weather"));
+    assert_eq!(inspector.tool_call_count(), 1);
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["tool_outcomes"][0]["domain"], "weather");
+}
