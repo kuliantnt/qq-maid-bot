@@ -110,7 +110,11 @@ pub(super) async fn prepare_dm_check(
 }
 
 fn parse_dm_check_plan(raw: &str) -> Result<DmCheckPlan, LlmError> {
-    let raw: RawDmCheckPlan = serde_json::from_str(raw.trim()).map_err(|_| {
+    let raw = raw.trim();
+    // 部分模型即使被要求只返回 JSON，仍会把完整对象包在 Markdown 代码块中。
+    // 这里只兼容单个完整外层代码块，不从解释文本中截取对象，避免放宽结构化输出边界。
+    let json = strip_outer_json_fence(raw).unwrap_or(raw);
+    let raw: RawDmCheckPlan = serde_json::from_str(json).map_err(|_| {
         LlmError::new(
             "roll_dm_invalid_output",
             "AI DM returned invalid structured output",
@@ -132,6 +136,13 @@ fn parse_dm_check_plan(raw: &str) -> Result<DmCheckPlan, LlmError> {
             MEANING_MAX_CHARS,
         )?,
     })
+}
+
+fn strip_outer_json_fence(text: &str) -> Option<&str> {
+    let body = text.strip_prefix("```")?.strip_suffix("```")?;
+    let (language, json) = body.split_once('\n')?;
+    let language = language.trim();
+    (language.is_empty() || language.eq_ignore_ascii_case("json")).then(|| json.trim())
 }
 
 fn validate_text_field(
@@ -166,6 +177,30 @@ mod tests {
         assert_eq!(plan.check_type, CheckType::Ability);
         assert_eq!(plan.difficulty.dc(), 15);
         assert_eq!(plan.difficulty.display_name(), "中等");
+    }
+
+    #[test]
+    fn accepts_a_single_outer_json_code_fence() {
+        for raw in [
+            "```json\n{\"type\":\"fortune\",\"check_name\":\"命运检定\",\"difficulty\":\"easy\",\"success_meaning\":\"喝咖啡\",\"failure_meaning\":\"不喝咖啡\"}\n```",
+            "```JSON\r\n{\"type\":\"fortune\",\"check_name\":\"命运检定\",\"difficulty\":\"easy\",\"success_meaning\":\"喝咖啡\",\"failure_meaning\":\"不喝咖啡\"}\r\n```",
+            "```\n{\"type\":\"fortune\",\"check_name\":\"命运检定\",\"difficulty\":\"easy\",\"success_meaning\":\"喝咖啡\",\"failure_meaning\":\"不喝咖啡\"}\n```",
+        ] {
+            let plan = parse_dm_check_plan(raw).unwrap();
+            assert_eq!(plan.check_type, CheckType::Fortune);
+            assert_eq!(plan.difficulty, Difficulty::Easy);
+        }
+    }
+
+    #[test]
+    fn rejects_json_wrapped_in_explanation_or_an_unrelated_code_fence() {
+        for raw in [
+            "判定方案：\n{\"type\":\"fortune\",\"check_name\":\"命运检定\",\"difficulty\":\"easy\",\"success_meaning\":\"成功\",\"failure_meaning\":\"失败\"}",
+            "```text\n{\"type\":\"fortune\",\"check_name\":\"命运检定\",\"difficulty\":\"easy\",\"success_meaning\":\"成功\",\"failure_meaning\":\"失败\"}\n```",
+        ] {
+            let error = parse_dm_check_plan(raw).unwrap_err();
+            assert_eq!(error.code, "roll_dm_invalid_output");
+        }
     }
 
     #[test]
