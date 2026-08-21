@@ -2,6 +2,32 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [v0.24.2] - 2026-08-21
+
+### Release Focus
+
+* **轻量骰子与 AI DM 判定**：将 `/roll` 从无参数 D20 扩展为本地 `dM` / `NdM` 表达式和带自然语言问题的独立 AI DM 判定，同时保持骰值由服务端生成、结果可验证并具备安全降级路径。
+
+### Added
+
+* **简单骰子表达式**（PR #679）：支持 `/roll d100`、`/roll 2d6` 等完整 `dM` / `NdM` 表达式，骰子个数和面数均限制为 1–100；本地路径不调用 Provider，不进入 session、pending 或 Tool Loop。
+* **AI DM D20 判定**（PR #679）：`/roll <问题>` 使用一次独立的普通模型调用生成严格判定方案，支持 `ability` / `fortune`、六档难度与固定 DC 映射；Core 校验方案后才生成 D20 并本地结算成功、失败、Natural 20 和 Natural 1。
+
+### Changed
+
+* **骰值生成与调用边界**（PR #679）：生产骰值改用线程级 CSPRNG 的均匀范围采样；AI DM 请求不接收实际骰值，也不进入普通 Agent Tool Loop、session 或 pending。AI DM 的内部超时按整轮请求预算裁剪，并为本地回退保留收口时间。
+* **结构化输出兼容**（PR #679）：仅兼容完整合法 JSON 外层的 `json`、`JSON` 或无语言标记代码块，不从解释文本中截取对象；帮助页同步说明表达式格式和限制。
+
+### Fixed
+
+* **骰子表达式误入 AI DM**（PR #679）：带空格的 `1d20 + 3`、`2d6 - 1` 等完整修正表达式会明确返回暂不支持，不再被误判为自然语言问题触发模型调用；越界、零值和其他未知字段同样不会伪造结果。
+* **AI DM 失败回退**（PR #679）：Provider 错误、超时或非法结构化输出时明确回退到普通本地 D20，不伪造 DC、成功状态或模型文案；诊断保留实际执行类型、Provider、模型和回退原因。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.24.2`，本次实际变更的 `qq-maid-core` 提升到 `0.1.26`；`qq-maid-common`、`qq-maid-gateway-rs` 和 `qq-maid-llm` 版本保持不变。
+* 本版本不新增 SQLite migration、配置迁移、必填环境变量或运行时入口；不支持 `1d20+3` 等修正值、角色属性、加值和优势/劣势规则。升级前仍建议按常规备份运行配置、数据库和主密钥。
+
 ## [v0.24.1] - 2026-08-21
 
 ### Release Focus
