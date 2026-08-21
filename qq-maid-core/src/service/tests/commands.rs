@@ -266,6 +266,57 @@ async fn core_codex_easter_egg_replies_in_unaddressed_group_without_model_call()
 }
 
 #[tokio::test]
+async fn core_roll_defaults_to_d20_and_is_consumed_without_model_or_session() {
+    let provider =
+        TestProvider::replying("不应调用").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let session_store = state.stores.session_store.clone();
+    let service = CoreHandle::new(state);
+
+    let classification = service
+        .classify_inbound(private_request("/roll"))
+        .await
+        .unwrap();
+    assert_eq!(classification.kind, CoreInboundKind::Immediate);
+
+    let CoreRespondOutput::Complete(response) =
+        service.respond(private_request("/roll")).await.unwrap()
+    else {
+        panic!("roll command should complete synchronously");
+    };
+    let assert_d20_reply = |response: &CoreResponse| {
+        let text = response.text_content().expect("roll should return text");
+        let value = text
+            .strip_prefix("🎲 掷出了 ")
+            .and_then(|text| text.strip_suffix(" / 20"))
+            .and_then(|value| value.parse::<u8>().ok())
+            .expect("roll reply should contain a D20 value");
+        assert!((1..=20).contains(&value));
+        assert_eq!(response.command.as_deref(), Some("roll"));
+    };
+    assert_d20_reply(&response);
+
+    let CoreRespondOutput::Complete(group_response) =
+        service.respond(group_request("/roll")).await.unwrap()
+    else {
+        panic!("group roll command should complete synchronously");
+    };
+    assert_d20_reply(&group_response);
+
+    let meta = SessionMeta::new(
+        private_scope(),
+        Some("u1".to_owned()),
+        None,
+        None,
+        None,
+        "qq_official",
+    );
+    assert!(session_store.get_active(&meta).unwrap().is_none());
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn core_codex_easter_egg_does_not_create_session_or_override_registered_command() {
     let provider = TestProvider::replying("不应调用");
     let state = test_state(provider.clone(), 5);

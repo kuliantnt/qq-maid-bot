@@ -37,6 +37,7 @@ enum RegisteredSlashCommand {
     Weather(ParsedCommand),
     Train(train_flow::ParsedTrainCommand),
     Radar(ParsedCommand),
+    Roll,
     WebSearch(ParsedCommand),
     Rss,
     Todo,
@@ -69,6 +70,9 @@ impl RegisteredSlashCommand {
         }
         if let Some(command) = crate::runtime::tools::radar::flow::parse_radar_command(text) {
             return Some(Self::Radar(command));
+        }
+        if crate::runtime::tools::roll::parse_roll_command(text).is_some() {
+            return Some(Self::Roll);
         }
         if let Some(command) = search_flow::parse_web_search_command(text) {
             return Some(Self::WebSearch(command));
@@ -150,6 +154,19 @@ impl<'a> CommandDispatcher<'a> {
                 )
             };
             return Ok(DispatchOutcome::Respond(Box::new(response)));
+        }
+
+        // `/roll` 是无状态娱乐命令：在读取 pending/session 前生成一次 D20 结果并收口，
+        // 避免消费交互状态或继续进入普通 Agent / Tool Loop。
+        if matches!(
+            registered_slash_command.as_ref(),
+            Some(RegisteredSlashCommand::Roll)
+        ) {
+            return Ok(DispatchOutcome::Respond(Box::new(command_response(
+                crate::runtime::tools::roll::roll_default_reply(),
+                None,
+                Some("roll"),
+            ))));
         }
 
         // pending、Todo 可见编号和 Memory 列表序号属于群内个人交互状态；

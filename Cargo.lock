@@ -2048,6 +2048,7 @@ dependencies = [
  "chrono",
  "dotenvy",
  "fastembed",
+ "fastrand",
  "feed-rs",
  "futures",
  "html2text",

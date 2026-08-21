@@ -38,6 +38,14 @@ const HELP_MODULES: &[HelpModule] = &[
         notes: &["- 需要保存长期信息时，可直接说“记住……”或使用 `/memory 内容`。"],
     },
     HelpModule {
+        key: "fun",
+        aliases: &["娱乐", "roll", "掷骰"],
+        title: "🎲 娱乐",
+        summary: "提供不经过模型的本地娱乐命令。",
+        commands: &["- `/roll`：掷 D20"],
+        notes: &["- 当前只支持无参数 `/roll`；骰子结果由程序运行时直接生成。"],
+    },
+    HelpModule {
         key: "todo",
         aliases: &["待办", "任务"],
         title: "✅ 待办",
@@ -266,6 +274,10 @@ fn format_help_home(context: HelpContext) -> CommandBody {
         );
     }
     render.push_pair(
+        "· 🎲 娱乐：/roll".to_owned(),
+        "- 🎲 娱乐：`/roll`".to_owned(),
+    );
+    render.push_pair(
         "· 📰 RSS / Atom：/rss".to_owned(),
         "- 📰 RSS / Atom：`/rss`".to_owned(),
     );
@@ -312,8 +324,8 @@ fn format_help_home(context: HelpContext) -> CommandBody {
         "- `/help <模块>`：查看模块用法".to_owned(),
     );
     render.push_pair(
-        "· 常用模块：chat、todo、rss、weather、search".to_owned(),
-        "- 常用模块：`chat`、`todo`、`rss`、`weather`、`search`".to_owned(),
+        "· 常用模块：chat、fun、todo、rss、weather、search".to_owned(),
+        "- 常用模块：`chat`、`fun`、`todo`、`rss`、`weather`、`search`".to_owned(),
     );
     render.push_pair(
         "· 更多模块：translation、memory、session、settings、voice、status、ops".to_owned(),
