@@ -27,6 +27,7 @@
 
 * 根包 `qq-maid-bot` 提升到 `0.24.2`，本次实际变更的 `qq-maid-core` 提升到 `0.1.26`；`qq-maid-common`、`qq-maid-gateway-rs` 和 `qq-maid-llm` 版本保持不变。
 * 本版本不新增 SQLite migration、配置迁移、必填环境变量或运行时入口；不支持 `1d20+3` 等修正值、角色属性、加值和优势/劣势规则。升级前仍建议按常规备份运行配置、数据库和主密钥。
+
 ## [v0.24.1] - 2026-08-21
 
 ### Release Focus
