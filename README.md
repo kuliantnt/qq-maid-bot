@@ -17,7 +17,7 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.24.1`，项目处于 `24.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.24.2`，项目处于 `24.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
@@ -133,11 +133,12 @@ runtime/botctl.sh status
 
 ## 24.x 版本线更新
 
-当前稳定版本为 `v0.24.1`。需要查看本版本线的详细变更和配置迁移提示时，再展开下面的更新记录：
+当前稳定版本为 `v0.24.2`。需要查看本版本线的详细变更和配置迁移提示时，再展开下面的更新记录：
 
 <details>
 <summary>展开查看 24.x 版本更新</summary>
 
+- **AI DM D20 判定与简单骰子表达式**（v0.24.2，PR #679）：`/roll d100`、`/roll 2d6` 等 `dM` / `NdM` 表达式由 Core 本地结算；`/roll <问题>` 由独立 AI DM 先制定并校验判定方案，再由 Core 使用 CSPRNG 掷骰和确定性模板结算。AI DM 看不到骰值，Provider 异常、超时或非法输出会明确降级为普通本地 D20。
 - **默认 D20 娱乐命令**（v0.24.1，PR #676）：私聊或群聊发送 `/roll` 即可由程序本地掷出 1–20；不调用模型、不创建 session，也不消费 pending 状态。
 - **Memory 管理与 Agent 回执收口**（v0.24.0）：部署管理员可在 Web Console 中分页筛选、创建、编辑、归档和恢复 Memory，高影响操作使用 opaque reference、版本校验与二次确认；自然语言 Agent 统一可信工具结果与最终正文，未完成工具轮次不再伪装成功，并新增不进入模型链路的 Codex Slash 彩蛋与完整中文星期展示。
 
@@ -216,6 +217,9 @@ v0.20.x 起推荐新部署通过 `/console/` 网页完成配置，也可在安�
 
 你：/roll
 机器人：🎲 掷出了 17 / 20
+
+你：/roll 2d6
+机器人：🎲 2d6：4 + 5 = 9
 
 管理员：/ops status
 机器人：运维任务 status 已受理，完成后会通知你。
