@@ -433,6 +433,7 @@ fn synthesize_assistant_output(
 
 fn respond_options(config: &AppConfig) -> RespondServiceOptions {
     RespondServiceOptions {
+        request_timeout: Duration::from_secs(config.request_timeout_seconds),
         memory_dream: MemoryDreamConfig {
             enabled: config.memory_dream_enabled,
             min_interval_seconds: config.memory_dream_min_interval_seconds,

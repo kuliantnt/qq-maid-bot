@@ -3,13 +3,17 @@
 //! 无参数命令保持本地 D20 快速路径，简单骰子表达式由 Core 本地结算；带问题的命令
 //! 先让模型生成并校验判定方案，再本地生成骰值和结算结果。命令分派层只负责路由与响应投影。
 
-use std::{sync::OnceLock, time::Duration};
+use std::{
+    sync::OnceLock,
+    time::{Duration, Instant},
+};
 
-use qq_maid_llm::provider::DynLlmProvider;
+use qq_maid_llm::provider::{DynLlmProvider, types::TokenUsage};
 use rand::RngExt;
 use regex::Regex;
+use serde_json::{Value, json};
 
-use crate::runtime::command::parse_slash_command;
+use crate::{runtime::command::parse_slash_command, util::metrics::LlmMetrics};
 
 mod dm;
 mod outcome;
@@ -21,6 +25,8 @@ use outcome::{DEFAULT_DIE_SIDES, RollResult, render_dm_result};
 pub(crate) const DM_QUERY_MAX_CHARS: usize = 500;
 /// AI DM 是娱乐命令的轻量独立调用，超时后立即回退本地 D20。
 const DM_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
+/// 必须早于 Core 整轮超时结束 AI 调用，给日志、随机数生成和响应投影保留收口时间。
+const DM_FALLBACK_RESERVE: Duration = Duration::from_millis(250);
 const MAX_DICE_COUNT: u8 = 100;
 const MAX_DIE_SIDES: u8 = 100;
 
@@ -36,6 +42,67 @@ pub(crate) enum RollCommand {
     DiceExpression { count: u8, sides: u8 },
     DmCheck { query: String },
     UnsupportedDiceExpression,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RollExecutionKind {
+    Local,
+    AiDmSuccess,
+    AiDmFallback,
+}
+
+impl RollExecutionKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::AiDmSuccess => "ai_dm_success",
+            Self::AiDmFallback => "ai_dm_fallback",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RollFallbackReason {
+    code: String,
+    stage: String,
+}
+
+/// roll 领域的结构化执行结果；命令分派层只负责投影，不重新判断业务状态。
+pub(crate) struct RollExecutionResult {
+    pub(crate) reply: String,
+    pub(crate) metrics: LlmMetrics,
+    pub(crate) usage: Option<TokenUsage>,
+    execution_kind: RollExecutionKind,
+    provider_fallback_used: Option<bool>,
+    fallback_reason: Option<RollFallbackReason>,
+}
+
+impl RollExecutionResult {
+    pub(crate) fn diagnostics(&self) -> Value {
+        let mut diagnostics = json!({
+            "backend": if matches!(self.execution_kind, RollExecutionKind::Local) {
+                "rust"
+            } else {
+                "llm"
+            },
+            "session_backend": "rust",
+            "used_memory": false,
+            "used_search": false,
+            "roll_execution_kind": self.execution_kind.as_str(),
+            "roll_provider": self.metrics.provider,
+            "roll_model": self.metrics.model,
+            "roll_total_latency_ms": self.metrics.total_latency_ms,
+            "roll_fallback_used": self.fallback_reason.is_some(),
+        });
+        if let Some(provider_fallback_used) = self.provider_fallback_used {
+            diagnostics["roll_provider_fallback_used"] = json!(provider_fallback_used);
+        }
+        if let Some(reason) = &self.fallback_reason {
+            diagnostics["roll_fallback_reason"] = json!(reason.code);
+            diagnostics["roll_fallback_stage"] = json!(reason.stage);
+        }
+        diagnostics
+    }
 }
 
 enum ParsedDiceExpression {
@@ -70,8 +137,10 @@ pub(crate) fn parse_roll_command(text: &str) -> Option<RollCommand> {
 fn parse_dice_expression(argument: &str) -> Option<ParsedDiceExpression> {
     let captures = DICE_EXPRESSION_RE
         .get_or_init(|| {
-            Regex::new(r"(?i)\A(?P<count>[0-9]+)?d(?P<sides>[0-9]+)(?P<modifier>[+-][0-9]+)?\z")
-                .expect("dice expression regex must compile")
+            Regex::new(
+                r"(?i)\A(?P<count>[0-9]+)?d(?P<sides>[0-9]+)(?:[ \t]*(?P<modifier>[+-])[ \t]*(?P<modifier_value>[0-9]+))?\z",
+            )
+            .expect("dice expression regex must compile")
         })
         .captures(argument)?;
 
@@ -98,15 +167,20 @@ pub(crate) async fn execute_roll_command(
     provider: &DynLlmProvider,
     model: Option<String>,
     command: RollCommand,
-) -> String {
+    request_budget: Duration,
+) -> RollExecutionResult {
     execute_roll_command_with_roller_factory(
         provider,
         model,
         command,
-        DM_CHECK_TIMEOUT,
+        dm_timeout_for_request(request_budget),
         thread_roller,
     )
     .await
+}
+
+fn dm_timeout_for_request(request_budget: Duration) -> Duration {
+    DM_CHECK_TIMEOUT.min(request_budget.saturating_sub(DM_FALLBACK_RESERVE))
 }
 
 /// 按需创建线程级 RNG，避免不可 `Send` 的句柄跨越 AI DM 的异步模型调用。
@@ -129,7 +203,7 @@ async fn execute_roll_command_with_roller<F>(
     command: RollCommand,
     dm_timeout: Duration,
     roller: F,
-) -> String
+) -> RollExecutionResult
 where
     F: FnMut(u8) -> u8,
 {
@@ -142,7 +216,7 @@ async fn execute_roll_command_with_roller_factory<RF, F>(
     command: RollCommand,
     dm_timeout: Duration,
     roller_factory: RF,
-) -> String
+) -> RollExecutionResult
 where
     RF: FnOnce() -> F,
     F: FnMut(u8) -> u8,
@@ -150,43 +224,66 @@ where
     let query = match command {
         RollCommand::Default => {
             let mut roller = roller_factory();
-            return roll_default_reply_from_value(roller(DEFAULT_DIE_SIDES));
+            return local_result(roll_default_reply_from_value(roller(DEFAULT_DIE_SIDES)));
         }
         RollCommand::DiceExpression { count, sides } => {
             let mut roller = roller_factory();
-            return roll_dice_expression_reply(count, sides, &mut roller);
+            return local_result(roll_dice_expression_reply(count, sides, &mut roller));
         }
         RollCommand::UnsupportedDiceExpression => {
-            return UNSUPPORTED_DICE_EXPRESSION_REPLY.to_owned();
+            return local_result(UNSUPPORTED_DICE_EXPRESSION_REPLY.to_owned());
         }
         RollCommand::DmCheck { query } => query,
     };
 
     let query_chars = query.chars().count();
     if query_chars > DM_QUERY_MAX_CHARS {
-        return format!("判定问题过长，请控制在 {DM_QUERY_MAX_CHARS} 个字符以内。");
+        return local_result(format!(
+            "判定问题过长，请控制在 {DM_QUERY_MAX_CHARS} 个字符以内。"
+        ));
     }
 
+    let started_at = Instant::now();
     let prepared = tokio::time::timeout(
         dm_timeout,
-        prepare_dm_check(provider, model, query.as_str()),
+        prepare_dm_check(provider, model.clone(), query.as_str()),
     )
     .await;
     match prepared {
-        Ok(Ok(plan)) => {
+        Ok(Ok(prepared)) => {
             // 此处是本轮第一次生成实际骰值；上面的模型 future 已完成且方案已通过校验。
             let mut roller = roller_factory();
-            render_dm_result(&plan, roller(DEFAULT_DIE_SIDES))
+            RollExecutionResult {
+                reply: render_dm_result(&prepared.plan, roller(DEFAULT_DIE_SIDES)),
+                metrics: prepared.metrics,
+                usage: prepared.usage,
+                execution_kind: RollExecutionKind::AiDmSuccess,
+                provider_fallback_used: Some(prepared.provider_fallback_used),
+                fallback_reason: None,
+            }
         }
-        Ok(Err(error)) => {
+        Ok(Err(failure)) => {
             tracing::warn!(
-                error_code = error.code,
-                error_stage = error.stage,
+                error_code = failure.error.code,
+                error_stage = failure.error.stage,
                 query_chars,
                 "AI DM 判定方案生成失败，降级为普通 D20"
             );
             let mut roller = roller_factory();
-            roll_fallback_reply_from_value(roller(DEFAULT_DIE_SIDES))
+            let metrics = failure.metrics.unwrap_or_else(|| {
+                requested_model_metrics(provider, model.as_deref(), started_at.elapsed())
+            });
+            RollExecutionResult {
+                reply: roll_fallback_reply_from_value(roller(DEFAULT_DIE_SIDES)),
+                metrics,
+                usage: failure.usage,
+                execution_kind: RollExecutionKind::AiDmFallback,
+                provider_fallback_used: failure.provider_fallback_used,
+                fallback_reason: Some(RollFallbackReason {
+                    code: failure.error.code.to_owned(),
+                    stage: failure.error.stage.to_owned(),
+                }),
+            }
         }
         Err(_) => {
             tracing::warn!(
@@ -196,8 +293,51 @@ where
                 "AI DM 判定方案生成超时，降级为普通 D20"
             );
             let mut roller = roller_factory();
-            roll_fallback_reply_from_value(roller(DEFAULT_DIE_SIDES))
+            RollExecutionResult {
+                reply: roll_fallback_reply_from_value(roller(DEFAULT_DIE_SIDES)),
+                metrics: requested_model_metrics(provider, model.as_deref(), started_at.elapsed()),
+                usage: None,
+                execution_kind: RollExecutionKind::AiDmFallback,
+                provider_fallback_used: None,
+                fallback_reason: Some(RollFallbackReason {
+                    code: "timeout".to_owned(),
+                    stage: "roll_dm".to_owned(),
+                }),
+            }
         }
+    }
+}
+
+fn local_result(reply: String) -> RollExecutionResult {
+    RollExecutionResult {
+        reply,
+        metrics: LlmMetrics {
+            provider: "rust".to_owned(),
+            model: "roll-local".to_owned(),
+            stream: false,
+            ttfe_ms: None,
+            ttft_ms: None,
+            total_latency_ms: 0,
+        },
+        usage: None,
+        execution_kind: RollExecutionKind::Local,
+        provider_fallback_used: None,
+        fallback_reason: None,
+    }
+}
+
+fn requested_model_metrics(
+    provider: &DynLlmProvider,
+    model: Option<&str>,
+    elapsed: Duration,
+) -> LlmMetrics {
+    LlmMetrics {
+        provider: provider.name().to_owned(),
+        model: model.unwrap_or_else(|| provider.model()).to_owned(),
+        stream: false,
+        ttfe_ms: None,
+        ttft_ms: None,
+        total_latency_ms: elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
     }
 }
 
@@ -358,7 +498,10 @@ mod tests {
         }
         for input in [
             "/roll 1d20+3",
+            "/roll 1d20 + 3",
+            "/roll 1d20+  3",
             "/roll 2d10-1",
+            "/roll 2d6 - 1",
             "/roll 2D6-1",
             "/roll 101d6",
             "/roll d101",
@@ -389,6 +532,22 @@ mod tests {
     }
 
     #[test]
+    fn dm_timeout_is_clipped_to_the_request_budget_with_fallback_reserve() {
+        assert_eq!(
+            dm_timeout_for_request(Duration::from_secs(30)),
+            DM_CHECK_TIMEOUT
+        );
+        assert_eq!(
+            dm_timeout_for_request(Duration::from_secs(1)),
+            Duration::from_millis(750)
+        );
+        assert_eq!(
+            dm_timeout_for_request(Duration::from_millis(100)),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
     fn default_roll_uses_d20_and_stays_in_inclusive_range() {
         // 固定种子只验证范围不变量，不断言多次结果必须不同，避免概率性测试。
         let mut rng = StdRng::seed_from_u64(20);
@@ -416,7 +575,9 @@ mod tests {
             },
         )
         .await;
-        assert_eq!(reply, "🎲 掷出了 13 / 20");
+        assert_eq!(reply.reply, "🎲 掷出了 13 / 20");
+        assert_eq!(reply.metrics.provider, "rust");
+        assert_eq!(reply.diagnostics()["roll_execution_kind"], "local");
     }
 
     #[tokio::test]
@@ -437,7 +598,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(reply, "🎲 2d6：2 + 5 = 7");
+        assert_eq!(reply.reply, "🎲 2d6：2 + 5 = 7");
         assert!(values.next().is_none());
         assert!(requests.lock().unwrap().is_empty());
 
@@ -455,7 +616,7 @@ mod tests {
             },
         )
         .await;
-        assert_eq!(reply, "🎲 掷出了 73 / 100");
+        assert_eq!(reply.reply, "🎲 掷出了 73 / 100");
         assert!(requests.lock().unwrap().is_empty());
     }
 
@@ -473,7 +634,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(reply, UNSUPPORTED_DICE_EXPRESSION_REPLY);
+        assert_eq!(reply.reply, UNSUPPORTED_DICE_EXPRESSION_REPLY);
         assert!(requests.lock().unwrap().is_empty());
     }
 
@@ -500,10 +661,13 @@ mod tests {
         .await;
 
         assert_eq!(*events.lock().unwrap(), ["model", "rng"]);
-        assert!(reply.contains("难度：容易（DC 10）"));
-        assert!(reply.contains("投掷：14"));
-        assert!(reply.contains("✅ 成功"));
-        assert!(reply.contains("今晚适合出门。"));
+        assert!(reply.reply.contains("难度：容易（DC 10）"));
+        assert!(reply.reply.contains("投掷：14"));
+        assert!(reply.reply.contains("✅ 成功"));
+        assert!(reply.reply.contains("今晚适合出门。"));
+        assert_eq!(reply.metrics.provider, "mock");
+        assert_eq!(reply.metrics.model, "mock:dm");
+        assert_eq!(reply.diagnostics()["roll_execution_kind"], "ai_dm_success");
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].metadata["purpose"], "roll_dm_check");
@@ -528,8 +692,12 @@ mod tests {
         )
         .await;
         assert_eq!(
-            reply,
+            reply.reply,
             "AI DM 暂时无法判断本次检定难度，本次仅进行普通 D20 投掷。\n\n🎲 掷出了 7 / 20"
+        );
+        assert_eq!(
+            reply.diagnostics()["roll_fallback_reason"],
+            "roll_dm_invalid_output"
         );
     }
 
@@ -547,7 +715,15 @@ mod tests {
             |_| 9,
         )
         .await;
-        assert!(failed_reply.ends_with("🎲 掷出了 9 / 20"));
+        assert!(failed_reply.reply.ends_with("🎲 掷出了 9 / 20"));
+        assert_eq!(
+            failed_reply.diagnostics()["roll_execution_kind"],
+            "ai_dm_fallback"
+        );
+        assert_eq!(
+            failed_reply.diagnostics()["roll_fallback_reason"],
+            "provider_error"
+        );
 
         let delayed =
             Arc::new(MockProvider::replying(fortune_json()).delayed(Duration::from_millis(50)))
@@ -562,7 +738,11 @@ mod tests {
             |_| 11,
         )
         .await;
-        assert!(timeout_reply.ends_with("🎲 掷出了 11 / 20"));
+        assert!(timeout_reply.reply.ends_with("🎲 掷出了 11 / 20"));
+        assert_eq!(
+            timeout_reply.diagnostics()["roll_fallback_reason"],
+            "timeout"
+        );
     }
 
     #[tokio::test]
@@ -581,7 +761,7 @@ mod tests {
         )
         .await;
         assert_eq!(
-            reply,
+            reply.reply,
             format!("判定问题过长，请控制在 {DM_QUERY_MAX_CHARS} 个字符以内。")
         );
         assert!(events.lock().unwrap().is_empty());

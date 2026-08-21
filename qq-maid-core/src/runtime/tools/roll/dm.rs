@@ -4,11 +4,11 @@ use std::collections::HashMap;
 
 use qq_maid_llm::provider::{
     DynLlmProvider,
-    types::{ChatMessage, ChatRequest, ReasoningEffort},
+    types::{ChatMessage, ChatRequest, ReasoningEffort, TokenUsage},
 };
 use serde::Deserialize;
 
-use crate::error::LlmError;
+use crate::{error::LlmError, util::metrics::LlmMetrics};
 
 const DM_SYSTEM_PROMPT: &str = r#"你是轻量跑团 DM，只负责为用户问题制定一次 D20 判定方案。
 你看不到、不能决定也不得猜测实际骰值；不要自行掷骰，不要声称行动已经成功或失败。
@@ -84,11 +84,26 @@ pub(super) struct DmCheckPlan {
     pub(super) failure_meaning: String,
 }
 
+pub(super) struct PreparedDmCheck {
+    pub(super) plan: DmCheckPlan,
+    pub(super) metrics: LlmMetrics,
+    pub(super) usage: Option<TokenUsage>,
+    pub(super) provider_fallback_used: bool,
+}
+
+pub(super) struct DmCheckFailure {
+    pub(super) error: LlmError,
+    /// Provider 已返回但结构化结果无效时仍保留真实调用指标；传输层失败时为空。
+    pub(super) metrics: Option<LlmMetrics>,
+    pub(super) usage: Option<TokenUsage>,
+    pub(super) provider_fallback_used: Option<bool>,
+}
+
 pub(super) async fn prepare_dm_check(
     provider: &DynLlmProvider,
     model: Option<String>,
     query: &str,
-) -> Result<DmCheckPlan, LlmError> {
+) -> Result<PreparedDmCheck, Box<DmCheckFailure>> {
     let request = ChatRequest {
         // 这是 provider 关联键，不对应也不会创建 conversation session。
         session_id: "roll-dm".to_owned(),
@@ -105,8 +120,28 @@ pub(super) async fn prepare_dm_check(
             ("query_chars".to_owned(), query.chars().count().to_string()),
         ]),
     };
-    let outcome = provider.chat(request).await?;
-    parse_dm_check_plan(&outcome.reply)
+    let outcome = provider.chat(request).await.map_err(|error| {
+        Box::new(DmCheckFailure {
+            error,
+            metrics: None,
+            usage: None,
+            provider_fallback_used: None,
+        })
+    })?;
+    let plan = parse_dm_check_plan(&outcome.reply).map_err(|error| {
+        Box::new(DmCheckFailure {
+            error,
+            metrics: Some(outcome.metrics.clone()),
+            usage: outcome.usage.clone(),
+            provider_fallback_used: Some(outcome.fallback_used),
+        })
+    })?;
+    Ok(PreparedDmCheck {
+        plan,
+        metrics: outcome.metrics,
+        usage: outcome.usage,
+        provider_fallback_used: outcome.fallback_used,
+    })
 }
 
 fn parse_dm_check_plan(raw: &str) -> Result<DmCheckPlan, LlmError> {

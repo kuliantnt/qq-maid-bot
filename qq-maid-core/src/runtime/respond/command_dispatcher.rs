@@ -179,17 +179,19 @@ impl<'a> CommandDispatcher<'a> {
             } else {
                 None
             };
-            let reply = crate::runtime::tools::roll::execute_roll_command(
+            let execution = crate::runtime::tools::roll::execute_roll_command(
                 &self.service.provider,
                 model,
                 command.clone(),
+                self.service.request_timeout,
             )
             .await;
-            return Ok(DispatchOutcome::Respond(Box::new(command_response(
-                reply,
-                None,
-                Some("roll"),
-            ))));
+            let diagnostics = execution.diagnostics();
+            let mut response = command_response(execution.reply, None, Some("roll"));
+            response.metrics = execution.metrics;
+            response.usage = execution.usage;
+            response.diagnostics = Some(diagnostics);
+            return Ok(DispatchOutcome::Respond(Box::new(response)));
         }
 
         // pending、Todo 可见编号和 Memory 列表序号属于群内个人交互状态；

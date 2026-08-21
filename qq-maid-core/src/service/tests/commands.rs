@@ -293,6 +293,14 @@ async fn core_roll_defaults_to_d20_and_is_consumed_without_model_or_session() {
             .expect("roll reply should contain a D20 value");
         assert!((1..=20).contains(&value));
         assert_eq!(response.command.as_deref(), Some("roll"));
+        let diagnostics = response
+            .diagnostics
+            .as_ref()
+            .expect("local roll should expose diagnostics");
+        assert_eq!(diagnostics["roll_execution_kind"], "local");
+        assert_eq!(diagnostics["roll_provider"], "rust");
+        assert_eq!(diagnostics["roll_model"], "roll-local");
+        assert_eq!(diagnostics["roll_fallback_used"], false);
     };
     assert_d20_reply(&response);
 
@@ -356,6 +364,18 @@ async fn core_roll_executes_dice_expression_without_model_tool_or_session() {
     );
     assert_eq!(response.command.as_deref(), Some("roll"));
 
+    let CoreRespondOutput::Complete(unsupported_response) = service
+        .respond(private_request("/roll 1d20 + 3"))
+        .await
+        .unwrap()
+    else {
+        panic!("unsupported spaced modifier should complete synchronously");
+    };
+    assert_eq!(
+        unsupported_response.text_content(),
+        Some("暂不支持该骰子表达式。目前支持 dM 或 NdM（骰子个数和面数均为 1–100）。")
+    );
+
     let meta = SessionMeta::new_with_account(
         private_scope(),
         Some("u1".to_owned()),
@@ -397,6 +417,15 @@ async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
             _ => assert!(text.contains("❌ 失败")),
         }
         assert_eq!(response.command.as_deref(), Some("roll"));
+        let diagnostics = response
+            .diagnostics
+            .as_ref()
+            .expect("roll DM should expose diagnostics");
+        assert_eq!(diagnostics["roll_execution_kind"], "ai_dm_success");
+        assert_eq!(diagnostics["roll_provider"], "test-provider");
+        assert_eq!(diagnostics["roll_model"], "test-model");
+        assert_eq!(diagnostics["roll_total_latency_ms"], 1);
+        assert_eq!(diagnostics["roll_fallback_used"], false);
     };
 
     let CoreRespondOutput::Complete(private_response) = service
@@ -452,6 +481,43 @@ async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
     );
     assert!(session_store.get_active(&private_meta).unwrap().is_none());
     assert!(session_store.get_active(&group_meta).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn core_roll_dm_short_request_timeout_keeps_local_fallback() {
+    let provider = TestProvider::delayed(
+        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"出门","failure_meaning":"宅家"}"#,
+        Duration::from_secs(2),
+    );
+    let state = test_state(provider.clone(), 1);
+    let service = CoreHandle::new(state);
+    let started_at = std::time::Instant::now();
+
+    let CoreRespondOutput::Complete(response) = service
+        .respond(private_request("/roll 今晚出门吗"))
+        .await
+        .unwrap()
+    else {
+        panic!("timed out roll DM should complete with a local fallback");
+    };
+
+    assert!(started_at.elapsed() < Duration::from_millis(1500));
+    assert!(
+        response
+            .text_content()
+            .is_some_and(|text| text.contains("本次仅进行普通 D20 投掷"))
+    );
+    let diagnostics = response
+        .diagnostics
+        .as_ref()
+        .expect("fallback should expose diagnostics");
+    assert_eq!(diagnostics["roll_execution_kind"], "ai_dm_fallback");
+    assert_eq!(diagnostics["roll_provider"], "test-provider");
+    assert_eq!(diagnostics["roll_model"], "test-model");
+    assert!(diagnostics["roll_total_latency_ms"].as_u64().unwrap() >= 700);
+    assert_eq!(diagnostics["roll_fallback_reason"], "timeout");
+    assert_eq!(diagnostics["roll_fallback_stage"], "roll_dm");
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

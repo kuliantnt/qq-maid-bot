@@ -125,6 +125,8 @@ pub struct RespondExecutors {
 /// `RustRespondService` 的策略和输出配置。
 #[derive(Clone)]
 pub struct RespondServiceOptions {
+    /// Core 整轮请求预算；领域内短模型调用必须据此提前收口并保留回退时间。
+    pub request_timeout: std::time::Duration,
     /// Session Dream 配置；启用位与确定性 Memory 整理独立。
     pub memory_dream: MemoryDreamConfig,
     /// RSS 摘要最大字符数
@@ -316,6 +318,8 @@ pub struct RustRespondService {
     bot_display_name: String,
     /// 解析用户命令和渲染确定性命令文案时使用同一个前缀快照。
     command_prefix: CommandPrefix,
+    /// Core 整轮请求预算，供具备本地回退的独立模型调用裁剪内部超时。
+    pub(crate) request_timeout: std::time::Duration,
 }
 
 impl RustRespondService {
@@ -387,6 +391,7 @@ impl RustRespondService {
             web_search_timeouts: options.web_search_timeouts,
             bot_display_name: options.bot_display_name,
             command_prefix: options.command_prefix,
+            request_timeout: options.request_timeout,
         }
     }
 
