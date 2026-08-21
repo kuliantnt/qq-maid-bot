@@ -151,6 +151,40 @@ async fn roll_dm_bypasses_pending_without_entering_tool_loop() {
 }
 
 #[tokio::test]
+async fn local_roll_expression_preserves_pending_without_model_or_tool() {
+    let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let service = test_service_with_provider_and_tool_calling(provider.clone(), true);
+    let owner = private_todo_owner();
+    let item = completed_todo(&service, &owner, "保留的已完成待办");
+    let pending = save_todo_pending(
+        &service,
+        &private_test_meta(),
+        todo_delete_pending(item.clone(), &owner.key),
+    );
+
+    let response = service.respond(private_message("/roll 2d6")).await.unwrap();
+
+    assert!(
+        response
+            .text
+            .as_deref()
+            .is_some_and(|text| text.starts_with("🎲 2d6："))
+    );
+    assert_eq!(response.command.as_deref(), Some("roll"));
+    assert_private_pending_unchanged(&service, &pending);
+    assert_eq!(
+        service
+            .task_store
+            .get_by_id(&owner, &item.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TodoStatus::Completed
+    );
+    assert_provider_unused(&provider);
+}
+
+#[tokio::test]
 async fn codex_easter_egg_does_not_consume_todo_delete_confirmation() {
     let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(provider.clone(), true);

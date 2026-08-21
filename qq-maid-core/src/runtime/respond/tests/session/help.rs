@@ -127,6 +127,24 @@ async fn help_all_lists_public_commands_by_module() {
 }
 
 #[tokio::test]
+async fn help_roll_describes_simple_dice_expressions_and_limits() {
+    let response = test_service().respond(message("/help roll")).await.unwrap();
+    let text = response.text.unwrap();
+    let markdown = response.markdown.unwrap();
+
+    for expected in ["dM", "NdM", "2d6", "d100", "1d20+3", "1–100", "暂不支持"] {
+        assert!(
+            text.contains(expected),
+            "missing roll help text: {expected}"
+        );
+        assert!(
+            markdown.contains(expected),
+            "missing roll help markdown: {expected}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn help_memory_describes_scopes_confirmation_and_profile_opt_out() {
     let response = test_service()
         .respond(message("/help memory"))

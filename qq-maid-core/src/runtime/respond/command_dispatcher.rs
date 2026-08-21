@@ -156,8 +156,8 @@ impl<'a> CommandDispatcher<'a> {
             return Ok(DispatchOutcome::Respond(Box::new(response)));
         }
 
-        // `/roll` 在读取 pending/session 前收口；带问题版本只做一次独立 DM 方案调用，
-        // 仍不读取会话历史、消费 pending 或进入普通 Agent / Tool Loop。
+        // `/roll` 在读取 pending/session 前收口；简单骰子表达式在本地执行，带问题版本只做
+        // 一次独立 DM 方案调用，二者都不读取会话历史、消费 pending 或进入普通 Agent / Tool Loop。
         if let Some(RegisteredSlashCommand::Roll(command)) = registered_slash_command.as_ref() {
             let model = if matches!(
                 command,

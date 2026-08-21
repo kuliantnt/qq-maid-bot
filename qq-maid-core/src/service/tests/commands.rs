@@ -317,6 +317,60 @@ async fn core_roll_defaults_to_d20_and_is_consumed_without_model_or_session() {
 }
 
 #[tokio::test]
+async fn core_roll_executes_dice_expression_without_model_tool_or_session() {
+    let provider =
+        TestProvider::replying("不应调用").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let session_store = state.stores.session_store.clone();
+    let service = CoreHandle::new(state);
+
+    let classification = service
+        .classify_inbound(private_request("/roll 2d6"))
+        .await
+        .unwrap();
+    assert_eq!(classification.kind, CoreInboundKind::Immediate);
+
+    let CoreRespondOutput::Complete(response) =
+        service.respond(private_request("/roll 2d6")).await.unwrap()
+    else {
+        panic!("dice expression should complete synchronously");
+    };
+    let text = response
+        .text_content()
+        .expect("dice expression should return text");
+    let calculation = text
+        .strip_prefix("🎲 2d6：")
+        .expect("2d6 reply should identify the expression");
+    let (values, total) = calculation
+        .split_once(" = ")
+        .expect("2d6 reply should contain a total");
+    let values = values
+        .split(" + ")
+        .map(|value| value.parse::<u8>().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 2);
+    assert!(values.iter().all(|value| (1..=6).contains(value)));
+    assert_eq!(
+        total.parse::<u16>().unwrap(),
+        values.iter().map(|value| u16::from(*value)).sum::<u16>()
+    );
+    assert_eq!(response.command.as_deref(), Some("roll"));
+
+    let meta = SessionMeta::new_with_account(
+        private_scope(),
+        Some("u1".to_owned()),
+        None,
+        None,
+        None,
+        "qq_official",
+        Some("app-1".to_owned()),
+    );
+    assert!(session_store.get_active(&meta).unwrap().is_none());
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
     let provider = TestProvider::replying(
         r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"今晚适合出门","failure_meaning":"今晚适合宅家"}"#,
