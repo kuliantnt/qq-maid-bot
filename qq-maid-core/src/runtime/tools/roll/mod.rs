@@ -6,6 +6,7 @@
 use std::{sync::OnceLock, time::Duration};
 
 use qq_maid_llm::provider::DynLlmProvider;
+use rand::RngExt;
 use regex::Regex;
 
 use crate::runtime::command::parse_slash_command;
@@ -98,30 +99,61 @@ pub(crate) async fn execute_roll_command(
     model: Option<String>,
     command: RollCommand,
 ) -> String {
-    let mut rng = fastrand::Rng::new();
-    execute_roll_command_with_roller(provider, model, command, DM_CHECK_TIMEOUT, move |sides| {
-        if sides == DEFAULT_DIE_SIDES {
-            roll_default_with_rng(&mut rng).value
-        } else {
-            rng.u8(1..=sides)
-        }
-    })
+    execute_roll_command_with_roller_factory(
+        provider,
+        model,
+        command,
+        DM_CHECK_TIMEOUT,
+        thread_roller,
+    )
     .await
 }
 
+/// 按需创建线程级 RNG，避免不可 `Send` 的句柄跨越 AI DM 的异步模型调用。
+/// 同一条 NdM 命令只创建一次 roller，因此连续投掷会复用同一个 RNG 句柄。
+fn thread_roller() -> impl FnMut(u8) -> u8 {
+    let mut rng = rand::rng();
+    move |sides| {
+        if sides == DEFAULT_DIE_SIDES {
+            roll_default_with_rng(&mut rng).value
+        } else {
+            rng.random_range(1..=sides)
+        }
+    }
+}
+
+#[cfg(test)]
 async fn execute_roll_command_with_roller<F>(
     provider: &DynLlmProvider,
     model: Option<String>,
     command: RollCommand,
     dm_timeout: Duration,
-    mut roller: F,
+    roller: F,
 ) -> String
 where
     F: FnMut(u8) -> u8,
 {
+    execute_roll_command_with_roller_factory(provider, model, command, dm_timeout, || roller).await
+}
+
+async fn execute_roll_command_with_roller_factory<RF, F>(
+    provider: &DynLlmProvider,
+    model: Option<String>,
+    command: RollCommand,
+    dm_timeout: Duration,
+    roller_factory: RF,
+) -> String
+where
+    RF: FnOnce() -> F,
+    F: FnMut(u8) -> u8,
+{
     let query = match command {
-        RollCommand::Default => return roll_default_reply_from_value(roller(DEFAULT_DIE_SIDES)),
+        RollCommand::Default => {
+            let mut roller = roller_factory();
+            return roll_default_reply_from_value(roller(DEFAULT_DIE_SIDES));
+        }
         RollCommand::DiceExpression { count, sides } => {
+            let mut roller = roller_factory();
             return roll_dice_expression_reply(count, sides, &mut roller);
         }
         RollCommand::UnsupportedDiceExpression => {
@@ -143,6 +175,7 @@ where
     match prepared {
         Ok(Ok(plan)) => {
             // 此处是本轮第一次生成实际骰值；上面的模型 future 已完成且方案已通过校验。
+            let mut roller = roller_factory();
             render_dm_result(&plan, roller(DEFAULT_DIE_SIDES))
         }
         Ok(Err(error)) => {
@@ -152,6 +185,7 @@ where
                 query_chars,
                 "AI DM 判定方案生成失败，降级为普通 D20"
             );
+            let mut roller = roller_factory();
             roll_fallback_reply_from_value(roller(DEFAULT_DIE_SIDES))
         }
         Err(_) => {
@@ -161,6 +195,7 @@ where
                 query_chars,
                 "AI DM 判定方案生成超时，降级为普通 D20"
             );
+            let mut roller = roller_factory();
             roll_fallback_reply_from_value(roller(DEFAULT_DIE_SIDES))
         }
     }
@@ -195,9 +230,12 @@ fn roll_fallback_reply_from_value(value: u8) -> String {
     )
 }
 
-fn roll_default_with_rng(rng: &mut fastrand::Rng) -> RollResult {
+fn roll_default_with_rng<R>(rng: &mut R) -> RollResult
+where
+    R: rand::Rng + ?Sized,
+{
     RollResult {
-        value: rng.u8(1..=DEFAULT_DIE_SIDES),
+        value: rng.random_range(1..=DEFAULT_DIE_SIDES),
         sides: DEFAULT_DIE_SIDES,
     }
 }
@@ -211,6 +249,7 @@ mod tests {
         ChatOutcome, LlmProvider,
         types::{ChatRequest, TokenUsage},
     };
+    use rand::{SeedableRng, rngs::StdRng};
 
     use crate::{error::LlmError, util::metrics::LlmMetrics};
 
@@ -352,7 +391,7 @@ mod tests {
     #[test]
     fn default_roll_uses_d20_and_stays_in_inclusive_range() {
         // 固定种子只验证范围不变量，不断言多次结果必须不同，避免概率性测试。
-        let mut rng = fastrand::Rng::with_seed(20);
+        let mut rng = StdRng::seed_from_u64(20);
         for _ in 0..4_096 {
             let result = roll_default_with_rng(&mut rng);
             assert_eq!(result.sides, 20);
