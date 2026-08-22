@@ -15,7 +15,7 @@ mod dm;
 mod outcome;
 
 use dice::{DiceExpression, DiceExpressionParse, RollResult, Roller};
-use dm::prepare_dm_check;
+use dm::{DmCheckPlan, prepare_dm_check};
 use outcome::render_dm_result;
 
 /// AI DM 问题的字符数上限；超过上限时拒绝请求，不做静默截断。
@@ -61,6 +61,41 @@ impl RollExecutionKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct RollDcDiagnostics {
+    dice_expression: String,
+    dice_minimum: i32,
+    dice_maximum: i32,
+    difficulty: &'static str,
+    computed_dc: i32,
+    dc_strategy: &'static str,
+}
+
+impl RollDcDiagnostics {
+    fn from_plan(expression: &DiceExpression, plan: &DmCheckPlan) -> Self {
+        let (dice_minimum, dice_maximum) = expression.total_range();
+        let computed = dm::compute_dc(expression, plan.difficulty);
+        debug_assert_eq!(computed.value, plan.dc);
+        Self {
+            dice_expression: expression.to_string(),
+            dice_minimum,
+            dice_maximum,
+            difficulty: plan.difficulty.key(),
+            computed_dc: computed.value,
+            dc_strategy: computed.strategy.as_str(),
+        }
+    }
+
+    fn add_to(&self, diagnostics: &mut Value) {
+        diagnostics["dice_expression"] = json!(self.dice_expression);
+        diagnostics["dice_minimum"] = json!(self.dice_minimum);
+        diagnostics["dice_maximum"] = json!(self.dice_maximum);
+        diagnostics["difficulty"] = json!(self.difficulty);
+        diagnostics["computed_dc"] = json!(self.computed_dc);
+        diagnostics["dc_strategy"] = json!(self.dc_strategy);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RollFallbackReason {
     code: String,
     stage: String,
@@ -74,6 +109,7 @@ pub(crate) struct RollExecutionResult {
     execution_kind: RollExecutionKind,
     provider_fallback_used: Option<bool>,
     fallback_reason: Option<RollFallbackReason>,
+    dc_diagnostics: Option<RollDcDiagnostics>,
 }
 
 impl RollExecutionResult {
@@ -99,6 +135,9 @@ impl RollExecutionResult {
         if let Some(reason) = &self.fallback_reason {
             diagnostics["roll_fallback_reason"] = json!(reason.code);
             diagnostics["roll_fallback_stage"] = json!(reason.stage);
+        }
+        if let Some(dc_diagnostics) = &self.dc_diagnostics {
+            dc_diagnostics.add_to(&mut diagnostics);
         }
         diagnostics
     }
@@ -233,6 +272,7 @@ where
                 execution_kind: RollExecutionKind::AiDmSuccess,
                 provider_fallback_used: Some(prepared.provider_fallback_used),
                 fallback_reason: None,
+                dc_diagnostics: Some(RollDcDiagnostics::from_plan(&expression, &prepared.plan)),
             }
         }
         Ok(Err(failure)) => {
@@ -259,6 +299,7 @@ where
                     code: failure.error.code.to_owned(),
                     stage: failure.error.stage.to_owned(),
                 }),
+                dc_diagnostics: None,
             }
         }
         Err(_) => {
@@ -282,6 +323,7 @@ where
                     code: "timeout".to_owned(),
                     stage: "roll_dm".to_owned(),
                 }),
+                dc_diagnostics: None,
             }
         }
     }
@@ -302,6 +344,7 @@ fn local_result(reply: String) -> RollExecutionResult {
         execution_kind: RollExecutionKind::Local,
         provider_fallback_used: None,
         fallback_reason: None,
+        dc_diagnostics: None,
     }
 }
 
@@ -443,7 +486,7 @@ mod tests {
     }
 
     fn fortune_json() -> &'static str {
-        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","dc":10,"success_meaning":"今晚适合出门","failure_meaning":"今晚适合宅家"}"#
+        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"今晚适合出门","failure_meaning":"今晚适合宅家"}"#
     }
 
     fn dice_expression(input: &str) -> DiceExpression {
@@ -679,6 +722,12 @@ mod tests {
         assert_eq!(reply.metrics.provider, "mock");
         assert_eq!(reply.metrics.model, "mock:dm");
         assert_eq!(reply.diagnostics()["roll_execution_kind"], "ai_dm_success");
+        assert_eq!(reply.diagnostics()["dice_expression"], "1d20");
+        assert_eq!(reply.diagnostics()["dice_minimum"], 1);
+        assert_eq!(reply.diagnostics()["dice_maximum"], 20);
+        assert_eq!(reply.diagnostics()["difficulty"], "easy");
+        assert_eq!(reply.diagnostics()["computed_dc"], 10);
+        assert_eq!(reply.diagnostics()["dc_strategy"], "legacy_d20");
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].metadata["purpose"], "roll_dm_check");
@@ -696,9 +745,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn custom_2d20_context_is_sent_before_roll_and_ai_dc_is_used() {
+    async fn custom_2d20_plus_modifier_uses_core_entertainment_dc_before_roll() {
         let provider = MockProvider::replying(
-            r#"{"type":"ability","check_name":"说服检定","difficulty":"hard","dc":26,"success_meaning":"守卫同意放行","failure_meaning":"守卫拒绝放行"}"#,
+            r#"{"type":"ability","check_name":"说服检定","difficulty":"easy","success_meaning":"守卫同意放行","failure_meaning":"守卫拒绝放行"}"#,
         );
         let requests = provider.requests.clone();
         let events = provider.events.clone();
@@ -709,7 +758,7 @@ mod tests {
             &provider,
             Some("mock:dm".to_owned()),
             RollCommand::DmCheck {
-                expression: Some(dice_expression("2d20")),
+                expression: Some(dice_expression("2d20+4")),
                 query: "我能否说服守卫".to_owned(),
             },
             Duration::from_secs(1),
@@ -722,17 +771,24 @@ mod tests {
         .await;
 
         assert_eq!(*events.lock().unwrap(), ["model", "rng", "rng"]);
-        assert!(reply.reply.contains("投掷：2d20：14 + 18 = 32"));
+        assert!(reply.reply.contains("难度：容易（DC 20）"));
+        assert!(reply.reply.contains("投掷：2d20+4：14 + 18 + 4 = 36"));
         assert!(reply.reply.contains("✅ 成功"));
+        assert_eq!(reply.diagnostics()["dice_expression"], "2d20+4");
+        assert_eq!(reply.diagnostics()["dice_minimum"], 6);
+        assert_eq!(reply.diagnostics()["dice_maximum"], 44);
+        assert_eq!(reply.diagnostics()["difficulty"], "easy");
+        assert_eq!(reply.diagnostics()["computed_dc"], 20);
+        assert_eq!(reply.diagnostics()["dc_strategy"], "entertainment_range");
         assert!(values.next().is_none());
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         let serialized = serde_json::to_string(&requests[0]).unwrap();
         assert!(serialized.contains("我能否说服守卫"));
-        assert!(serialized.contains("2d20"));
-        assert!(serialized.contains("最小总值：2"));
-        assert!(serialized.contains("最大总值：40"));
-        for actual_roll_value in ["14", "18", "32"] {
+        assert!(serialized.contains("2d20+4"));
+        assert!(serialized.contains("最小总值：6"));
+        assert!(serialized.contains("最大总值：44"));
+        for actual_roll_value in ["14", "18", "36"] {
             assert!(
                 !serialized.contains(actual_roll_value),
                 "request leaked actual roll value {actual_roll_value}: {serialized}"
@@ -743,15 +799,15 @@ mod tests {
     #[tokio::test]
     async fn dm_receives_canonical_expression_and_range_for_each_supported_shape() {
         for (input, canonical, minimum, maximum, dc) in [
-            ("1d6", "1d6", 1, 6, 4),
+            ("2d20", "2d20", 2, 40, 21),
+            ("2d20+4", "2d20+4", 6, 44, 25),
             ("d100", "1d100", 1, 100, 51),
             ("1d20+3", "1d20+3", 4, 23, 14),
             ("1d8+1d6+4", "1d8+1d6+4", 6, 18, 12),
         ] {
-            let reply_json = format!(
-                r#"{{"type":"fortune","check_name":"命运检定","difficulty":"medium","dc":{dc},"success_meaning":"成功","failure_meaning":"失败"}}"#
+            let provider = MockProvider::replying(
+                r#"{"type":"fortune","check_name":"命运检定","difficulty":"medium","success_meaning":"成功","failure_meaning":"失败"}"#,
             );
-            let provider = MockProvider::replying(&reply_json);
             let requests = provider.requests.clone();
             let provider = Arc::new(provider) as DynLlmProvider;
             let result = execute_roll_command_with_roller(
@@ -767,6 +823,7 @@ mod tests {
             .await;
 
             assert_eq!(result.diagnostics()["roll_execution_kind"], "ai_dm_success");
+            assert!(result.reply.contains(&format!("DC {dc}")), "{input}");
             let requests = requests.lock().unwrap();
             let request = &requests[0];
             assert_eq!(request.metadata["dice_expression"], canonical, "{input}");
@@ -788,9 +845,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_or_result_bearing_ai_dc_outputs_use_explicit_fallback() {
+    async fn invalid_or_result_bearing_ai_outputs_use_explicit_fallback() {
         for invalid_reply in [
-            r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"出门","failure_meaning":"宅家"}"#,
+            r#"{"type":"fortune","check_name":"命运检定","success_meaning":"出门","failure_meaning":"宅家"}"#,
             r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","dc":"10","success_meaning":"出门","failure_meaning":"宅家"}"#,
             r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","dc":2147483648,"success_meaning":"出门","failure_meaning":"宅家"}"#,
             r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","dc":1,"success_meaning":"出门","failure_meaning":"宅家"}"#,

@@ -29,6 +29,8 @@ impl RollOutcome {
 
 pub(super) fn render_dm_result(plan: &DmCheckPlan, result: &RollResult) -> String {
     let dc = plan.dc;
+    let (dice_minimum, dice_maximum) = result.expression.total_range();
+    let computed_dc = super::dm::compute_dc(&result.expression, plan.difficulty);
     let outcome = RollOutcome::resolve(result, dc);
     let check_name = display_check_name(&plan.check_name);
     let check_type = match plan.check_type {
@@ -37,8 +39,12 @@ pub(super) fn render_dm_result(plan: &DmCheckPlan, result: &RollResult) -> Strin
     };
     tracing::debug!(
         check_type,
-        difficulty = plan.difficulty.display_name(),
+        difficulty = plan.difficulty.key(),
         dc,
+        dice_minimum,
+        dice_maximum,
+        computed_dc = computed_dc.value,
+        dc_strategy = computed_dc.strategy.as_str(),
         roll_expression = %result.expression,
         roll_total = result.total,
         result = outcome.as_str(),

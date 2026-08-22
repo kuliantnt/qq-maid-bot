@@ -408,7 +408,7 @@ async fn core_roll_executes_dice_expression_without_model_tool_or_session() {
 #[tokio::test]
 async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
     let provider = TestProvider::replying(
-        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","dc":10,"success_meaning":"今晚适合出门","failure_meaning":"今晚适合宅家"}"#,
+        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"今晚适合出门","failure_meaning":"今晚适合宅家"}"#,
     )
     .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider.clone(), 5, true);
@@ -504,9 +504,54 @@ async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
 }
 
 #[tokio::test]
+async fn core_roll_dm_custom_expression_uses_core_entertainment_dc() {
+    let provider = TestProvider::replying(
+        r#"{"type":"fortune","check_name":"是否吃夜宵检定","difficulty":"easy","success_meaning":"吃夜宵","failure_meaning":"今晚不吃"}"#,
+    );
+    let state = test_state(provider.clone(), 5);
+    let service = CoreHandle::new(state);
+
+    let CoreRespondOutput::Complete(response) = service
+        .respond(private_request("/roll 2d20+4 我想要不要吃夜宵"))
+        .await
+        .unwrap()
+    else {
+        panic!("custom roll DM command should complete synchronously");
+    };
+
+    let text = response
+        .text_content()
+        .expect("custom roll DM should return text");
+    assert!(text.contains("难度：容易（DC 20）"));
+    let diagnostics = response
+        .diagnostics
+        .as_ref()
+        .expect("custom roll DM should expose diagnostics");
+    assert_eq!(diagnostics["dice_expression"], "2d20+4");
+    assert_eq!(diagnostics["dice_minimum"], 6);
+    assert_eq!(diagnostics["dice_maximum"], 44);
+    assert_eq!(diagnostics["difficulty"], "easy");
+    assert_eq!(diagnostics["computed_dc"], 20);
+    assert_eq!(diagnostics["dc_strategy"], "entertainment_range");
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].metadata["dice_expression"], "2d20+4");
+    assert_eq!(requests[0].metadata["dice_minimum"], "6");
+    assert_eq!(requests[0].metadata["dice_maximum"], "44");
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("投掷：")),
+        "actual roll result must not enter the AI request"
+    );
+}
+
+#[tokio::test]
 async fn core_roll_dm_short_request_timeout_keeps_local_fallback() {
     let provider = TestProvider::delayed(
-        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","dc":10,"success_meaning":"出门","failure_meaning":"宅家"}"#,
+        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"出门","failure_meaning":"宅家"}"#,
         Duration::from_secs(2),
     );
     let state = test_state(provider.clone(), 1);

@@ -53,7 +53,7 @@ impl DiceExpression {
         self.is_single_unmodified() && self.terms[0].sides == DEFAULT_DIE_SIDES
     }
 
-    /// 确定性计算表达式的理论总值范围，供 AI DM 制定 DC 和 Core 校验使用。
+    /// 确定性计算表达式的理论总值范围，供 AI DM 选择难度、Core 计算 DC 和诊断使用。
     ///
     /// 解析器已限制骰子数量、面数和修正值，因此这里使用 `i32` 不会溢出，也不需要
     /// 让模型重复解析或推算骰式。

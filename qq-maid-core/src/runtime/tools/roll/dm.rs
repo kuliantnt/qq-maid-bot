@@ -16,10 +16,10 @@ const DM_SYSTEM_PROMPT: &str = r#"你是轻量跑团 DM，只负责为用户问�
 骰式由用户命令或 Core 规则引擎决定；你看不到、不能决定也不得猜测实际骰值；不要自行掷骰，不要声称行动已经成功或失败。
 日常二选一、运气和娱乐选择优先使用 fortune，通常选择 easy；只有问题明确很难时才提高难度。
 潜行、说服、观察等实际行动使用 ability。check_name 是简短的完整检定名称。
-不使用角色卡、属性值、熟练、装备或任何加值。difficulty 只能取允许的枚举，dc 是 Core 最终使用的实际整数阈值。
-通常必须选择“最小总值 < dc <= 最大总值”，避免必成功或必失败。默认 1d20 沿用常用 DC：very_easy=5、easy=10、medium=15、hard=20、very_hard=25、nearly_impossible=30；后两档由 Core 的 Natural 20 规则保留成功机会。
+不使用角色卡、属性值、熟练、装备或任何加值。difficulty 只能取允许的枚举；你只选择 difficulty，不提供 dc。
+实际 DC 由 Core 根据骰式理论范围和固定的娱乐模式难度刻度计算；这不是 DND5E 或正式 TRPG 规则。不要输出 dc 字段。
 只输出一个 JSON 对象，不要 Markdown、解释或额外字段：
-{"type":"ability|fortune","check_name":"...","difficulty":"very_easy|easy|medium|hard|very_hard|nearly_impossible","dc":15,"success_meaning":"...","failure_meaning":"..."}"#;
+{"type":"ability|fortune","check_name":"...","difficulty":"very_easy|easy|medium|hard|very_hard|nearly_impossible","success_meaning":"...","failure_meaning":"..."}"#;
 
 const CHECK_NAME_MAX_CHARS: usize = 40;
 const MEANING_MAX_CHARS: usize = 120;
@@ -56,6 +56,29 @@ impl Difficulty {
         }
     }
 
+    /// 通用骰式的娱乐模式区间位置，使用有理数避免浮点取整漂移。
+    const fn entertainment_position(self) -> (i32, i32) {
+        match self {
+            Self::VeryEasy => (1, 5),
+            Self::Easy => (7, 20),
+            Self::Medium => (1, 2),
+            Self::Hard => (13, 20),
+            Self::VeryHard => (4, 5),
+            Self::NearlyImpossible => (19, 20),
+        }
+    }
+
+    pub(super) const fn key(self) -> &'static str {
+        match self {
+            Self::VeryEasy => "very_easy",
+            Self::Easy => "easy",
+            Self::Medium => "medium",
+            Self::Hard => "hard",
+            Self::VeryHard => "very_hard",
+            Self::NearlyImpossible => "nearly_impossible",
+        }
+    }
+
     pub(super) const fn display_name(self) -> &'static str {
         match self {
             Self::VeryEasy => "很容易",
@@ -68,6 +91,53 @@ impl Difficulty {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DcStrategy {
+    LegacyD20,
+    EntertainmentRange,
+}
+
+impl DcStrategy {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::LegacyD20 => "legacy_d20",
+            Self::EntertainmentRange => "entertainment_range",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ComputedDc {
+    pub(super) value: i32,
+    pub(super) strategy: DcStrategy,
+}
+
+/// 根据骰式理论范围和娱乐难度刻度计算 Core 实际使用的 DC。
+///
+/// 默认无修正 `1d20` 保留历史固定映射；其它表达式按区间位置计算，并统一向上取整，
+/// 避免浮点误差或截断导致难度意外降低。宽度为零时不存在区间内部阈值，公式结果为
+/// 唯一可表示的理论范围端点。
+pub(super) fn compute_dc(expression: &DiceExpression, difficulty: Difficulty) -> ComputedDc {
+    if expression.is_default_d20() {
+        return ComputedDc {
+            value: difficulty.conventional_d20_dc(),
+            strategy: DcStrategy::LegacyD20,
+        };
+    }
+
+    let (minimum, maximum) = expression.total_range();
+    let width = i64::from(maximum) - i64::from(minimum);
+    let (numerator, denominator) = difficulty.entertainment_position();
+    let offset =
+        (width * i64::from(numerator) + i64::from(denominator) - 1) / i64::from(denominator);
+    let value = i64::from(minimum) + offset;
+    debug_assert!(value >= i64::from(i32::MIN) && value <= i64::from(i32::MAX));
+    ComputedDc {
+        value: value as i32,
+        strategy: DcStrategy::EntertainmentRange,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawDmCheckPlan {
@@ -75,7 +145,6 @@ struct RawDmCheckPlan {
     check_type: CheckType,
     check_name: String,
     difficulty: Difficulty,
-    dc: i32,
     success_meaning: String,
     failure_meaning: String,
 }
@@ -169,12 +238,12 @@ fn parse_dm_check_plan(raw: &str, expression: &DiceExpression) -> Result<DmCheck
             "roll_dm",
         )
     })?;
-    validate_dc(raw.dc, raw.difficulty, expression)?;
+    let computed_dc = compute_dc(expression, raw.difficulty);
     Ok(DmCheckPlan {
         check_type: raw.check_type,
         check_name: validate_text_field(raw.check_name, "check_name", CHECK_NAME_MAX_CHARS)?,
         difficulty: raw.difficulty,
-        dc: raw.dc,
+        dc: computed_dc.value,
         success_meaning: validate_text_field(
             raw.success_meaning,
             "success_meaning",
@@ -186,30 +255,6 @@ fn parse_dm_check_plan(raw: &str, expression: &DiceExpression) -> Result<DmCheck
             MEANING_MAX_CHARS,
         )?,
     })
-}
-
-fn validate_dc(
-    dc: i32,
-    difficulty: Difficulty,
-    expression: &DiceExpression,
-) -> Result<(), LlmError> {
-    // 默认无修正 D20 是历史兼容路径，difficulty 与 DC 必须一一对应；very_hard=25
-    // 和 nearly_impossible=30 虽超出理论最大值，仍由 Natural 20 特殊规则保留成功机会。
-    let is_valid = if expression.is_default_d20() {
-        dc == difficulty.conventional_d20_dc()
-    } else {
-        // 自定义骰式不套用 D20 固定表，只接受有实际成功机会且不会必定成功的阈值。
-        let (minimum, maximum) = expression.total_range();
-        dc > minimum && dc <= maximum
-    };
-    if is_valid {
-        return Ok(());
-    }
-    Err(LlmError::new(
-        "roll_dm_invalid_output",
-        "AI DM returned invalid `dc` for dice range",
-        "roll_dm",
-    ))
 }
 
 fn strip_outer_json_fence(text: &str) -> Option<&str> {
@@ -250,23 +295,23 @@ mod tests {
     }
 
     #[test]
-    fn parses_allowed_schema_with_actual_dc() {
+    fn parses_difficulty_only_schema_and_computes_dc_in_core() {
         let plan = parse_dm_check_plan(
-            r#"{"type":"ability","check_name":"说服检定","difficulty":"hard","dc":26,"success_meaning":"成功说服守卫","failure_meaning":"守卫拒绝放行"}"#,
-            &expression("2d20"),
+            r#"{"type":"ability","check_name":"说服检定","difficulty":"easy","success_meaning":"成功说服守卫","failure_meaning":"守卫拒绝放行"}"#,
+            &expression("2d20+4"),
         )
         .unwrap();
         assert_eq!(plan.check_type, CheckType::Ability);
-        assert_eq!(plan.difficulty.display_name(), "困难");
-        assert_eq!(plan.dc, 26);
+        assert_eq!(plan.difficulty, Difficulty::Easy);
+        assert_eq!(plan.dc, 20);
     }
 
     #[test]
     fn accepts_a_single_outer_json_code_fence() {
         for raw in [
-            "```json\n{\"type\":\"fortune\",\"check_name\":\"命运检定\",\"difficulty\":\"easy\",\"dc\":10,\"success_meaning\":\"喝咖啡\",\"failure_meaning\":\"不喝咖啡\"}\n```",
-            "```JSON\r\n{\"type\":\"fortune\",\"check_name\":\"命运检定\",\"difficulty\":\"easy\",\"dc\":10,\"success_meaning\":\"喝咖啡\",\"failure_meaning\":\"不喝咖啡\"}\r\n```",
-            "```\n{\"type\":\"fortune\",\"check_name\":\"命运检定\",\"difficulty\":\"easy\",\"dc\":10,\"success_meaning\":\"喝咖啡\",\"failure_meaning\":\"不喝咖啡\"}\n```",
+            "```json\n{\"type\":\"fortune\",\"check_name\":\"命运检定\",\"difficulty\":\"easy\",\"success_meaning\":\"喝咖啡\",\"failure_meaning\":\"不喝咖啡\"}\n```",
+            "```JSON\r\n{\"type\":\"fortune\",\"check_name\":\"命运检定\",\"difficulty\":\"easy\",\"success_meaning\":\"喝咖啡\",\"failure_meaning\":\"不喝咖啡\"}\r\n```",
+            "```\n{\"type\":\"fortune\",\"check_name\":\"命运检定\",\"difficulty\":\"easy\",\"success_meaning\":\"喝咖啡\",\"failure_meaning\":\"不喝咖啡\"}\n```",
         ] {
             let plan = parse_dm_check_plan(raw, &DiceExpression::default_d20()).unwrap();
             assert_eq!(plan.check_type, CheckType::Fortune);
@@ -287,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn default_d20_requires_the_conventional_difficulty_dc_pair() {
+    fn default_d20_keeps_the_conventional_difficulty_dc_mapping() {
         let cases = [
             (Difficulty::VeryEasy, 5),
             (Difficulty::Easy, 10),
@@ -297,38 +342,59 @@ mod tests {
             (Difficulty::NearlyImpossible, 30),
         ];
         for (difficulty, dc) in cases {
-            validate_dc(dc, difficulty, &DiceExpression::default_d20()).unwrap();
+            let computed = compute_dc(&DiceExpression::default_d20(), difficulty);
+            assert_eq!(computed.value, dc);
+            assert_eq!(computed.strategy, DcStrategy::LegacyD20);
         }
-        for (difficulty, dc) in [
-            (Difficulty::Easy, 15),
-            (Difficulty::Hard, 10),
-            (Difficulty::Medium, 20),
-            (Difficulty::NearlyImpossible, 29),
-        ] {
+    }
+
+    #[test]
+    fn custom_expression_dc_uses_monotonic_entertainment_range_positions() {
+        let difficulties = [
+            Difficulty::VeryEasy,
+            Difficulty::Easy,
+            Difficulty::Medium,
+            Difficulty::Hard,
+            Difficulty::VeryHard,
+            Difficulty::NearlyImpossible,
+        ];
+        for input in ["2d20", "2d20+4", "d100", "1d20+3", "1d8+1d6+4"] {
+            let expression = expression(input);
+            let (minimum, maximum) = expression.total_range();
+            let values = difficulties
+                .iter()
+                .map(|difficulty| {
+                    let computed = compute_dc(&expression, *difficulty);
+                    assert_eq!(computed.strategy, DcStrategy::EntertainmentRange, "{input}");
+                    assert!(
+                        computed.value >= minimum && computed.value <= maximum,
+                        "DC {} outside {minimum}..={maximum} for {input}",
+                        computed.value
+                    );
+                    computed.value
+                })
+                .collect::<Vec<_>>();
             assert!(
-                validate_dc(dc, difficulty, &DiceExpression::default_d20()).is_err(),
-                "mismatched default D20 pair should be rejected: {difficulty:?} + DC {dc}"
+                values.windows(2).all(|window| window[0] <= window[1]),
+                "{input}"
             );
         }
     }
 
     #[test]
-    fn custom_expression_dc_must_be_a_meaningful_reachable_threshold() {
-        let custom = expression("2d20");
-        validate_dc(26, Difficulty::Hard, &custom).unwrap();
-        validate_dc(55, Difficulty::Medium, &expression("d100")).unwrap();
-        for invalid in [i32::MIN, 2, 41, i32::MAX] {
-            let error = validate_dc(invalid, Difficulty::NearlyImpossible, &custom).unwrap_err();
-            assert_eq!(error.code, "roll_dm_invalid_output");
-        }
+    fn custom_expression_dc_rounds_up_without_lowering_difficulty() {
+        let expression = expression("2d20+4");
+        let computed = compute_dc(&expression, Difficulty::Easy);
+        assert_eq!(computed.value, 20);
+        assert_eq!(computed.strategy, DcStrategy::EntertainmentRange);
     }
 
     #[test]
     fn rejects_invalid_json_unknown_type_and_unknown_difficulty() {
         for raw in [
             "not-json",
-            r#"{"type":"skill","check_name":"检定","difficulty":"easy","dc":10,"success_meaning":"成功","failure_meaning":"失败"}"#,
-            r#"{"type":"fortune","check_name":"命运检定","difficulty":"dc17","dc":17,"success_meaning":"成功","failure_meaning":"失败"}"#,
+            r#"{"type":"skill","check_name":"检定","difficulty":"easy","success_meaning":"成功","failure_meaning":"失败"}"#,
+            r#"{"type":"fortune","check_name":"命运检定","difficulty":"dc17","success_meaning":"成功","failure_meaning":"失败"}"#,
         ] {
             let error = parse_dm_check_plan(raw, &DiceExpression::default_d20()).unwrap_err();
             assert_eq!(error.code, "roll_dm_invalid_output");
@@ -336,19 +402,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_wrong_extreme_and_forbidden_result_fields() {
+    fn rejects_missing_invalid_and_forbidden_result_fields() {
         for raw in [
             r#"{"type":"fortune","difficulty":"easy","success_meaning":"成功","failure_meaning":"失败"}"#,
-            r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"成功","failure_meaning":"失败"}"#,
-            r#"{"type":"fortune","check_name":" ","difficulty":"easy","dc":10,"success_meaning":"成功","failure_meaning":"失败"}"#,
-            r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","dc":10,"success_meaning":"","failure_meaning":"失败"}"#,
-            r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","dc":10,"success_meaning":"成功","failure_meaning":""}"#,
-            r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","dc":"10","success_meaning":"成功","failure_meaning":"失败"}"#,
-            r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","dc":10.5,"success_meaning":"成功","failure_meaning":"失败"}"#,
-            r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","dc":2147483648,"success_meaning":"成功","failure_meaning":"失败"}"#,
-            r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","dc":10,"success_meaning":"成功","failure_meaning":"失败","roll":10}"#,
-            r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","dc":10,"success_meaning":"成功","failure_meaning":"失败","total":10}"#,
-            r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","dc":10,"success_meaning":"成功","failure_meaning":"失败","success":true}"#,
+            r#"{"type":"fortune","check_name":" ","difficulty":"easy","success_meaning":"成功","failure_meaning":"失败"}"#,
+            r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"","failure_meaning":"失败"}"#,
+            r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"成功","failure_meaning":""}"#,
+            r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"成功","failure_meaning":"失败","dc":10}"#,
+            r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"成功","failure_meaning":"失败","roll":10}"#,
+            r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"成功","failure_meaning":"失败","total":10}"#,
+            r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"成功","failure_meaning":"失败","success":true}"#,
         ] {
             let error = parse_dm_check_plan(raw, &DiceExpression::default_d20()).unwrap_err();
             assert_eq!(error.code, "roll_dm_invalid_output");
