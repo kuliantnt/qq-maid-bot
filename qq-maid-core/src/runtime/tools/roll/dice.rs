@@ -49,6 +49,25 @@ impl DiceExpression {
         self.terms.len() == 1 && self.terms[0].count == 1 && self.modifier == 0
     }
 
+    pub(crate) fn is_default_d20(&self) -> bool {
+        self.is_single_unmodified() && self.terms[0].sides == DEFAULT_DIE_SIDES
+    }
+
+    /// 确定性计算表达式的理论总值范围，供 AI DM 制定 DC 和 Core 校验使用。
+    ///
+    /// 解析器已限制骰子数量、面数和修正值，因此这里使用 `i32` 不会溢出，也不需要
+    /// 让模型重复解析或推算骰式。
+    pub(crate) fn total_range(&self) -> (i32, i32) {
+        let minimum = self.total_dice() as i32 + self.modifier;
+        let maximum = self
+            .terms
+            .iter()
+            .map(|term| i32::from(term.count) * i32::from(term.sides))
+            .sum::<i32>()
+            + self.modifier;
+        (minimum, maximum)
+    }
+
     pub(crate) fn total_dice(&self) -> u32 {
         self.terms.iter().map(|term| u32::from(term.count)).sum()
     }
@@ -511,5 +530,22 @@ mod tests {
             panic!("expression should parse");
         };
         assert_eq!(expression.to_string(), "1d8+1d6-4");
+    }
+
+    #[test]
+    fn calculates_total_ranges_without_rolling() {
+        for (input, expected) in [
+            ("2d20", (2, 40)),
+            ("1d20+3", (4, 23)),
+            ("1d6", (1, 6)),
+            ("d100", (1, 100)),
+            ("1d8+1d6+4", (6, 18)),
+            ("2d6-4", (-2, 8)),
+        ] {
+            let DiceExpressionParse::Parsed(expression) = parse_expression(input) else {
+                panic!("expected expression to parse: {input}");
+            };
+            assert_eq!(expression.total_range(), expected, "{input}");
+        }
     }
 }

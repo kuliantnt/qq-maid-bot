@@ -408,7 +408,7 @@ async fn core_roll_executes_dice_expression_without_model_tool_or_session() {
 #[tokio::test]
 async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
     let provider = TestProvider::replying(
-        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"今晚适合出门","failure_meaning":"今晚适合宅家"}"#,
+        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","dc":10,"success_meaning":"今晚适合出门","failure_meaning":"今晚适合宅家"}"#,
     )
     .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider.clone(), 5, true);
@@ -457,13 +457,18 @@ async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
     let requests = provider.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].metadata["purpose"], "roll_dm_check");
-    assert_eq!(
-        requests[0].messages.last().unwrap().content,
-        "晚上要不要出门"
+    let dm_context = &requests[0].messages.last().unwrap().content;
+    assert!(dm_context.contains("用户问题：晚上要不要出门"));
+    assert!(dm_context.contains("骰式：1d20"));
+    assert!(dm_context.contains("最小总值：1"));
+    assert!(dm_context.contains("最大总值：20"));
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("投掷："))
     );
-    assert!(requests[0].messages.iter().all(|message| {
-        !message.content.contains("投掷：") && !message.content.contains("Natural 20")
-    }));
+    assert!(!dm_context.contains("Natural 20"));
 
     let CoreRespondOutput::Complete(group_response) = service
         .respond(group_request("/roll 能不能说服老板让我早点下班"))
@@ -501,7 +506,7 @@ async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
 #[tokio::test]
 async fn core_roll_dm_short_request_timeout_keeps_local_fallback() {
     let provider = TestProvider::delayed(
-        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"出门","failure_meaning":"宅家"}"#,
+        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","dc":10,"success_meaning":"出门","failure_meaning":"宅家"}"#,
         Duration::from_secs(2),
     );
     let state = test_state(provider.clone(), 1);

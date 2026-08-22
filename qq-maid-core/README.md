@@ -109,7 +109,7 @@ Todo 管理接口复用同一管理员 Session、同源和 CSRF 安全边界，�
 ## 指令能力
 
 - 会话：`/new`、`/rename`、`/resume`、`/clear`、`/state`、`/compact`、`/help`。`/list` 仅作为 deprecated 兼容别名保留，推荐 `/resume` 或 `/恢复`。
-- 娱乐：`/roll`（别名 `/r`）无参数时本地掷 D20，`/roll d100`、`/roll 2d6`、`/roll 1d20+3`、`/roll 1d8+1d6+4` 等表达式也在本地解析、掷骰和结算；`/roll <问题>` 先由独立 AI DM 调用生成并校验判定方案，`/roll <骰子表达式> <问题>` 则使用指定骰式，再由 Core 本地掷骰和结算。三类路径都不进入普通 session 或 Tool Loop，本地骰子路径也不调用模型。
+- 娱乐：`/roll`（别名 `/r`）无参数时本地掷 D20，`/roll d100`、`/roll 2d6`、`/roll 1d20+3`、`/roll 1d8+1d6+4` 等表达式也在本地解析、掷骰和结算；`/roll <问题>` 先由独立 AI DM 调用生成并校验判定方案，`/roll <骰子表达式> <问题>` 则由 Core 把规范骰式及理论总值范围提供给 AI DM 制定实际 DC，通过校验后才本地掷骰和结算。三类路径都不进入普通 session 或 Tool Loop，本地骰子路径也不调用模型，AI DM 不会获得实际骰值。
 - 记忆：`/memory`、`/memory 内容`、`/memory show 1`、`/memory edit 1 新内容`、`/memory delete 1`；中文别名 `/记忆`、`/记`。
 - 待办：slash 入口只保留查询（`/todo`、`/todo all`、`/todo search 关键词`、`/todo done`、`/todo undo`；中文别名 `/待办`、`/任务`），新增、完成、恢复、修改、取消和永久删除请直接用自然语言触发 Todo Tool。火车时刻请使用 `/火车 车次 [日期]` 查询。
 - RSS：`/rss`、`/rss recent [数量]`、`/rss add RSS地址 [名称]`、`/rss delete 1`、`/rss test RSS地址`；中文别名 `/订阅`。

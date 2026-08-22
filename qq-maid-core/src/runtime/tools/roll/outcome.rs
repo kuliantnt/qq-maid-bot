@@ -11,20 +11,15 @@ enum RollOutcome {
 }
 
 impl RollOutcome {
-    fn resolve(result: &RollResult, dc: u8) -> Self {
-        if result.expression.is_single_unmodified()
-            && result
-                .rolls
-                .first()
-                .is_some_and(|roll| roll.sides == super::dice::DEFAULT_DIE_SIDES)
-        {
+    fn resolve(result: &RollResult, dc: i32) -> Self {
+        if result.expression.is_default_d20() {
             match result.rolls[0].value {
                 20 => return Self::CriticalSuccess,
                 1 => return Self::CriticalFailure,
                 _ => {}
             }
         }
-        if result.total >= i32::from(dc) {
+        if result.total >= dc {
             Self::Success
         } else {
             Self::Failure
@@ -33,7 +28,7 @@ impl RollOutcome {
 }
 
 pub(super) fn render_dm_result(plan: &DmCheckPlan, result: &RollResult) -> String {
-    let dc = plan.difficulty.dc();
+    let dc = plan.dc;
     let outcome = RollOutcome::resolve(result, dc);
     let check_name = display_check_name(&plan.check_name);
     let check_type = match plan.check_type {
@@ -116,11 +111,12 @@ mod tests {
         dm::{CheckType, Difficulty},
     };
 
-    fn plan(difficulty: Difficulty) -> DmCheckPlan {
+    fn plan(difficulty: Difficulty, dc: i32) -> DmCheckPlan {
         DmCheckPlan {
             check_type: CheckType::Fortune,
             check_name: "命运检定".to_owned(),
             difficulty,
+            dc,
             success_meaning: "适合行动".to_owned(),
             failure_meaning: "暂缓行动".to_owned(),
         }
@@ -134,7 +130,7 @@ mod tests {
 
     #[test]
     fn resolves_normal_success_and_failure_locally() {
-        let plan = plan(Difficulty::Easy);
+        let plan = plan(Difficulty::Easy, 10);
         let success = render_dm_result(&plan, &d20_result(14));
         assert!(success.contains("✅ 成功"));
         assert!(success.contains("适合行动。"));
@@ -147,12 +143,12 @@ mod tests {
     #[test]
     fn natural_twenty_and_one_override_dc() {
         let critical_success =
-            render_dm_result(&plan(Difficulty::NearlyImpossible), &d20_result(20));
+            render_dm_result(&plan(Difficulty::NearlyImpossible, 30), &d20_result(20));
         assert!(critical_success.starts_with("✨ Natural 20！大成功"));
         assert!(critical_success.contains("DC 30"));
         assert!(critical_success.contains("适合行动。"));
 
-        let critical_failure = render_dm_result(&plan(Difficulty::VeryEasy), &d20_result(1));
+        let critical_failure = render_dm_result(&plan(Difficulty::VeryEasy, 5), &d20_result(1));
         assert!(critical_failure.starts_with("💀 Natural 1！大失败"));
         assert!(critical_failure.contains("DC 5"));
         assert!(critical_failure.contains("暂缓行动。"));
@@ -173,7 +169,7 @@ mod tests {
                 20
             })
             .expect("test roller should return valid values");
-        let rendered = render_dm_result(&plan(Difficulty::NearlyImpossible), &result);
+        let rendered = render_dm_result(&plan(Difficulty::NearlyImpossible, 40), &result);
         assert!(rendered.contains("投掷：2d20：20 + 20 = 40"));
         assert!(rendered.contains("✅ 成功"));
         assert!(!rendered.contains("Natural 20"));
