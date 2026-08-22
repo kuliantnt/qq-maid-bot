@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn resolves_normal_success_and_failure_locally() {
-        let plan = plan(Difficulty::Easy, 10);
+        let plan = plan(Difficulty::Easy, 8);
         let success = render_dm_result(&plan, &d20_result(14));
         assert!(success.contains("✅ 成功"));
         assert!(success.contains("适合行动。"));
@@ -149,9 +149,9 @@ mod tests {
     #[test]
     fn natural_twenty_and_one_override_dc() {
         let critical_success =
-            render_dm_result(&plan(Difficulty::NearlyImpossible, 30), &d20_result(20));
+            render_dm_result(&plan(Difficulty::NearlyImpossible, 20), &d20_result(20));
         assert!(critical_success.starts_with("✨ Natural 20！大成功"));
-        assert!(critical_success.contains("DC 30"));
+        assert!(critical_success.contains("DC 20"));
         assert!(critical_success.contains("适合行动。"));
 
         let critical_failure = render_dm_result(&plan(Difficulty::VeryEasy, 5), &d20_result(1));
@@ -175,7 +175,7 @@ mod tests {
                 20
             })
             .expect("test roller should return valid values");
-        let rendered = render_dm_result(&plan(Difficulty::NearlyImpossible, 40), &result);
+        let rendered = render_dm_result(&plan(Difficulty::NearlyImpossible, 39), &result);
         assert!(rendered.contains("投掷：2d20：20 + 20 = 40"));
         assert!(rendered.contains("✅ 成功"));
         assert!(!rendered.contains("Natural 20"));

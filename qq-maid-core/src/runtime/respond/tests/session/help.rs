@@ -142,6 +142,8 @@ async fn help_roll_describes_dice_expressions_and_limits() {
         "1d20+3",
         "1d8+1d6+4",
         "指定骰式",
+        "娱乐刻度",
+        "DND5E",
         "1–100",
         "64",
         "100",

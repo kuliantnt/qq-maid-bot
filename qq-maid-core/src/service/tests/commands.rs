@@ -418,7 +418,7 @@ async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
     let assert_dm_reply = |response: &CoreResponse| {
         let text = response.text_content().expect("roll DM should return text");
         assert!(text.contains("🎲 命运检定"));
-        assert!(text.contains("难度：容易（DC 10）"));
+        assert!(text.contains("难度：容易（DC 8）"));
         let roll = text
             .lines()
             .find_map(|line| line.strip_prefix("投掷："))
@@ -428,7 +428,7 @@ async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
         match roll {
             20 => assert!(text.contains("✨ Natural 20！大成功")),
             1 => assert!(text.contains("💀 Natural 1！大失败")),
-            10..=19 => assert!(text.contains("✅ 成功")),
+            8..=19 => assert!(text.contains("✅ 成功")),
             _ => assert!(text.contains("❌ 失败")),
         }
         assert_eq!(response.command.as_deref(), Some("roll"));

@@ -17,7 +17,7 @@ const DM_SYSTEM_PROMPT: &str = r#"你是轻量跑团 DM，只负责为用户问�
 日常二选一、运气和娱乐选择优先使用 fortune，通常选择 easy；只有问题明确很难时才提高难度。
 潜行、说服、观察等实际行动使用 ability。check_name 是简短的完整检定名称。
 不使用角色卡、属性值、熟练、装备或任何加值。difficulty 只能取允许的枚举；你只选择 difficulty，不提供 dc。
-实际 DC 由 Core 根据骰式理论范围和固定的娱乐模式难度刻度计算；这不是 DND5E 或正式 TRPG 规则。不要输出 dc 字段。
+实际 DC 由 Core 根据当前骰式（包括默认 1d20）的理论范围和固定的娱乐模式难度刻度计算；这不是 DND5E 或正式 TRPG 规则。不要输出 dc 字段。
 只输出一个 JSON 对象，不要 Markdown、解释或额外字段：
 {"type":"ability|fortune","check_name":"...","difficulty":"very_easy|easy|medium|hard|very_hard|nearly_impossible","success_meaning":"...","failure_meaning":"..."}"#;
 
@@ -44,19 +44,7 @@ pub(super) enum Difficulty {
 }
 
 impl Difficulty {
-    /// 默认 D20 的历史难度习惯；通用骰式不得直接套用这个映射。
-    const fn conventional_d20_dc(self) -> i32 {
-        match self {
-            Self::VeryEasy => 5,
-            Self::Easy => 10,
-            Self::Medium => 15,
-            Self::Hard => 20,
-            Self::VeryHard => 25,
-            Self::NearlyImpossible => 30,
-        }
-    }
-
-    /// 通用骰式的娱乐模式区间位置，使用有理数避免浮点取整漂移。
+    /// 所有骰式共用的娱乐模式区间位置，使用有理数避免浮点取整漂移。
     const fn entertainment_position(self) -> (i32, i32) {
         match self {
             Self::VeryEasy => (1, 5),
@@ -93,14 +81,12 @@ impl Difficulty {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DcStrategy {
-    LegacyD20,
     EntertainmentRange,
 }
 
 impl DcStrategy {
     pub(super) const fn as_str(self) -> &'static str {
         match self {
-            Self::LegacyD20 => "legacy_d20",
             Self::EntertainmentRange => "entertainment_range",
         }
     }
@@ -114,17 +100,9 @@ pub(super) struct ComputedDc {
 
 /// 根据骰式理论范围和娱乐难度刻度计算 Core 实际使用的 DC。
 ///
-/// 默认无修正 `1d20` 保留历史固定映射；其它表达式按区间位置计算，并统一向上取整，
-/// 避免浮点误差或截断导致难度意外降低。宽度为零时不存在区间内部阈值，公式结果为
-/// 唯一可表示的理论范围端点。
+/// 所有表达式都按区间位置计算，并统一向上取整，避免浮点误差或截断导致难度意外降低。
+/// 宽度为零时不存在区间内部阈值，公式结果为唯一可表示的理论范围端点。
 pub(super) fn compute_dc(expression: &DiceExpression, difficulty: Difficulty) -> ComputedDc {
-    if expression.is_default_d20() {
-        return ComputedDc {
-            value: difficulty.conventional_d20_dc(),
-            strategy: DcStrategy::LegacyD20,
-        };
-    }
-
     let (minimum, maximum) = expression.total_range();
     let width = i64::from(maximum) - i64::from(minimum);
     let (numerator, denominator) = difficulty.entertainment_position();
@@ -316,7 +294,7 @@ mod tests {
             let plan = parse_dm_check_plan(raw, &DiceExpression::default_d20()).unwrap();
             assert_eq!(plan.check_type, CheckType::Fortune);
             assert_eq!(plan.difficulty, Difficulty::Easy);
-            assert_eq!(plan.dc, 10);
+            assert_eq!(plan.dc, 8);
         }
     }
 
@@ -332,19 +310,19 @@ mod tests {
     }
 
     #[test]
-    fn default_d20_keeps_the_conventional_difficulty_dc_mapping() {
+    fn default_d20_uses_entertainment_range_difficulty_positions() {
         let cases = [
             (Difficulty::VeryEasy, 5),
-            (Difficulty::Easy, 10),
-            (Difficulty::Medium, 15),
-            (Difficulty::Hard, 20),
-            (Difficulty::VeryHard, 25),
-            (Difficulty::NearlyImpossible, 30),
+            (Difficulty::Easy, 8),
+            (Difficulty::Medium, 11),
+            (Difficulty::Hard, 14),
+            (Difficulty::VeryHard, 17),
+            (Difficulty::NearlyImpossible, 20),
         ];
         for (difficulty, dc) in cases {
             let computed = compute_dc(&DiceExpression::default_d20(), difficulty);
             assert_eq!(computed.value, dc);
-            assert_eq!(computed.strategy, DcStrategy::LegacyD20);
+            assert_eq!(computed.strategy, DcStrategy::EntertainmentRange);
         }
     }
 

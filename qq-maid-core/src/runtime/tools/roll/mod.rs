@@ -715,7 +715,7 @@ mod tests {
         .await;
 
         assert_eq!(*events.lock().unwrap(), ["model", "rng"]);
-        assert!(reply.reply.contains("难度：容易（DC 10）"));
+        assert!(reply.reply.contains("难度：容易（DC 8）"));
         assert!(reply.reply.contains("投掷：14"));
         assert!(reply.reply.contains("✅ 成功"));
         assert!(reply.reply.contains("今晚适合出门。"));
@@ -726,8 +726,8 @@ mod tests {
         assert_eq!(reply.diagnostics()["dice_minimum"], 1);
         assert_eq!(reply.diagnostics()["dice_maximum"], 20);
         assert_eq!(reply.diagnostics()["difficulty"], "easy");
-        assert_eq!(reply.diagnostics()["computed_dc"], 10);
-        assert_eq!(reply.diagnostics()["dc_strategy"], "legacy_d20");
+        assert_eq!(reply.diagnostics()["computed_dc"], 8);
+        assert_eq!(reply.diagnostics()["dc_strategy"], "entertainment_range");
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].metadata["purpose"], "roll_dm_check");
