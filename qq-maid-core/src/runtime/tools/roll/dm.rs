@@ -193,13 +193,16 @@ fn validate_dc(
     difficulty: Difficulty,
     expression: &DiceExpression,
 ) -> Result<(), LlmError> {
-    let (minimum, maximum) = expression.total_range();
-    let is_meaningful_threshold = dc > minimum && dc <= maximum;
-    // 仅默认无修正 D20 允许历史 very_hard=25 / nearly_impossible=30 超出理论最大值；
-    // Natural 20 仍会成功。自定义骰式没有此特殊规则，避免接受任意“必失败”阈值。
-    let is_legacy_d20_threshold =
-        expression.is_default_d20() && dc == difficulty.conventional_d20_dc() && dc > maximum;
-    if is_meaningful_threshold || is_legacy_d20_threshold {
+    // 默认无修正 D20 是历史兼容路径，difficulty 与 DC 必须一一对应；very_hard=25
+    // 和 nearly_impossible=30 虽超出理论最大值，仍由 Natural 20 特殊规则保留成功机会。
+    let is_valid = if expression.is_default_d20() {
+        dc == difficulty.conventional_d20_dc()
+    } else {
+        // 自定义骰式不套用 D20 固定表，只接受有实际成功机会且不会必定成功的阈值。
+        let (minimum, maximum) = expression.total_range();
+        dc > minimum && dc <= maximum
+    };
+    if is_valid {
         return Ok(());
     }
     Err(LlmError::new(
@@ -284,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn default_d20_accepts_conventional_dcs_including_natural_twenty_only_levels() {
+    fn default_d20_requires_the_conventional_difficulty_dc_pair() {
         let cases = [
             (Difficulty::VeryEasy, 5),
             (Difficulty::Easy, 10),
@@ -296,20 +299,24 @@ mod tests {
         for (difficulty, dc) in cases {
             validate_dc(dc, difficulty, &DiceExpression::default_d20()).unwrap();
         }
-        assert!(
-            validate_dc(
-                29,
-                Difficulty::NearlyImpossible,
-                &DiceExpression::default_d20()
-            )
-            .is_err()
-        );
+        for (difficulty, dc) in [
+            (Difficulty::Easy, 15),
+            (Difficulty::Hard, 10),
+            (Difficulty::Medium, 20),
+            (Difficulty::NearlyImpossible, 29),
+        ] {
+            assert!(
+                validate_dc(dc, difficulty, &DiceExpression::default_d20()).is_err(),
+                "mismatched default D20 pair should be rejected: {difficulty:?} + DC {dc}"
+            );
+        }
     }
 
     #[test]
     fn custom_expression_dc_must_be_a_meaningful_reachable_threshold() {
         let custom = expression("2d20");
         validate_dc(26, Difficulty::Hard, &custom).unwrap();
+        validate_dc(55, Difficulty::Medium, &expression("d100")).unwrap();
         for invalid in [i32::MIN, 2, 41, i32::MAX] {
             let error = validate_dc(invalid, Difficulty::NearlyImpossible, &custom).unwrap_err();
             assert_eq!(error.code, "roll_dm_invalid_output");
