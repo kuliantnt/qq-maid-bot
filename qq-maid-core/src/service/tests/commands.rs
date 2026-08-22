@@ -364,17 +364,32 @@ async fn core_roll_executes_dice_expression_without_model_tool_or_session() {
     );
     assert_eq!(response.command.as_deref(), Some("roll"));
 
-    let CoreRespondOutput::Complete(unsupported_response) = service
+    let CoreRespondOutput::Complete(modifier_response) = service
         .respond(private_request("/roll 1d20 + 3"))
         .await
         .unwrap()
     else {
-        panic!("unsupported spaced modifier should complete synchronously");
+        panic!("modifier expression should complete synchronously");
     };
-    assert_eq!(
-        unsupported_response.text_content(),
-        Some("暂不支持该骰子表达式。目前支持 dM 或 NdM（骰子个数和面数均为 1–100）。")
-    );
+    let modifier_text = modifier_response
+        .text_content()
+        .expect("modifier expression should return text");
+    assert!(modifier_text.starts_with("🎲 1d20+3："));
+    assert!(modifier_text.contains(" + 3 = "));
+    assert_eq!(modifier_response.command.as_deref(), Some("roll"));
+
+    let CoreRespondOutput::Complete(short_alias_response) = service
+        .respond(private_request("/r 1d8+1d6+4"))
+        .await
+        .unwrap()
+    else {
+        panic!("/r dice expression should complete synchronously");
+    };
+    let short_alias_text = short_alias_response
+        .text_content()
+        .expect("/r expression should return text");
+    assert!(short_alias_text.starts_with("🎲 1d8+1d6+4："));
+    assert_eq!(short_alias_response.command.as_deref(), Some("roll"));
 
     let meta = SessionMeta::new_with_account(
         private_scope(),
@@ -393,7 +408,7 @@ async fn core_roll_executes_dice_expression_without_model_tool_or_session() {
 #[tokio::test]
 async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
     let provider = TestProvider::replying(
-        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"今晚适合出门","failure_meaning":"今晚适合宅家"}"#,
+        r#"{"type":"fortune","check_name":"命运检定","difficulty":"medium","success_meaning":"今晚适合出门","failure_meaning":"今晚适合宅家"}"#,
     )
     .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider.clone(), 5, true);
@@ -403,7 +418,7 @@ async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
     let assert_dm_reply = |response: &CoreResponse| {
         let text = response.text_content().expect("roll DM should return text");
         assert!(text.contains("🎲 命运检定"));
-        assert!(text.contains("难度：容易（DC 10）"));
+        assert!(text.contains("难度：中等（DC 11）"));
         let roll = text
             .lines()
             .find_map(|line| line.strip_prefix("投掷："))
@@ -413,7 +428,7 @@ async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
         match roll {
             20 => assert!(text.contains("✨ Natural 20！大成功")),
             1 => assert!(text.contains("💀 Natural 1！大失败")),
-            10..=19 => assert!(text.contains("✅ 成功")),
+            11..=19 => assert!(text.contains("✅ 成功")),
             _ => assert!(text.contains("❌ 失败")),
         }
         assert_eq!(response.command.as_deref(), Some("roll"));
@@ -442,13 +457,18 @@ async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
     let requests = provider.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].metadata["purpose"], "roll_dm_check");
-    assert_eq!(
-        requests[0].messages.last().unwrap().content,
-        "晚上要不要出门"
+    let dm_context = &requests[0].messages.last().unwrap().content;
+    assert!(dm_context.contains("用户问题：晚上要不要出门"));
+    assert!(dm_context.contains("骰式：1d20"));
+    assert!(dm_context.contains("最小总值：1"));
+    assert!(dm_context.contains("最大总值：20"));
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("投掷："))
     );
-    assert!(requests[0].messages.iter().all(|message| {
-        !message.content.contains("投掷：") && !message.content.contains("Natural 20")
-    }));
+    assert!(!dm_context.contains("Natural 20"));
 
     let CoreRespondOutput::Complete(group_response) = service
         .respond(group_request("/roll 能不能说服老板让我早点下班"))
@@ -484,9 +504,54 @@ async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
 }
 
 #[tokio::test]
+async fn core_roll_dm_custom_expression_uses_core_entertainment_dc() {
+    let provider = TestProvider::replying(
+        r#"{"type":"fortune","check_name":"是否吃夜宵检定","difficulty":"easy","success_meaning":"吃夜宵","failure_meaning":"今晚不吃"}"#,
+    );
+    let state = test_state(provider.clone(), 5);
+    let service = CoreHandle::new(state);
+
+    let CoreRespondOutput::Complete(response) = service
+        .respond(private_request("/roll 2d20+4 我想要不要吃夜宵"))
+        .await
+        .unwrap()
+    else {
+        panic!("custom roll DM command should complete synchronously");
+    };
+
+    let text = response
+        .text_content()
+        .expect("custom roll DM should return text");
+    assert!(text.contains("难度：容易（DC 20）"));
+    let diagnostics = response
+        .diagnostics
+        .as_ref()
+        .expect("custom roll DM should expose diagnostics");
+    assert_eq!(diagnostics["dice_expression"], "2d20+4");
+    assert_eq!(diagnostics["dice_minimum"], 6);
+    assert_eq!(diagnostics["dice_maximum"], 44);
+    assert_eq!(diagnostics["difficulty"], "easy");
+    assert_eq!(diagnostics["computed_dc"], 20);
+    assert_eq!(diagnostics["dc_strategy"], "entertainment_range");
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].metadata["dice_expression"], "2d20+4");
+    assert_eq!(requests[0].metadata["dice_minimum"], "6");
+    assert_eq!(requests[0].metadata["dice_maximum"], "44");
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("投掷：")),
+        "actual roll result must not enter the AI request"
+    );
+}
+
+#[tokio::test]
 async fn core_roll_dm_short_request_timeout_keeps_local_fallback() {
     let provider = TestProvider::delayed(
-        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"出门","failure_meaning":"宅家"}"#,
+        r#"{"type":"fortune","check_name":"命运检定","difficulty":"medium","success_meaning":"出门","failure_meaning":"宅家"}"#,
         Duration::from_secs(2),
     );
     let state = test_state(provider.clone(), 1);

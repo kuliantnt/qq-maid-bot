@@ -18,6 +18,7 @@ async fn help_without_argument_returns_concise_overview() {
     // 纯文本侧不能带反引号，否则 QQ 纯文本渲染会吞掉命令内容
     assert!(text.contains("✅ 待办：/todo"));
     assert!(text.contains("🎲 娱乐：/roll"));
+    assert!(text.contains("/r"));
     assert!(text.contains("🩺 状态：私聊发送 /ping"));
     assert!(!text.contains('`'));
     assert!(markdown.starts_with("# 女仆长助手"));
@@ -100,6 +101,7 @@ async fn help_all_lists_public_commands_by_module() {
     for command in [
         "/todo undo",
         "/roll",
+        "/r",
         "/todo daily status",
         "/rss recent",
         "/rss add",
@@ -127,12 +129,25 @@ async fn help_all_lists_public_commands_by_module() {
 }
 
 #[tokio::test]
-async fn help_roll_describes_simple_dice_expressions_and_limits() {
+async fn help_roll_describes_dice_expressions_and_limits() {
     let response = test_service().respond(message("/help roll")).await.unwrap();
     let text = response.text.unwrap();
     let markdown = response.markdown.unwrap();
 
-    for expected in ["dM", "NdM", "2d6", "d100", "1d20+3", "1–100", "暂不支持"] {
+    for expected in [
+        "dM",
+        "NdM",
+        "2d6",
+        "d100",
+        "1d20+3",
+        "1d8+1d6+4",
+        "指定骰式",
+        "娱乐刻度",
+        "DND5E",
+        "1–100",
+        "64",
+        "100",
+    ] {
         assert!(
             text.contains(expected),
             "missing roll help text: {expected}"

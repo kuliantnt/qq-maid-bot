@@ -123,6 +123,34 @@ async fn weather_command_accepts_city_weather_suffix() {
 }
 
 #[tokio::test]
+async fn explicit_roll_command_is_not_taken_by_weather_shortcut() {
+    let weather_calls = Arc::new(AtomicUsize::new(0));
+    let (service, _) = test_service_with_provider_base_title_query_weather_train_models_and_options(
+        MockProvider::new(),
+        None,
+        Arc::new(MockWebSearchExecutor),
+        Arc::new(MockWeatherExecutor::with_counter(weather_calls.clone())),
+        Arc::new(MockTrainExecutor::new()),
+        TestModelOptions::default(),
+        TestToolCallingOptions::default(),
+    );
+
+    let response = service
+        .respond(message("/roll 明天有个好天气"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.command.as_deref(), Some("roll"));
+    assert!(
+        response
+            .text
+            .as_deref()
+            .is_some_and(|text| { text.starts_with("AI DM 暂时无法判断本次检定难度") })
+    );
+    assert_eq!(weather_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn weather_command_ignores_plain_city_weather_suffix() {
     let provider_calls = Arc::new(AtomicUsize::new(0));
     let weather_calls = Arc::new(AtomicUsize::new(0));

@@ -11,7 +11,7 @@
 ### Added
 
 * **简单骰子表达式**（PR #679）：支持 `/roll d100`、`/roll 2d6` 等完整 `dM` / `NdM` 表达式，骰子个数和面数均限制为 1–100；本地路径不调用 Provider，不进入 session、pending 或 Tool Loop。
-* **AI DM D20 判定**（PR #679）：`/roll <问题>` 使用一次独立的普通模型调用生成严格判定方案，支持 `ability` / `fortune`、六档难度与固定 DC 映射；Core 校验方案后才生成 D20 并本地结算成功、失败、Natural 20 和 Natural 1。
+* **AI DM D20 判定**（PR #679）：`/roll <问题>` 使用一次独立的普通模型调用生成严格判定方案，支持 `ability` / `fortune` 和六档难度；Core 根据当前骰式理论范围和娱乐模式区间刻度计算 DC，校验方案后才生成 D20 并本地结算成功、失败、Natural 20 和 Natural 1。
 
 ### Changed
 
