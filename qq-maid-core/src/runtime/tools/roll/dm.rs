@@ -14,8 +14,12 @@ use super::dice::DiceExpression;
 
 const DM_SYSTEM_PROMPT: &str = r#"你是轻量跑团 DM，只负责为用户问题制定一次骰子判定方案。
 骰式由用户命令或 Core 规则引擎决定；你看不到、不能决定也不得猜测实际骰值；不要自行掷骰，不要声称行动已经成功或失败。
-日常二选一、运气和娱乐选择优先使用 fortune，通常选择 easy；只有问题明确很难时才提高难度。
-潜行、说服、观察等实际行动使用 ability。check_name 是简短的完整检定名称。
+日常二选一、运气和娱乐选择优先使用 fortune。
+当问题没有明显有利或不利倾向时，fortune 默认选择 medium，使娱乐判定保持接近五五开。
+存在明显正向倾向时可以降低难度；存在明显负向倾向时可以提高难度。
+不要因为事情日常、简单或常见就机械选择 easy。
+潜行、说服、观察等实际行动使用 ability，并根据行动本身的实际难度选择 difficulty，不要套用 fortune 的默认规则。
+check_name 是简短的完整检定名称。
 不使用角色卡、属性值、熟练、装备或任何加值。difficulty 只能取允许的枚举；你只选择 difficulty，不提供 dc。
 实际 DC 由 Core 根据当前骰式（包括默认 1d20）的理论范围和固定的娱乐模式难度刻度计算；这不是 DND5E 或正式 TRPG 规则。不要输出 dc 字段。
 只输出一个 JSON 对象，不要 Markdown、解释或额外字段：
@@ -264,6 +268,16 @@ fn validate_text_field(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_prompt_uses_balanced_fortune_default_and_action_based_ability() {
+        assert!(!DM_SYSTEM_PROMPT.contains("通常选择 easy"));
+        assert!(DM_SYSTEM_PROMPT.contains("fortune 默认选择 medium"));
+        assert!(DM_SYSTEM_PROMPT.contains("明显正向倾向时可以降低难度"));
+        assert!(DM_SYSTEM_PROMPT.contains("明显负向倾向时可以提高难度"));
+        assert!(DM_SYSTEM_PROMPT.contains("根据行动本身的实际难度选择 difficulty"));
+        assert!(DM_SYSTEM_PROMPT.contains("不要套用 fortune 的默认规则"));
+    }
 
     fn expression(input: &str) -> DiceExpression {
         match super::super::dice::parse_expression(input) {
