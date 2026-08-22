@@ -10,8 +10,8 @@ use serde::Deserialize;
 
 use crate::{error::LlmError, util::metrics::LlmMetrics};
 
-const DM_SYSTEM_PROMPT: &str = r#"你是轻量跑团 DM，只负责为用户问题制定一次 D20 判定方案。
-你看不到、不能决定也不得猜测实际骰值；不要自行掷骰，不要声称行动已经成功或失败。
+const DM_SYSTEM_PROMPT: &str = r#"你是轻量跑团 DM，只负责为用户问题制定一次骰子判定方案。
+骰式由用户命令或 Core 规则引擎决定；你看不到、不能决定也不得猜测实际骰值；不要自行掷骰，不要声称行动已经成功或失败。
 日常二选一、运气和娱乐选择优先使用 fortune，通常选择 easy；只有问题明确很难时才提高难度。
 潜行、说服、观察等实际行动使用 ability。check_name 是简短的完整检定名称。
 不使用角色卡、属性值、熟练、装备或任何加值。difficulty 只能取允许的枚举。

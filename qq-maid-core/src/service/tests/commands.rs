@@ -364,17 +364,32 @@ async fn core_roll_executes_dice_expression_without_model_tool_or_session() {
     );
     assert_eq!(response.command.as_deref(), Some("roll"));
 
-    let CoreRespondOutput::Complete(unsupported_response) = service
+    let CoreRespondOutput::Complete(modifier_response) = service
         .respond(private_request("/roll 1d20 + 3"))
         .await
         .unwrap()
     else {
-        panic!("unsupported spaced modifier should complete synchronously");
+        panic!("modifier expression should complete synchronously");
     };
-    assert_eq!(
-        unsupported_response.text_content(),
-        Some("暂不支持该骰子表达式。目前支持 dM 或 NdM（骰子个数和面数均为 1–100）。")
-    );
+    let modifier_text = modifier_response
+        .text_content()
+        .expect("modifier expression should return text");
+    assert!(modifier_text.starts_with("🎲 1d20+3："));
+    assert!(modifier_text.contains(" + 3 = "));
+    assert_eq!(modifier_response.command.as_deref(), Some("roll"));
+
+    let CoreRespondOutput::Complete(short_alias_response) = service
+        .respond(private_request("/r 1d8+1d6+4"))
+        .await
+        .unwrap()
+    else {
+        panic!("/r dice expression should complete synchronously");
+    };
+    let short_alias_text = short_alias_response
+        .text_content()
+        .expect("/r expression should return text");
+    assert!(short_alias_text.starts_with("🎲 1d8+1d6+4："));
+    assert_eq!(short_alias_response.command.as_deref(), Some("roll"));
 
     let meta = SessionMeta::new_with_account(
         private_scope(),

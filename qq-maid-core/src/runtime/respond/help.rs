@@ -41,13 +41,13 @@ const HELP_MODULES: &[HelpModule] = &[
         key: "fun",
         aliases: &["娱乐", "roll", "掷骰"],
         title: "🎲 娱乐",
-        summary: "提供本地 D20 与轻量 AI DM 判定。",
+        summary: "提供本地骰子表达式与轻量 AI DM 判定。",
         commands: &[
-            "- `/roll [问题或骰子表达式]`：无参数时本地掷 D20；`d100`、`2d6` 等表达式本地结算；自然语言问题由 AI DM 先定难度",
+            "- `/roll [骰子表达式] [问题]`（别名 `/r`）：无参数时本地掷 D20；纯表达式本地结算；带问题时使用指定骰式并由 AI DM 先定难度",
         ],
         notes: &[
             "- 骰值始终由程序本地生成；AI DM 看不到骰值，只负责在掷骰前设定判定方案。",
-            "- 骰子表达式支持 `dM` 或 `NdM`，骰子个数和面数均为 1–100；暂不支持 `1d20+3` 等修正值、角色属性或加值。",
+            "- 骰子表达式支持 `dM` / `NdM`，例如 `d20`、`d100`、`2d6`、`1d20+3`、`1d8+1d6+4` 及负数修正；单段骰子数量和面数均为 1–100，总骰子数不超过 100，最多 8 段，表达式不超过 64 个字符。",
         ],
     },
     HelpModule {
@@ -279,8 +279,8 @@ fn format_help_home(context: HelpContext) -> CommandBody {
         );
     }
     render.push_pair(
-        "· 🎲 娱乐：/roll".to_owned(),
-        "- 🎲 娱乐：`/roll`".to_owned(),
+        "· 🎲 娱乐：/roll（别名 /r）".to_owned(),
+        "- 🎲 娱乐：`/roll`（别名 `/r`）".to_owned(),
     );
     render.push_pair(
         "· 📰 RSS / Atom：/rss".to_owned(),
