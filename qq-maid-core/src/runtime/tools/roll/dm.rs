@@ -280,6 +280,36 @@ mod tests {
         assert!(DM_SYSTEM_PROMPT.contains("明显负向倾向时可以提高难度"));
         assert!(DM_SYSTEM_PROMPT.contains("根据行动本身的实际难度选择 difficulty"));
         assert!(DM_SYSTEM_PROMPT.contains("不要套用 fortune 的默认规则"));
+
+        for (context, difficulty) in [
+            ("我要不要吃夜宵", "fortune / medium"),
+            ("冰箱里还有我最喜欢的蛋糕", "fortune / easy"),
+            ("我已经吃撑了", "fortune / hard"),
+        ] {
+            let example = DM_SYSTEM_PROMPT
+                .lines()
+                .find(|line| line.contains(context))
+                .unwrap_or_else(|| panic!("missing fortune example context: {context}"));
+            assert!(
+                example.contains(difficulty),
+                "fortune example {context:?} does not select {difficulty:?}: {example}"
+            );
+        }
+
+        for forbidden in [
+            "Campaign",
+            "Rule Context",
+            "active campaign",
+            "Rule System",
+            "DND5E",
+            "CoC",
+            "CSPRNG",
+        ] {
+            assert!(
+                !DM_SYSTEM_PROMPT.contains(forbidden),
+                "entertainment prompt contains architecture noise: {forbidden}"
+            );
+        }
     }
 
     fn expression(input: &str) -> DiceExpression {
