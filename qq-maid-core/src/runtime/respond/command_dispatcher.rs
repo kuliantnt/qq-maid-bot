@@ -62,9 +62,6 @@ impl RegisteredSlashCommand {
         if let Some(command) = parse_unset_command(text) {
             return Some(Self::Unset(command));
         }
-        if let Some(command) = weather_flow::parse_weather_command(text) {
-            return Some(Self::Weather(command));
-        }
         if let Some(command) = train_flow::parse_train_command(text) {
             return Some(Self::Train(command));
         }
@@ -83,7 +80,13 @@ impl RegisteredSlashCommand {
         if should_try_todo_flow(text) {
             return Some(Self::Todo);
         }
-        memory_flow::parse_memory_command(text).map(|_| Self::Memory)
+        if memory_flow::parse_memory_command(text).is_some() {
+            return Some(Self::Memory);
+        }
+
+        // 天气解析器同时兼容 `/城市天气` 这一快捷形式，不能在这里提前接管
+        // `/roll ...天气`、`/查 ...天气` 等显式 Slash 命令的参数。
+        weather_flow::parse_weather_command(text).map(Self::Weather)
     }
 }
 
@@ -460,5 +463,57 @@ impl<'a> CommandDispatcher<'a> {
             respond_route,
             status_hint,
         })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command_kind(text: &str) -> &'static str {
+        match RegisteredSlashCommand::parse(text) {
+            Some(RegisteredSlashCommand::Session(_)) => "session",
+            Some(RegisteredSlashCommand::Translation(_)) => "translation",
+            Some(RegisteredSlashCommand::Set(_)) => "set",
+            Some(RegisteredSlashCommand::Unset(_)) => "unset",
+            Some(RegisteredSlashCommand::Weather(_)) => "weather",
+            Some(RegisteredSlashCommand::Train(_)) => "train",
+            Some(RegisteredSlashCommand::Radar(_)) => "radar",
+            Some(RegisteredSlashCommand::Roll(_)) => "roll",
+            Some(RegisteredSlashCommand::WebSearch(_)) => "web_search",
+            Some(RegisteredSlashCommand::Rss) => "rss",
+            Some(RegisteredSlashCommand::Todo) => "todo",
+            Some(RegisteredSlashCommand::Memory) => "memory",
+            Some(RegisteredSlashCommand::Voice(_)) => "voice",
+            None => "none",
+        }
+    }
+
+    #[test]
+    fn explicit_slash_commands_precede_weather_shortcut() {
+        let cases = [
+            ("/语音 明天天气", "voice"),
+            ("/help 明天天气", "session"),
+            ("/翻译 明天天气", "translation"),
+            ("/set 昵称 明天天气", "set"),
+            ("/unset 昵称天气", "unset"),
+            ("/train G123天气", "train"),
+            ("/rader codex天气", "radar"),
+            ("/roll 明天有个好天气", "roll"),
+            ("/查 杭州天气", "web_search"),
+            ("/rss list天气", "rss"),
+            ("/todo list天气", "todo"),
+            ("/memory list天气", "memory"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(command_kind(input), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn weather_shortcut_remains_available_after_explicit_commands() {
+        assert_eq!(command_kind("/天气杭州"), "weather");
+        assert_eq!(command_kind("/杭州天气"), "weather");
     }
 }
