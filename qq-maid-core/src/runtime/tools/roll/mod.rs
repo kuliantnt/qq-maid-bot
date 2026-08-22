@@ -2,6 +2,9 @@
 //!
 //! 无参数命令保持本地 D20 快速路径，通用骰子表达式由 Core 本地结算；带问题的命令
 //! 先让模型生成并校验判定方案，再本地生成骰值和结算结果。命令分派层只负责路由与响应投影。
+//! 当前仓库尚无 Campaign / Rule Context，因此带问题路径固定使用 Entertainment DM；未来应由
+//! active campaign 的 `rule_system` 在调用方确定性选择对应 Rule System，不能让模型猜测模式。
+//! 明确的纯骰子表达式在这里始终直接进入 Dice Engine，不因未来存在正式跑团上下文而改变含义。
 
 use std::time::{Duration, Instant};
 
@@ -144,6 +147,9 @@ impl RollExecutionResult {
 }
 
 /// `/roll`（以及 `/r`）支持无参数本地 D20、通用骰子表达式，以及一个非空自然语言问题。
+///
+/// 当前没有正式规则上下文，因此自然语言问题固定进入 Entertainment DM；纯骰子表达式
+/// 在解析后直接进入 Dice Engine，不会调用模型。
 pub(crate) fn parse_roll_command(text: &str) -> Option<RollCommand> {
     let command = parse_slash_command(text)?;
     if command.action != "roll" {
@@ -486,7 +492,7 @@ mod tests {
     }
 
     fn fortune_json() -> &'static str {
-        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"今晚适合出门","failure_meaning":"今晚适合宅家"}"#
+        r#"{"type":"fortune","check_name":"命运检定","difficulty":"medium","success_meaning":"今晚适合出门","failure_meaning":"今晚适合宅家"}"#
     }
 
     fn dice_expression(input: &str) -> DiceExpression {
@@ -528,6 +534,7 @@ mod tests {
             ("/roll 2d6", "2d6"),
             ("/roll 1D100", "1D100"),
             ("/roll 1d20+3", "1d20+3"),
+            ("/roll 2d20+4", "2d20+4"),
             ("/roll 2d6 + 1", "2d6 + 1"),
             ("/roll 1d8+1d6+4", "1d8+1d6+4"),
         ] {
@@ -692,7 +699,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_d20_context_precedes_roll_and_request_contains_no_roll_result() {
+    async fn default_d20_entertainment_context_precedes_roll_and_request_contains_no_roll_result() {
         let provider = MockProvider::replying(fortune_json());
         let events = provider.events.clone();
         let requests = provider.requests.clone();
@@ -715,7 +722,7 @@ mod tests {
         .await;
 
         assert_eq!(*events.lock().unwrap(), ["model", "rng"]);
-        assert!(reply.reply.contains("难度：容易（DC 8）"));
+        assert!(reply.reply.contains("难度：中等（DC 11）"));
         assert!(reply.reply.contains("投掷：14"));
         assert!(reply.reply.contains("✅ 成功"));
         assert!(reply.reply.contains("今晚适合出门。"));
@@ -725,8 +732,8 @@ mod tests {
         assert_eq!(reply.diagnostics()["dice_expression"], "1d20");
         assert_eq!(reply.diagnostics()["dice_minimum"], 1);
         assert_eq!(reply.diagnostics()["dice_maximum"], 20);
-        assert_eq!(reply.diagnostics()["difficulty"], "easy");
-        assert_eq!(reply.diagnostics()["computed_dc"], 8);
+        assert_eq!(reply.diagnostics()["difficulty"], "medium");
+        assert_eq!(reply.diagnostics()["computed_dc"], 11);
         assert_eq!(reply.diagnostics()["dc_strategy"], "entertainment_range");
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 1);

@@ -160,7 +160,9 @@ impl<'a> CommandDispatcher<'a> {
         }
 
         // `/roll` 在读取 pending/session 前收口；纯骰子表达式在本地执行，带问题版本只做
-        // 一次独立 DM 方案调用，二者都不读取会话历史、消费 pending 或进入普通 Agent / Tool Loop。
+        // 一次独立 Entertainment DM 方案调用，二者都不读取会话历史、消费 pending 或进入普通
+        // Agent / Tool Loop。当前没有 Campaign / Rule Context；未来应在这里根据 active campaign
+        // 的 rule_system 确定性选择正式 Rule System，不能让模型自行判断模式。
         if let Some(RegisteredSlashCommand::Roll(command)) = registered_slash_command.as_ref() {
             let model = if matches!(
                 command,

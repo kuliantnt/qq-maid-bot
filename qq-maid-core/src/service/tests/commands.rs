@@ -408,7 +408,7 @@ async fn core_roll_executes_dice_expression_without_model_tool_or_session() {
 #[tokio::test]
 async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
     let provider = TestProvider::replying(
-        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"今晚适合出门","failure_meaning":"今晚适合宅家"}"#,
+        r#"{"type":"fortune","check_name":"命运检定","difficulty":"medium","success_meaning":"今晚适合出门","failure_meaning":"今晚适合宅家"}"#,
     )
     .with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let state = test_state_with_tool_calling(provider.clone(), 5, true);
@@ -418,7 +418,7 @@ async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
     let assert_dm_reply = |response: &CoreResponse| {
         let text = response.text_content().expect("roll DM should return text");
         assert!(text.contains("🎲 命运检定"));
-        assert!(text.contains("难度：容易（DC 8）"));
+        assert!(text.contains("难度：中等（DC 11）"));
         let roll = text
             .lines()
             .find_map(|line| line.strip_prefix("投掷："))
@@ -428,7 +428,7 @@ async fn core_roll_dm_uses_one_plain_model_call_without_tool_loop_or_session() {
         match roll {
             20 => assert!(text.contains("✨ Natural 20！大成功")),
             1 => assert!(text.contains("💀 Natural 1！大失败")),
-            8..=19 => assert!(text.contains("✅ 成功")),
+            11..=19 => assert!(text.contains("✅ 成功")),
             _ => assert!(text.contains("❌ 失败")),
         }
         assert_eq!(response.command.as_deref(), Some("roll"));
@@ -551,7 +551,7 @@ async fn core_roll_dm_custom_expression_uses_core_entertainment_dc() {
 #[tokio::test]
 async fn core_roll_dm_short_request_timeout_keeps_local_fallback() {
     let provider = TestProvider::delayed(
-        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"出门","failure_meaning":"宅家"}"#,
+        r#"{"type":"fortune","check_name":"命运检定","difficulty":"medium","success_meaning":"出门","failure_meaning":"宅家"}"#,
         Duration::from_secs(2),
     );
     let state = test_state(provider.clone(), 1);
