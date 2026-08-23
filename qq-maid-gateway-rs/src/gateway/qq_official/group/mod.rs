@@ -49,16 +49,14 @@ use super::super::{
     media_fetch::{
         MediaFetchContext, fetch_qq_official_image_attachments, fetch_qq_official_quoted_images,
     },
-    outbound::{
-        ReplyCapability, ReplyTarget, RuntimeRecordingGroupSender, send_group_text_with_status,
-    },
+    outbound::{ReplyCapability, ReplyTarget, RuntimeRecordingGroupSender},
     ping::GatewayRuntimeStatus,
     platform,
     ref_index::SharedRefIndex,
     stream::RespondEventStream,
 };
 use crate::{
-    api::{GroupOutboundSender, QqApiClient, SendMessageIds},
+    api::{GroupOutboundSender, QqApiClient, SendMessageIds, send_group_outbound_with_fallback},
     config::AppConfig,
     gateway::event::strip_contaminated_quote_from_context,
     message_chunk::{
@@ -83,16 +81,9 @@ fn group_reply_mention_prefix(
         .and_then(platform::qq_official::member_mention)
 }
 
-fn prefix_group_reply_text(
-    message: &GroupMessage,
-    text: String,
-    capability: &ReplyCapability,
-) -> String {
-    let Some(prefix) = group_reply_mention_prefix(message, capability) else {
-        return text;
-    };
+fn prepend_group_mention(prefix: &str, text: &str) -> String {
     if text.trim().is_empty() {
-        prefix
+        prefix.to_owned()
     } else {
         format!("{prefix}\n{text}")
     }
@@ -103,25 +94,47 @@ fn prefix_group_reply_outbound(
     outbound: OutboundMessage,
     capability: &ReplyCapability,
 ) -> OutboundMessage {
-    // 这是群聊的通用提及回执规则：只要能取得原发言人的平台身份，就回 @ 原发言人；
-    // 不按是否显式 @ 机器人、命令名称、骰点结果或模型响应类型做额外分支。
+    // 这是群聊的通用提及回执规则：无论入站是否显式 @ 当前机器人，都回 @ 原发言人；
+    // 不按命令名称、骰点结果或模型响应类型做额外分支。
     let Some(prefix) = group_reply_mention_prefix(message, capability) else {
         return outbound;
     };
-    // QQ 官方群的文本和 Markdown content 都支持 `<@openid>` 原生提及；即使部署关闭
-    // 普通 Markdown 渲染，入站 @ 机器人的纯文本回复也不能丢失提及回执。
-    outbound.prefix_text(&prefix)
+    // QQ 官方的 `<@openid>` 只有作为 Markdown content 发送时才是可靠的原生提及。
+    // 即使普通 Markdown 渲染配置关闭，这条平台提及通道仍强制使用 Markdown，避免把
+    // openid 当作普通文本显示成 `@A...`；Markdown 失败时只降级为不带 openid 的正文。
+    match outbound {
+        OutboundMessage::Text { text } => OutboundMessage::Markdown {
+            markdown: crate::markdown::MarkdownPayload::new(prepend_group_mention(&prefix, &text)),
+            fallback_text: text,
+        },
+        OutboundMessage::Markdown {
+            markdown,
+            fallback_text,
+        } => OutboundMessage::Markdown {
+            markdown: crate::markdown::MarkdownPayload::new(prepend_group_mention(
+                &prefix,
+                &markdown.content,
+            )),
+            fallback_text,
+        },
+        outbound => outbound,
+    }
 }
 
-fn group_respond_error_texts(
+fn group_respond_error_outbound(
     message: &GroupMessage,
     err: &crate::respond::RespondError,
     capability: &ReplyCapability,
-) -> (String, String) {
+) -> (OutboundMessage, String) {
     let log_text = respond_error_to_qq_text(err);
-    // QQ 官方群文本 content 支持原生 `<@openid>`；只把提及放进出站正文，日志仍保持脱敏。
-    let qq_text = prefix_group_reply_text(message, log_text.clone(), capability);
-    (qq_text, log_text)
+    let outbound = prefix_group_reply_outbound(
+        message,
+        OutboundMessage::Text {
+            text: log_text.clone(),
+        },
+        capability,
+    );
+    (outbound, log_text)
 }
 
 /// 群聊冷却命中但明确指向机器人时发送轻量提示。
@@ -136,19 +149,24 @@ async fn send_cooldown_hint(
     bot_display_name: &str,
 ) {
     let capability = ReplyCapability::qq_official_group(config);
-    let text = prefix_group_reply_text(
+    let outbound = prefix_group_reply_outbound(
         message,
-        group_cooldown_hint_text(bot_display_name),
+        OutboundMessage::Text {
+            text: group_cooldown_hint_text(bot_display_name),
+        },
         &capability,
     );
-    let result = send_group_text_with_status(
-        api,
+    let sender = RuntimeRecordingGroupSender {
+        inner: api,
         runtime,
-        &message.group_openid,
-        Some(&message.message_id),
-        &text,
+    };
+    let target = ReplyTarget::qq_group(
+        message.group_openid.clone(),
+        Some(message.message_id.clone()),
     )
-    .await;
+    .to_qq_group_target()
+    .expect("QQ group cooldown target should adapt to QQ API target");
+    let result = send_group_outbound_with_fallback(&sender, &target, &outbound).await;
     if let Err(error) = result {
         warn!(
             message_id = %message.message_id,
@@ -395,7 +413,7 @@ pub(crate) async fn handle_prepared_group_message(
         Err(err) => {
             runtime.record_respond_failure(err.log_summary());
             let capability = ReplyCapability::qq_official_group(config);
-            let (qq_text, log_text) = group_respond_error_texts(&message, &err, &capability);
+            let (outbound, log_text) = group_respond_error_outbound(&message, &err, &capability);
             warn!(
                 message_id = %message.message_id,
                 group = %masked_group,
@@ -405,14 +423,18 @@ pub(crate) async fn handle_prepared_group_message(
                 qq_error_text = %log_text,
                 "回复后端调用失败，正在发送本地群聊降级回复"
             );
-            let sent_message_id = send_group_text_with_status(
-                api,
+            let sender = RuntimeRecordingGroupSender {
+                inner: api,
                 runtime,
-                &message.group_openid,
-                Some(&message.message_id),
-                &qq_text,
+            };
+            let target = ReplyTarget::qq_group(
+                message.group_openid.clone(),
+                Some(message.message_id.clone()),
             )
-            .await?;
+            .to_qq_group_target()
+            .expect("QQ group error target should adapt to QQ API target");
+            let sent_message_id =
+                send_group_outbound_with_fallback(&sender, &target, &outbound).await?;
             group_outbound_cache
                 .lock()
                 .unwrap()
@@ -456,8 +478,15 @@ pub(crate) async fn handle_prepared_group_message(
                     inner: api,
                     runtime,
                 };
-                send_group_stream_failure(&sender, group_outbound_cache, &message, &failure)
-                    .await?;
+                let capability = ReplyCapability::qq_official_group(config);
+                send_group_stream_failure(
+                    &sender,
+                    group_outbound_cache,
+                    &message,
+                    &failure,
+                    &capability,
+                )
+                .await?;
             }
             GroupStreamOutcome::ClosedBeforeCompleted => {}
         },
@@ -695,6 +724,7 @@ async fn send_group_stream_failure<S>(
     group_outbound_cache: &Arc<Mutex<BotOutboundCache>>,
     message: &GroupMessage,
     failure: &CoreRespondFailure,
+    capability: &ReplyCapability,
 ) -> anyhow::Result<()>
 where
     S: GroupOutboundSender + ?Sized,
@@ -707,7 +737,14 @@ where
     .expect("QQ group reply target should adapt to QQ API target");
     // failure.message 由 Core 按失败类型映射为安全用户文案；Gateway 只负责真实发送，
     // 不把上游原始错误、工具结果或模型中间内容暴露到群聊。
-    let sent_ids = sender.send_text(&target, &failure.message).await?;
+    let outbound = prefix_group_reply_outbound(
+        message,
+        OutboundMessage::Text {
+            text: failure.message.clone(),
+        },
+        capability,
+    );
+    let sent_ids = send_group_outbound_with_fallback(sender, &target, &outbound).await?;
     let mut cache = group_outbound_cache.lock().unwrap();
     cache.insert(sent_ids.message_id);
     cache.insert_ref_index_id(sent_ids.ref_index_id);

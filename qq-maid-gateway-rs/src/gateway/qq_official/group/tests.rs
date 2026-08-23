@@ -28,7 +28,8 @@ async fn group_stream_timeout_sends_core_safe_failure_text() {
     let cache = Arc::new(Mutex::new(BotOutboundCache::default()));
     let message = group_message("联网对比", GroupEventType::GroupAtMessage);
 
-    send_group_stream_failure(&sender, &cache, &message, &failure)
+    let capability = qq_group_capability();
+    send_group_stream_failure(&sender, &cache, &message, &failure, &capability)
         .await
         .unwrap();
 
