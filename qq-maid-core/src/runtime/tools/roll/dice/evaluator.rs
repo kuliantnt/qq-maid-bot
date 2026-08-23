@@ -84,7 +84,13 @@ pub(super) fn node_range(node: &DiceNode) -> Result<(i64, i64), DiceExpressionEr
                         return Err(DiceExpressionError::ExponentOutOfRange);
                     }
                     let mut values = Vec::new();
-                    for base in [left_minimum, left_maximum] {
+                    // 幂函数的区间极值不一定在两个端点：底数跨过 0 时，偶数指数的
+                    // 最小值可能来自内部的 0；负底数还要保留 -1/1 以覆盖奇偶指数
+                    // 切换。候选集合足以覆盖整数区间上的极值，同时不需要枚举大区间。
+                    for base in [left_minimum, left_maximum, -1, 0, 1]
+                        .into_iter()
+                        .filter(|base| (left_minimum..=left_maximum).contains(base))
+                    {
                         for exponent in right_minimum..=right_maximum {
                             let exponent = u32::try_from(exponent)
                                 .map_err(|_| DiceExpressionError::ExponentOutOfRange)?;
@@ -187,7 +193,7 @@ pub(super) fn evaluate_node<R: Roller>(
             let precedence = binary_precedence(*operator);
             let display = format!(
                 "{} {} {}",
-                format_child(&left, precedence, false),
+                format_child(&left, precedence, matches!(operator, BinaryOperator::Power),),
                 binary_symbol(*operator),
                 format_child(
                     &right,

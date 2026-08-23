@@ -99,6 +99,13 @@ fn rejects_invalid_expression_and_complexity_limits() {
 }
 
 #[test]
+fn bounds_prefix_scans_before_trying_expression_boundaries() {
+    let oversized = format!("d20 {}", "原因".repeat(MAX_PREFIX_INPUT_CHARS));
+    assert!(parse_roll_spec_prefix(&oversized).is_none());
+    assert!(parse_roll_spec_compact_prefix(&oversized).is_none());
+}
+
+#[test]
 fn parses_repetitions_and_enforces_limits() {
     let parsed = spec("2#d20");
     assert_eq!(parsed.repetitions, 2);
@@ -216,6 +223,17 @@ fn canonical_expression_contains_operators_and_suffixes() {
 }
 
 #[test]
+fn canonical_power_formatting_preserves_parse_semantics() {
+    let left_nested = expression("(d6**2)**3");
+    let left_canonical = left_nested.to_string();
+    assert_eq!(left_canonical, "(1d6**2)**3");
+    assert_eq!(expression(&left_canonical), left_nested);
+
+    let right_nested = expression("d2**(2**3)");
+    assert_eq!(expression(&right_nested.to_string()), right_nested);
+}
+
+#[test]
 fn calculates_total_ranges_without_rolling() {
     for (input, expected) in [
         ("2d20", (2, 40)),
@@ -229,4 +247,13 @@ fn calculates_total_ranges_without_rolling() {
     ] {
         assert_eq!(expression(input).total_range(), expected, "{input}");
     }
+}
+
+#[test]
+fn power_ranges_include_interior_zero_and_block_zero_denominators() {
+    assert_eq!(expression("(d3-2)**2").total_range(), (0, 1));
+    assert_eq!(
+        parse_expression("1/((d3-2)**2)"),
+        DiceExpressionParse::Invalid(DiceExpressionError::DivisionByZero)
+    );
 }

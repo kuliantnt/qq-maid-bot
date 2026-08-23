@@ -237,6 +237,17 @@ fn parses_sealdice_compact_commands_and_aliases() {
             reason: Some(reason),
         }) if expression == dice_expression("b") && reason == "奖励骰"
     ));
+    for input in ["/rapid", "/rabbit", ".rapid", ".rabbit"] {
+        assert_eq!(parse_roll_command(input), None, "unknown command: {input}");
+    }
+    assert!(matches!(
+        parse_roll_command("/rap 失败原因"),
+        Some(RollCommand::DiceBatch {
+            expression,
+            repetitions: 1,
+            reason: Some(reason),
+        }) if expression == dice_expression("p") && reason == "失败原因"
+    ));
     assert!(matches!(
         parse_roll_command("/r 2#d20"),
         Some(RollCommand::DiceBatch {

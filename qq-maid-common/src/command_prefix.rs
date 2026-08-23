@@ -254,6 +254,10 @@ mod tests {
             "发送 `*rss add https://example.com/feed` 或 *天气 杭州"
         );
         assert_eq!(
+            prefix.render("骰点使用 /roll 或 /r"),
+            "骰点使用 *roll 或 *r"
+        );
+        assert_eq!(
             prefix.render("文件位于 /home/maid/app.db"),
             "文件位于 /home/maid/app.db"
         );

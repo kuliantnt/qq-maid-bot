@@ -101,7 +101,9 @@ pub(super) fn format_node(node: &DiceNode, parent_precedence: u8, right_child: b
             (
                 format!(
                     "{}{}{}",
-                    format_node(left, precedence, false),
+                    // Power 是右结合的；左侧同优先级子树必须保留括号，否则
+                    // `(d6**2)**3` 会被回执或诊断重新解析成 `d6**(2**3)`。
+                    format_node(left, precedence, matches!(operator, BinaryOperator::Power),),
                     binary_symbol(*operator),
                     format_node(right, precedence, true),
                 ),

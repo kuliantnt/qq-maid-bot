@@ -5,7 +5,8 @@ use super::{
     DEFAULT_DIE_SIDES, DiceExpression, DiceExpressionError, DiceExpressionParse, DiceKeep,
     DiceNode, DiceRollSpec, DiceRollSpecParse, DiceTerm, MAX_AST_NODES, MAX_DICE_COUNT_PER_TERM,
     MAX_DICE_TERMS, MAX_DIE_SIDES, MAX_EXPRESSION_CHARS, MAX_MODIFIER, MAX_NESTING_DEPTH,
-    MAX_REPETITIONS, MAX_SPECIAL_DICE_COUNT, MAX_TOTAL_DICE, MAX_TOTAL_ROLLS_PER_COMMAND,
+    MAX_PREFIX_INPUT_CHARS, MAX_REPETITIONS, MAX_SPECIAL_DICE_COUNT, MAX_TOTAL_DICE,
+    MAX_TOTAL_ROLLS_PER_COMMAND,
 };
 
 /// 解析一个单轮骰子表达式。
@@ -73,10 +74,11 @@ pub(crate) fn parse_expression_prefix(input: &str) -> Option<(DiceExpression, &s
 /// parse_expression_prefix 的重复投掷版本。
 pub(crate) fn parse_roll_spec_prefix(input: &str) -> Option<(DiceRollSpec, &str)> {
     let input = input.trim();
+    let max_boundary = prefix_boundary_limit(input)?;
     for (boundary, _) in input
         .char_indices()
         .rev()
-        .filter(|(_, character)| character.is_whitespace())
+        .filter(|(boundary, character)| *boundary <= max_boundary && character.is_whitespace())
     {
         let expression_text = input[..boundary].trim_end();
         let reason = input[boundary..].trim();
@@ -97,7 +99,12 @@ pub(crate) fn parse_roll_spec_prefix(input: &str) -> Option<(DiceRollSpec, &str)
 /// 失败时才从字符边界回退寻找合法骰式前缀，避免把 `2d6k1` 等合法后缀误当成原因。
 pub(crate) fn parse_roll_spec_compact_prefix(input: &str) -> Option<(DiceRollSpec, &str)> {
     let input = input.trim();
-    for (boundary, _) in input.char_indices().rev() {
+    let max_boundary = prefix_boundary_limit(input)?;
+    for (boundary, _) in input
+        .char_indices()
+        .rev()
+        .filter(|(boundary, _)| *boundary <= max_boundary)
+    {
         if boundary == 0 {
             continue;
         }
@@ -120,6 +127,22 @@ pub(crate) fn parse_roll_spec_compact_prefix(input: &str) -> Option<(DiceRollSpe
         }
     }
     None
+}
+
+/// 返回不超过表达式字符上限的候选边界。
+///
+/// `parse_roll_spec_prefix` 和紧凑前缀解析都要对候选前缀重新走一次完整解析；这里先
+/// 对整段输入做一次长度限制，再限制边界范围，确保重复解析的输入规模有固定上界。
+fn prefix_boundary_limit(input: &str) -> Option<usize> {
+    if input.chars().count() > MAX_PREFIX_INPUT_CHARS {
+        return None;
+    }
+    Some(
+        input
+            .char_indices()
+            .nth(MAX_EXPRESSION_CHARS)
+            .map_or(input.len(), |(boundary, _)| boundary),
+    )
 }
 
 fn parse_repeat_count(count_text: &str) -> Result<u8, DiceExpressionError> {

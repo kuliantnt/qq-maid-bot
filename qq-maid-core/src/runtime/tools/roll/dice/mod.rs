@@ -40,6 +40,12 @@ pub(crate) const MAX_TOTAL_ROLLS_PER_COMMAND: u32 = 200;
 pub(crate) const MAX_MODIFIER: u32 = 1_000;
 /// 表达式原文的字符数上限。
 pub(crate) const MAX_EXPRESSION_CHARS: usize = 64;
+/// “骰式 + 原因”前缀解析的整段输入上限，覆盖表达式、分隔空格和 DM 问题上限。
+///
+/// 前缀解析会尝试多个边界；先限制输入总长度，再把候选边界收窄到表达式上限内，
+/// 避免攻击者用超长原因触发重复解析。
+pub(crate) const MAX_PREFIX_INPUT_CHARS: usize =
+    MAX_EXPRESSION_CHARS + 1 + super::DM_QUERY_MAX_CHARS;
 /// N#expr 的重复次数上限。
 pub(crate) const MAX_REPETITIONS: u32 = 20;
 

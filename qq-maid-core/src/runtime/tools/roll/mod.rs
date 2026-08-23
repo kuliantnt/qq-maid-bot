@@ -272,6 +272,12 @@ fn parse_compact_roll_command(text: &str) -> Option<ParsedCommand> {
 
     for alias in ["rap", "rab"] {
         if lowercase.starts_with(alias) && lowercase.len() > alias.len() {
+            // 无空格的紧凑别名只接受中文原因；ASCII 后缀必须走普通 Slash 解析，
+            // 避免 `/rapid`、`/rabbit` 等未知命令被误接管成骰点。
+            let suffix = &token[alias.len()..];
+            if !is_cjk_reason_start(suffix) {
+                continue;
+            }
             let argument = join_compact_argument(&token[alias.len()..], remainder);
             return Some(ParsedCommand {
                 action: "roll".to_owned(),

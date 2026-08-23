@@ -39,8 +39,13 @@ async fn custom_prefix_routes_commands_and_renders_help_consistently() {
     assert_eq!(response.command.as_deref(), Some("help"));
     assert!(text.contains("#help all"));
     assert!(text.contains("✅ 待办：#todo"));
+    assert!(text.contains("#roll"));
+    assert!(text.contains("#r"));
     assert!(markdown.contains("`#memory`"));
+    assert!(markdown.contains("`#roll`"));
+    assert!(markdown.contains("`#r`"));
     assert!(!markdown.contains("`/help"));
+    assert!(!markdown.contains("`/roll"));
 
     for ordinary in ["/help", "你好 #help", "##help"] {
         let planned = service.plan_core_respond(&message(ordinary)).unwrap();
@@ -142,6 +147,7 @@ async fn help_roll_describes_dice_expressions_and_limits() {
         "1d20+3",
         "1d8+1d6+4",
         "指定骰式",
+        "骰点原因",
         "娱乐刻度",
         "DND5E",
         "1–100",
@@ -157,6 +163,8 @@ async fn help_roll_describes_dice_expressions_and_limits() {
             "missing roll help markdown: {expected}"
         );
     }
+    assert!(text.contains("只有 /roll"));
+    assert!(markdown.contains("只有 `/roll <骰式> <问题>`"));
 }
 
 #[tokio::test]
