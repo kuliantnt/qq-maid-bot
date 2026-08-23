@@ -53,7 +53,7 @@ fn group_at_reply_markdown_outbound_mentions_sender() {
 }
 
 #[test]
-fn group_without_bot_mention_does_not_force_sender_mention() {
+fn group_reply_mentions_sender_without_explicit_bot_mention() {
     let message = group_message("/r d20", GroupEventType::GroupMessage);
     let capability = qq_group_capability();
     let outbound = OutboundMessage::Text {
@@ -63,7 +63,7 @@ fn group_without_bot_mention_does_not_force_sender_mention() {
     assert_eq!(
         prefix_group_reply_outbound(&message, outbound, &capability),
         OutboundMessage::Text {
-            text: "🎲 掷出了 12 / 20".to_owned(),
+            text: "<@member-1>\n🎲 掷出了 12 / 20".to_owned(),
         }
     );
 }

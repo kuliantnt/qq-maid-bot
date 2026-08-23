@@ -317,7 +317,7 @@ fn evaluate_special_dice<R: Roller>(
     }
     let candidates = tens
         .iter()
-        .map(|value| i64::from(*value) * 10 + i64::from(unit))
+        .map(|value| percentile_value(*value, unit))
         .collect::<Vec<_>>();
     let selected = match special {
         SpecialDice::Bonus(_) => candidates
@@ -364,6 +364,13 @@ fn evaluate_special_dice<R: Roller>(
         precedence: 5,
         rolls,
     })
+}
+
+/// 百分骰的十面骰中，`10` 表示数字 `0`；两个 `0` 组合时按惯例显示为 `100`。
+/// 直接把十面骰原始值当作十位会产生 `D100=108` 之类的越界结果。
+fn percentile_value(tens: u8, unit: u8) -> i64 {
+    let value = i64::from(tens % 10) * 10 + i64::from(unit % 10);
+    if value == 0 { 100 } else { value }
 }
 
 fn valid_roll<R: Roller>(roller: &mut R, sides: u8) -> Result<u8, DiceRollError> {

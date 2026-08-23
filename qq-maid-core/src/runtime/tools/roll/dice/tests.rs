@@ -181,6 +181,21 @@ fn bonus_and_penalty_dice_choose_the_expected_percentile_result() {
 }
 
 #[test]
+fn percentile_special_dice_maps_ten_faces_to_zero() {
+    let mut values = [8, 10, 6].into_iter();
+    let penalty = expression("p")
+        .roll(&mut |_| {
+            values
+                .next()
+                .expect("percentile dice should roll three d10s")
+        })
+        .unwrap();
+
+    assert_eq!(penalty.total, 68);
+    assert_eq!(penalty.calculation(), "D100=68（惩罚 6）");
+}
+
+#[test]
 fn rejects_out_of_range_injected_rolls() {
     let error = expression("d20").roll(&mut |_| 21).unwrap_err();
     assert_eq!(

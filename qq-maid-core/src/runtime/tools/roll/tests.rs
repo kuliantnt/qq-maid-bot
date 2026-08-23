@@ -355,6 +355,32 @@ async fn compact_reason_and_repeated_rolls_stay_local_and_keep_dice_icon() {
 }
 
 #[tokio::test]
+async fn compact_penalty_alias_uses_valid_percentile_roll_template() {
+    let provider = Arc::new(MockProvider::failing(LlmError::provider(
+        "must not call",
+        "test",
+    ))) as DynLlmProvider;
+    let command = parse_roll_command(".rap 测试").expect("compact penalty alias should parse");
+    let mut values = [8, 10, 6].into_iter();
+    let reply = execute_roll_command_with_roller(
+        &provider,
+        None,
+        command,
+        Duration::from_secs(1),
+        |sides| {
+            assert_eq!(sides, 10);
+            values
+                .next()
+                .expect("penalty expression should roll three d10s")
+        },
+    )
+    .await;
+
+    assert_eq!(reply.reply, "🎲 “测试” p：D100=68（惩罚 6） = 68");
+    assert!(reply.diagnostics()["roll_execution_kind"] == "local");
+}
+
+#[tokio::test]
 async fn sealdice_default_advantage_expression_uses_roll_template_without_provider() {
     let provider = MockProvider::failing(LlmError::provider(
         "must not call for compact advantage",

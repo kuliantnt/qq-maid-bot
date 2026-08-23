@@ -44,7 +44,7 @@ use super::super::{
     cache::BotOutboundCache,
     command::{GatewayCommandContext, GatewayCommandConversation, GatewayCommandService},
     event::{GroupEventType, GroupMessage},
-    group_filter::{GroupCooldowns, group_message_addresses_bot, mentions_current_bot},
+    group_filter::{GroupCooldowns, group_message_addresses_bot},
     logging::{group_message_log_summary, mask_openid},
     media_fetch::{
         MediaFetchContext, fetch_qq_official_image_attachments, fetch_qq_official_quoted_images,
@@ -74,7 +74,7 @@ fn group_reply_mention_prefix(
     message: &GroupMessage,
     capability: &ReplyCapability,
 ) -> Option<String> {
-    if !capability.supports_at_mention || !mentions_current_bot(message) {
+    if !capability.supports_at_mention {
         return None;
     }
     message
@@ -103,8 +103,8 @@ fn prefix_group_reply_outbound(
     outbound: OutboundMessage,
     capability: &ReplyCapability,
 ) -> OutboundMessage {
-    // 这是群聊的通用提及回执规则：只要入站消息显式 @ 当前机器人，就回 @ 原发言人；
-    // 不按命令名称、骰点结果或模型响应类型做额外分支。
+    // 这是群聊的通用提及回执规则：只要能取得原发言人的平台身份，就回 @ 原发言人；
+    // 不按是否显式 @ 机器人、命令名称、骰点结果或模型响应类型做额外分支。
     let Some(prefix) = group_reply_mention_prefix(message, capability) else {
         return outbound;
     };
