@@ -395,13 +395,9 @@ impl RustRespondService {
         }
     }
 
-    pub(crate) const fn command_prefix(&self) -> CommandPrefix {
-        self.command_prefix
-    }
-
-    /// 统一规范化 Core 命令，并保留默认前缀下 SealDice 点号快捷兼容入口。
+    /// 统一规范化 Core 命令，并保留默认前缀下的点号命令入口。
     pub(crate) fn normalize_command_text(&self, text: &str) -> Option<String> {
-        self.command_prefix.normalize_with_sealdice_compat(text)
+        self.command_prefix.normalize_with_dot_compat(text)
     }
 
     /// 返回当前 Core 实际注册的模型 Tool；控制台只消费其中的名称和说明。

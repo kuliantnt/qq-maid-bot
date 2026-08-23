@@ -156,9 +156,8 @@ pub(crate) fn should_process_group_message_with_prefix(
 
     // QQ 有时把 `@机器人 /help` 作为普通群消息下发；
     // 此时原始 content 不是斜杠开头，需要使用 gateway 已归一化的 Core 文本判断命令。
-    let is_direct_command_candidate =
-        command_prefix.is_candidate_with_sealdice_compat(&message.content);
-    let is_normalized_command = command_prefix.is_candidate_with_sealdice_compat(respond_content);
+    let is_direct_command_candidate = command_prefix.is_candidate_with_dot_compat(&message.content);
+    let is_normalized_command = command_prefix.is_candidate_with_dot_compat(respond_content);
     let is_structured_mention_command = mentions_current_bot && is_normalized_command;
 
     match mode {

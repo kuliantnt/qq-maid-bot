@@ -147,11 +147,11 @@ pub(crate) fn preprocess_group_message(
     let facts = GroupIngressFacts {
         local_command_candidate: config
             .command_prefix
-            .is_candidate_with_sealdice_compat(&message.content)
+            .is_candidate_with_dot_compat(&message.content)
             || (mentions_current_bot
                 && config
                     .command_prefix
-                    .is_candidate_with_sealdice_compat(&command_content)),
+                    .is_candidate_with_dot_compat(&command_content)),
         mentions_current_bot,
         active_keyword: contains_active_keyword(&message.content, &config.group_active_keywords),
         replies_to_bot: is_reply_to_bot(&message, group_outbound_cache),

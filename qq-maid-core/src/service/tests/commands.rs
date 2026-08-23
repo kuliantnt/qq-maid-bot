@@ -325,6 +325,49 @@ async fn core_roll_defaults_to_d20_and_is_consumed_without_model_or_session() {
 }
 
 #[tokio::test]
+async fn core_dot_nn_query_is_immediate_and_returns_manual_display_name() {
+    let provider =
+        TestProvider::replying("不应调用").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let state = test_state_with_tool_calling(provider.clone(), 5, true);
+    let service = CoreHandle::new(state);
+
+    let mut set_request = group_request(".nn 雪雪");
+    set_request.input_parts = vec![qq_maid_common::input_part::MessageInputPart::text(
+        ".nn 雪雪",
+    )];
+    let set_response = voice_command_completed(service.respond(set_request).await.unwrap()).await;
+    assert_eq!(set_response.command.as_deref(), Some("set"));
+    assert!(
+        set_response
+            .text_content()
+            .is_some_and(|text| text.contains("雪雪"))
+    );
+
+    let mut query_request = group_request(".nn");
+    query_request.input_parts = vec![qq_maid_common::input_part::MessageInputPart::text(".nn")];
+    let classification = service
+        .classify_inbound(query_request.clone())
+        .await
+        .unwrap();
+    assert_eq!(classification.kind, CoreInboundKind::Immediate);
+
+    let query_response =
+        voice_command_completed(service.respond(query_request).await.unwrap()).await;
+    assert_eq!(query_response.command.as_deref(), Some("set"));
+    assert!(
+        query_response
+            .text_content()
+            .is_some_and(|text| text.contains("雪雪"))
+    );
+
+    let mut help_request = group_request(".help");
+    help_request.input_parts = vec![qq_maid_common::input_part::MessageInputPart::text(".help")];
+    let help_response = voice_command_completed(service.respond(help_request).await.unwrap()).await;
+    assert_eq!(help_response.command.as_deref(), Some("help"));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn core_roll_executes_dice_expression_without_model_tool_or_session() {
     let provider =
         TestProvider::replying("不应调用").with_tool_protocol(ToolCallingProtocol::OpenAiResponses);

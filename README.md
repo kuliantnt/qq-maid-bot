@@ -187,7 +187,7 @@ v0.20.x 起推荐新部署通过 `/console/` 网页完成配置，也可在安�
 
 完整环境变量以 [`.env.example`](./runtime/config/.env.example) 为准，配置中心优先级与安全边界见 [配置中心清单](./docs/development/config-center.md)。首次启动从二进制内嵌的同版默认模板生成未跟踪的 `config/agent.toml`；Release 中的 [`agent.example.toml`](./runtime/config/agent.example.toml) 仅用于参考、开发和升级迁移，修改该外部示例不会改变首次生成内容。`/ops` 配置从 [`ops.example.toml`](./runtime/config/ops.example.toml) 复制为未跟踪的 `ops.toml` 后填写，具体步骤见 Wiki [用 `/ops` 在 QQ 里做运维](https://github.com/kuliantnt/qq-maid-bot/wiki/ops运维命令) 与 [用 `/ops codex` 跑长任务](https://github.com/kuliantnt/qq-maid-bot/wiki/ops-codex)。调整模型、工具、场景策略或白名单运维命令时，不需要修改业务代码。
 
-聊天命令默认使用 `/` 前缀；可在 Web 控制台“命令设置”中通过下拉框改为 `#` 或 `*`，也可设置 `runtime.toml` 的 `command.prefix` / 环境变量 `CHAT_COMMAND_PREFIX`。前缀必须是一个可见非空白字符，修改后重启生效；自定义后旧 `/` 不再触发普通命令。默认前缀下额外兼容 SealDice 点号快捷入口，如 `.r2d6`、`.rd优势`、`.rap 原因`、`.nn emmm`；配置其他前缀时不额外放开点号。
+聊天命令默认使用 `/` 前缀；可在 Web 控制台“命令设置”中通过下拉框改为 `#` 或 `*`，也可设置 `runtime.toml` 的 `command.prefix` / 环境变量 `CHAT_COMMAND_PREFIX`。前缀必须是一个可见非空白字符，修改后重启生效；自定义后旧 `/` 不再触发普通命令。默认前缀下 `/` 与 `.` 都是命令前缀，例如 `/help` 与 `.help`、`/nn` 与 `.nn` 会进入同一条 Core 命令通道；点号只在消息开头生效，具体命令和参数由 Core 统一判断。配置其他前缀时不额外放开点号。
 
 未配置 Provider 或平台入口的新实例会以 `setup_required` 启动。访问默认同源 `/console/`，读取服务器本地 `config/secrets/bootstrap.token` 建立首位部署管理员后，可分步保存 Provider、QQ/OneBot/微信入口、主要功能开关、模型路线和 Tool Calling；普通值与人工编辑共享受管 TOML，secret 不回传原文。约 22 字符的短时单次 Bootstrap token 在新生成时同时写入权限受限文件，并通过一次 `info` 启动日志事件输出；状态查询、有效 token 复用和后续重启不会重复输出，成功使用后文件立即删除。忘记密码时可在登录页生成同路径的一次性重置 token，完成重置后旧管理员会话全部失效。完成配置后按当前部署方式重启，完整预检通过才进入机器人正常运行态。
 

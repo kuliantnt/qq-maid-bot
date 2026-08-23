@@ -225,7 +225,7 @@ impl OneBotInboundDispatcher {
             && !inbound.mentioned_bot
             && !self
                 .command_prefix
-                .is_candidate_with_sealdice_compat(&inbound.text)
+                .is_candidate_with_dot_compat(&inbound.text)
             && inbound.quoted.as_ref().and_then(|quoted| quoted.from_bot) != Some(true)
         {
             // 群聊 reply 候选只有在索引确认引用机器人出站消息后才触发；重启后的 miss

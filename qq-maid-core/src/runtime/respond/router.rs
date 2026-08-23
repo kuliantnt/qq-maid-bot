@@ -141,6 +141,7 @@ impl<'a> RespondRouter<'a> {
         req: RespondRequest,
     ) -> Result<CoreInboundClassification, LlmError> {
         let user_text = req.effective_command_text();
+        let command_text = self.service.normalize_command_text(&user_text);
         let meta = respond_meta(&req);
         let interaction_meta = respond_interaction_meta(&req);
         let active_interaction_session = self
@@ -154,9 +155,11 @@ impl<'a> RespondRouter<'a> {
             .get_active(&meta)
             .map_err(session_error)?;
 
-        // Gateway 只提交候选，Core 负责后续注册表与权限判断；所有斜杠候选都应绕过
-        // Gateway 普通聊天冷却，确保未知命令也能在 Core 确定性收口。
-        if self.service.command_prefix().is_candidate(&user_text) {
+        // Gateway 只提交候选，Core 负责后续注册表与权限判断；所有统一前缀和点号命令
+        // 候选都应绕过 Gateway 普通聊天冷却，确保未知命令也能在 Core 确定性收口。
+        // 这里必须复用与真正分派相同的归一化，不能只检查配置前缀，否则 `.help`、`.nn`
+        // 等点号命令会在群聊分类阶段被误判为普通消息。
+        if command_text.is_some() {
             return Ok(CoreInboundClassification {
                 kind: CoreInboundKind::Immediate,
             });
@@ -169,10 +172,7 @@ impl<'a> RespondRouter<'a> {
         }
 
         if pending_blocks_immediate(
-            self.service
-                .normalize_command_text(&user_text)
-                .as_deref()
-                .unwrap_or(&user_text),
+            command_text.as_deref().unwrap_or(&user_text),
             active_interaction_session.as_ref(),
             active_conversation_session.as_ref(),
             meta.user_id.as_deref(),
