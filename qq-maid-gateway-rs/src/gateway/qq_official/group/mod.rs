@@ -83,6 +83,21 @@ fn group_reply_mention_prefix(
         .and_then(platform::qq_official::member_mention)
 }
 
+fn prefix_group_reply_text(
+    message: &GroupMessage,
+    text: String,
+    capability: &ReplyCapability,
+) -> String {
+    let Some(prefix) = group_reply_mention_prefix(message, capability) else {
+        return text;
+    };
+    if text.trim().is_empty() {
+        prefix
+    } else {
+        format!("{prefix}\n{text}")
+    }
+}
+
 fn prefix_group_reply_outbound(
     message: &GroupMessage,
     outbound: OutboundMessage,
@@ -93,33 +108,19 @@ fn prefix_group_reply_outbound(
     let Some(prefix) = group_reply_mention_prefix(message, capability) else {
         return outbound;
     };
-    // QQ 官方群文本消息不会把 `<@openid>` 渲染成昵称，会直接暴露 openid。
-    // 入站确实 @ 机器人时，若当前能力支持 Markdown，将纯文本升级为安全的 Markdown
-    // 提及；能力关闭时保留原文，避免把 openid 当普通文本泄露给群成员。
-    let outbound = match outbound {
-        OutboundMessage::Text { text } if capability.render.supports_markdown => {
-            OutboundMessage::Markdown {
-                markdown: crate::markdown::MarkdownPayload::new(text.clone()),
-                fallback_text: text,
-            }
-        }
-        outbound => outbound,
-    };
-    if matches!(outbound, OutboundMessage::Markdown { .. }) {
-        outbound.prefix_text(&prefix)
-    } else {
-        outbound
-    }
+    // QQ 官方群的文本和 Markdown content 都支持 `<@openid>` 原生提及；即使部署关闭
+    // 普通 Markdown 渲染，入站 @ 机器人的纯文本回复也不能丢失提及回执。
+    outbound.prefix_text(&prefix)
 }
 
 fn group_respond_error_texts(
-    _message: &GroupMessage,
+    message: &GroupMessage,
     err: &crate::respond::RespondError,
-    _capability: &ReplyCapability,
+    capability: &ReplyCapability,
 ) -> (String, String) {
     let log_text = respond_error_to_qq_text(err);
-    // 本地错误 fallback 是纯文本发送，不能拼 `<@openid>`，否则 QQ 会原样展示 openid。
-    let qq_text = log_text.clone();
+    // QQ 官方群文本 content 支持原生 `<@openid>`；只把提及放进出站正文，日志仍保持脱敏。
+    let qq_text = prefix_group_reply_text(message, log_text.clone(), capability);
     (qq_text, log_text)
 }
 
@@ -130,10 +131,16 @@ fn group_respond_error_texts(
 async fn send_cooldown_hint(
     api: &QqApiClient,
     runtime: &GatewayRuntimeStatus,
+    config: &AppConfig,
     message: &GroupMessage,
     bot_display_name: &str,
 ) {
-    let text = group_cooldown_hint_text(bot_display_name);
+    let capability = ReplyCapability::qq_official_group(config);
+    let text = prefix_group_reply_text(
+        message,
+        group_cooldown_hint_text(bot_display_name),
+        &capability,
+    );
     let result = send_group_text_with_status(
         api,
         runtime,
@@ -308,7 +315,7 @@ pub(crate) async fn handle_prepared_group_message(
                 member = %message.member_openid.as_deref().map(mask_openid).unwrap_or_default(),
                 "群聊消息触发冷却限制，正在发送轻量提示"
             );
-            send_cooldown_hint(api, runtime, &message, config.bot_display_name()).await;
+            send_cooldown_hint(api, runtime, config, &message, config.bot_display_name()).await;
         } else {
             info!(
                 message_id = %message.message_id,

@@ -1,7 +1,7 @@
 use super::*;
 mod outbound;
 #[test]
-fn group_at_respond_error_log_text_keeps_member_openid_out() {
+fn group_at_respond_error_mentions_sender_but_log_text_keeps_member_openid_out() {
     let message = group_message("hello", GroupEventType::GroupAtMessage);
     let error = crate::respond::RespondError::Core(qq_maid_core::service::CoreError::new(
         "internal_error",
@@ -12,25 +12,24 @@ fn group_at_respond_error_log_text_keeps_member_openid_out() {
 
     let (qq_text, log_text) = group_respond_error_texts(&message, &error, &capability);
 
-    assert!(!qq_text.contains("member-1"));
-    assert!(!qq_text.contains("<@"));
+    assert_eq!(qq_text, "<@member-1>\n处理失败：backend down");
     assert!(!log_text.contains("member-1"));
     assert!(!log_text.contains("<@"));
 }
 
 #[test]
-fn group_at_reply_text_outbound_mentions_sender_when_markdown_is_available() {
+fn group_at_reply_text_outbound_mentions_sender_without_markdown() {
     let message = group_message("hello", GroupEventType::GroupAtMessage);
-    let capability = qq_group_capability();
+    let mut capability = qq_group_capability();
+    capability.render.supports_markdown = false;
     let outbound = OutboundMessage::Text {
         text: "回复正文".to_owned(),
     };
 
     assert_eq!(
         prefix_group_reply_outbound(&message, outbound, &capability),
-        OutboundMessage::Markdown {
-            markdown: crate::markdown::MarkdownPayload::new("<@member-1>\n回复正文"),
-            fallback_text: "<@member-1>\n回复正文".to_owned(),
+        OutboundMessage::Text {
+            text: "<@member-1>\n回复正文".to_owned(),
         }
     );
 }

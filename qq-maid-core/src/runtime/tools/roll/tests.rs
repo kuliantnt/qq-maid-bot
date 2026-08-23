@@ -184,6 +184,11 @@ fn parses_sealdice_compact_commands_and_aliases() {
         ("/rd优势", "2d20k1"),
         ("/rd劣势", "2d20q1"),
         (".r2d6", "2d6"),
+        (".rd优势", "2d20k1"),
+        (".rd劣势", "2d20q1"),
+        (".rd优势+6", "d20优势+6"),
+        (".rd劣势+6", "d20劣势+6"),
+        (".rd优势+6+1d4", "d20优势+6+1d4"),
     ] {
         let parsed = parse_roll_command(input);
         assert!(
@@ -203,6 +208,19 @@ fn parses_sealdice_compact_commands_and_aliases() {
             reason: Some(reason),
         }) if expression == dice_expression("2d6") && reason == "xxx"
     ));
+    for input in ["/r测试", ".r测试"] {
+        assert!(
+            matches!(
+                parse_roll_command(input),
+                Some(RollCommand::DiceBatch {
+                    expression,
+                    repetitions: 1,
+                    reason: Some(reason),
+                }) if expression == dice_expression("d20") && reason == "测试"
+            ),
+            "{input}"
+        );
+    }
     assert!(matches!(
         parse_roll_command("/rap 是惩罚骰"),
         Some(RollCommand::DiceBatch {
@@ -334,6 +352,36 @@ async fn compact_reason_and_repeated_rolls_stay_local_and_keep_dice_icon() {
     assert!(reply.reply.contains("第1轮：掷出了 2 / 6"));
     assert!(reply.reply.contains("第2轮：掷出了 5 / 6"));
     assert!(reply.reply.contains("“测试”"));
+}
+
+#[tokio::test]
+async fn sealdice_default_advantage_expression_uses_roll_template_without_provider() {
+    let provider = MockProvider::failing(LlmError::provider(
+        "must not call for compact advantage",
+        "test",
+    ));
+    let events = provider.events.clone();
+    let provider = Arc::new(provider) as DynLlmProvider;
+    let command = parse_roll_command(".rd优势+6+1d4").expect("compact advantage should parse");
+    let mut values = [20, 17, 4].into_iter();
+    let reply = execute_roll_command_with_roller(
+        &provider,
+        None,
+        command,
+        Duration::from_secs(1),
+        |sides| {
+            assert!(matches!(sides, 20 | 4));
+            values
+                .next()
+                .expect("advantage expression should roll three dice")
+        },
+    )
+    .await;
+
+    assert!(reply.reply.starts_with("🎲 2d20k1+6+1d4："));
+    assert!(reply.reply.ends_with("= 30"));
+    assert_eq!(reply.diagnostics()["roll_execution_kind"], "local");
+    assert!(events.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

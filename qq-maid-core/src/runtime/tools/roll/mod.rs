@@ -288,19 +288,34 @@ fn parse_compact_roll_command(text: &str) -> Option<ParsedCommand> {
     } else {
         return None;
     };
-    if !looks_like_compact_roll_suffix(suffix) {
+    let local_reason_suffix = raw_command == "r" && is_cjk_reason_start(suffix);
+    if !looks_like_compact_roll_suffix(suffix) && !local_reason_suffix {
         return None;
     }
-    let expression = if raw_command == "rd" {
+    let expression = if local_reason_suffix {
+        "d20".to_owned()
+    } else if raw_command == "rd" {
         compact_rd_expression(suffix)
     } else {
         suffix.to_owned()
     };
+    let argument = if local_reason_suffix {
+        let reason = join_compact_argument(suffix, remainder);
+        join_compact_argument("d20", &reason)
+    } else {
+        join_compact_argument(&expression, remainder)
+    };
     Some(ParsedCommand {
         action: "roll".to_owned(),
-        argument: join_compact_argument(&expression, remainder),
+        argument,
         raw_command: raw_command.to_owned(),
     })
+}
+
+fn is_cjk_reason_start(suffix: &str) -> bool {
+    suffix.chars().next().is_some_and(
+        |character| matches!(character, '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}'),
+    )
 }
 
 /// 允许 Roll domain 单独处理原生 SealDice 点号入口；正常 Core 路由仍先由命令前缀统一规范化。
@@ -345,6 +360,11 @@ fn looks_like_compact_roll_suffix(suffix: &str) -> bool {
 }
 
 fn compact_rd_expression(suffix: &str) -> String {
+    // SealDice 的 `d` 是默认骰表达式，`d优势`/`d劣势` 会先展开为双 D20 取高/取低；
+    // 后续的 `+6`、`+1d4` 等仍属于同一条表达式，不能把“优势”当作普通原因截断。
+    if suffix.starts_with("优势") || suffix.starts_with("劣势") {
+        return format!("d20{suffix}");
+    }
     let starts_with_digit = suffix
         .chars()
         .next()

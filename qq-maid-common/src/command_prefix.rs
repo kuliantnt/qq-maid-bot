@@ -134,6 +134,7 @@ fn is_roll_suffix_start(character: char) -> bool {
             character,
             'd' | 'b' | 'p' | 'f' | 'k' | 'q' | '(' | '+' | '-' | '#' | '优' | '劣'
         )
+        || is_cjk(character)
 }
 
 impl fmt::Display for CommandPrefix {
@@ -243,6 +244,10 @@ mod tests {
             Some("/r2d6xxx")
         );
         assert!(prefix.is_candidate_with_sealdice_compat(".rd优势"));
+        assert_eq!(
+            prefix.normalize_with_sealdice_compat(".r测试").as_deref(),
+            Some("/r测试")
+        );
         assert!(prefix.is_candidate_with_sealdice_compat(".rap 原因"));
         assert_eq!(
             prefix.normalize_with_sealdice_compat(".nn emmm").as_deref(),
