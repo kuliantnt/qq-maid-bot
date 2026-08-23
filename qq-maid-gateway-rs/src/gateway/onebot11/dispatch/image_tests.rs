@@ -41,7 +41,9 @@ async fn group_text_and_image_are_sent_in_order() {
         sender.clone(),
     );
 
-    dispatcher.dispatch(inbound("mixed", true)).await.unwrap();
+    let mut message = inbound("mixed", true);
+    message.mentioned_bot = false;
+    dispatcher.dispatch(message).await.unwrap();
 
     assert_eq!(
         sender.sent.lock().unwrap().as_slice(),

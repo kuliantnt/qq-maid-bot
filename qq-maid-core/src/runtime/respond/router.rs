@@ -33,7 +33,7 @@ impl<'a> RespondRouter<'a> {
     pub(super) fn plan(&self, req: &RespondRequest) -> Result<PlannedRespond, LlmError> {
         let user_text = req.effective_command_text();
         let trimmed = user_text.trim();
-        let command_text = self.service.command_prefix().normalize(&user_text);
+        let command_text = self.service.normalize_command_text(&user_text);
         if trimmed.is_empty() && req.effective_input_parts().is_empty() {
             return Ok(PlannedRespond::immediate_chat("deterministic_or_empty"));
         }
@@ -170,8 +170,7 @@ impl<'a> RespondRouter<'a> {
 
         if pending_blocks_immediate(
             self.service
-                .command_prefix()
-                .normalize(&user_text)
+                .normalize_command_text(&user_text)
                 .as_deref()
                 .unwrap_or(&user_text),
             active_interaction_session.as_ref(),

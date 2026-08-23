@@ -192,7 +192,7 @@ const HELP_MODULES: &[HelpModule] = &[
         title: "⚙️ 设置",
         summary: "管理当前会话偏好；展示名只用于显示，不代表现实身份认证。",
         commands: &[
-            "- `/set 昵称 [名称]`：查看或设置展示名；`/unset 昵称`：清除",
+            "- `/set 昵称 [名称]`：查看或设置展示名；`/nn [名称]` 是快捷别名；`/unset 昵称`：清除",
             "- `/语音 [开启|关闭]`：查询或切换当前 QQ 会话语音回复",
         ],
         notes: &[
@@ -309,8 +309,8 @@ fn format_help_home(context: HelpContext) -> CommandBody {
         "- 🗂 会话：`/state`".to_owned(),
     );
     render.push_pair(
-        "· ⚙️ 设置：/set 昵称 脸脸".to_owned(),
-        "- ⚙️ 设置：`/set 昵称 脸脸`".to_owned(),
+        "· ⚙️ 设置：/set 昵称 脸脸（或 /nn 脸脸）".to_owned(),
+        "- ⚙️ 设置：`/set 昵称 脸脸`（快捷别名：`/nn 脸脸`）".to_owned(),
     );
     render.push_pair(
         "· 🔊 语音回复：/语音".to_owned(),

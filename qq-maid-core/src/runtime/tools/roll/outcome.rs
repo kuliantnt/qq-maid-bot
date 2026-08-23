@@ -162,12 +162,9 @@ mod tests {
 
     #[test]
     fn custom_expression_uses_total_without_natural_twenty_override() {
-        let expression = DiceExpression {
-            terms: vec![super::super::dice::DiceTerm {
-                count: 2,
-                sides: 20,
-            }],
-            modifier: 0,
+        let expression = match super::super::dice::parse_expression("2d20") {
+            super::super::dice::DiceExpressionParse::Parsed(expression) => expression,
+            other => panic!("expected a valid test expression, got {other:?}"),
         };
         let result = expression
             .roll(&mut |sides| {

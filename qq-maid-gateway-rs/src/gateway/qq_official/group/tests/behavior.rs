@@ -19,7 +19,7 @@ fn group_at_respond_error_log_text_keeps_member_openid_out() {
 }
 
 #[test]
-fn group_at_reply_text_outbound_keeps_plain_text_without_openid_mention() {
+fn group_at_reply_text_outbound_mentions_sender_when_markdown_is_available() {
     let message = group_message("hello", GroupEventType::GroupAtMessage);
     let capability = qq_group_capability();
     let outbound = OutboundMessage::Text {
@@ -28,8 +28,9 @@ fn group_at_reply_text_outbound_keeps_plain_text_without_openid_mention() {
 
     assert_eq!(
         prefix_group_reply_outbound(&message, outbound, &capability),
-        OutboundMessage::Text {
-            text: "回复正文".to_owned(),
+        OutboundMessage::Markdown {
+            markdown: crate::markdown::MarkdownPayload::new("<@member-1>\n回复正文"),
+            fallback_text: "<@member-1>\n回复正文".to_owned(),
         }
     );
 }
@@ -48,6 +49,22 @@ fn group_at_reply_markdown_outbound_mentions_sender() {
         OutboundMessage::Markdown {
             markdown: crate::markdown::MarkdownPayload::new("<@member-1>\n**回复正文**"),
             fallback_text: "<@member-1>\n回复正文".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn group_without_bot_mention_does_not_force_sender_mention() {
+    let message = group_message("/r d20", GroupEventType::GroupMessage);
+    let capability = qq_group_capability();
+    let outbound = OutboundMessage::Text {
+        text: "🎲 掷出了 12 / 20".to_owned(),
+    };
+
+    assert_eq!(
+        prefix_group_reply_outbound(&message, outbound, &capability),
+        OutboundMessage::Text {
+            text: "🎲 掷出了 12 / 20".to_owned(),
         }
     );
 }

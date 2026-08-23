@@ -117,7 +117,7 @@ impl<'a> CommandDispatcher<'a> {
         planned: PlannedRespond,
     ) -> Result<DispatchOutcome, LlmError> {
         let user_text = req.effective_command_text();
-        let command_text = self.service.command_prefix().normalize(&user_text);
+        let command_text = self.service.normalize_command_text(&user_text);
         let command_text = command_text.as_deref();
         let pending_text = command_text.unwrap_or(&user_text);
         let foreign_command_text = self.service.is_foreign_or_repeated_command_text(&user_text);
@@ -184,11 +184,13 @@ impl<'a> CommandDispatcher<'a> {
             } else {
                 None
             };
-            let execution = crate::runtime::tools::roll::execute_roll_command(
+            let display_name = roll_display_name(self.service, &req);
+            let execution = crate::runtime::tools::roll::execute_roll_command_with_display_name(
                 &self.service.provider,
                 model,
                 command.clone(),
                 self.service.request_timeout,
+                display_name,
             )
             .await;
             let diagnostics = execution.diagnostics();
@@ -468,6 +470,34 @@ impl<'a> CommandDispatcher<'a> {
     }
 }
 
+/// 骰点结果沿用通用 `/set 昵称` 展示名；查询失败时回退到 Gateway 提供的当前平台昵称。
+///
+/// 这里只做展示投影，不把昵称当成身份、权限或骰点 owner，也不在 Roll domain 内重复建设
+/// 昵称存储。私聊没有平台 actor 时保持无名称回执，避免把稳定 user_id 直接展示给用户。
+fn roll_display_name(service: &RustRespondService, req: &RespondRequest) -> Option<String> {
+    let meta = respond_meta(req);
+    if let Some(user_id) = req
+        .user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        && let Ok(Some(name)) = service.display_name_store.get(&meta.scope_key, user_id)
+    {
+        let name = name.trim();
+        if !name.is_empty() {
+            return Some(name.to_owned());
+        }
+    }
+
+    req.message_context
+        .as_ref()
+        .and_then(|context| context.actor.as_ref())
+        .and_then(|actor| actor.display_name.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,6 +528,7 @@ mod tests {
             ("/help 明天天气", "session"),
             ("/翻译 明天天气", "translation"),
             ("/set 昵称 明天天气", "set"),
+            ("/nn emmm", "set"),
             ("/unset 昵称天气", "unset"),
             ("/train G123天气", "train"),
             ("/rader codex天气", "radar"),

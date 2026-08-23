@@ -74,12 +74,7 @@ fn group_reply_mention_prefix(
     message: &GroupMessage,
     capability: &ReplyCapability,
 ) -> Option<String> {
-    // 只有官方确认提到当前机器人时，才在回复正文里 @ 回发起人；
-    // 普通群命令、关键词触发和回复机器人消息继续只挂原消息 msg_id，避免额外打扰。
-    if !capability.supports_at_mention {
-        return None;
-    }
-    if !mentions_current_bot(message) {
+    if !capability.supports_at_mention || !mentions_current_bot(message) {
         return None;
     }
     message
@@ -93,15 +88,28 @@ fn prefix_group_reply_outbound(
     outbound: OutboundMessage,
     capability: &ReplyCapability,
 ) -> OutboundMessage {
-    // QQ 官方群文本消息不会把 `<@openid>` 渲染成昵称，会直接暴露 openid。
-    // 只有 markdown 出站消息保留显式 at；纯文本命令依靠 reply target 关联原消息。
-    if !matches!(outbound, OutboundMessage::Markdown { .. }) {
-        return outbound;
-    }
+    // 这是群聊的通用提及回执规则：只要入站消息显式 @ 当前机器人，就回 @ 原发言人；
+    // 不按命令名称、骰点结果或模型响应类型做额外分支。
     let Some(prefix) = group_reply_mention_prefix(message, capability) else {
         return outbound;
     };
-    outbound.prefix_text(&prefix)
+    // QQ 官方群文本消息不会把 `<@openid>` 渲染成昵称，会直接暴露 openid。
+    // 入站确实 @ 机器人时，若当前能力支持 Markdown，将纯文本升级为安全的 Markdown
+    // 提及；能力关闭时保留原文，避免把 openid 当普通文本泄露给群成员。
+    let outbound = match outbound {
+        OutboundMessage::Text { text } if capability.render.supports_markdown => {
+            OutboundMessage::Markdown {
+                markdown: crate::markdown::MarkdownPayload::new(text.clone()),
+                fallback_text: text,
+            }
+        }
+        outbound => outbound,
+    };
+    if matches!(outbound, OutboundMessage::Markdown { .. }) {
+        outbound.prefix_text(&prefix)
+    } else {
+        outbound
+    }
 }
 
 fn group_respond_error_texts(
@@ -251,13 +259,10 @@ pub(crate) async fn handle_prepared_group_message(
             group = %masked_group,
             "QQ 群聊已匹配本地 Gateway 命令"
         );
-        send_group_local_command(
-            api,
-            runtime,
-            config,
-            &message,
-            output.render(&ReplyCapability::qq_official_group(config)),
-        )
+        send_group_local_command(api, runtime, config, &message, {
+            let capability = ReplyCapability::qq_official_group(config);
+            prefix_group_reply_outbound(&message, output.render(&capability), &capability)
+        })
         .await?;
         return Ok(());
     }
