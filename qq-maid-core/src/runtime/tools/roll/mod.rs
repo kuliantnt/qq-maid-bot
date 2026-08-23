@@ -326,7 +326,8 @@ fn is_cjk_reason_start(suffix: &str) -> bool {
 
 /// 允许 Roll domain 单独处理原生 SealDice 点号入口；正常 Core 路由仍先由命令前缀统一规范化。
 fn parse_dot_roll_command(text: &str) -> Option<ParsedCommand> {
-    let remainder = text.trim().strip_prefix('.')?;
+    let text = text.trim();
+    let remainder = text.strip_prefix('.').or_else(|| text.strip_prefix('。'))?;
     parse_compact_roll_command(&format!("/{remainder}"))
         .or_else(|| parse_slash_command(&format!("/{remainder}")))
 }

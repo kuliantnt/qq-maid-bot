@@ -371,7 +371,7 @@ async fn compact_penalty_alias_uses_valid_percentile_roll_template() {
         "must not call",
         "test",
     ))) as DynLlmProvider;
-    let command = parse_roll_command(".rap 测试").expect("compact penalty alias should parse");
+    let command = parse_roll_command("。rap 测试").expect("compact penalty alias should parse");
     let mut values = [8, 10, 6].into_iter();
     let reply = execute_roll_command_with_roller(
         &provider,

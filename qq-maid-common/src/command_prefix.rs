@@ -49,10 +49,10 @@ impl CommandPrefix {
         self.normalize(text).is_some()
     }
 
-    /// 兼容默认 `/` 前缀下的点号命令入口。
+    /// 兼容默认 `/` 前缀下的英文句号和中文句号命令入口。
     ///
-    /// 点号只作为命令前缀归一化为 `/`，不在这里维护具体命令白名单；命令是否注册、
-    /// 参数如何解释统一交给 Core。配置了其他前缀时不额外放开点号，保持自定义前缀的边界。
+    /// 句号只作为命令前缀归一化为 `/`，不在这里维护具体命令白名单；命令是否注册、
+    /// 参数如何解释统一交给 Core。配置了其他前缀时不额外放开句号，保持自定义前缀的边界。
     pub fn normalize_with_dot_compat(self, text: &str) -> Option<String> {
         self.normalize(text).or_else(|| self.normalize_dot(text))
     }
@@ -100,8 +100,8 @@ impl CommandPrefix {
             return None;
         }
         let text = text.trim();
-        let remainder = text.strip_prefix('.')?;
-        if remainder.is_empty() || remainder.starts_with('.') {
+        let remainder = text.strip_prefix('.').or_else(|| text.strip_prefix('。'))?;
+        if remainder.is_empty() || remainder.starts_with('.') || remainder.starts_with('。') {
             return None;
         }
         Some(format!("/{remainder}"))
@@ -214,7 +214,12 @@ mod tests {
             prefix.normalize_with_dot_compat(".r2d6xxx").as_deref(),
             Some("/r2d6xxx")
         );
+        assert_eq!(
+            prefix.normalize_with_dot_compat("。r2d6xxx").as_deref(),
+            Some("/r2d6xxx")
+        );
         assert!(prefix.is_candidate_with_dot_compat(".rd优势"));
+        assert!(prefix.is_candidate_with_dot_compat("。rd优势"));
         assert_eq!(
             prefix.normalize_with_dot_compat(".r测试").as_deref(),
             Some("/r测试")
@@ -237,11 +242,19 @@ mod tests {
             Some("/rename")
         );
         assert_eq!(prefix.normalize_with_dot_compat("."), None);
+        assert_eq!(prefix.normalize_with_dot_compat("。"), None);
         assert_eq!(prefix.normalize_with_dot_compat("..help"), None);
+        assert_eq!(prefix.normalize_with_dot_compat("。。help"), None);
         assert_eq!(
             CommandPrefix::parse("#")
                 .unwrap()
                 .normalize_with_dot_compat(".r2d6"),
+            None
+        );
+        assert_eq!(
+            CommandPrefix::parse("#")
+                .unwrap()
+                .normalize_with_dot_compat("。r2d6"),
             None
         );
     }
