@@ -198,9 +198,14 @@ pub(super) fn evaluate_node<R: Roller>(
                 format_child(
                     &right,
                     precedence,
+                    // 整数乘除不可结合；乘法右侧的同优先级子树即使以乘法为根，
+                    // 也可能包含先执行的除法，因此统一保留原有分组。
                     matches!(
                         operator,
-                        BinaryOperator::Subtract | BinaryOperator::Divide | BinaryOperator::Power
+                        BinaryOperator::Subtract
+                            | BinaryOperator::Multiply
+                            | BinaryOperator::Divide
+                            | BinaryOperator::Power
                     ),
                 )
             );

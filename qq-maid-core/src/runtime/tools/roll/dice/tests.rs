@@ -125,6 +125,13 @@ fn parses_repetitions_and_enforces_limits() {
     let parsed = spec("2#d20");
     assert_eq!(parsed.repetitions, 2);
     assert_eq!(parsed.expression.to_string(), "1d20");
+    for input in ["C# 值得学吗", "看#电影"] {
+        assert_eq!(
+            parse_roll_spec(input),
+            DiceRollSpecParse::NotDiceExpression,
+            "普通 # 文本不能被当作重复骰点：{input}"
+        );
+    }
     assert_eq!(
         parse_roll_spec("21#d20"),
         DiceRollSpecParse::Invalid(DiceExpressionError::RepeatCountOutOfRange)
@@ -219,6 +226,27 @@ fn groups_expanded_multi_dice_in_composite_calculations() {
         .unwrap();
     assert_eq!(powered.total, 9);
     assert_eq!(powered.calculation(), "(1 + 2) ** 2");
+}
+
+#[test]
+fn preserves_division_grouping_on_the_right_of_multiplication() {
+    let direct_division = expression("d3*(5/2)")
+        .roll(&mut |sides| {
+            assert_eq!(sides, 3);
+            2
+        })
+        .unwrap();
+    assert_eq!(direct_division.total, 4);
+    assert_eq!(direct_division.calculation(), "2 * (5 / 2)");
+
+    let nested_division_chain = expression("d2*(1/2*2)")
+        .roll(&mut |sides| {
+            assert_eq!(sides, 2);
+            2
+        })
+        .unwrap();
+    assert_eq!(nested_division_chain.total, 0);
+    assert_eq!(nested_division_chain.calculation(), "2 * (1 / 2 * 2)");
 }
 
 #[test]

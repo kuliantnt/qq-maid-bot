@@ -36,12 +36,19 @@ pub(crate) fn parse_expression(input: &str) -> DiceExpressionParse {
 pub(crate) fn parse_roll_spec(input: &str) -> DiceRollSpecParse {
     let input = input.trim();
     let (repetitions, expression_text) = match input.find('#') {
-        Some(hash) => {
+        Some(hash)
+            if !input[..hash].trim().is_empty()
+                && input[..hash]
+                    .trim()
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit()) =>
+        {
             let count_text = input[..hash].trim();
             let expression_text = input[hash + 1..].trim();
             (parse_repeat_count(count_text), expression_text)
         }
-        None => (Ok(1), input),
+        // `#` 也是普通自然语言字符；只有开头确实是数字重复前缀时才消费它。
+        Some(_) | None => (Ok(1), input),
     };
     let repetitions = match repetitions {
         Ok(value) => value,

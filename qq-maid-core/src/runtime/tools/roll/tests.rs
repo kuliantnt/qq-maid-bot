@@ -109,14 +109,14 @@ fn parses_default_dm_supported_and_invalid_dice_expressions() {
             query: "晚上要不要出门".to_owned(),
         })
     );
-    for query in ["2 cats", "20 minutes"] {
+    for query in ["2 cats", "20 minutes", "C# 值得学吗"] {
         assert_eq!(
             parse_roll_command(&format!("/roll {query}")),
             Some(RollCommand::DmCheck {
                 expression: None,
                 query: query.to_owned(),
             }),
-            "带单位的自然语言问题必须进入 AI DM：{query}"
+            "自然语言问题必须进入 AI DM：{query}"
         );
     }
     assert!(matches!(
@@ -127,7 +127,11 @@ fn parses_default_dm_supported_and_invalid_dice_expressions() {
             reason: Some(reason),
         }) if expression == dice_expression("2d20") && reason == "我能否说服守卫"
     ));
-    for (input, reason) in [("/r 2 dogs", "2 dogs"), ("/r battle", "battle")] {
+    for (input, reason) in [
+        ("/r 2 dogs", "2 dogs"),
+        ("/r battle", "battle"),
+        ("/r 看#电影", "看#电影"),
+    ] {
         assert!(
             matches!(
                 parse_roll_command(input),
