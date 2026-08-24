@@ -86,7 +86,9 @@ pub(crate) fn parse_roll_spec_prefix(input: &str) -> Option<(DiceRollSpec, &str)
         {
             continue;
         }
-        if let DiceRollSpecParse::Parsed(spec) = parse_roll_spec(expression_text) {
+        if let DiceRollSpecParse::Parsed(spec) = parse_roll_spec(expression_text)
+            && spec.expression.total_dice() > 0
+        {
             return Some((spec, reason));
         }
     }
@@ -117,6 +119,20 @@ pub(crate) fn parse_roll_spec_compact_prefix(input: &str) -> Option<(DiceRollSpe
                 .next()
                 .is_some_and(|character| character.is_ascii_digit())
             || matches!(reason.as_bytes().first(), Some(b'+' | b'-' | b'*' | b'/'))
+        {
+            continue;
+        }
+        // `b`、`p`、`d` 等单字母本身是合法骰式，但紧邻 ASCII 单词时更可能是
+        // 自然语言开头；只有显式空格分隔或后接非 ASCII 文本时才按骰式处理。
+        if expression_text.chars().count() == 1
+            && expression_text
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphabetic())
+            && reason
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphabetic())
         {
             continue;
         }
@@ -172,7 +188,13 @@ fn looks_like_dice_expression(input: &str) -> bool {
                 character.is_ascii_digit() || *character == '优' || *character == '劣'
             }) || characters.peek().is_none()
         }
-        Some('b' | 'B' | 'p' | 'P' | 'f' | 'F') => true,
+        Some('b' | 'B' | 'p' | 'P' | 'f' | 'F') => {
+            // 特殊骰允许单字母、数字参数和后续运算；紧邻 ASCII 字母时应视为
+            // 英文自然语言，避免把 battle / Please 等单词报成无效骰式。
+            characters
+                .peek()
+                .is_none_or(|character| !character.is_ascii_alphabetic())
+        }
         Some(character) if character.is_ascii_digit() => {
             while characters
                 .peek()

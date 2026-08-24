@@ -26,6 +26,8 @@ use outcome::render_dm_result;
 
 /// AI DM 问题的字符数上限；超过上限时拒绝请求，不做静默截断。
 pub(crate) const DM_QUERY_MAX_CHARS: usize = 500;
+/// 本地骰点原因会直接进入用户可见回执，因此与 AI DM 问题采用相同的输入上限。
+const LOCAL_ROLL_REASON_MAX_CHARS: usize = DM_QUERY_MAX_CHARS;
 /// AI DM 是娱乐命令的轻量独立调用，超时后立即回退本地骰子表达式。
 const DM_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 /// 必须早于 Core 整轮超时结束 AI 调用，给日志、随机数生成和响应投影保留收口时间。
@@ -35,6 +37,8 @@ const DM_FALLBACK_PREFIX: &str = "AI DM 暂时无法判断本次检定难度，�
 const DM_EXPRESSION_FALLBACK_PREFIX: &str =
     "AI DM 暂时无法判断本次检定难度，本次仅进行指定骰子表达式投掷。";
 const INVALID_DICE_EXPRESSION_REPLY: &str = "骰子表达式无效。示例：d20、2d6、1d20+3、1d8+1d6+4；单段骰子数量和面数均为 1–100，总骰子数不超过 100，最多 8 段，表达式不超过 64 个字符，修正值范围为 -1000 到 +1000。";
+const INVALID_LOCAL_ROLL_REASON_REPLY: &str =
+    "骰点原因无效，请控制在 500 个字符以内，且不要包含换行或控制字符。";
 const REPEATED_DM_CHECK_REPLY: &str = "Entertainment DM 暂不支持带问题的重复骰点。请使用 `/roll d20 问题` 进行单次 AI 判定，或使用 `/r 2#d20 原因` 进行本地多轮骰点。";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +58,7 @@ pub(crate) enum RollCommand {
         query: String,
     },
     RepeatedDmCheckUnsupported,
+    InvalidLocalReason,
     InvalidDiceExpression,
 }
 
@@ -232,6 +237,12 @@ fn parse_local_roll_argument(argument: &str) -> Option<(DiceRollSpec, Option<Str
 }
 
 fn local_roll_command(spec: DiceRollSpec, reason: Option<String>) -> RollCommand {
+    if reason
+        .as_deref()
+        .is_some_and(|reason| !is_valid_local_roll_reason(reason))
+    {
+        return RollCommand::InvalidLocalReason;
+    }
     if spec.repetitions == 1 && reason.is_none() {
         RollCommand::DiceExpression {
             expression: spec.expression,
@@ -245,6 +256,13 @@ fn local_roll_command(spec: DiceRollSpec, reason: Option<String>) -> RollCommand
     }
 }
 
+fn is_valid_local_roll_reason(reason: &str) -> bool {
+    reason.chars().count() <= LOCAL_ROLL_REASON_MAX_CHARS
+        && !reason
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '\u{2028}' | '\u{2029}'))
+}
+
 fn parse_bonus_penalty_alias(command: &ParsedCommand) -> Option<RollCommand> {
     let expression = match dice::parse_expression(if command.raw_command == "rab" {
         "b"
@@ -254,15 +272,13 @@ fn parse_bonus_penalty_alias(command: &ParsedCommand) -> Option<RollCommand> {
         DiceExpressionParse::Parsed(expression) => expression,
         _ => return None,
     };
-    if command.argument.is_empty() {
-        Some(RollCommand::DiceExpression { expression })
-    } else {
-        Some(RollCommand::DiceBatch {
+    Some(local_roll_command(
+        DiceRollSpec {
             expression,
             repetitions: 1,
-            reason: Some(command.argument.clone()),
-        })
-    }
+        },
+        (!command.argument.is_empty()).then(|| command.argument.clone()),
+    ))
 }
 
 /// 解析 `/r2d6`、`/rd20` 等 SealDice 常见的无空格命令形式。
@@ -494,6 +510,9 @@ where
         }
         RollCommand::InvalidDiceExpression => {
             return local_result(INVALID_DICE_EXPRESSION_REPLY.to_owned());
+        }
+        RollCommand::InvalidLocalReason => {
+            return local_result(INVALID_LOCAL_ROLL_REASON_REPLY.to_owned());
         }
         RollCommand::RepeatedDmCheckUnsupported => {
             return local_result(REPEATED_DM_CHECK_REPLY.to_owned());

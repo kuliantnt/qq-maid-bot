@@ -117,6 +117,19 @@ fn parses_default_dm_supported_and_invalid_dice_expressions() {
             reason: Some(reason),
         }) if expression == dice_expression("2d20") && reason == "我能否说服守卫"
     ));
+    for (input, reason) in [("/r 2 dogs", "2 dogs"), ("/r battle", "battle")] {
+        assert!(
+            matches!(
+                parse_roll_command(input),
+                Some(RollCommand::DiceBatch {
+                    expression,
+                    repetitions: 1,
+                    reason: Some(parsed_reason),
+                }) if expression == dice_expression("d20") && parsed_reason == reason
+            ),
+            "自然语言原因必须保持完整：{input}"
+        );
+    }
     assert_eq!(
         parse_roll_command("/roll 1d20 + 3 能否通过"),
         Some(RollCommand::DmCheck {
@@ -174,6 +187,8 @@ fn parses_default_dm_supported_and_invalid_dice_expressions() {
     for (input, query) in [
         ("/roll 我能不能通过 DC20 的门", "我能不能通过 DC20 的门"),
         ("/roll 我有 2d6 个苹果吗", "我有 2d6 个苹果吗"),
+        ("/roll 20 days", "20 days"),
+        ("/roll Please pass", "Please pass"),
     ] {
         assert_eq!(
             parse_roll_command(input),
@@ -280,6 +295,23 @@ fn parses_sealdice_compact_commands_and_aliases() {
         parse_roll_command("/roll 2#d20 问题"),
         Some(RollCommand::RepeatedDmCheckUnsupported)
     );
+}
+
+#[test]
+fn rejects_oversized_or_controlled_local_reasons_before_building_a_batch() {
+    let oversized = "x".repeat(LOCAL_ROLL_REASON_MAX_CHARS + 1);
+    for alias in ["r", "rd", "rap", "rab"] {
+        assert_eq!(
+            parse_roll_command(&format!("/{alias} {oversized}")),
+            Some(RollCommand::InvalidLocalReason),
+            "{alias} 必须拒绝超长原因"
+        );
+        assert_eq!(
+            parse_roll_command(&format!("/{alias} 第一行\n第二行")),
+            Some(RollCommand::InvalidLocalReason),
+            "{alias} 必须拒绝换行原因"
+        );
+    }
 }
 
 #[test]
@@ -555,6 +587,25 @@ async fn invalid_dice_expression_never_calls_provider_or_roller() {
     .await;
 
     assert_eq!(reply.reply, INVALID_DICE_EXPRESSION_REPLY);
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn invalid_local_reason_returns_bounded_reply_without_provider_or_roller() {
+    let provider = MockProvider::replying(fortune_json());
+    let requests = provider.requests.clone();
+    let provider = Arc::new(provider) as DynLlmProvider;
+    let reply = execute_roll_command_with_roller(
+        &provider,
+        Some("unused".to_owned()),
+        RollCommand::InvalidLocalReason,
+        Duration::from_secs(1),
+        |_| panic!("非法本地原因不能触发投骰"),
+    )
+    .await;
+
+    assert_eq!(reply.reply, INVALID_LOCAL_ROLL_REASON_REPLY);
+    assert!(reply.reply.chars().count() < 100);
     assert!(requests.lock().unwrap().is_empty());
 }
 

@@ -52,6 +52,8 @@ fn leaves_natural_language_for_the_dm_path() {
         "DC20",
         "20 days",
         "2 dogs",
+        "battle",
+        "Please pass",
     ] {
         assert_eq!(
             parse_expression(input),
@@ -132,6 +134,19 @@ fn parses_expression_prefix_without_consuming_reason() {
     let (spec, reason) = parse_roll_spec_compact_prefix("2d6原因").expect("compact prefix");
     assert_eq!(spec.expression.to_string(), "2d6");
     assert_eq!(reason, "原因");
+
+    for input in ["20 days", "2 dogs"] {
+        assert!(
+            parse_roll_spec_prefix(input).is_none(),
+            "纯数字不能作为骰式前缀：{input}"
+        );
+    }
+    for input in ["battle", "Please pass", "difficult"] {
+        assert!(
+            parse_roll_spec_compact_prefix(input).is_none(),
+            "ASCII 单词不能从单字母骰式处拆开：{input}"
+        );
+    }
 }
 
 #[test]
