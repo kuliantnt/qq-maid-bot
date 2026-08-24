@@ -90,6 +90,14 @@ fn rejects_invalid_expression_and_complexity_limits() {
         parse_expression("1d20+1d20+1d20+1d20+1d20+1d20+1d20+1d20+1d20"),
         DiceExpressionParse::Invalid(DiceExpressionError::TooManyTerms)
     );
+    assert!(matches!(
+        parse_expression("b+b+b+b+p+p+p+p"),
+        DiceExpressionParse::Parsed(_)
+    ));
+    assert_eq!(
+        parse_expression("b+b+b+b+b+b+b+b+b"),
+        DiceExpressionParse::Invalid(DiceExpressionError::TooManyTerms)
+    );
     assert_eq!(
         parse_expression("100d1+1d1"),
         DiceExpressionParse::Invalid(DiceExpressionError::TooManyDice)

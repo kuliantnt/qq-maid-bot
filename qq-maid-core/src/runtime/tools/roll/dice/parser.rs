@@ -483,6 +483,11 @@ impl Parser {
         if !(1..=MAX_SPECIAL_DICE_COUNT).contains(&count) {
             return Err(DiceExpressionError::CountOutOfRange);
         }
+        // 奖励骰和惩罚骰同样是独立骰式段，必须与普通 NdM 共用公开的段数上限。
+        self.dice_terms += 1;
+        if self.dice_terms > MAX_DICE_TERMS {
+            return Err(DiceExpressionError::TooManyTerms);
+        }
         self.total_dice = self
             .total_dice
             .checked_add(2 + count)

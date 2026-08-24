@@ -317,7 +317,10 @@ fn parse_compact_roll_command(text: &str) -> Option<ParsedCommand> {
     } else {
         return None;
     };
-    let local_reason_suffix = raw_command == "r" && is_cjk_reason_start(suffix);
+    // `/rd优势`、`/rd劣势` 是 SealDice 的默认 D20 特殊表达式；其余 CJK 尾缀与
+    // `/r原因` 一致，按默认 D20 的本地原因处理，不能落到未知命令。
+    let local_reason_suffix = is_cjk_reason_start(suffix)
+        && (raw_command == "r" || !(suffix.starts_with("优势") || suffix.starts_with("劣势")));
     if !looks_like_compact_roll_suffix(suffix) && !local_reason_suffix {
         return None;
     }

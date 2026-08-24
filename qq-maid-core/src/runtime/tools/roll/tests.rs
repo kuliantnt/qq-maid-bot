@@ -238,7 +238,9 @@ fn parses_sealdice_compact_commands_and_aliases() {
     ));
     for input in [
         "/r测试",
+        "/rd测试",
         ".r测试",
+        ".rd测试",
         "/r 测试",
         "/rd 测试",
         ".r 测试",

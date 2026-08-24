@@ -107,6 +107,16 @@ trait OneBotReplySender: Send + Sync {
         group_id: &str,
         image: &ImagePayload,
     ) -> Result<OneBotSendResult, OneBotSendError>;
+
+    async fn send_group_image_with_mentions(
+        &self,
+        group_id: &str,
+        mention_user_ids: &[String],
+        image: &ImagePayload,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        let _ = mention_user_ids;
+        self.send_group_image(group_id, image).await
+    }
 }
 
 #[async_trait]
@@ -150,6 +160,15 @@ impl OneBotReplySender for OneBotSender {
         image: &ImagePayload,
     ) -> Result<OneBotSendResult, OneBotSendError> {
         OneBotSender::send_group_image(self, group_id, image).await
+    }
+
+    async fn send_group_image_with_mentions(
+        &self,
+        group_id: &str,
+        mention_user_ids: &[String],
+        image: &ImagePayload,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        OneBotSender::send_group_image_with_mentions(self, group_id, mention_user_ids, image).await
     }
 }
 
@@ -351,7 +370,13 @@ impl OneBotInboundDispatcher {
                     self.sender.send_private_image(target_id, image).await
                 }
                 ConversationTarget::Group { target_id } => {
-                    self.sender.send_group_image(target_id, image).await
+                    if let Some(user_id) = mention_user_id {
+                        self.sender
+                            .send_group_image_with_mentions(target_id, &[user_id.to_owned()], image)
+                            .await
+                    } else {
+                        self.sender.send_group_image(target_id, image).await
+                    }
                 }
                 _ => Err(OneBotSendError::InvalidTargetId),
             };
@@ -604,6 +629,23 @@ mod tests {
                 Err(OneBotSendError::Transport(OneBotCallError::NotConnected))
             } else {
                 self.send("group_image", group_id, "[image]")
+            }
+        }
+
+        async fn send_group_image_with_mentions(
+            &self,
+            group_id: &str,
+            mention_user_ids: &[String],
+            _image: &ImagePayload,
+        ) -> Result<OneBotSendResult, OneBotSendError> {
+            if self.fail_images {
+                Err(OneBotSendError::Transport(OneBotCallError::NotConnected))
+            } else {
+                self.send(
+                    "group_image_with_mentions",
+                    group_id,
+                    &format!("{}|[image]", mention_user_ids.join(",")),
+                )
             }
         }
     }
