@@ -269,6 +269,13 @@ fn evaluate_dice_term<R: Roller>(
     } else {
         format!("{{{}}}", display_values.join(" | "))
     };
+    // 未取舍的多骰会展开为 `1 + 2`，其展示语义是加法而非原子值；参与乘除、幂或
+    // 一元运算时必须由 format_child 补括号，避免回执展示成另一条算式。
+    let precedence = if term.keep.is_all() && term.count > 1 {
+        binary_precedence(BinaryOperator::Add)
+    } else {
+        5
+    };
     let rolls = values
         .into_iter()
         .zip(kept)
@@ -281,7 +288,7 @@ fn evaluate_dice_term<R: Roller>(
     Ok(EvaluatedValue {
         value: total,
         display,
-        precedence: 5,
+        precedence,
         rolls,
     })
 }

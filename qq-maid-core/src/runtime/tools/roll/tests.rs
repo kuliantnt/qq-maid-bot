@@ -109,6 +109,16 @@ fn parses_default_dm_supported_and_invalid_dice_expressions() {
             query: "晚上要不要出门".to_owned(),
         })
     );
+    for query in ["2 cats", "20 minutes"] {
+        assert_eq!(
+            parse_roll_command(&format!("/roll {query}")),
+            Some(RollCommand::DmCheck {
+                expression: None,
+                query: query.to_owned(),
+            }),
+            "带单位的自然语言问题必须进入 AI DM：{query}"
+        );
+    }
     assert!(matches!(
         parse_roll_command("/r 2d20 我能否说服守卫"),
         Some(RollCommand::DiceBatch {

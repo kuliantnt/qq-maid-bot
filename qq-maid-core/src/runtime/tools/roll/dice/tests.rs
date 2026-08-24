@@ -52,6 +52,11 @@ fn leaves_natural_language_for_the_dm_path() {
         "DC20",
         "20 days",
         "2 dogs",
+        "7 apples",
+        "2 cats",
+        "3 kittens",
+        "4 queens",
+        "20 minutes",
         "battle",
         "Please pass",
     ] {
@@ -183,6 +188,37 @@ fn rolls_simple_and_arithmetic_expressions() {
     let result = expression("100+3*2").roll(&mut |_| 1).unwrap();
     assert_eq!(result.total, 106);
     assert_eq!(result.calculation(), "100 + 3 * 2");
+}
+
+#[test]
+fn groups_expanded_multi_dice_in_composite_calculations() {
+    let mut values = [1, 2].into_iter();
+    let multiplied = expression("2d6*3")
+        .roll(&mut |_| values.next().expect("2d6 should roll twice"))
+        .unwrap();
+    assert_eq!(multiplied.total, 9);
+    assert_eq!(multiplied.calculation(), "(1 + 2) * 3");
+
+    let mut values = [1, 2].into_iter();
+    let negated = expression("-2d6")
+        .roll(&mut |_| values.next().expect("2d6 should roll twice"))
+        .unwrap();
+    assert_eq!(negated.total, -3);
+    assert_eq!(negated.calculation(), "-(1 + 2)");
+
+    let mut values = [1, 2].into_iter();
+    let divisor = expression("12/2d6")
+        .roll(&mut |_| values.next().expect("2d6 should roll twice"))
+        .unwrap();
+    assert_eq!(divisor.total, 4);
+    assert_eq!(divisor.calculation(), "12 / (1 + 2)");
+
+    let mut values = [1, 2].into_iter();
+    let powered = expression("2d6**2")
+        .roll(&mut |_| values.next().expect("2d6 should roll twice"))
+        .unwrap();
+    assert_eq!(powered.total, 9);
+    assert_eq!(powered.calculation(), "(1 + 2) ** 2");
 }
 
 #[test]

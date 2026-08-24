@@ -231,6 +231,12 @@ fn looks_like_dice_expression(input: &str) -> bool {
             {
                 characters.next();
             }
+            // `5a6` 等紧凑扩展骰式即使暂不支持，也应保留为骰式语法错误；但数字
+            // 后有空格时，a/c/k/q/m 更可能是自然语言单词（如 `2 cats`），不能因
+            // 跳过空格而丢失这条边界。
+            let suffix_is_adjacent = characters
+                .peek()
+                .is_some_and(|character| !character.is_whitespace());
             skip_whitespace(&mut characters);
             match characters.peek().copied() {
                 Some('d' | 'D') => {
@@ -240,11 +246,10 @@ fn looks_like_dice_expression(input: &str) -> bool {
                         value.is_ascii_digit() || *value == '优' || *value == '劣'
                     }) || characters.peek().is_none()
                 }
-                Some(
-                    '#' | '+' | '-' | '*' | '/' | '(' | ')' | 'a' | 'A' | 'c' | 'C' | 'k' | 'K'
-                    | 'q' | 'Q' | 'm' | 'M',
-                )
-                | None => true,
+                Some('#' | '+' | '-' | '*' | '/' | '(' | ')') | None => true,
+                Some('a' | 'A' | 'c' | 'C' | 'k' | 'K' | 'q' | 'Q' | 'm' | 'M') => {
+                    suffix_is_adjacent
+                }
                 _ => false,
             }
         }
