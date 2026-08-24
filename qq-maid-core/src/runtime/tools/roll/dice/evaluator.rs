@@ -359,7 +359,7 @@ fn evaluate_special_dice<R: Roller>(
     let extras = tens
         .iter()
         .skip(1)
-        .map(u8::to_string)
+        .map(|value| percentile_digit(*value).to_string())
         .collect::<Vec<_>>()
         .join(" ");
     let display = format!("D100={selected_value}（{marker} {extras}）");
@@ -387,8 +387,12 @@ fn evaluate_special_dice<R: Roller>(
 /// 百分骰的十面骰中，`10` 表示数字 `0`；两个 `0` 组合时按惯例显示为 `100`。
 /// 直接把十面骰原始值当作十位会产生 `D100=108` 之类的越界结果。
 fn percentile_value(tens: u8, unit: u8) -> i64 {
-    let value = i64::from(tens % 10) * 10 + i64::from(unit % 10);
+    let value = i64::from(percentile_digit(tens)) * 10 + i64::from(percentile_digit(unit));
     if value == 0 { 100 } else { value }
+}
+
+fn percentile_digit(value: u8) -> u8 {
+    value % 10
 }
 
 fn valid_roll<R: Roller>(roller: &mut R, sides: u8) -> Result<u8, DiceRollError> {

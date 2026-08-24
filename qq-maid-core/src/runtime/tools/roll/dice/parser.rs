@@ -213,11 +213,20 @@ fn parse_repeat_count(count_text: &str) -> Result<u8, DiceExpressionError> {
 fn looks_like_dice_expression(input: &str) -> bool {
     let input = input.trim();
     let mut characters = input.chars().peekable();
-    while matches!(characters.peek(), Some('+' | '-')) {
+    // 左括号本身不足以说明输入是骰式；自然语言问题也可能用括号开头。只跳过解析器
+    // 允许出现在首个主表达式前的括号、一元符号和空白，再检查实际的骰式候选 token。
+    loop {
+        skip_whitespace(&mut characters);
+        while matches!(characters.peek(), Some('+' | '-')) {
+            characters.next();
+            skip_whitespace(&mut characters);
+        }
+        if characters.peek() != Some(&'(') {
+            break;
+        }
         characters.next();
     }
     match characters.next() {
-        Some('(') => true,
         Some('d' | 'D') => {
             skip_whitespace(&mut characters);
             characters.peek().is_some_and(|character| {

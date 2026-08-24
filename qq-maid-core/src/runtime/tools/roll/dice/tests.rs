@@ -59,6 +59,8 @@ fn leaves_natural_language_for_the_dm_path() {
         "20 minutes",
         "battle",
         "Please pass",
+        "(今晚要不要出门)",
+        "((今晚要不要出门))",
     ] {
         assert_eq!(
             parse_expression(input),
@@ -68,6 +70,10 @@ fn leaves_natural_language_for_the_dm_path() {
     }
     assert!(matches!(
         parse_expression("2 d 6"),
+        DiceExpressionParse::Parsed(_)
+    ));
+    assert!(matches!(
+        parse_expression("( - (d20 + 3))"),
         DiceExpressionParse::Parsed(_)
     ));
 }
@@ -294,6 +300,22 @@ fn percentile_special_dice_maps_ten_faces_to_zero() {
 
     assert_eq!(penalty.total, 68);
     assert_eq!(penalty.calculation(), "D100=68（惩罚 6）");
+
+    for (input, expected_total, expected_calculation) in
+        [("b", 8, "D100=8（奖励 0）"), ("p", 68, "D100=68（惩罚 0）")]
+    {
+        let mut values = [8, 6, 10].into_iter();
+        let result = expression(input)
+            .roll(&mut |_| {
+                values
+                    .next()
+                    .expect("percentile dice should roll three d10s")
+            })
+            .unwrap();
+
+        assert_eq!(result.total, expected_total);
+        assert_eq!(result.calculation(), expected_calculation);
+    }
 }
 
 #[test]

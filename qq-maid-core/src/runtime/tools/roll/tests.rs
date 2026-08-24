@@ -109,7 +109,7 @@ fn parses_default_dm_supported_and_invalid_dice_expressions() {
             query: "晚上要不要出门".to_owned(),
         })
     );
-    for query in ["2 cats", "20 minutes", "C# 值得学吗"] {
+    for query in ["2 cats", "20 minutes", "C# 值得学吗", "(今晚要不要出门)"] {
         assert_eq!(
             parse_roll_command(&format!("/roll {query}")),
             Some(RollCommand::DmCheck {
