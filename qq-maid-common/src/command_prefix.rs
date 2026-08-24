@@ -101,7 +101,11 @@ impl CommandPrefix {
         }
         let text = text.trim();
         let remainder = text.strip_prefix('.').or_else(|| text.strip_prefix('。'))?;
-        if remainder.is_empty() || remainder.starts_with('.') || remainder.starts_with('。') {
+        if remainder.is_empty()
+            || remainder.starts_with('.')
+            || remainder.starts_with('。')
+            || remainder.starts_with('/')
+        {
             return None;
         }
         Some(format!("/{remainder}"))
@@ -245,6 +249,8 @@ mod tests {
         assert_eq!(prefix.normalize_with_dot_compat("。"), None);
         assert_eq!(prefix.normalize_with_dot_compat("..help"), None);
         assert_eq!(prefix.normalize_with_dot_compat("。。help"), None);
+        assert_eq!(prefix.normalize_with_dot_compat("./clear"), None);
+        assert_eq!(prefix.normalize_with_dot_compat("。/new"), None);
         assert_eq!(
             CommandPrefix::parse("#")
                 .unwrap()

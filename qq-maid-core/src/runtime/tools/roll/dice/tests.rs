@@ -143,6 +143,13 @@ fn parses_expression_prefix_without_consuming_reason() {
     assert_eq!(spec.expression.to_string(), "2d6");
     assert_eq!(reason, "原因");
 
+    for input in ["4d6k5", "d20dh1", "4d6kh0", "4d6k5 原因"] {
+        assert!(
+            parse_roll_spec_compact_prefix(input).is_none(),
+            "非法取骰后缀不能降级为原因：{input}"
+        );
+    }
+
     for input in ["20 days", "2 dogs"] {
         assert!(
             parse_roll_spec_prefix(input).is_none(),

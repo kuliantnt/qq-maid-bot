@@ -357,6 +357,23 @@ fn scope_label(session: &SessionRecord) -> String {
 
 /// 尝试从用户文本中解析 `/set` 指令，并把 `/nn` 展开为昵称设置参数。
 pub(super) fn parse_set_command(text: &str) -> Option<ParsedCommand> {
+    // `/nn昵称` 是点号兼容入口 `.nn昵称` 归一化后的紧凑写法；别名层在
+    // 这里拆出紧跟的名称，后续仍复用展示名的身份、长度和持久化校验。
+    let text = text.trim();
+    let compact_nn_argument = text
+        .get(..3)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("/nn"))
+        .map(|_| &text[3..]);
+    if let Some(argument) = compact_nn_argument
+        && !argument.is_empty()
+        && !argument.chars().next().is_some_and(char::is_whitespace)
+    {
+        return Some(ParsedCommand {
+            action: "set".to_owned(),
+            argument: format!("昵称 {argument}"),
+            raw_command: "nn".to_owned(),
+        });
+    }
     let mut command = crate::runtime::command::parse_slash_command(text)?;
     if command.raw_command == "nn" {
         command.argument = if command.argument.is_empty() {
@@ -411,6 +428,14 @@ mod tests {
 
         let command = parse_set_command("/nn").expect("nn should parse");
         assert_eq!(command.argument, "昵称");
+
+        let command = parse_set_command("/nn初墨").expect("compact nn should parse");
+        assert_eq!(command.action, "set");
+        assert_eq!(command.argument, "昵称 初墨");
+        assert_eq!(command.raw_command, "nn");
+
+        let command = parse_set_command("/Nn初墨").expect("compact nn should ignore case");
+        assert_eq!(command.argument, "昵称 初墨");
         assert_eq!(parse_set_command("/rename emmm"), None);
     }
 

@@ -102,6 +102,15 @@ pub(crate) fn parse_roll_spec_prefix(input: &str) -> Option<(DiceRollSpec, &str)
 pub(crate) fn parse_roll_spec_compact_prefix(input: &str) -> Option<(DiceRollSpec, &str)> {
     let input = input.trim();
     let max_boundary = prefix_boundary_limit(input)?;
+    // 完整骰式已经识别出范围或计算语义错误时，不得通过截短前缀绕过。
+    // `InvalidSyntax` 和长度错误仍可由后续边界扫描区分“骰式 + 原因”。
+    if matches!(
+        parse_roll_spec(input),
+        DiceRollSpecParse::Invalid(error)
+            if !matches!(error, DiceExpressionError::InvalidSyntax | DiceExpressionError::TooLong)
+    ) {
+        return None;
+    }
     for (boundary, _) in input
         .char_indices()
         .rev()
@@ -121,6 +130,11 @@ pub(crate) fn parse_roll_spec_compact_prefix(input: &str) -> Option<(DiceRollSpe
             || matches!(reason.as_bytes().first(), Some(b'+' | b'-' | b'*' | b'/'))
         {
             continue;
+        }
+        // 如果合法骰式前缀后紧跟已知取骰后缀，整体解析的语义错误必须保留。
+        // 例如 `4d6k5` 和 `d20dh1` 不能降级为 `4d6`/`d20` 加原因文本。
+        if starts_with_dice_keep_suffix(reason) {
+            return None;
         }
         // `b`、`p`、`d` 等单字母本身是合法骰式，但紧邻 ASCII 单词时更可能是
         // 自然语言开头；只有显式空格分隔或后接非 ASCII 文本时才按骰式处理。
@@ -143,6 +157,21 @@ pub(crate) fn parse_roll_spec_compact_prefix(input: &str) -> Option<(DiceRollSpe
         }
     }
     None
+}
+
+/// 判断紧跟在骰子项后的文本是否以已知取骰后缀开头。
+fn starts_with_dice_keep_suffix(text: &str) -> bool {
+    let mut characters = text.chars();
+    match characters
+        .next()
+        .map(|character| character.to_ascii_lowercase())
+    {
+        Some('k' | 'q') => true,
+        Some('d') => characters
+            .next()
+            .is_some_and(|character| matches!(character.to_ascii_lowercase(), 'h' | 'l')),
+        _ => text.starts_with("优势") || text.starts_with("劣势"),
+    }
 }
 
 /// 返回不超过表达式字符上限的候选边界。

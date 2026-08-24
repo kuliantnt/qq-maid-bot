@@ -177,6 +177,8 @@ fn parses_default_dm_supported_and_invalid_dice_expressions() {
         "/roll 0d6",
         "/roll d0",
         "/roll 1d20+1001",
+        "/r 4d6k5",
+        "/roll d20dh1",
     ] {
         assert_eq!(
             parse_roll_command(input),
