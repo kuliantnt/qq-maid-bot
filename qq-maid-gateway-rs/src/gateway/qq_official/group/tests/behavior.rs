@@ -42,6 +42,44 @@ fn group_at_reply_text_outbound_forces_markdown_mention_when_render_disabled() {
 }
 
 #[test]
+fn group_text_mention_escapes_dynamic_plain_text_before_markdown() {
+    let message = group_message("hello", GroupEventType::GroupAtMessage);
+    let capability = qq_group_capability();
+    let outbound = OutboundMessage::Text {
+        text: "[查看](https://evil.example) *原因*\n# 标题".to_owned(),
+    };
+
+    assert_eq!(
+        prefix_group_reply_outbound(&message, outbound, &capability),
+        OutboundMessage::Markdown {
+            markdown: crate::markdown::MarkdownPayload::new(
+                "<@member-1>\n\\[查看\\]\\(https://evil.example\\) \\*原因\\*  \n\\# 标题",
+            ),
+            fallback_text: "[查看](https://evil.example) *原因*\n# 标题".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn group_text_placeholder_uses_safe_markdown_mention() {
+    let message = group_message("hello", GroupEventType::GroupAtMessage);
+    let capability = qq_group_capability();
+    let outbound = OutboundMessage::ImagePlaceholder {
+        fallback_text: "图片 [失败](https://evil.example)".to_owned(),
+    };
+
+    assert_eq!(
+        prefix_group_reply_outbound(&message, outbound, &capability),
+        OutboundMessage::Markdown {
+            markdown: crate::markdown::MarkdownPayload::new(
+                "<@member-1>\n图片 \\[失败\\]\\(https://evil.example\\)",
+            ),
+            fallback_text: "图片 [失败](https://evil.example)".to_owned(),
+        }
+    );
+}
+
+#[test]
 fn group_at_reply_markdown_outbound_mentions_sender() {
     let message = group_message("hello", GroupEventType::GroupAtMessage);
     let capability = qq_group_capability();

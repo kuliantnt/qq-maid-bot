@@ -35,6 +35,7 @@ const DM_FALLBACK_PREFIX: &str = "AI DM 暂时无法判断本次检定难度，�
 const DM_EXPRESSION_FALLBACK_PREFIX: &str =
     "AI DM 暂时无法判断本次检定难度，本次仅进行指定骰子表达式投掷。";
 const INVALID_DICE_EXPRESSION_REPLY: &str = "骰子表达式无效。示例：d20、2d6、1d20+3、1d8+1d6+4；单段骰子数量和面数均为 1–100，总骰子数不超过 100，最多 8 段，表达式不超过 64 个字符，修正值范围为 -1000 到 +1000。";
+const REPEATED_DM_CHECK_REPLY: &str = "Entertainment DM 暂不支持带问题的重复骰点。请使用 `/roll d20 问题` 进行单次 AI 判定，或使用 `/r 2#d20 原因` 进行本地多轮骰点。";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RollCommand {
@@ -52,6 +53,7 @@ pub(crate) enum RollCommand {
         expression: Option<DiceExpression>,
         query: String,
     },
+    RepeatedDmCheckUnsupported,
     InvalidDiceExpression,
 }
 
@@ -179,9 +181,12 @@ pub(crate) fn parse_roll_command(text: &str) -> Option<RollCommand> {
             if local_reason_syntax {
                 return Some(local_roll_command(spec, reason));
             }
-            if let Some(reason) = reason
-                && spec.repetitions == 1
-            {
+            if let Some(reason) = reason {
+                // Entertainment DM 当前只接受一次表达式；重复骰点带问题不能静默丢掉
+                // 问题并退化为本地骰点，否则用户会误以为模型已完成判定。
+                if spec.repetitions != 1 {
+                    return Some(RollCommand::RepeatedDmCheckUnsupported);
+                }
                 return Some(RollCommand::DmCheck {
                     expression: Some(spec.expression),
                     query: reason,
@@ -192,7 +197,9 @@ pub(crate) fn parse_roll_command(text: &str) -> Option<RollCommand> {
         match dice::parse_roll_spec(&command.argument) {
             dice::DiceRollSpecParse::Parsed(spec) => Some(local_roll_command(spec, None)),
             dice::DiceRollSpecParse::NotDiceExpression => {
-                if command.raw_command == "rd" {
+                if matches!(command.raw_command.as_str(), "r" | "rd") {
+                    // SealDice 的 `/r 原因`、`/rd 原因` 与无空格写法语义一致：使用
+                    // 默认 d20 在本地投掷，尾随文本只作为展示原因，不进入 AI DM。
                     return Some(local_roll_command(
                         DiceRollSpec {
                             expression: DiceExpression::default_d20(),
@@ -487,6 +494,9 @@ where
         }
         RollCommand::InvalidDiceExpression => {
             return local_result(INVALID_DICE_EXPRESSION_REPLY.to_owned());
+        }
+        RollCommand::RepeatedDmCheckUnsupported => {
+            return local_result(REPEATED_DM_CHECK_REPLY.to_owned());
         }
         RollCommand::DmCheck { expression, query } => (query, expression),
     };

@@ -9,6 +9,7 @@ use std::{
 };
 
 use anyhow::Context;
+use qq_maid_common::markdown::escape_text;
 use qq_maid_core::service::{
     CoreDeliveryHint, CoreInboundKind, CoreRespondFailure, CoreRespondOutput, CoreResponse,
     CoreResponseEvent,
@@ -94,17 +95,22 @@ fn prefix_group_reply_outbound(
     outbound: OutboundMessage,
     capability: &ReplyCapability,
 ) -> OutboundMessage {
-    // 这是群聊的通用提及回执规则：无论入站是否显式 @ 当前机器人，都回 @ 原发言人；
-    // 不按命令名称、骰点结果或模型响应类型做额外分支。
+    // 对能够承载正文的群聊回复统一 @ 原发言人，不按是否显式 @ 机器人、命令名称、
+    // 骰点结果或文本来源做额外分支。
     let Some(prefix) = group_reply_mention_prefix(message, capability) else {
         return outbound;
     };
     // QQ 官方的 `<@openid>` 只有作为 Markdown content 发送时才是可靠的原生提及。
-    // 即使普通 Markdown 渲染配置关闭，这条平台提及通道仍强制使用 Markdown，避免把
-    // openid 当作普通文本显示成 `@A...`；Markdown 失败时只降级为不带 openid 的正文。
+    // 文本和占位正文强制转为 Markdown，并先转义动态纯文本，避免原因、昵称等内容
+    // 激活格式或链接；Markdown 失败时只降级为不带 openid 的原始正文。
+    // 图片和语音使用 QQ `msg_type=7`，同一消息无法携带 Markdown 提及，仍依赖被动回复
+    // 的 msg_id 关联原消息，不能把 openid 塞进纯文本 fallback。
     match outbound {
         OutboundMessage::Text { text } => OutboundMessage::Markdown {
-            markdown: crate::markdown::MarkdownPayload::new(prepend_group_mention(&prefix, &text)),
+            markdown: crate::markdown::MarkdownPayload::new(prepend_group_mention(
+                &prefix,
+                &escape_text(&text),
+            )),
             fallback_text: text,
         },
         OutboundMessage::Markdown {
@@ -114,6 +120,14 @@ fn prefix_group_reply_outbound(
             markdown: crate::markdown::MarkdownPayload::new(prepend_group_mention(
                 &prefix,
                 &markdown.content,
+            )),
+            fallback_text,
+        },
+        OutboundMessage::ImagePlaceholder { fallback_text }
+        | OutboundMessage::AttachmentPlaceholder { fallback_text } => OutboundMessage::Markdown {
+            markdown: crate::markdown::MarkdownPayload::new(prepend_group_mention(
+                &prefix,
+                &escape_text(&fallback_text),
             )),
             fallback_text,
         },

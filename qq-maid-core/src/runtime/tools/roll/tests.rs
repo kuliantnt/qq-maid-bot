@@ -124,6 +124,19 @@ fn parses_default_dm_supported_and_invalid_dice_expressions() {
             query: "能否通过".to_owned(),
         })
     );
+    for (input, expression, query) in [
+        ("/roll d20优势 说服守卫", "2d20k1", "说服守卫"),
+        ("/roll d20劣势 潜行通过", "2d20q1", "潜行通过"),
+    ] {
+        assert_eq!(
+            parse_roll_command(input),
+            Some(RollCommand::DmCheck {
+                expression: Some(dice_expression(expression)),
+                query: query.to_owned(),
+            }),
+            "{input}"
+        );
+    }
     for (input, expression) in [
         ("/roll d20", "d20"),
         ("/roll d100", "d100"),
@@ -208,7 +221,14 @@ fn parses_sealdice_compact_commands_and_aliases() {
             reason: Some(reason),
         }) if expression == dice_expression("2d6") && reason == "xxx"
     ));
-    for input in ["/r测试", ".r测试"] {
+    for input in [
+        "/r测试",
+        ".r测试",
+        "/r 测试",
+        "/rd 测试",
+        ".r 测试",
+        ".rd 测试",
+    ] {
         assert!(
             matches!(
                 parse_roll_command(input),
@@ -256,6 +276,10 @@ fn parses_sealdice_compact_commands_and_aliases() {
             reason: None,
         }) if expression == dice_expression("d20")
     ));
+    assert_eq!(
+        parse_roll_command("/roll 2#d20 问题"),
+        Some(RollCommand::RepeatedDmCheckUnsupported)
+    );
 }
 
 #[test]
@@ -444,6 +468,23 @@ async fn slash_r_reason_is_local_but_roll_reason_keeps_explicit_ai_dm_path() {
     assert_eq!(reply.diagnostics()["roll_execution_kind"], "local");
     assert!(events.lock().unwrap().is_empty());
 
+    let command = parse_roll_command("/r 测试").expect("/r reason should use default d20");
+    assert!(matches!(command, RollCommand::DiceBatch { .. }));
+    let reply = execute_roll_command_with_roller(
+        &provider,
+        None,
+        command,
+        Duration::from_secs(1),
+        |sides| {
+            assert_eq!(sides, 20);
+            12
+        },
+    )
+    .await;
+    assert!(reply.reply.contains("“测试”"));
+    assert_eq!(reply.diagnostics()["roll_execution_kind"], "local");
+    assert!(events.lock().unwrap().is_empty());
+
     assert_eq!(
         parse_roll_command("/roll d50 开锁"),
         Some(RollCommand::DmCheck {
@@ -514,6 +555,27 @@ async fn invalid_dice_expression_never_calls_provider_or_roller() {
     .await;
 
     assert_eq!(reply.reply, INVALID_DICE_EXPRESSION_REPLY);
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn repeated_dm_check_is_rejected_without_provider_or_roller() {
+    let provider = MockProvider::replying(fortune_json());
+    let requests = provider.requests.clone();
+    let provider = Arc::new(provider) as DynLlmProvider;
+    let command = parse_roll_command("/roll 2#d20 问题")
+        .expect("repeated DM check should be handled by roll domain");
+    let reply = execute_roll_command_with_roller(
+        &provider,
+        Some("unused".to_owned()),
+        command,
+        Duration::from_secs(1),
+        |_| panic!("rejected repeated DM check must not roll"),
+    )
+    .await;
+
+    assert_eq!(reply.reply, REPEATED_DM_CHECK_REPLY);
+    assert_eq!(reply.diagnostics()["roll_execution_kind"], "local");
     assert!(requests.lock().unwrap().is_empty());
 }
 
@@ -630,6 +692,8 @@ async fn dm_receives_canonical_expression_and_range_for_each_supported_shape() {
         ("d100", "1d100", 1, 100, 51),
         ("1d20+3", "1d20+3", 4, 23, 14),
         ("1d8+1d6+4", "1d8+1d6+4", 6, 18, 12),
+        ("d20优势", "2d20k1", 1, 20, 11),
+        ("d20劣势", "2d20q1", 1, 20, 11),
     ] {
         let provider = MockProvider::replying(
             r#"{"type":"fortune","check_name":"命运检定","difficulty":"medium","success_meaning":"成功","failure_meaning":"失败"}"#,
