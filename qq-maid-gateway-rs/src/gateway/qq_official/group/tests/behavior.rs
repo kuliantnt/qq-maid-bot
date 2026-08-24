@@ -61,6 +61,25 @@ fn group_text_mention_escapes_dynamic_plain_text_before_markdown() {
 }
 
 #[test]
+fn group_text_mention_neutralizes_untrusted_qq_mentions() {
+    let message = group_message("hello", GroupEventType::GroupAtMessage);
+    let capability = qq_group_capability();
+    let outbound = OutboundMessage::Text {
+        text: "替 <@other-member> 掷骰".to_owned(),
+    };
+
+    assert_eq!(
+        prefix_group_reply_outbound(&message, outbound, &capability),
+        OutboundMessage::Markdown {
+            markdown: crate::markdown::MarkdownPayload::new(
+                "<@member-1>\n替 ＜@other\\-member\\> 掷骰",
+            ),
+            fallback_text: "替 ＜@other-member> 掷骰".to_owned(),
+        }
+    );
+}
+
+#[test]
 fn group_text_placeholder_uses_safe_markdown_mention() {
     let message = group_message("hello", GroupEventType::GroupAtMessage);
     let capability = qq_group_capability();
@@ -93,6 +112,26 @@ fn group_at_reply_markdown_outbound_mentions_sender() {
         OutboundMessage::Markdown {
             markdown: crate::markdown::MarkdownPayload::new("<@member-1>\n**回复正文**"),
             fallback_text: "回复正文".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn group_at_reply_markdown_neutralizes_body_mentions_only() {
+    let message = group_message("hello", GroupEventType::GroupAtMessage);
+    let capability = qq_group_capability();
+    let outbound = OutboundMessage::Markdown {
+        markdown: crate::markdown::MarkdownPayload::new("**提醒 <@other-member>**"),
+        fallback_text: "提醒 <@other-member>".to_owned(),
+    };
+
+    assert_eq!(
+        prefix_group_reply_outbound(&message, outbound, &capability),
+        OutboundMessage::Markdown {
+            markdown: crate::markdown::MarkdownPayload::new(
+                "<@member-1>\n**提醒 ＜@other-member>**",
+            ),
+            fallback_text: "提醒 ＜@other-member>".to_owned(),
         }
     );
 }

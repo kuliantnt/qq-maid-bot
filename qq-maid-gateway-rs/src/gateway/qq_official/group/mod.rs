@@ -90,6 +90,15 @@ fn prepend_group_mention(prefix: &str, text: &str) -> String {
     }
 }
 
+/// 中和正文中非 Gateway 生成的 QQ 原生提及标记。
+///
+/// QQ 会在 Markdown content 中把 ASCII `<@...>` 解释为真实成员提及；仅转义通用
+/// Markdown 符号不足以建立这条协议边界，因此把不受信任正文中的起始尖括号换成全角
+/// 字符。可信的发言人提及会在此处理之后由 Gateway 单独拼接，不受影响。
+fn neutralize_qq_body_mentions(text: &str) -> String {
+    text.replace("<@", "＜@")
+}
+
 fn prefix_group_reply_outbound(
     message: &GroupMessage,
     outbound: OutboundMessage,
@@ -102,35 +111,45 @@ fn prefix_group_reply_outbound(
     };
     // QQ 官方的 `<@openid>` 只有作为 Markdown content 发送时才是可靠的原生提及。
     // 文本和占位正文强制转为 Markdown，并先转义动态纯文本，避免原因、昵称等内容
-    // 激活格式或链接；Markdown 失败时只降级为不带 openid 的原始正文。
+    // 激活格式或链接。所有正文还要中和其自带的 QQ mention 语法，可信的发言人前缀
+    // 只能由 Gateway 生成；Markdown 失败时降级为同样已中和且不带 openid 的正文。
     // 图片和语音使用 QQ `msg_type=7`，同一消息无法携带 Markdown 提及，仍依赖被动回复
     // 的 msg_id 关联原消息，不能把 openid 塞进纯文本 fallback。
     match outbound {
-        OutboundMessage::Text { text } => OutboundMessage::Markdown {
-            markdown: crate::markdown::MarkdownPayload::new(prepend_group_mention(
-                &prefix,
-                &escape_text(&text),
-            )),
-            fallback_text: text,
-        },
+        OutboundMessage::Text { text } => {
+            let fallback_text = neutralize_qq_body_mentions(&text);
+            OutboundMessage::Markdown {
+                markdown: crate::markdown::MarkdownPayload::new(prepend_group_mention(
+                    &prefix,
+                    &escape_text(&fallback_text),
+                )),
+                fallback_text,
+            }
+        }
         OutboundMessage::Markdown {
             markdown,
             fallback_text,
-        } => OutboundMessage::Markdown {
-            markdown: crate::markdown::MarkdownPayload::new(prepend_group_mention(
-                &prefix,
-                &markdown.content,
-            )),
-            fallback_text,
-        },
+        } => {
+            let markdown_body = neutralize_qq_body_mentions(&markdown.content);
+            OutboundMessage::Markdown {
+                markdown: crate::markdown::MarkdownPayload::new(prepend_group_mention(
+                    &prefix,
+                    &markdown_body,
+                )),
+                fallback_text: neutralize_qq_body_mentions(&fallback_text),
+            }
+        }
         OutboundMessage::ImagePlaceholder { fallback_text }
-        | OutboundMessage::AttachmentPlaceholder { fallback_text } => OutboundMessage::Markdown {
-            markdown: crate::markdown::MarkdownPayload::new(prepend_group_mention(
-                &prefix,
-                &escape_text(&fallback_text),
-            )),
-            fallback_text,
-        },
+        | OutboundMessage::AttachmentPlaceholder { fallback_text } => {
+            let fallback_text = neutralize_qq_body_mentions(&fallback_text);
+            OutboundMessage::Markdown {
+                markdown: crate::markdown::MarkdownPayload::new(prepend_group_mention(
+                    &prefix,
+                    &escape_text(&fallback_text),
+                )),
+                fallback_text,
+            }
+        }
         outbound => outbound,
     }
 }
