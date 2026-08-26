@@ -171,6 +171,7 @@ fn parses_default_dm_supported_and_invalid_dice_expressions() {
         ("/roll 1D100", "1D100"),
         ("/roll 1d20+3", "1d20+3"),
         ("/roll 2d20+4", "2d20+4"),
+        ("/roll 4d6k5", "4d6k5"),
         ("/roll 2d6 + 1", "2d6 + 1"),
         ("/roll 1d8+1d6+4", "1d8+1d6+4"),
         ("/roll 1d20-1d6", "1d20-1d6"),
@@ -191,7 +192,7 @@ fn parses_default_dm_supported_and_invalid_dice_expressions() {
         "/roll 0d6",
         "/roll d0",
         "/roll 1d20+1001",
-        "/r 4d6k5",
+        "/r 4d6k0",
         "/roll d20dh1",
     ] {
         assert_eq!(
@@ -437,6 +438,39 @@ async fn compact_reason_and_repeated_rolls_stay_local_and_keep_dice_icon() {
     assert!(reply.reply.contains("第1轮：掷出了 2 / 6"));
     assert!(reply.reply.contains("第2轮：掷出了 5 / 6"));
     assert!(reply.reply.contains("“测试”"));
+}
+
+#[tokio::test]
+async fn oversized_keep_count_preserves_all_dice_for_compact_sealdice_command() {
+    let provider = MockProvider::failing(LlmError::provider("must not call", "test"));
+    let events = provider.events.clone();
+    let provider = Arc::new(provider) as DynLlmProvider;
+    let command = parse_roll_command(".r4d6k5原因").expect("compact keep command should parse");
+    assert!(matches!(
+        &command,
+        RollCommand::DiceBatch {
+            expression,
+            repetitions: 1,
+            reason: Some(reason),
+        } if *expression == dice_expression("4d6k5") && reason == "原因"
+    ));
+
+    let mut values = [6, 6, 5, 2].into_iter();
+    let reply = execute_roll_command_with_roller(
+        &provider,
+        None,
+        command,
+        Duration::from_secs(1),
+        |sides| {
+            assert_eq!(sides, 6);
+            values.next().expect("4d6 should roll four dice")
+        },
+    )
+    .await;
+
+    assert_eq!(reply.reply, "🎲 “原因” 4d6k5：{6 | 6 | 5 | 2} = 19");
+    assert!(values.next().is_none());
+    assert!(events.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

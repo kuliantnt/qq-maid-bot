@@ -65,7 +65,9 @@ impl DiceTerm {
     pub(super) fn selected_count(&self) -> u32 {
         match self.keep {
             DiceKeep::All => u32::from(self.count),
-            DiceKeep::Highest(count) | DiceKeep::Lowest(count) => u32::from(count),
+            // SealDice 允许保留数量超过骰池，此时实际仍只能保留已有的全部骰子。
+            // 范围分析必须同步取较小值，不能按不存在的骰子扩大理论上下界。
+            DiceKeep::Highest(count) | DiceKeep::Lowest(count) => u32::from(count.min(self.count)),
             DiceKeep::DropHighest(count) | DiceKeep::DropLowest(count) => {
                 u32::from(self.count - count)
             }

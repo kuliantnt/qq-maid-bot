@@ -89,7 +89,7 @@ fn rejects_invalid_expression_and_complexity_limits() {
         ("1/0", DiceExpressionError::DivisionByZero),
         ("2**13", DiceExpressionError::ExponentOutOfRange),
         ("5a6", DiceExpressionError::InvalidSyntax),
-        ("4d6k5", DiceExpressionError::KeepCountOutOfRange),
+        ("4d6k0", DiceExpressionError::KeepCountOutOfRange),
     ] {
         assert_eq!(
             parse_expression(input),
@@ -161,7 +161,16 @@ fn parses_expression_prefix_without_consuming_reason() {
     assert_eq!(spec.expression.to_string(), "2d6");
     assert_eq!(reason, "原因");
 
-    for input in ["4d6k5", "d20dh1", "4d6kh0", "4d6k5 原因"] {
+    let (spec, reason) = parse_roll_spec_prefix("4d6 k5 原因").expect("oversized keep with reason");
+    assert_eq!(spec.expression.to_string(), "4d6k5");
+    assert_eq!(reason, "原因");
+
+    let (spec, reason) =
+        parse_roll_spec_compact_prefix("4d6k5原因").expect("compact oversized keep");
+    assert_eq!(spec.expression.to_string(), "4d6k5");
+    assert_eq!(reason, "原因");
+
+    for input in ["d20dh1", "4d6kh0"] {
         assert!(
             parse_roll_spec_compact_prefix(input).is_none(),
             "非法取骰后缀不能降级为原因：{input}"
@@ -270,6 +279,16 @@ fn keeps_highest_and_lowest_without_aggregating_dropped_dice() {
         .unwrap();
     assert_eq!(low.total, 7);
     assert_eq!(low.rolls.iter().filter(|roll| roll.kept).count(), 1);
+
+    let oversized_keep = expression("4d6k5");
+    assert_eq!(oversized_keep.total_range(), (4, 24));
+    let mut values = [6, 6, 5, 2].into_iter();
+    let result = oversized_keep
+        .roll(&mut |_| values.next().expect("4d6 should roll four dice"))
+        .unwrap();
+    assert_eq!(result.total, 19);
+    assert_eq!(result.rolls.iter().filter(|roll| roll.kept).count(), 4);
+    assert_eq!(result.calculation(), "{6 | 6 | 5 | 2}");
 }
 
 #[test]

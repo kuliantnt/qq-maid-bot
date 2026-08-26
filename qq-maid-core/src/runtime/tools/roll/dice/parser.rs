@@ -505,10 +505,12 @@ impl Parser {
         } else {
             1
         };
-        if amount == 0 || amount > u32::from(term.count) {
+        if amount == 0 || amount > u32::from(u8::MAX) {
             return Err(DiceExpressionError::KeepCountOutOfRange);
         }
-        if dropping && amount == u32::from(term.count) {
+        // SealDice 的 k/q 数量可以超过骰池，实际效果是保留已有的全部骰子；drop
+        // 若达到骰池大小则会丢空，仍作为无效表达式拒绝，避免生成无骰值结果。
+        if dropping && amount >= u32::from(term.count) {
             return Err(DiceExpressionError::KeepCountOutOfRange);
         }
         let amount = amount as u8;
