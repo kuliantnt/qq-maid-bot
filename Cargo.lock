@@ -2007,7 +2007,7 @@ checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
 
 [[package]]
 name = "qq-maid-bot"
-version = "0.24.2"
+version = "0.24.3"
 dependencies = [
  "anyhow",
  "qq-maid-core",
@@ -2024,7 +2024,7 @@ dependencies = [
 
 [[package]]
 name = "qq-maid-common"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "pulldown-cmark",
@@ -2037,7 +2037,7 @@ dependencies = [
 
 [[package]]
 name = "qq-maid-core"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "ammonia",
  "anyhow",
@@ -2079,7 +2079,7 @@ dependencies = [
 
 [[package]]
 name = "qq-maid-gateway-rs"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "aes",
  "anyhow",

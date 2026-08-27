@@ -2,6 +2,10 @@
 
 本目录保留开发边界、部署约定、设计基线和可 review 的历史记录。面向使用者的安装、配置和场景化教程优先查看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)；程序真实行为仍以当前源码、测试、配置模板和各 crate README 为准。
 
+## 使用指南
+
+- [骰子使用教程](./guides/dice.md)：本地骰式、重复投掷、取骰、优势/劣势、奖励/惩罚骰、SealDice 写法与 Entertainment DM 边界。
+
 ## 首先阅读
 
 | 文档 | 用途 |

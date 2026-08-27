@@ -2,15 +2,25 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
-## [Unreleased]
+## [v0.24.3] - 2026-08-27
+
+### Release Focus
+
+* **通用骰点引擎与 SealDice 兼容**：在 v0.24.2 简单骰式和 AI DM 基础上，补齐常用本地骰点语法、SealDice 入口与用户教程；确定性骰点仍由 Core 负责，模型不参与随机或本地结果计算。
 
 ### Added
 
-* **通用骰子表达式与 SealDice 兼容**（Issue #682）：支持带修正、多段骰子、重复投掷、取骰、优势/劣势和奖励/惩罚骰；`/r`、`/rd` 的骰式尾随文本作为本地原因，`/roll <骰式> <问题>` 仍是显式 Entertainment DM。DC 由 Core 根据骰式理论范围和娱乐刻度计算，模型不参与本地骰点。
+* **通用骰子表达式与 SealDice 兼容**（Issue #682、PR #683）：支持带修正、多段骰子、重复投掷、取骰、优势/劣势和奖励/惩罚骰；`/r`、`/rd` 的骰式尾随文本作为本地原因，`/roll <骰式> <问题>` 仍是显式 Entertainment DM。DC 由 Core 根据骰式理论范围和娱乐刻度计算，模型不参与本地骰点。
+* **骰子使用教程**：新增独立教程，覆盖基础骰式、取骰、重复投掷、奖励/惩罚骰、紧凑命令、Entertainment DM 调用边界、安全限制和常见排错，并同步 README 与 Wiki 导航。
 
 ### Fixed
 
 * **骰式边界与幂运算安全**：限制前缀解析的候选规模，避免未知紧凑命令误触发骰点，并修正跨零幂运算的范围分析和规范化格式化。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.24.3`；本次实际变更的 `qq-maid-common`、`qq-maid-core` 和 `qq-maid-gateway-rs` 分别提升到 `0.1.6`、`0.1.27` 和 `0.1.19`，`qq-maid-llm` 保持 `0.1.13`。
+* 本版本不新增 SQLite migration、配置迁移、必填环境变量或运行时入口；现有 `/roll` Entertainment DM 的失败回退和本地 CSPRNG 边界保持不变。升级前仍建议按常规备份运行配置、数据库和主密钥。
 
 ## [v0.24.2] - 2026-08-21
 
