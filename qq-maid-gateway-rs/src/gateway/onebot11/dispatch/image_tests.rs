@@ -33,6 +33,28 @@ fn mixed_response() -> Box<CoreResponse> {
     })
 }
 
+fn image_response() -> Box<CoreResponse> {
+    Box::new(CoreResponse {
+        output: Some(AssistantOutput {
+            text_fallback: "图片发送失败".to_owned(),
+            markdown: None,
+            parts: vec![OutputPart::Image {
+                media: OutputMedia {
+                    data_base64: Some("aGVsbG8=".to_owned()),
+                    fallback_text: Some("图片发送失败".to_owned()),
+                    ..OutputMedia::default()
+                },
+            }],
+        }),
+        handled: Some(true),
+        session_id: None,
+        command: None,
+        diagnostics: None,
+        visible_entity_snapshot: None,
+        delivery_hint: None,
+    })
+}
+
 #[tokio::test]
 async fn group_text_and_image_are_sent_in_order() {
     let sender = Arc::new(FakeSender::default());
@@ -41,7 +63,9 @@ async fn group_text_and_image_are_sent_in_order() {
         sender.clone(),
     );
 
-    dispatcher.dispatch(inbound("mixed", true)).await.unwrap();
+    let mut message = inbound("mixed", true);
+    message.mentioned_bot = false;
+    dispatcher.dispatch(message).await.unwrap();
 
     assert_eq!(
         sender.sent.lock().unwrap().as_slice(),
@@ -82,5 +106,28 @@ async fn failed_image_send_falls_back_without_repeating_prior_text() {
                 "图片发送失败".to_owned(),
             ),
         ]
+    );
+}
+
+#[tokio::test]
+async fn successful_group_image_preserves_native_actor_mention() {
+    let sender = Arc::new(FakeSender::default());
+    let (dispatcher, _) = dispatcher(
+        vec![Ok(OneBotCoreTransport::Complete(image_response()))],
+        sender.clone(),
+    );
+
+    dispatcher
+        .dispatch(inbound("image-at-mention", true))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        sender.sent.lock().unwrap().as_slice(),
+        &[(
+            "group_image_with_mentions".to_owned(),
+            "30003".to_owned(),
+            "20002|[image]".to_owned(),
+        )]
     );
 }

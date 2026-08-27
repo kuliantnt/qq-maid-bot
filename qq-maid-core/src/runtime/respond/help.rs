@@ -41,13 +41,16 @@ const HELP_MODULES: &[HelpModule] = &[
         key: "fun",
         aliases: &["娱乐", "roll", "掷骰"],
         title: "🎲 娱乐",
-        summary: "提供本地 D20 与轻量 AI DM 判定。",
+        summary: "提供本地骰子表达式与 Entertainment DM（娱乐判定）。",
         commands: &[
-            "- `/roll [问题或骰子表达式]`：无参数时本地掷 D20；`d100`、`2d6` 等表达式本地结算；自然语言问题由 AI DM 先定难度",
+            "- `/roll [骰子表达式] [问题]`（别名 `/r`）：无参数时本地掷 D20；纯表达式本地结算；带问题时使用指定骰式进入 Entertainment DM，AI 只判断难度，Core 根据理论范围计算 DC",
         ],
         notes: &[
-            "- 骰值始终由程序本地生成；AI DM 看不到骰值，只负责在掷骰前设定判定方案。",
-            "- 骰子表达式支持 `dM` 或 `NdM`，骰子个数和面数均为 1–100；暂不支持 `1d20+3` 等修正值、角色属性或加值。",
+            "- 骰值始终由程序本地生成；AI DM 看不到骰值，只负责在掷骰前选择难度和判定文案，DC 由 Core 计算。",
+            "- `/r`、`/rd` 后随骰式的文本只作为骰点原因并在本地结算；只有 `/roll <骰式> <问题>` 进入 Entertainment DM。",
+            "- 当前没有正式跑团上下文，带问题路径固定使用 Entertainment DM；未来由 active campaign 的 `rule_system` 确定性选择规则系统，AI 不参与模式切换。",
+            "- 娱乐 AI DM 的所有骰式（包括默认 `1d20`）统一按理论范围和六档娱乐刻度计算 DC，不是正式 DND5E 规则；纯骰式不调用 AI。",
+            "- 骰子表达式支持 `dM` / `NdM`，例如 `d20`、`d100`、`2d6`、`1d20+3`、`1d8+1d6+4` 及负数修正；单段骰子数量和面数均为 1–100，总骰子数不超过 100，最多 8 段，表达式不超过 64 个字符。",
         ],
     },
     HelpModule {
@@ -190,7 +193,7 @@ const HELP_MODULES: &[HelpModule] = &[
         title: "⚙️ 设置",
         summary: "管理当前会话偏好；展示名只用于显示，不代表现实身份认证。",
         commands: &[
-            "- `/set 昵称 [名称]`：查看或设置展示名；`/unset 昵称`：清除",
+            "- `/set 昵称 [名称]`：查看或设置展示名；`/nn [名称]` 是快捷别名；`/unset 昵称`：清除",
             "- `/语音 [开启|关闭]`：查询或切换当前 QQ 会话语音回复",
         ],
         notes: &[
@@ -279,8 +282,8 @@ fn format_help_home(context: HelpContext) -> CommandBody {
         );
     }
     render.push_pair(
-        "· 🎲 娱乐：/roll".to_owned(),
-        "- 🎲 娱乐：`/roll`".to_owned(),
+        "· 🎲 娱乐：/roll（别名 /r）".to_owned(),
+        "- 🎲 娱乐：`/roll`（别名 `/r`）".to_owned(),
     );
     render.push_pair(
         "· 📰 RSS / Atom：/rss".to_owned(),
@@ -307,8 +310,8 @@ fn format_help_home(context: HelpContext) -> CommandBody {
         "- 🗂 会话：`/state`".to_owned(),
     );
     render.push_pair(
-        "· ⚙️ 设置：/set 昵称 脸脸".to_owned(),
-        "- ⚙️ 设置：`/set 昵称 脸脸`".to_owned(),
+        "· ⚙️ 设置：/set 昵称 脸脸（或 /nn 脸脸）".to_owned(),
+        "- ⚙️ 设置：`/set 昵称 脸脸`（快捷别名：`/nn 脸脸`）".to_owned(),
     );
     render.push_pair(
         "· 🔊 语音回复：/语音".to_owned(),

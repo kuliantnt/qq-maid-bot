@@ -5,7 +5,7 @@
 //! 让用户主动声明“我在这个会话里叫什么”。展示名只用于显示和帮助 LLM 理解上下文，
 //! 不参与权限判断、owner 或稳定身份认证。
 //!
-//! 查看和设置走 `/set`，清除走 `/unset`，语义分离更直观。
+//! 查看和设置走 `/set`（另有 `/nn` 昵称快捷别名），清除走 `/unset`，语义分离更直观。
 //!
 //! 新增设置项时：
 //! 1. 在 [`SettingKind`] 增加变体并补全 [`SETTING_KEYS`] 别名分组；
@@ -29,7 +29,7 @@ const DISPLAY_NAME_MIN_CHARS: usize = 1;
 const DISPLAY_NAME_MAX_CHARS: usize = 32;
 
 /// `/set` 无参数时的用法提示。
-const SET_USAGE_REPLY: &str = "用法：\n- /set 昵称 脸脸：设置当前会话里的展示名\n- /set 昵称：查看当前展示名\n- /unset 昵称：清除展示名";
+const SET_USAGE_REPLY: &str = "用法：\n- /set 昵称 脸脸：设置当前会话里的展示名\n- /nn 脸脸：设置当前会话里的展示名（/set 昵称的快捷别名）\n- /set 昵称：查看当前展示名\n- /nn：查看当前展示名\n- /unset 昵称：清除展示名";
 
 /// `/unset` 无参数时的用法提示。
 const UNSET_USAGE_REPLY: &str = "用法：/unset 昵称\n清除当前会话里你设置的展示名。";
@@ -355,9 +355,33 @@ fn scope_label(session: &SessionRecord) -> String {
     }
 }
 
-/// 尝试从用户文本中解析 `/set` 指令。
+/// 尝试从用户文本中解析 `/set` 指令，并把 `/nn` 展开为昵称设置参数。
 pub(super) fn parse_set_command(text: &str) -> Option<ParsedCommand> {
-    let command = crate::runtime::command::parse_slash_command(text)?;
+    // `/nn昵称` 是点号兼容入口 `.nn昵称` 归一化后的紧凑写法；别名层在
+    // 这里拆出紧跟的名称，后续仍复用展示名的身份、长度和持久化校验。
+    let text = text.trim();
+    let compact_nn_argument = text
+        .get(..3)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("/nn"))
+        .map(|_| &text[3..]);
+    if let Some(argument) = compact_nn_argument
+        && !argument.is_empty()
+        && !argument.chars().next().is_some_and(char::is_whitespace)
+    {
+        return Some(ParsedCommand {
+            action: "set".to_owned(),
+            argument: format!("昵称 {argument}"),
+            raw_command: "nn".to_owned(),
+        });
+    }
+    let mut command = crate::runtime::command::parse_slash_command(text)?;
+    if command.raw_command == "nn" {
+        command.argument = if command.argument.is_empty() {
+            "昵称".to_owned()
+        } else {
+            format!("昵称 {}", command.argument)
+        };
+    }
     (command.action == "set").then_some(command)
 }
 
@@ -393,6 +417,26 @@ mod tests {
         // 未知 key
         assert_eq!(parse_set_argument("xxx yyy"), None);
         assert_eq!(parse_set_argument(""), None);
+    }
+
+    #[test]
+    fn parse_nn_alias_reuses_display_name_setting() {
+        let command = parse_set_command("/nn emmm").expect("nn should parse");
+        assert_eq!(command.action, "set");
+        assert_eq!(command.argument, "昵称 emmm");
+        assert_eq!(command.raw_command, "nn");
+
+        let command = parse_set_command("/nn").expect("nn should parse");
+        assert_eq!(command.argument, "昵称");
+
+        let command = parse_set_command("/nn初墨").expect("compact nn should parse");
+        assert_eq!(command.action, "set");
+        assert_eq!(command.argument, "昵称 初墨");
+        assert_eq!(command.raw_command, "nn");
+
+        let command = parse_set_command("/Nn初墨").expect("compact nn should ignore case");
+        assert_eq!(command.argument, "昵称 初墨");
+        assert_eq!(parse_set_command("/rename emmm"), None);
     }
 
     #[test]

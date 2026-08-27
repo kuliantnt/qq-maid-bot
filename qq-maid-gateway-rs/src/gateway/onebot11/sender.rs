@@ -110,7 +110,7 @@ impl OneBotSender {
         user_id: &str,
         image: &ImagePayload,
     ) -> Result<OneBotSendResult, OneBotSendError> {
-        self.send_image(SEND_PRIVATE_MSG, "user_id", user_id, image)
+        self.send_image(SEND_PRIVATE_MSG, "user_id", user_id, &[], image)
             .await
     }
 
@@ -119,8 +119,26 @@ impl OneBotSender {
         group_id: &str,
         image: &ImagePayload,
     ) -> Result<OneBotSendResult, OneBotSendError> {
-        self.send_image(SEND_GROUP_MSG, "group_id", group_id, image)
+        self.send_image(SEND_GROUP_MSG, "group_id", group_id, &[], image)
             .await
+    }
+
+    /// 使用 OneBot 原生 `at` segment 后接图片；无效成员 ID 仅跳过对应 segment，
+    /// 图片本身仍会正常发送。
+    pub async fn send_group_image_with_mentions(
+        &self,
+        group_id: &str,
+        mention_user_ids: &[String],
+        image: &ImagePayload,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        self.send_image(
+            SEND_GROUP_MSG,
+            "group_id",
+            group_id,
+            mention_user_ids,
+            image,
+        )
+        .await
     }
 
     async fn send_text(
@@ -208,11 +226,12 @@ impl OneBotSender {
         action: &'static str,
         target_key: &'static str,
         target_id: &str,
+        mention_user_ids: &[String],
         image: &ImagePayload,
     ) -> Result<OneBotSendResult, OneBotSendError> {
         let started = Instant::now();
         let target_id = parse_target_id(target_id)?;
-        let params = build_image_params(target_key, target_id, image)?;
+        let params = build_image_params(target_key, target_id, mention_user_ids, image)?;
         let result = self
             .connection
             .call(action, params)
@@ -222,9 +241,22 @@ impl OneBotSender {
         let elapsed_ms = started.elapsed().as_millis();
         let target = mask_identifier(&target_id.to_string());
         match &result {
-            Ok(_) => info!(action, elapsed_ms, target = %target, "OneBot 11 图片已发送"),
+            Ok(_) => info!(
+                action,
+                elapsed_ms,
+                target = %target,
+                mention_count = mention_user_ids.len(),
+                "OneBot 11 图片已发送"
+            ),
             Err(error) => {
-                warn!(action, retcode = ?error.retcode(), elapsed_ms, target = %target, "OneBot 11 图片发送失败")
+                warn!(
+                    action,
+                    retcode = ?error.retcode(),
+                    elapsed_ms,
+                    target = %target,
+                    mention_count = mention_user_ids.len(),
+                    "OneBot 11 图片发送失败"
+                )
             }
         }
         result
@@ -279,11 +311,14 @@ fn local_path_file_uri(path: &str) -> Option<String> {
 fn build_image_params(
     target_key: &'static str,
     target_id: u64,
+    mention_user_ids: &[String],
     image: &ImagePayload,
 ) -> Result<Value, OneBotSendError> {
+    let mut message = build_mention_segments(mention_user_ids);
+    message.push(json!({"type": "image", "data": {"file": onebot_image_file(image)?}}));
     Ok(json!({
         target_key: Value::Number(Number::from(target_id)),
-        "message": [{"type": "image", "data": {"file": onebot_image_file(image)?}}]
+        "message": message,
     }))
 }
 
@@ -293,11 +328,7 @@ fn build_text_params(
     mention_user_ids: &[String],
     text: &str,
 ) -> Value {
-    let mut message = mention_user_ids
-        .iter()
-        .filter_map(|user_id| parse_target_id(user_id).ok())
-        .map(|user_id| json!({"type": "at", "data": {"qq": user_id.to_string()}}))
-        .collect::<Vec<_>>();
+    let mut message = build_mention_segments(mention_user_ids);
     let text = if message.is_empty() {
         text.to_owned()
     } else {
@@ -308,6 +339,14 @@ fn build_text_params(
         target_key: Value::Number(Number::from(target_id)),
         "message": message,
     })
+}
+
+fn build_mention_segments(mention_user_ids: &[String]) -> Vec<Value> {
+    mention_user_ids
+        .iter()
+        .filter_map(|user_id| parse_target_id(user_id).ok())
+        .map(|user_id| json!({"type": "at", "data": {"qq": user_id.to_string()}}))
+        .collect()
 }
 
 fn parse_target_id(target_id: &str) -> Result<u64, OneBotSendError> {
@@ -471,10 +510,33 @@ mod tests {
     #[test]
     fn group_image_params_use_standard_onebot_image_segment() {
         let params =
-            build_image_params("group_id", 123, &ImagePayload::from_base64("aGVsbG8=")).unwrap();
+            build_image_params("group_id", 123, &[], &ImagePayload::from_base64("aGVsbG8="))
+                .unwrap();
 
         assert_eq!(params["group_id"], 123);
         assert_eq!(params["message"][0]["type"], "image");
         assert_eq!(params["message"][0]["data"]["file"], "base64://aGVsbG8=");
+    }
+
+    #[test]
+    fn group_image_params_prepend_native_at_segments() {
+        let params = build_image_params(
+            "group_id",
+            123,
+            &["1001".to_owned(), "bad".to_owned()],
+            &ImagePayload::from_base64("aGVsbG8="),
+        )
+        .unwrap();
+
+        assert_eq!(
+            params,
+            json!({
+                "group_id": 123,
+                "message": [
+                    {"type": "at", "data": {"qq": "1001"}},
+                    {"type": "image", "data": {"file": "base64://aGVsbG8="}},
+                ],
+            })
+        );
     }
 }

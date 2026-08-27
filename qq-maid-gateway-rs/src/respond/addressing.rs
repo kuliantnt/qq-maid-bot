@@ -121,9 +121,9 @@ fn normalize_group_addressed_content(
 
 fn command_remainder(text: &str, command_prefix: CommandPrefix) -> Option<String> {
     let rest = trim_command_separator(text.trim_start());
-    if command_prefix.is_candidate(rest) {
+    if command_prefix.is_candidate_with_dot_compat(rest) {
         // Core 负责把配置前缀规范化为内部 `/`；Gateway 这里只剥离 @/唤醒词，
-        // 必须保留配置字符，避免跨层重复规范化后被当成旧前缀普通文本。
+        // 必须保留配置字符，避免跨层重复规范化后被当成普通文本。
         return Some(rest.trim().to_owned());
     }
     if command_prefix.as_char() == '/'

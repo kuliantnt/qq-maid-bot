@@ -139,6 +139,7 @@ runtime/botctl.sh status
 <summary>展开查看 24.x 版本更新</summary>
 
 - **AI DM D20 判定与简单骰子表达式**（v0.24.2，PR #679）：`/roll d100`、`/roll 2d6` 等 `dM` / `NdM` 表达式由 Core 本地结算；`/roll <问题>` 由独立 AI DM 先制定并校验判定方案，再由 Core 使用 CSPRNG 掷骰和确定性模板结算。AI DM 看不到骰值，Provider 异常、超时或非法输出会明确降级为普通本地 D20。
+- **通用骰子表达式扩展**（Issue #682 Phase 1）：支持 `1d20+3`、`2d6+1`、`1d8+1d6+4` 等带修正和多段骰子表达式；Phase 2 兼容 `/r`、`/rd`、`/rap`、`/rab` 及 `/r2d6`、`.r2d6` 等 SealDice 常见短写。以 `/r` / `/rd` 开头的骰式后尾随文本是本地骰点原因，不调用模型；保留 `/roll <骰式> <问题>` 作为显式 Entertainment DM（娱乐判定）。Core 先确定性解析、随机和结算，AI DM 只处理显式判定方案；当前不存在 Campaign / Rule Context，未来由 active campaign 的 `rule_system` 确定性选择正式 Rule System，AI 不参与模式切换。
 - **默认 D20 娱乐命令**（v0.24.1，PR #676）：私聊或群聊发送 `/roll` 即可由程序本地掷出 1–20；不调用模型、不创建 session，也不消费 pending 状态。
 - **Memory 管理与 Agent 回执收口**（v0.24.0）：部署管理员可在 Web Console 中分页筛选、创建、编辑、归档和恢复 Memory，高影响操作使用 opaque reference、版本校验与二次确认；自然语言 Agent 统一可信工具结果与最终正文，未完成工具轮次不再伪装成功，并新增不进入模型链路的 Codex Slash 彩蛋与完整中文星期展示。
 
@@ -152,7 +153,7 @@ runtime/botctl.sh status
 
 ## 能做什么
 
-- **聊天与上下文**：管理多轮会话，理解图片，并结合引用消息继续追问；共享群聊历史会区分发言成员，降低昵称、偏好和身份信息串线风险。
+- **聊天与上下文**：管理多轮会话，理解图片，并结合引用消息继续追问；共享群聊历史会区分发言成员，降低昵称、偏好和身份信息串线风险；可用 `/set 昵称` 或 `/nn` 管理当前会话展示名。
 - **Todo 与提醒**：新增、修改、完成、恢复和删除待办，支持单次提醒、重复提醒和每日摘要；列表可按今天 / 明天 / 本周 / 逾期 / 关键词组合筛选。群主或管理员可用 `/todo group` 管理本群未完成 Todo。
 - **查询与订阅**：查询天气、火车时刻和网页信息，支持多对象对比式联网搜索；订阅 RSS/Atom 并主动推送更新。
 - **记忆与知识库**：个人记忆、群内个人画像和群公共记忆分域管理，并按场景与可见性召回。用户明确要求“记住”时可直接保存；可选的确定性整理（`MEMORY_CONSOLIDATION_ENABLED`）与 Session Dream（`MEMORY_DREAM_ENABLED`）分开开关。Dream 只从会话消息提取安全长期事实，写入个人记忆或当前成员群画像，不覆盖已确认记忆；本地 Markdown 可自动索引并按需检索。
@@ -186,7 +187,7 @@ v0.20.x 起推荐新部署通过 `/console/` 网页完成配置，也可在安�
 
 完整环境变量以 [`.env.example`](./runtime/config/.env.example) 为准，配置中心优先级与安全边界见 [配置中心清单](./docs/development/config-center.md)。首次启动从二进制内嵌的同版默认模板生成未跟踪的 `config/agent.toml`；Release 中的 [`agent.example.toml`](./runtime/config/agent.example.toml) 仅用于参考、开发和升级迁移，修改该外部示例不会改变首次生成内容。`/ops` 配置从 [`ops.example.toml`](./runtime/config/ops.example.toml) 复制为未跟踪的 `ops.toml` 后填写，具体步骤见 Wiki [用 `/ops` 在 QQ 里做运维](https://github.com/kuliantnt/qq-maid-bot/wiki/ops运维命令) 与 [用 `/ops codex` 跑长任务](https://github.com/kuliantnt/qq-maid-bot/wiki/ops-codex)。调整模型、工具、场景策略或白名单运维命令时，不需要修改业务代码。
 
-聊天命令默认使用 `/` 前缀；可在 Web 控制台“命令设置”中通过下拉框改为 `#` 或 `*`，也可设置 `runtime.toml` 的 `command.prefix` / 环境变量 `CHAT_COMMAND_PREFIX`。前缀必须是一个可见非空白字符，修改后重启生效；自定义后旧 `/` 不再触发命令。
+聊天命令默认使用 `/` 前缀；可在 Web 控制台“命令设置”中通过下拉框改为 `#` 或 `*`，也可设置 `runtime.toml` 的 `command.prefix` / 环境变量 `CHAT_COMMAND_PREFIX`。前缀必须是一个可见非空白字符，修改后重启生效；自定义后旧 `/` 不再触发普通命令。默认前缀下 `/` 与 `.` 都是命令前缀，例如 `/help` 与 `.help`、`/nn` 与 `.nn` 会进入同一条 Core 命令通道；点号只在消息开头生效，具体命令和参数由 Core 统一判断。配置其他前缀时不额外放开点号。
 
 未配置 Provider 或平台入口的新实例会以 `setup_required` 启动。访问默认同源 `/console/`，读取服务器本地 `config/secrets/bootstrap.token` 建立首位部署管理员后，可分步保存 Provider、QQ/OneBot/微信入口、主要功能开关、模型路线和 Tool Calling；普通值与人工编辑共享受管 TOML，secret 不回传原文。约 22 字符的短时单次 Bootstrap token 在新生成时同时写入权限受限文件，并通过一次 `info` 启动日志事件输出；状态查询、有效 token 复用和后续重启不会重复输出，成功使用后文件立即删除。忘记密码时可在登录页生成同路径的一次性重置 token，完成重置后旧管理员会话全部失效。完成配置后按当前部署方式重启，完整预检通过才进入机器人正常运行态。
 
@@ -220,6 +221,17 @@ v0.20.x 起推荐新部署通过 `/console/` 网页完成配置，也可在安�
 
 你：/roll 2d6
 机器人：🎲 2d6：4 + 5 = 9
+
+你：/r 1d20+3
+机器人：🎲 1d20+3：14 + 3 = 17
+
+你：/r 2d20 说服守卫
+机器人：🎲 “说服守卫” 2d20：14 + 18 = 32
+
+你：/roll 2d20 我能否说服守卫
+机器人：🎲 命运检定
+难度：容易（DC 16）
+投掷：2d20：14 + 18 = 32
 
 管理员：/ops status
 机器人：运维任务 status 已受理，完成后会通知你。

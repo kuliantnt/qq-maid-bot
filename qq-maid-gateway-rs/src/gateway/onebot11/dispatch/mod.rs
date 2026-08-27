@@ -86,6 +86,16 @@ trait OneBotReplySender: Send + Sync {
         text: &str,
     ) -> Result<OneBotSendResult, OneBotSendError>;
 
+    async fn send_group_text_with_mentions(
+        &self,
+        group_id: &str,
+        mention_user_ids: &[String],
+        text: &str,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        let _ = mention_user_ids;
+        self.send_group_text(group_id, text).await
+    }
+
     async fn send_private_image(
         &self,
         user_id: &str,
@@ -97,6 +107,16 @@ trait OneBotReplySender: Send + Sync {
         group_id: &str,
         image: &ImagePayload,
     ) -> Result<OneBotSendResult, OneBotSendError>;
+
+    async fn send_group_image_with_mentions(
+        &self,
+        group_id: &str,
+        mention_user_ids: &[String],
+        image: &ImagePayload,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        let _ = mention_user_ids;
+        self.send_group_image(group_id, image).await
+    }
 }
 
 #[async_trait]
@@ -117,6 +137,15 @@ impl OneBotReplySender for OneBotSender {
         OneBotSender::send_group_text(self, group_id, text).await
     }
 
+    async fn send_group_text_with_mentions(
+        &self,
+        group_id: &str,
+        mention_user_ids: &[String],
+        text: &str,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        OneBotSender::send_group_text_with_mentions(self, group_id, mention_user_ids, text).await
+    }
+
     async fn send_private_image(
         &self,
         user_id: &str,
@@ -131,6 +160,15 @@ impl OneBotReplySender for OneBotSender {
         image: &ImagePayload,
     ) -> Result<OneBotSendResult, OneBotSendError> {
         OneBotSender::send_group_image(self, group_id, image).await
+    }
+
+    async fn send_group_image_with_mentions(
+        &self,
+        group_id: &str,
+        mention_user_ids: &[String],
+        image: &ImagePayload,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        OneBotSender::send_group_image_with_mentions(self, group_id, mention_user_ids, image).await
     }
 }
 
@@ -204,7 +242,9 @@ impl OneBotInboundDispatcher {
         }
         if matches!(inbound.conversation, ConversationTarget::Group { .. })
             && !inbound.mentioned_bot
-            && !self.command_prefix.is_candidate(&inbound.text)
+            && !self
+                .command_prefix
+                .is_candidate_with_dot_compat(&inbound.text)
             && inbound.quoted.as_ref().and_then(|quoted| quoted.from_bot) != Some(true)
         {
             // 群聊 reply 候选只有在索引确认引用机器人出站消息后才触发；重启后的 miss
@@ -237,8 +277,14 @@ impl OneBotInboundDispatcher {
             };
             if let Some(output) = commands.try_handle(&inbound.text, &context).await {
                 let capability = crate::gateway::outbound::ReplyCapability::onebot11_text();
-                self.send_text(&inbound, output.render(&capability).fallback_text(), None)
-                    .await?;
+                let mention_user_id = incoming_at_mention_user_id(&inbound);
+                self.send_text(
+                    &inbound,
+                    output.render(&capability).fallback_text(),
+                    mention_user_id,
+                    None,
+                )
+                .await?;
                 return Ok(OneBotDispatchOutcome::Sent);
             }
         }
@@ -253,13 +299,15 @@ impl OneBotInboundDispatcher {
         &self,
         inbound: InboundMessage,
     ) -> Result<OneBotDispatchOutcome, OneBotDispatchError> {
+        let mention_user_id = incoming_at_mention_user_id(&inbound);
         let content = platform::render_text_for_core(&inbound);
         let transport = match self.core.respond(&inbound, content).await {
             Ok(transport) => transport,
             Err(error) => {
                 let summary = error.log_summary();
                 let visible = respond_error_to_qq_text(&error);
-                self.send_text(&inbound, &visible, None).await?;
+                self.send_text(&inbound, &visible, mention_user_id, None)
+                    .await?;
                 return Err(OneBotDispatchError::Core { summary });
             }
         };
@@ -267,12 +315,18 @@ impl OneBotInboundDispatcher {
             Ok(response) => response,
             Err(CompletionError::Failed(failure)) => {
                 let kind = failure.kind;
-                self.send_text(&inbound, stream_failure_text(&failure), None)
-                    .await?;
+                self.send_text(
+                    &inbound,
+                    stream_failure_text(&failure),
+                    mention_user_id,
+                    None,
+                )
+                .await?;
                 return Err(OneBotDispatchError::StreamFailed { kind });
             }
             Err(CompletionError::Ended) => {
-                self.send_text(&inbound, STREAM_FAILED_TEXT, None).await?;
+                self.send_text(&inbound, STREAM_FAILED_TEXT, mention_user_id, None)
+                    .await?;
                 return Err(OneBotDispatchError::StreamEnded);
             }
         };
@@ -283,12 +337,18 @@ impl OneBotInboundDispatcher {
         let outbounds = render_respond_response_parts_for_profile(&response, &capability.render);
         if outbounds.is_empty() {
             let fallback = self.empty_reply_text();
-            self.send_text(&inbound, &fallback, None).await?;
+            self.send_text(&inbound, &fallback, mention_user_id, None)
+                .await?;
             return Err(OneBotDispatchError::EmptyResponse);
         }
         for outbound in &outbounds {
-            self.send_outbound(&inbound, outbound, response.visible_entity_snapshot.clone())
-                .await?;
+            self.send_outbound(
+                &inbound,
+                outbound,
+                mention_user_id,
+                response.visible_entity_snapshot.clone(),
+            )
+            .await?;
         }
         Ok(OneBotDispatchOutcome::Sent)
     }
@@ -297,6 +357,7 @@ impl OneBotInboundDispatcher {
         &self,
         inbound: &InboundMessage,
         outbound: &OutboundMessage,
+        mention_user_id: Option<&str>,
         visible_entity_snapshot: Option<VisibleEntitySnapshot>,
     ) -> Result<OneBotSendResult, OneBotSendError> {
         if let OutboundMessage::Image {
@@ -309,7 +370,13 @@ impl OneBotInboundDispatcher {
                     self.sender.send_private_image(target_id, image).await
                 }
                 ConversationTarget::Group { target_id } => {
-                    self.sender.send_group_image(target_id, image).await
+                    if let Some(user_id) = mention_user_id {
+                        self.sender
+                            .send_group_image_with_mentions(target_id, &[user_id.to_owned()], image)
+                            .await
+                    } else {
+                        self.sender.send_group_image(target_id, image).await
+                    }
                 }
                 _ => Err(OneBotSendError::InvalidTargetId),
             };
@@ -323,14 +390,20 @@ impl OneBotInboundDispatcher {
                 }
             }
         }
-        self.send_text(inbound, outbound.fallback_text(), visible_entity_snapshot)
-            .await
+        self.send_text(
+            inbound,
+            outbound.fallback_text(),
+            mention_user_id,
+            visible_entity_snapshot,
+        )
+        .await
     }
 
     async fn send_text(
         &self,
         inbound: &InboundMessage,
         text: &str,
+        mention_user_id: Option<&str>,
         visible_entity_snapshot: Option<VisibleEntitySnapshot>,
     ) -> Result<OneBotSendResult, OneBotSendError> {
         let result = match &inbound.conversation {
@@ -338,7 +411,13 @@ impl OneBotInboundDispatcher {
                 self.sender.send_private_text(target_id, text).await
             }
             ConversationTarget::Group { target_id } => {
-                self.sender.send_group_text(target_id, text).await
+                if let Some(user_id) = mention_user_id {
+                    self.sender
+                        .send_group_text_with_mentions(target_id, &[user_id.to_owned()], text)
+                        .await
+                } else {
+                    self.sender.send_group_text(target_id, text).await
+                }
             }
             ConversationTarget::Channel { .. } | ConversationTarget::ServiceAccount { .. } => {
                 // OneBot 一期 adapter 不会构造这两类目标；若未来边界变化，必须显式失败。
@@ -383,6 +462,23 @@ impl OneBotInboundDispatcher {
             Err(error) => warn!(error = %error, "OneBot 11 回复分发失败"),
         }
     }
+}
+
+/// 群消息显式 @ 当前机器人时，回复用平台原生 mention 回到原发言人。
+///
+/// 这是 Gateway 的通用出站规则，与骰点、命令或模型响应类型无关；没有 @ 机器人的
+/// 直接命令不会因此额外提及发送者。
+fn incoming_at_mention_user_id(inbound: &InboundMessage) -> Option<&str> {
+    if !matches!(&inbound.conversation, ConversationTarget::Group { .. }) || !inbound.mentioned_bot
+    {
+        return None;
+    }
+    inbound
+        .actor
+        .sender_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 enum CompletionError {
@@ -499,6 +595,19 @@ mod tests {
             self.send("group", group_id, text)
         }
 
+        async fn send_group_text_with_mentions(
+            &self,
+            group_id: &str,
+            mention_user_ids: &[String],
+            text: &str,
+        ) -> Result<OneBotSendResult, OneBotSendError> {
+            self.send(
+                "group_with_mentions",
+                group_id,
+                &format!("{}|{text}", mention_user_ids.join(",")),
+            )
+        }
+
         async fn send_private_image(
             &self,
             user_id: &str,
@@ -520,6 +629,23 @@ mod tests {
                 Err(OneBotSendError::Transport(OneBotCallError::NotConnected))
             } else {
                 self.send("group_image", group_id, "[image]")
+            }
+        }
+
+        async fn send_group_image_with_mentions(
+            &self,
+            group_id: &str,
+            mention_user_ids: &[String],
+            _image: &ImagePayload,
+        ) -> Result<OneBotSendResult, OneBotSendError> {
+            if self.fail_images {
+                Err(OneBotSendError::Transport(OneBotCallError::NotConnected))
+            } else {
+                self.send(
+                    "group_image_with_mentions",
+                    group_id,
+                    &format!("{}|[image]", mention_user_ids.join(",")),
+                )
             }
         }
     }
@@ -675,8 +801,10 @@ mod tests {
                 sender.clone(),
             );
 
+            let mut message = inbound("m1", group);
+            message.mentioned_bot = false;
             assert_eq!(
-                dispatcher.dispatch(inbound("m1", group)).await.unwrap(),
+                dispatcher.dispatch(message).await.unwrap(),
                 OneBotDispatchOutcome::Sent
             );
             assert_eq!(core.calls.lock().unwrap().len(), 1);
@@ -703,6 +831,59 @@ mod tests {
         );
         assert_eq!(core.calls.lock().unwrap().len(), 1);
         assert_eq!(sender.sent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn group_message_at_bot_mentions_actor_with_native_segment() {
+        let sender = Arc::new(FakeSender::default());
+        let (dispatcher, _) = dispatcher(
+            vec![Ok(OneBotCoreTransport::Complete(response(Some(
+                "普通回复，不是骰点结果",
+            ))))],
+            sender.clone(),
+        );
+
+        assert_eq!(
+            dispatcher
+                .dispatch(inbound("group-at-mention", true))
+                .await
+                .unwrap(),
+            OneBotDispatchOutcome::Sent
+        );
+        assert_eq!(
+            sender.sent.lock().unwrap().as_slice(),
+            &[(
+                "group_with_mentions".to_owned(),
+                "30003".to_owned(),
+                "20002|普通回复，不是骰点结果".to_owned(),
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn group_command_without_at_does_not_mention_actor() {
+        let sender = Arc::new(FakeSender::default());
+        let (dispatcher, _) = dispatcher(
+            vec![Ok(OneBotCoreTransport::Complete(response(Some(
+                "直接命令回复",
+            ))))],
+            sender.clone(),
+        );
+        let mut command = inbound("group-without-at", true);
+        command.mentioned_bot = false;
+
+        assert_eq!(
+            dispatcher.dispatch(command).await.unwrap(),
+            OneBotDispatchOutcome::Sent
+        );
+        assert_eq!(
+            sender.sent.lock().unwrap().as_slice(),
+            &[(
+                "group".to_owned(),
+                "30003".to_owned(),
+                "直接命令回复".to_owned(),
+            )]
+        );
     }
 
     #[tokio::test]

@@ -29,6 +29,35 @@ async fn set_display_name_roundtrip_and_unset() {
 }
 
 #[tokio::test]
+async fn nn_alias_reuses_set_display_name_flow() {
+    let service = test_service();
+
+    let response = service.respond(message("/nn emmm")).await.unwrap();
+    let text = response.text.unwrap();
+    assert_eq!(response.command.as_deref(), Some("set"));
+    assert!(text.contains("展示名已设置"));
+    assert!(text.contains("emmm"));
+
+    let response = service.respond(message("/nn")).await.unwrap();
+    let text = response.text.unwrap();
+    assert_eq!(response.command.as_deref(), Some("set"));
+    assert!(text.contains("当前展示名"));
+    assert!(text.contains("emmm"));
+
+    let response = service.respond(message(".nn初墨")).await.unwrap();
+    let text = response.text.unwrap();
+    assert_eq!(response.command.as_deref(), Some("set"));
+    assert!(text.contains("展示名已设置"));
+    assert!(text.contains("初墨"));
+
+    let response = service.respond(message(".nn")).await.unwrap();
+    let text = response.text.unwrap();
+    assert_eq!(response.command.as_deref(), Some("set"));
+    assert!(text.contains("当前展示名"));
+    assert!(text.contains("初墨"));
+}
+
+#[tokio::test]
 async fn set_display_name_rejects_invalid_values() {
     let service = test_service();
 

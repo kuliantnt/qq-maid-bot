@@ -1,47 +1,65 @@
 //! 骰子 Slash 命令领域门面。
 //!
-//! 无参数命令保持本地 D20 快速路径，简单骰子表达式由 Core 本地结算；带问题的命令
+//! 无参数命令保持本地 D20 快速路径，通用骰子表达式由 Core 本地结算；带问题的命令
 //! 先让模型生成并校验判定方案，再本地生成骰值和结算结果。命令分派层只负责路由与响应投影。
+//! 当前仓库尚无 Campaign / Rule Context，因此带问题路径固定使用 Entertainment DM；未来应由
+//! active campaign 的 `rule_system` 在调用方确定性选择对应 Rule System，不能让模型猜测模式。
+//! 明确的纯骰子表达式在这里始终直接进入 Dice Engine，不因未来存在正式跑团上下文而改变含义。
 
-use std::{
-    sync::OnceLock,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use qq_maid_llm::provider::{DynLlmProvider, types::TokenUsage};
-use rand::RngExt;
-use regex::Regex;
 use serde_json::{Value, json};
 
-use crate::{runtime::command::parse_slash_command, util::metrics::LlmMetrics};
+use crate::{
+    runtime::command::{ParsedCommand, parse_slash_command},
+    util::metrics::LlmMetrics,
+};
 
+mod dice;
 mod dm;
 mod outcome;
 
-use dm::prepare_dm_check;
-use outcome::{DEFAULT_DIE_SIDES, RollResult, render_dm_result};
+use dice::{DiceExpression, DiceExpressionParse, DiceRollSpec, RollResult, Roller};
+use dm::{DmCheckPlan, prepare_dm_check};
+use outcome::render_dm_result;
 
 /// AI DM 问题的字符数上限；超过上限时拒绝请求，不做静默截断。
 pub(crate) const DM_QUERY_MAX_CHARS: usize = 500;
-/// AI DM 是娱乐命令的轻量独立调用，超时后立即回退本地 D20。
+/// 本地骰点原因会直接进入用户可见回执，因此与 AI DM 问题采用相同的输入上限。
+const LOCAL_ROLL_REASON_MAX_CHARS: usize = DM_QUERY_MAX_CHARS;
+/// AI DM 是娱乐命令的轻量独立调用，超时后立即回退本地骰子表达式。
 const DM_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 /// 必须早于 Core 整轮超时结束 AI 调用，给日志、随机数生成和响应投影保留收口时间。
 const DM_FALLBACK_RESERVE: Duration = Duration::from_millis(250);
-const MAX_DICE_COUNT: u8 = 100;
-const MAX_DIE_SIDES: u8 = 100;
 
 const DM_FALLBACK_PREFIX: &str = "AI DM 暂时无法判断本次检定难度，本次仅进行普通 D20 投掷。";
-const UNSUPPORTED_DICE_EXPRESSION_REPLY: &str =
-    "暂不支持该骰子表达式。目前支持 dM 或 NdM（骰子个数和面数均为 1–100）。";
-
-static DICE_EXPRESSION_RE: OnceLock<Regex> = OnceLock::new();
+const DM_EXPRESSION_FALLBACK_PREFIX: &str =
+    "AI DM 暂时无法判断本次检定难度，本次仅进行指定骰子表达式投掷。";
+const INVALID_DICE_EXPRESSION_REPLY: &str = "骰子表达式无效。示例：d20、2d6、1d20+3、1d8+1d6+4；单段骰子数量和面数均为 1–100，总骰子数不超过 100，最多 8 段，表达式不超过 64 个字符，修正值范围为 -1000 到 +1000。";
+const INVALID_LOCAL_ROLL_REASON_REPLY: &str =
+    "骰点原因无效，请控制在 500 个字符以内，且不要包含换行或控制字符。";
+const REPEATED_DM_CHECK_REPLY: &str = "Entertainment DM 暂不支持带问题的重复骰点。请使用 `/roll d20 问题` 进行单次 AI 判定，或使用 `/r 2#d20 原因` 进行本地多轮骰点。";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RollCommand {
     Default,
-    DiceExpression { count: u8, sides: u8 },
-    DmCheck { query: String },
-    UnsupportedDiceExpression,
+    DiceExpression {
+        expression: DiceExpression,
+    },
+    /// `/r`、`/rd` 的多轮或带原因本地投掷；原因只用于结果展示，不进入 AI DM。
+    DiceBatch {
+        expression: DiceExpression,
+        repetitions: u8,
+        reason: Option<String>,
+    },
+    DmCheck {
+        expression: Option<DiceExpression>,
+        query: String,
+    },
+    RepeatedDmCheckUnsupported,
+    InvalidLocalReason,
+    InvalidDiceExpression,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +80,41 @@ impl RollExecutionKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct RollDcDiagnostics {
+    dice_expression: String,
+    dice_minimum: i32,
+    dice_maximum: i32,
+    difficulty: &'static str,
+    computed_dc: i32,
+    dc_strategy: &'static str,
+}
+
+impl RollDcDiagnostics {
+    fn from_plan(expression: &DiceExpression, plan: &DmCheckPlan) -> Self {
+        let (dice_minimum, dice_maximum) = expression.total_range();
+        let computed = dm::compute_dc(expression, plan.difficulty);
+        debug_assert_eq!(computed.value, plan.dc);
+        Self {
+            dice_expression: expression.to_string(),
+            dice_minimum,
+            dice_maximum,
+            difficulty: plan.difficulty.key(),
+            computed_dc: computed.value,
+            dc_strategy: computed.strategy.as_str(),
+        }
+    }
+
+    fn add_to(&self, diagnostics: &mut Value) {
+        diagnostics["dice_expression"] = json!(self.dice_expression);
+        diagnostics["dice_minimum"] = json!(self.dice_minimum);
+        diagnostics["dice_maximum"] = json!(self.dice_maximum);
+        diagnostics["difficulty"] = json!(self.difficulty);
+        diagnostics["computed_dc"] = json!(self.computed_dc);
+        diagnostics["dc_strategy"] = json!(self.dc_strategy);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RollFallbackReason {
     code: String,
     stage: String,
@@ -75,6 +128,7 @@ pub(crate) struct RollExecutionResult {
     execution_kind: RollExecutionKind,
     provider_fallback_used: Option<bool>,
     fallback_reason: Option<RollFallbackReason>,
+    dc_diagnostics: Option<RollDcDiagnostics>,
 }
 
 impl RollExecutionResult {
@@ -101,73 +155,281 @@ impl RollExecutionResult {
             diagnostics["roll_fallback_reason"] = json!(reason.code);
             diagnostics["roll_fallback_stage"] = json!(reason.stage);
         }
+        if let Some(dc_diagnostics) = &self.dc_diagnostics {
+            dc_diagnostics.add_to(&mut diagnostics);
+        }
         diagnostics
     }
 }
 
-enum ParsedDiceExpression {
-    Supported { count: u8, sides: u8 },
-    Unsupported,
-}
-
-/// `/roll` 支持无参数本地 D20、简单 `NdM` 骰子表达式，以及一个非空自然语言问题。
+/// `/roll`（以及 `/r`）支持无参数本地 D20、通用骰子表达式，以及一个非空自然语言问题。
+///
+/// `/r`、`/rd` 的表达式尾随文本是本地骰点原因，不会调用模型；保留 `/roll` 的表达式加
+/// 文本作为显式 Entertainment DM 语法，避免归一化命令时丢失用户原始入口语义。
 pub(crate) fn parse_roll_command(text: &str) -> Option<RollCommand> {
-    let command = parse_slash_command(text)?;
+    let command = parse_slash_command(text)
+        .or_else(|| parse_compact_roll_command(text))
+        .or_else(|| parse_dot_roll_command(text))?;
     if command.action != "roll" {
         return None;
+    }
+
+    if matches!(command.raw_command.as_str(), "rap" | "rab") {
+        return parse_bonus_penalty_alias(&command);
     }
     if command.argument.is_empty() {
         Some(RollCommand::Default)
     } else {
-        match parse_dice_expression(&command.argument) {
-            Some(ParsedDiceExpression::Supported { count, sides }) => {
-                Some(RollCommand::DiceExpression { count, sides })
+        let local_reason_syntax =
+            matches!(command.raw_command.as_str(), "r" | "rd" | "rap" | "rab");
+        if let Some((spec, reason)) = parse_local_roll_argument(&command.argument) {
+            if local_reason_syntax {
+                return Some(local_roll_command(spec, reason));
             }
-            Some(ParsedDiceExpression::Unsupported) => Some(RollCommand::UnsupportedDiceExpression),
-            None => Some(RollCommand::DmCheck {
-                query: command.argument,
-            }),
+            if let Some(reason) = reason {
+                // Entertainment DM 当前只接受一次表达式；重复骰点带问题不能静默丢掉
+                // 问题并退化为本地骰点，否则用户会误以为模型已完成判定。
+                if spec.repetitions != 1 {
+                    return Some(RollCommand::RepeatedDmCheckUnsupported);
+                }
+                return Some(RollCommand::DmCheck {
+                    expression: Some(spec.expression),
+                    query: reason,
+                });
+            }
+            return Some(local_roll_command(spec, None));
+        }
+        match dice::parse_roll_spec(&command.argument) {
+            dice::DiceRollSpecParse::Parsed(spec) => Some(local_roll_command(spec, None)),
+            dice::DiceRollSpecParse::NotDiceExpression => {
+                if matches!(command.raw_command.as_str(), "r" | "rd") {
+                    // SealDice 的 `/r 原因`、`/rd 原因` 与无空格写法语义一致：使用
+                    // 默认 d20 在本地投掷，尾随文本只作为展示原因，不进入 AI DM。
+                    return Some(local_roll_command(
+                        DiceRollSpec {
+                            expression: DiceExpression::default_d20(),
+                            repetitions: 1,
+                        },
+                        Some(command.argument),
+                    ));
+                }
+                Some(RollCommand::DmCheck {
+                    expression: None,
+                    query: command.argument,
+                })
+            }
+            dice::DiceRollSpecParse::Invalid(_) => Some(RollCommand::InvalidDiceExpression),
         }
     }
 }
 
-/// 只匹配完整参数，避免自然语言中出现 `2d6` 或 `DC20` 时误判为骰子命令。
+fn parse_local_roll_argument(argument: &str) -> Option<(DiceRollSpec, Option<String>)> {
+    if let dice::DiceRollSpecParse::Parsed(spec) = dice::parse_roll_spec(argument) {
+        return Some((spec, None));
+    }
+    if let Some((spec, reason)) = dice::parse_roll_spec_prefix(argument) {
+        return Some((spec, Some(reason.to_owned())));
+    }
+    if let Some((spec, reason)) = dice::parse_roll_spec_compact_prefix(argument) {
+        return Some((spec, Some(reason.to_owned())));
+    }
+    None
+}
+
+fn local_roll_command(spec: DiceRollSpec, reason: Option<String>) -> RollCommand {
+    if reason
+        .as_deref()
+        .is_some_and(|reason| !is_valid_local_roll_reason(reason))
+    {
+        return RollCommand::InvalidLocalReason;
+    }
+    if spec.repetitions == 1 && reason.is_none() {
+        RollCommand::DiceExpression {
+            expression: spec.expression,
+        }
+    } else {
+        RollCommand::DiceBatch {
+            expression: spec.expression,
+            repetitions: spec.repetitions,
+            reason,
+        }
+    }
+}
+
+fn is_valid_local_roll_reason(reason: &str) -> bool {
+    reason.chars().count() <= LOCAL_ROLL_REASON_MAX_CHARS
+        && !reason
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '\u{2028}' | '\u{2029}'))
+}
+
+fn parse_bonus_penalty_alias(command: &ParsedCommand) -> Option<RollCommand> {
+    let expression = match dice::parse_expression(if command.raw_command == "rab" {
+        "b"
+    } else {
+        "p"
+    }) {
+        DiceExpressionParse::Parsed(expression) => expression,
+        _ => return None,
+    };
+    Some(local_roll_command(
+        DiceRollSpec {
+            expression,
+            repetitions: 1,
+        },
+        (!command.argument.is_empty()).then(|| command.argument.clone()),
+    ))
+}
+
+/// 解析 `/r2d6`、`/rd20` 等 SealDice 常见的无空格命令形式。
 ///
-/// `+/-` 修正值仍会被识别并明确拒绝；个数与面数限制用于约束工作量和回复长度。
-fn parse_dice_expression(argument: &str) -> Option<ParsedDiceExpression> {
-    let captures = DICE_EXPRESSION_RE
-        .get_or_init(|| {
-            Regex::new(
-                r"(?i)\A(?P<count>[0-9]+)?d(?P<sides>[0-9]+)(?:[ \t]*(?P<modifier>[+-])[ \t]*(?P<modifier_value>[0-9]+))?\z",
-            )
-            .expect("dice expression regex must compile")
-        })
-        .captures(argument)?;
+/// 只把看起来确实是骰点后缀的短命令交给 Roll domain；`/rss`、`/rename` 等其他命令
+/// 不会因为共享首字母而被误接管。命令前缀本身仍由上层 `CommandPrefix` 统一规范化。
+fn parse_compact_roll_command(text: &str) -> Option<ParsedCommand> {
+    let text = text.trim();
+    let body = text.strip_prefix('/')?;
+    let mut parts = body.splitn(2, char::is_whitespace);
+    let token = parts.next()?.trim();
+    let remainder = parts.next().unwrap_or("").trim();
+    let lowercase = token.to_ascii_lowercase();
 
-    if captures.name("modifier").is_some() {
-        return Some(ParsedDiceExpression::Unsupported);
-    }
-    let count = captures
-        .name("count")
-        .map_or(Ok(1), |value| value.as_str().parse::<u8>());
-    let sides = captures["sides"].parse::<u8>();
-    match (count, sides) {
-        (Ok(count @ 1..=MAX_DICE_COUNT), Ok(sides @ 1..=MAX_DIE_SIDES)) => {
-            Some(ParsedDiceExpression::Supported { count, sides })
+    for alias in ["rap", "rab"] {
+        if lowercase.starts_with(alias) && lowercase.len() > alias.len() {
+            // 无空格的紧凑别名只接受中文原因；ASCII 后缀必须走普通 Slash 解析，
+            // 避免 `/rapid`、`/rabbit` 等未知命令被误接管成骰点。
+            let suffix = &token[alias.len()..];
+            if !is_cjk_reason_start(suffix) {
+                continue;
+            }
+            let argument = join_compact_argument(&token[alias.len()..], remainder);
+            return Some(ParsedCommand {
+                action: "roll".to_owned(),
+                argument,
+                raw_command: alias.to_owned(),
+            });
         }
-        _ => Some(ParsedDiceExpression::Unsupported),
+    }
+
+    let (raw_command, suffix) = if lowercase.starts_with("rd") && lowercase.len() > 2 {
+        ("rd", &token[2..])
+    } else if lowercase.starts_with('r') && lowercase.len() > 1 {
+        ("r", &token[1..])
+    } else {
+        return None;
+    };
+    // `/rd优势`、`/rd劣势` 是 SealDice 的默认 D20 特殊表达式；其余 CJK 尾缀与
+    // `/r原因` 一致，按默认 D20 的本地原因处理，不能落到未知命令。
+    let local_reason_suffix = is_cjk_reason_start(suffix)
+        && (raw_command == "r" || !(suffix.starts_with("优势") || suffix.starts_with("劣势")));
+    if !looks_like_compact_roll_suffix(suffix) && !local_reason_suffix {
+        return None;
+    }
+    let expression = if local_reason_suffix {
+        "d20".to_owned()
+    } else if raw_command == "rd" {
+        compact_rd_expression(suffix)
+    } else {
+        suffix.to_owned()
+    };
+    let argument = if local_reason_suffix {
+        let reason = join_compact_argument(suffix, remainder);
+        join_compact_argument("d20", &reason)
+    } else {
+        join_compact_argument(&expression, remainder)
+    };
+    Some(ParsedCommand {
+        action: "roll".to_owned(),
+        argument,
+        raw_command: raw_command.to_owned(),
+    })
+}
+
+fn is_cjk_reason_start(suffix: &str) -> bool {
+    suffix.chars().next().is_some_and(
+        |character| matches!(character, '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}'),
+    )
+}
+
+/// 允许 Roll domain 单独处理原生 SealDice 点号入口；正常 Core 路由仍先由命令前缀统一规范化。
+fn parse_dot_roll_command(text: &str) -> Option<ParsedCommand> {
+    let text = text.trim();
+    let remainder = text.strip_prefix('.').or_else(|| text.strip_prefix('。'))?;
+    parse_compact_roll_command(&format!("/{remainder}"))
+        .or_else(|| parse_slash_command(&format!("/{remainder}")))
+}
+
+fn join_compact_argument(expression: &str, remainder: &str) -> String {
+    if remainder.is_empty() {
+        expression.to_owned()
+    } else {
+        format!("{expression} {remainder}")
     }
 }
 
-/// 执行一次 `/roll` 命令。
+fn looks_like_compact_roll_suffix(suffix: &str) -> bool {
+    suffix.chars().next().is_some_and(|character| {
+        character.is_ascii_digit()
+            || matches!(
+                character,
+                'd' | 'D'
+                    | 'b'
+                    | 'B'
+                    | 'p'
+                    | 'P'
+                    | 'f'
+                    | 'F'
+                    | 'k'
+                    | 'K'
+                    | 'q'
+                    | 'Q'
+                    | '('
+                    | '+'
+                    | '-'
+                    | '#'
+                    | '优'
+                    | '劣'
+            )
+    })
+}
+
+fn compact_rd_expression(suffix: &str) -> String {
+    // SealDice 的 `d` 是默认骰表达式，`d优势`/`d劣势` 会先展开为双 D20 取高/取低；
+    // 后续的 `+6`、`+1d4` 等仍属于同一条表达式，不能把“优势”当作普通原因截断。
+    if suffix.starts_with("优势") || suffix.starts_with("劣势") {
+        return format!("d20{suffix}");
+    }
+    let starts_with_digit = suffix
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_digit());
+    let contains_dice_separator = suffix
+        .chars()
+        .any(|character| matches!(character, 'd' | 'D'));
+    if starts_with_digit && contains_dice_separator {
+        suffix.to_owned()
+    } else if starts_with_digit {
+        format!("d{suffix}")
+    } else if suffix
+        .chars()
+        .next()
+        .is_some_and(|character| matches!(character, 'd' | 'D'))
+    {
+        suffix.to_owned()
+    } else {
+        format!("d20{suffix}")
+    }
+}
+
+/// 执行骰点命令，并把已有 `/set 昵称` 展示名仅用于本地结果投影。
 ///
 /// `prepare_dm_check` 的 API 不接收骰值；只有它返回已校验的不可变方案后，才会调用
 /// 本地 roller。这个调用顺序是防止模型看到骰值后调整 DC 的核心安全边界。
-pub(crate) async fn execute_roll_command(
+pub(crate) async fn execute_roll_command_with_display_name(
     provider: &DynLlmProvider,
     model: Option<String>,
     command: RollCommand,
     request_budget: Duration,
+    display_name: Option<String>,
 ) -> RollExecutionResult {
     execute_roll_command_with_roller_factory(
         provider,
@@ -175,6 +437,7 @@ pub(crate) async fn execute_roll_command(
         command,
         dm_timeout_for_request(request_budget),
         thread_roller,
+        display_name,
     )
     .await
 }
@@ -185,15 +448,8 @@ fn dm_timeout_for_request(request_budget: Duration) -> Duration {
 
 /// 按需创建线程级 RNG，避免不可 `Send` 的句柄跨越 AI DM 的异步模型调用。
 /// 同一条 NdM 命令只创建一次 roller，因此连续投掷会复用同一个 RNG 句柄。
-fn thread_roller() -> impl FnMut(u8) -> u8 {
-    let mut rng = rand::rng();
-    move |sides| {
-        if sides == DEFAULT_DIE_SIDES {
-            roll_default_with_rng(&mut rng).value
-        } else {
-            rng.random_range(1..=sides)
-        }
-    }
+fn thread_roller() -> impl Roller {
+    dice::csprng_roller()
 }
 
 #[cfg(test)]
@@ -205,9 +461,10 @@ async fn execute_roll_command_with_roller<F>(
     roller: F,
 ) -> RollExecutionResult
 where
-    F: FnMut(u8) -> u8,
+    F: Roller,
 {
-    execute_roll_command_with_roller_factory(provider, model, command, dm_timeout, || roller).await
+    execute_roll_command_with_roller_factory(provider, model, command, dm_timeout, || roller, None)
+        .await
 }
 
 async fn execute_roll_command_with_roller_factory<RF, F>(
@@ -216,24 +473,54 @@ async fn execute_roll_command_with_roller_factory<RF, F>(
     command: RollCommand,
     dm_timeout: Duration,
     roller_factory: RF,
+    display_name: Option<String>,
 ) -> RollExecutionResult
 where
     RF: FnOnce() -> F,
-    F: FnMut(u8) -> u8,
+    F: Roller,
 {
-    let query = match command {
+    let (query, expression) = match command {
         RollCommand::Default => {
             let mut roller = roller_factory();
-            return local_result(roll_default_reply_from_value(roller(DEFAULT_DIE_SIDES)));
+            let (result, _) = roll_expression_result(None, &mut roller);
+            return local_result(roll_dice_expression_reply_with_context(
+                &result,
+                display_name.as_deref(),
+                None,
+            ));
         }
-        RollCommand::DiceExpression { count, sides } => {
+        RollCommand::DiceExpression { expression } => {
             let mut roller = roller_factory();
-            return local_result(roll_dice_expression_reply(count, sides, &mut roller));
+            let (result, _) = roll_expression_result(Some(expression), &mut roller);
+            return local_result(roll_dice_expression_reply_with_context(
+                &result,
+                display_name.as_deref(),
+                None,
+            ));
         }
-        RollCommand::UnsupportedDiceExpression => {
-            return local_result(UNSUPPORTED_DICE_EXPRESSION_REPLY.to_owned());
+        RollCommand::DiceBatch {
+            expression,
+            repetitions,
+            reason,
+        } => {
+            let mut roller = roller_factory();
+            let results = roll_expression_results(expression, repetitions, &mut roller);
+            return local_result(roll_dice_results_reply(
+                &results,
+                display_name.as_deref(),
+                reason.as_deref(),
+            ));
         }
-        RollCommand::DmCheck { query } => query,
+        RollCommand::InvalidDiceExpression => {
+            return local_result(INVALID_DICE_EXPRESSION_REPLY.to_owned());
+        }
+        RollCommand::InvalidLocalReason => {
+            return local_result(INVALID_LOCAL_ROLL_REASON_REPLY.to_owned());
+        }
+        RollCommand::RepeatedDmCheckUnsupported => {
+            return local_result(REPEATED_DM_CHECK_REPLY.to_owned());
+        }
+        RollCommand::DmCheck { expression, query } => (query, expression),
     };
 
     let query_chars = query.chars().count();
@@ -243,23 +530,29 @@ where
         ));
     }
 
+    let requested_expression = expression.is_some();
+    let expression = expression.unwrap_or_else(DiceExpression::default_d20);
     let started_at = Instant::now();
     let prepared = tokio::time::timeout(
         dm_timeout,
-        prepare_dm_check(provider, model.clone(), query.as_str()),
+        prepare_dm_check(provider, model.clone(), query.as_str(), &expression),
     )
     .await;
     match prepared {
         Ok(Ok(prepared)) => {
             // 此处是本轮第一次生成实际骰值；上面的模型 future 已完成且方案已通过校验。
             let mut roller = roller_factory();
+            let roll = expression
+                .roll(&mut roller)
+                .expect("本地 Roller 必须返回有效骰值");
             RollExecutionResult {
-                reply: render_dm_result(&prepared.plan, roller(DEFAULT_DIE_SIDES)),
+                reply: render_dm_result(&prepared.plan, &roll),
                 metrics: prepared.metrics,
                 usage: prepared.usage,
                 execution_kind: RollExecutionKind::AiDmSuccess,
                 provider_fallback_used: Some(prepared.provider_fallback_used),
                 fallback_reason: None,
+                dc_diagnostics: Some(RollDcDiagnostics::from_plan(&expression, &prepared.plan)),
             }
         }
         Ok(Err(failure)) => {
@@ -267,14 +560,21 @@ where
                 error_code = failure.error.code,
                 error_stage = failure.error.stage,
                 query_chars,
-                "AI DM 判定方案生成失败，降级为普通 D20"
+                "AI DM 判定方案生成失败，降级为本地骰子投掷"
             );
             let mut roller = roller_factory();
             let metrics = failure.metrics.unwrap_or_else(|| {
                 requested_model_metrics(provider, model.as_deref(), started_at.elapsed())
             });
+            let roll = expression
+                .roll(&mut roller)
+                .expect("本地 Roller 必须返回有效骰值");
             RollExecutionResult {
-                reply: roll_fallback_reply_from_value(roller(DEFAULT_DIE_SIDES)),
+                reply: roll_fallback_reply_from_result(
+                    &roll,
+                    requested_expression,
+                    display_name.as_deref(),
+                ),
                 metrics,
                 usage: failure.usage,
                 execution_kind: RollExecutionKind::AiDmFallback,
@@ -283,6 +583,7 @@ where
                     code: failure.error.code.to_owned(),
                     stage: failure.error.stage.to_owned(),
                 }),
+                dc_diagnostics: None,
             }
         }
         Err(_) => {
@@ -290,11 +591,18 @@ where
                 error_code = "timeout",
                 error_stage = "roll_dm",
                 query_chars,
-                "AI DM 判定方案生成超时，降级为普通 D20"
+                "AI DM 判定方案生成超时，降级为本地骰子投掷"
             );
             let mut roller = roller_factory();
+            let roll = expression
+                .roll(&mut roller)
+                .expect("本地 Roller 必须返回有效骰值");
             RollExecutionResult {
-                reply: roll_fallback_reply_from_value(roller(DEFAULT_DIE_SIDES)),
+                reply: roll_fallback_reply_from_result(
+                    &roll,
+                    requested_expression,
+                    display_name.as_deref(),
+                ),
                 metrics: requested_model_metrics(provider, model.as_deref(), started_at.elapsed()),
                 usage: None,
                 execution_kind: RollExecutionKind::AiDmFallback,
@@ -303,6 +611,7 @@ where
                     code: "timeout".to_owned(),
                     stage: "roll_dm".to_owned(),
                 }),
+                dc_diagnostics: None,
             }
         }
     }
@@ -323,6 +632,7 @@ fn local_result(reply: String) -> RollExecutionResult {
         execution_kind: RollExecutionKind::Local,
         provider_fallback_used: None,
         fallback_reason: None,
+        dc_diagnostics: None,
     }
 }
 
@@ -341,429 +651,100 @@ fn requested_model_metrics(
     }
 }
 
-fn roll_default_reply_from_value(value: u8) -> String {
-    format!("🎲 掷出了 {value} / {DEFAULT_DIE_SIDES}")
+fn roll_expression_result<R>(
+    expression: Option<DiceExpression>,
+    roller: &mut R,
+) -> (RollResult, bool)
+where
+    R: Roller,
+{
+    let requested_expression = expression.is_some();
+    let expression = expression.unwrap_or_else(DiceExpression::default_d20);
+    let result = expression
+        .roll(roller)
+        .expect("本地 Roller 必须返回有效骰值");
+    (result, requested_expression)
 }
 
-fn roll_dice_expression_reply<F>(count: u8, sides: u8, roller: &mut F) -> String
+fn roll_expression_results<R>(
+    expression: DiceExpression,
+    repetitions: u8,
+    roller: &mut R,
+) -> Vec<RollResult>
 where
-    F: FnMut(u8) -> u8,
+    R: Roller,
 {
-    let values = (0..count).map(|_| roller(sides)).collect::<Vec<_>>();
-    if count == 1 {
-        return format!("🎲 掷出了 {} / {sides}", values[0]);
+    (0..repetitions)
+        .map(|_| {
+            expression
+                .roll(roller)
+                .expect("本地 Roller 必须返回有效骰值")
+        })
+        .collect()
+}
+
+fn roll_dice_expression_reply_with_context(
+    result: &RollResult,
+    display_name: Option<&str>,
+    reason: Option<&str>,
+) -> String {
+    let prefix = roll_context_prefix(display_name, reason);
+    format!("🎲 {prefix}{}", roll_detail(result))
+}
+
+fn roll_dice_results_reply(
+    results: &[RollResult],
+    display_name: Option<&str>,
+    reason: Option<&str>,
+) -> String {
+    let prefix = roll_context_prefix(display_name, reason);
+    if results.len() == 1 {
+        return format!("🎲 {prefix}{}", roll_detail(&results[0]));
     }
 
-    let total = values.iter().map(|value| u16::from(*value)).sum::<u16>();
-    let calculation = values
+    let rounds = results
         .iter()
-        .map(u8::to_string)
+        .enumerate()
+        .map(|(index, result)| format!("第{}轮：{}", index + 1, roll_detail(result)))
         .collect::<Vec<_>>()
-        .join(" + ");
-    format!("🎲 {count}d{sides}：{calculation} = {total}")
+        .join("\n");
+    format!("🎲 {prefix}多轮投掷\n{rounds}")
 }
 
-fn roll_fallback_reply_from_value(value: u8) -> String {
+fn roll_context_prefix(display_name: Option<&str>, reason: Option<&str>) -> String {
+    match (display_name, reason) {
+        (Some(display_name), Some(reason)) => format!("<{display_name}> 的“{reason}” "),
+        (Some(display_name), None) => format!("<{display_name}> "),
+        (None, Some(reason)) => format!("“{reason}” "),
+        (None, None) => String::new(),
+    }
+}
+
+fn roll_detail(result: &RollResult) -> String {
+    if result.expression.is_single_unmodified() {
+        let roll = result.rolls.first().expect("单骰表达式必须产生一个骰值");
+        return format!("掷出了 {} / {}", roll.value, roll.sides);
+    }
+
+    let calculation = result.calculation();
+    format!("{}：{calculation} = {}", result.expression, result.total)
+}
+
+fn roll_fallback_reply_from_result(
+    result: &RollResult,
+    requested_expression: bool,
+    display_name: Option<&str>,
+) -> String {
+    let prefix = if requested_expression {
+        DM_EXPRESSION_FALLBACK_PREFIX
+    } else {
+        DM_FALLBACK_PREFIX
+    };
     format!(
-        "{DM_FALLBACK_PREFIX}\n\n{}",
-        roll_default_reply_from_value(value)
+        "{prefix}\n\n{}",
+        roll_dice_expression_reply_with_context(result, display_name, None)
     )
 }
 
-fn roll_default_with_rng<R>(rng: &mut R) -> RollResult
-where
-    R: rand::Rng + ?Sized,
-{
-    RollResult {
-        value: rng.random_range(1..=DEFAULT_DIE_SIDES),
-        sides: DEFAULT_DIE_SIDES,
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use async_trait::async_trait;
-    use qq_maid_llm::provider::{
-        ChatOutcome, LlmProvider,
-        types::{ChatRequest, TokenUsage},
-    };
-    use rand::{SeedableRng, rngs::StdRng};
-
-    use crate::{error::LlmError, util::metrics::LlmMetrics};
-
-    use super::*;
-
-    #[derive(Clone)]
-    struct MockProvider {
-        result: Result<String, LlmError>,
-        requests: Arc<Mutex<Vec<ChatRequest>>>,
-        events: Arc<Mutex<Vec<&'static str>>>,
-        delay: Duration,
-    }
-
-    impl MockProvider {
-        fn replying(reply: &str) -> Self {
-            Self {
-                result: Ok(reply.to_owned()),
-                requests: Arc::new(Mutex::new(Vec::new())),
-                events: Arc::new(Mutex::new(Vec::new())),
-                delay: Duration::ZERO,
-            }
-        }
-
-        fn failing(error: LlmError) -> Self {
-            Self {
-                result: Err(error),
-                requests: Arc::new(Mutex::new(Vec::new())),
-                events: Arc::new(Mutex::new(Vec::new())),
-                delay: Duration::ZERO,
-            }
-        }
-
-        fn delayed(mut self, delay: Duration) -> Self {
-            self.delay = delay;
-            self
-        }
-    }
-
-    #[async_trait]
-    impl LlmProvider for MockProvider {
-        async fn chat(&self, req: ChatRequest) -> Result<ChatOutcome, LlmError> {
-            self.events.lock().unwrap().push("model");
-            self.requests.lock().unwrap().push(req.clone());
-            tokio::time::sleep(self.delay).await;
-            let reply = self.result.clone()?;
-            Ok(ChatOutcome {
-                reply,
-                output_parts: Vec::new(),
-                metrics: LlmMetrics {
-                    provider: "mock".to_owned(),
-                    model: req.model.unwrap_or_else(|| "mock-model".to_owned()),
-                    stream: false,
-                    ttfe_ms: None,
-                    ttft_ms: None,
-                    total_latency_ms: 1,
-                },
-                usage: Some(TokenUsage {
-                    input_tokens: None,
-                    cached_input_tokens: None,
-                    output_tokens: None,
-                    total_tokens: None,
-                }),
-                fallback_used: false,
-                agent: Default::default(),
-            })
-        }
-
-        fn name(&self) -> &str {
-            "mock"
-        }
-
-        fn model(&self) -> &str {
-            "mock-model"
-        }
-
-        fn stream_enabled(&self) -> bool {
-            false
-        }
-    }
-
-    fn fortune_json() -> &'static str {
-        r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"今晚适合出门","failure_meaning":"今晚适合宅家"}"#
-    }
-
-    #[test]
-    fn parses_default_dm_supported_and_unsupported_dice_expressions() {
-        assert_eq!(parse_roll_command("/roll"), Some(RollCommand::Default));
-        assert_eq!(parse_roll_command("  /ROLL  "), Some(RollCommand::Default));
-        assert_eq!(
-            parse_roll_command(" /RoLl   晚上要不要出门  "),
-            Some(RollCommand::DmCheck {
-                query: "晚上要不要出门".to_owned(),
-            })
-        );
-        for (input, count, sides) in [
-            ("/roll d20", 1, 20),
-            ("/roll d100", 1, 100),
-            ("/roll 2d6", 2, 6),
-            ("/roll 1D100", 1, 100),
-        ] {
-            assert_eq!(
-                parse_roll_command(input),
-                Some(RollCommand::DiceExpression { count, sides }),
-                "{input}"
-            );
-        }
-        for input in [
-            "/roll 1d20+3",
-            "/roll 1d20 + 3",
-            "/roll 1d20+  3",
-            "/roll 2d10-1",
-            "/roll 2d6 - 1",
-            "/roll 2D6-1",
-            "/roll 101d6",
-            "/roll d101",
-            "/roll 0d6",
-            "/roll d0",
-        ] {
-            assert_eq!(
-                parse_roll_command(input),
-                Some(RollCommand::UnsupportedDiceExpression),
-                "{input}"
-            );
-        }
-        for (input, query) in [
-            ("/roll 我能不能通过 DC20 的门", "我能不能通过 DC20 的门"),
-            ("/roll 我有 2d6 个苹果吗", "我有 2d6 个苹果吗"),
-        ] {
-            assert_eq!(
-                parse_roll_command(input),
-                Some(RollCommand::DmCheck {
-                    query: query.to_owned(),
-                }),
-                "{input}"
-            );
-        }
-        assert_eq!(parse_roll_command("/roll    "), Some(RollCommand::Default));
-        assert_eq!(parse_roll_command("/help"), None);
-        assert_eq!(parse_roll_command("普通消息"), None);
-    }
-
-    #[test]
-    fn dm_timeout_is_clipped_to_the_request_budget_with_fallback_reserve() {
-        assert_eq!(
-            dm_timeout_for_request(Duration::from_secs(30)),
-            DM_CHECK_TIMEOUT
-        );
-        assert_eq!(
-            dm_timeout_for_request(Duration::from_secs(1)),
-            Duration::from_millis(750)
-        );
-        assert_eq!(
-            dm_timeout_for_request(Duration::from_millis(100)),
-            Duration::ZERO
-        );
-    }
-
-    #[test]
-    fn default_roll_uses_d20_and_stays_in_inclusive_range() {
-        // 固定种子只验证范围不变量，不断言多次结果必须不同，避免概率性测试。
-        let mut rng = StdRng::seed_from_u64(20);
-        for _ in 0..4_096 {
-            let result = roll_default_with_rng(&mut rng);
-            assert_eq!(result.sides, 20);
-            assert!((1..=20).contains(&result.value));
-        }
-    }
-
-    #[tokio::test]
-    async fn default_roll_never_calls_provider() {
-        let provider = Arc::new(MockProvider::failing(LlmError::provider(
-            "must not call",
-            "test",
-        ))) as DynLlmProvider;
-        let reply = execute_roll_command_with_roller(
-            &provider,
-            Some("unused".to_owned()),
-            RollCommand::Default,
-            Duration::from_secs(1),
-            |sides| {
-                assert_eq!(sides, 20);
-                13
-            },
-        )
-        .await;
-        assert_eq!(reply.reply, "🎲 掷出了 13 / 20");
-        assert_eq!(reply.metrics.provider, "rust");
-        assert_eq!(reply.diagnostics()["roll_execution_kind"], "local");
-    }
-
-    #[tokio::test]
-    async fn simple_dice_expressions_roll_locally_without_provider() {
-        let provider = MockProvider::replying(fortune_json());
-        let requests = provider.requests.clone();
-        let provider = Arc::new(provider) as DynLlmProvider;
-        let mut values = [2, 5].into_iter();
-        let reply = execute_roll_command_with_roller(
-            &provider,
-            Some("unused".to_owned()),
-            RollCommand::DiceExpression { count: 2, sides: 6 },
-            Duration::from_secs(1),
-            |sides| {
-                assert_eq!(sides, 6);
-                values.next().expect("2d6 should roll exactly twice")
-            },
-        )
-        .await;
-
-        assert_eq!(reply.reply, "🎲 2d6：2 + 5 = 7");
-        assert!(values.next().is_none());
-        assert!(requests.lock().unwrap().is_empty());
-
-        let reply = execute_roll_command_with_roller(
-            &provider,
-            None,
-            RollCommand::DiceExpression {
-                count: 1,
-                sides: 100,
-            },
-            Duration::from_secs(1),
-            |sides| {
-                assert_eq!(sides, 100);
-                73
-            },
-        )
-        .await;
-        assert_eq!(reply.reply, "🎲 掷出了 73 / 100");
-        assert!(requests.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn unsupported_dice_expression_never_calls_provider_or_roller() {
-        let provider = MockProvider::replying(fortune_json());
-        let requests = provider.requests.clone();
-        let provider = Arc::new(provider) as DynLlmProvider;
-        let reply = execute_roll_command_with_roller(
-            &provider,
-            Some("unused".to_owned()),
-            RollCommand::UnsupportedDiceExpression,
-            Duration::from_secs(1),
-            |_| panic!("unsupported dice expression must not roll"),
-        )
-        .await;
-
-        assert_eq!(reply.reply, UNSUPPORTED_DICE_EXPRESSION_REPLY);
-        assert!(requests.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn dm_plan_is_fixed_before_local_roll_and_request_contains_no_roll() {
-        let provider = MockProvider::replying(fortune_json());
-        let events = provider.events.clone();
-        let requests = provider.requests.clone();
-        let provider = Arc::new(provider) as DynLlmProvider;
-        let roller_events = events.clone();
-        let reply = execute_roll_command_with_roller(
-            &provider,
-            Some("mock:dm".to_owned()),
-            RollCommand::DmCheck {
-                query: "晚上要不要出门".to_owned(),
-            },
-            Duration::from_secs(1),
-            move |sides| {
-                assert_eq!(sides, 20);
-                roller_events.lock().unwrap().push("rng");
-                14
-            },
-        )
-        .await;
-
-        assert_eq!(*events.lock().unwrap(), ["model", "rng"]);
-        assert!(reply.reply.contains("难度：容易（DC 10）"));
-        assert!(reply.reply.contains("投掷：14"));
-        assert!(reply.reply.contains("✅ 成功"));
-        assert!(reply.reply.contains("今晚适合出门。"));
-        assert_eq!(reply.metrics.provider, "mock");
-        assert_eq!(reply.metrics.model, "mock:dm");
-        assert_eq!(reply.diagnostics()["roll_execution_kind"], "ai_dm_success");
-        let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].metadata["purpose"], "roll_dm_check");
-        let serialized = serde_json::to_string(&requests[0]).unwrap();
-        assert!(!serialized.contains("\"roll\""));
-        assert!(!serialized.contains("投掷：14"));
-    }
-
-    #[tokio::test]
-    async fn provider_cannot_supply_roll_or_success_and_invalid_output_falls_back() {
-        let reply_with_forbidden_fields = r#"{"type":"fortune","check_name":"命运检定","difficulty":"easy","success_meaning":"出门","failure_meaning":"宅家","roll":20,"success":true}"#;
-        let provider =
-            Arc::new(MockProvider::replying(reply_with_forbidden_fields)) as DynLlmProvider;
-        let reply = execute_roll_command_with_roller(
-            &provider,
-            None,
-            RollCommand::DmCheck {
-                query: "出门吗".to_owned(),
-            },
-            Duration::from_secs(1),
-            |_| 7,
-        )
-        .await;
-        assert_eq!(
-            reply.reply,
-            "AI DM 暂时无法判断本次检定难度，本次仅进行普通 D20 投掷。\n\n🎲 掷出了 7 / 20"
-        );
-        assert_eq!(
-            reply.diagnostics()["roll_fallback_reason"],
-            "roll_dm_invalid_output"
-        );
-    }
-
-    #[tokio::test]
-    async fn provider_error_and_timeout_fall_back_to_local_d20() {
-        let failed =
-            Arc::new(MockProvider::failing(LlmError::provider("boom", "test"))) as DynLlmProvider;
-        let failed_reply = execute_roll_command_with_roller(
-            &failed,
-            None,
-            RollCommand::DmCheck {
-                query: "出门吗".to_owned(),
-            },
-            Duration::from_secs(1),
-            |_| 9,
-        )
-        .await;
-        assert!(failed_reply.reply.ends_with("🎲 掷出了 9 / 20"));
-        assert_eq!(
-            failed_reply.diagnostics()["roll_execution_kind"],
-            "ai_dm_fallback"
-        );
-        assert_eq!(
-            failed_reply.diagnostics()["roll_fallback_reason"],
-            "provider_error"
-        );
-
-        let delayed =
-            Arc::new(MockProvider::replying(fortune_json()).delayed(Duration::from_millis(50)))
-                as DynLlmProvider;
-        let timeout_reply = execute_roll_command_with_roller(
-            &delayed,
-            None,
-            RollCommand::DmCheck {
-                query: "出门吗".to_owned(),
-            },
-            Duration::from_millis(1),
-            |_| 11,
-        )
-        .await;
-        assert!(timeout_reply.reply.ends_with("🎲 掷出了 11 / 20"));
-        assert_eq!(
-            timeout_reply.diagnostics()["roll_fallback_reason"],
-            "timeout"
-        );
-    }
-
-    #[tokio::test]
-    async fn oversized_query_is_rejected_without_model_or_roll() {
-        let provider = MockProvider::replying(fortune_json());
-        let events = provider.events.clone();
-        let provider = Arc::new(provider) as DynLlmProvider;
-        let reply = execute_roll_command_with_roller(
-            &provider,
-            None,
-            RollCommand::DmCheck {
-                query: "问".repeat(DM_QUERY_MAX_CHARS + 1),
-            },
-            Duration::from_secs(1),
-            |_| panic!("oversized query must not roll"),
-        )
-        .await;
-        assert_eq!(
-            reply.reply,
-            format!("判定问题过长，请控制在 {DM_QUERY_MAX_CHARS} 个字符以内。")
-        );
-        assert!(events.lock().unwrap().is_empty());
-    }
-}
+mod tests;

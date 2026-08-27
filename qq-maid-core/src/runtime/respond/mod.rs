@@ -395,8 +395,9 @@ impl RustRespondService {
         }
     }
 
-    pub(crate) const fn command_prefix(&self) -> CommandPrefix {
-        self.command_prefix
+    /// 统一规范化 Core 命令，并保留默认前缀下的点号命令入口。
+    pub(crate) fn normalize_command_text(&self, text: &str) -> Option<String> {
+        self.command_prefix.normalize_with_dot_compat(text)
     }
 
     /// 返回当前 Core 实际注册的模型 Tool；控制台只消费其中的名称和说明。
@@ -525,7 +526,7 @@ impl RustRespondService {
         F: FnMut(String) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send>> + Send,
     {
         let user_text = req.effective_command_text();
-        let command_text = self.command_prefix.normalize(&user_text);
+        let command_text = self.normalize_command_text(&user_text);
         let deterministic_text = command_text.as_deref();
         let pending_text = deterministic_text.unwrap_or(&user_text);
         let meta = respond_meta(&req);
@@ -627,7 +628,7 @@ impl RustRespondService {
         F: FnMut(String) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send>> + Send,
     {
         let user_text = req.effective_command_text();
-        let command_text = self.command_prefix.normalize(&user_text);
+        let command_text = self.normalize_command_text(&user_text);
         let deterministic_text = command_text.as_deref();
         let pending_text = deterministic_text.unwrap_or(&user_text);
         let meta = respond_meta(&req);

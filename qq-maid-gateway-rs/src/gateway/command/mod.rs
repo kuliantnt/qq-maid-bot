@@ -140,7 +140,9 @@ impl GatewayCommandService {
         text: &str,
         context: &GatewayCommandContext,
     ) -> Option<GatewayCommandOutput> {
-        let command_text = self.config.command_prefix.normalize(text)?;
+        // Gateway 本地命令与 Core 候选识别必须共享同一套点号兼容规则，否则
+        // `.ping` 会绕过本地诊断入口并落入未注册的 Core 命令。
+        let command_text = self.config.command_prefix.normalize_with_dot_compat(text)?;
         if !ping::is_ping_command(&command_text) {
             return None;
         }
@@ -311,6 +313,15 @@ mod tests {
         );
         assert_eq!(core.respond_calls.load(Ordering::SeqCst), 0);
         assert_eq!(core.upstream_calls.load(Ordering::SeqCst), 0);
+        for text in [".ping", ".ping all", "。ping", "。ping all"] {
+            assert!(
+                commands
+                    .try_handle(text, &qq_context(GatewayCommandConversation::Private))
+                    .await
+                    .is_some(),
+                "默认前缀应兼容本地点号命令：{text}"
+            );
+        }
         assert!(
             commands
                 .try_handle("/pingxxx", &qq_context(GatewayCommandConversation::Private),)
@@ -386,6 +397,12 @@ mod tests {
         assert!(
             commands
                 .try_handle("##ping", &qq_context(GatewayCommandConversation::Private))
+                .await
+                .is_none()
+        );
+        assert!(
+            commands
+                .try_handle(".ping", &qq_context(GatewayCommandConversation::Private))
                 .await
                 .is_none()
         );

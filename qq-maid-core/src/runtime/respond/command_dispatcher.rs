@@ -62,9 +62,6 @@ impl RegisteredSlashCommand {
         if let Some(command) = parse_unset_command(text) {
             return Some(Self::Unset(command));
         }
-        if let Some(command) = weather_flow::parse_weather_command(text) {
-            return Some(Self::Weather(command));
-        }
         if let Some(command) = train_flow::parse_train_command(text) {
             return Some(Self::Train(command));
         }
@@ -83,7 +80,13 @@ impl RegisteredSlashCommand {
         if should_try_todo_flow(text) {
             return Some(Self::Todo);
         }
-        memory_flow::parse_memory_command(text).map(|_| Self::Memory)
+        if memory_flow::parse_memory_command(text).is_some() {
+            return Some(Self::Memory);
+        }
+
+        // 天气解析器同时兼容 `/城市天气` 这一快捷形式，不能在这里提前接管
+        // `/roll ...天气`、`/查 ...天气` 等显式 Slash 命令的参数。
+        weather_flow::parse_weather_command(text).map(Self::Weather)
     }
 }
 
@@ -114,7 +117,7 @@ impl<'a> CommandDispatcher<'a> {
         planned: PlannedRespond,
     ) -> Result<DispatchOutcome, LlmError> {
         let user_text = req.effective_command_text();
-        let command_text = self.service.command_prefix().normalize(&user_text);
+        let command_text = self.service.normalize_command_text(&user_text);
         let command_text = command_text.as_deref();
         let pending_text = command_text.unwrap_or(&user_text);
         let foreign_command_text = self.service.is_foreign_or_repeated_command_text(&user_text);
@@ -156,8 +159,10 @@ impl<'a> CommandDispatcher<'a> {
             return Ok(DispatchOutcome::Respond(Box::new(response)));
         }
 
-        // `/roll` 在读取 pending/session 前收口；简单骰子表达式在本地执行，带问题版本只做
-        // 一次独立 DM 方案调用，二者都不读取会话历史、消费 pending 或进入普通 Agent / Tool Loop。
+        // `/roll` 在读取 pending/session 前收口；纯骰子表达式在本地执行，带问题版本只做
+        // 一次独立 Entertainment DM 方案调用，二者都不读取会话历史、消费 pending 或进入普通
+        // Agent / Tool Loop。当前没有 Campaign / Rule Context；未来应在这里根据 active campaign
+        // 的 rule_system 确定性选择正式 Rule System，不能让模型自行判断模式。
         if let Some(RegisteredSlashCommand::Roll(command)) = registered_slash_command.as_ref() {
             let model = if matches!(
                 command,
@@ -179,11 +184,13 @@ impl<'a> CommandDispatcher<'a> {
             } else {
                 None
             };
-            let execution = crate::runtime::tools::roll::execute_roll_command(
+            let display_name = roll_display_name(self.service, &req);
+            let execution = crate::runtime::tools::roll::execute_roll_command_with_display_name(
                 &self.service.provider,
                 model,
                 command.clone(),
                 self.service.request_timeout,
+                display_name,
             )
             .await;
             let diagnostics = execution.diagnostics();
@@ -460,5 +467,86 @@ impl<'a> CommandDispatcher<'a> {
             respond_route,
             status_hint,
         })))
+    }
+}
+
+/// 骰点结果沿用通用 `/set 昵称` 展示名；查询失败时回退到 Gateway 提供的当前平台昵称。
+///
+/// 这里只做展示投影，不把昵称当成身份、权限或骰点 owner，也不在 Roll domain 内重复建设
+/// 昵称存储。私聊没有平台 actor 时保持无名称回执，避免把稳定 user_id 直接展示给用户。
+fn roll_display_name(service: &RustRespondService, req: &RespondRequest) -> Option<String> {
+    let meta = respond_meta(req);
+    if let Some(user_id) = req
+        .user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        && let Ok(Some(name)) = service.display_name_store.get(&meta.scope_key, user_id)
+    {
+        let name = name.trim();
+        if !name.is_empty() {
+            return Some(name.to_owned());
+        }
+    }
+
+    req.message_context
+        .as_ref()
+        .and_then(|context| context.actor.as_ref())
+        .and_then(|actor| actor.display_name.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command_kind(text: &str) -> &'static str {
+        match RegisteredSlashCommand::parse(text) {
+            Some(RegisteredSlashCommand::Session(_)) => "session",
+            Some(RegisteredSlashCommand::Translation(_)) => "translation",
+            Some(RegisteredSlashCommand::Set(_)) => "set",
+            Some(RegisteredSlashCommand::Unset(_)) => "unset",
+            Some(RegisteredSlashCommand::Weather(_)) => "weather",
+            Some(RegisteredSlashCommand::Train(_)) => "train",
+            Some(RegisteredSlashCommand::Radar(_)) => "radar",
+            Some(RegisteredSlashCommand::Roll(_)) => "roll",
+            Some(RegisteredSlashCommand::WebSearch(_)) => "web_search",
+            Some(RegisteredSlashCommand::Rss) => "rss",
+            Some(RegisteredSlashCommand::Todo) => "todo",
+            Some(RegisteredSlashCommand::Memory) => "memory",
+            Some(RegisteredSlashCommand::Voice(_)) => "voice",
+            None => "none",
+        }
+    }
+
+    #[test]
+    fn explicit_slash_commands_precede_weather_shortcut() {
+        let cases = [
+            ("/语音 明天天气", "voice"),
+            ("/help 明天天气", "session"),
+            ("/翻译 明天天气", "translation"),
+            ("/set 昵称 明天天气", "set"),
+            ("/nn emmm", "set"),
+            ("/unset 昵称天气", "unset"),
+            ("/train G123天气", "train"),
+            ("/rader codex天气", "radar"),
+            ("/roll 明天有个好天气", "roll"),
+            ("/查 杭州天气", "web_search"),
+            ("/rss list天气", "rss"),
+            ("/todo list天气", "todo"),
+            ("/memory list天气", "memory"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(command_kind(input), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn weather_shortcut_remains_available_after_explicit_commands() {
+        assert_eq!(command_kind("/天气杭州"), "weather");
+        assert_eq!(command_kind("/杭州天气"), "weather");
     }
 }

@@ -125,7 +125,7 @@ pub(crate) fn inbound_from_event_with_media_limit(
             // adapter 只允许含结构化 reply 的候选继续，不能把任意群消息都送入 Core。
             if !parsed.mentioned_bot
                 && parsed.quoted.is_none()
-                && !command_prefix.is_candidate(&parsed.text)
+                && !command_prefix.is_candidate_with_dot_compat(&parsed.text)
             {
                 return OneBotInboundOutcome::Ignored(OneBotIgnoreReason::GroupNotTriggered);
             }

@@ -49,6 +49,19 @@ impl CommandPrefix {
         self.normalize(text).is_some()
     }
 
+    /// 兼容默认 `/` 前缀下的英文句号和中文句号命令入口。
+    ///
+    /// 句号只作为命令前缀归一化为 `/`，不在这里维护具体命令白名单；命令是否注册、
+    /// 参数如何解释统一交给 Core。配置了其他前缀时不额外放开句号，保持自定义前缀的边界。
+    pub fn normalize_with_dot_compat(self, text: &str) -> Option<String> {
+        self.normalize(text).or_else(|| self.normalize_dot(text))
+    }
+
+    /// 判断消息是否是配置前缀命令或默认模式下的点号命令。
+    pub fn is_candidate_with_dot_compat(self, text: &str) -> bool {
+        self.normalize_with_dot_compat(text).is_some()
+    }
+
     /// 把配置前缀规范化为 Core 现有解析器使用的 `/`，只改消息开头的一个字符。
     pub fn normalize(self, text: &str) -> Option<String> {
         let text = text.trim();
@@ -80,6 +93,22 @@ impl CommandPrefix {
             }
         }
         rendered
+    }
+
+    fn normalize_dot(self, text: &str) -> Option<String> {
+        if self.0 != DEFAULT_COMMAND_PREFIX {
+            return None;
+        }
+        let text = text.trim();
+        let remainder = text.strip_prefix('.').or_else(|| text.strip_prefix('。'))?;
+        if remainder.is_empty()
+            || remainder.starts_with('.')
+            || remainder.starts_with('。')
+            || remainder.starts_with('/')
+        {
+            return None;
+        }
+        Some(format!("/{remainder}"))
     }
 }
 
@@ -140,6 +169,12 @@ fn looks_like_command(remainder: &[char]) -> bool {
             | "weather"
             | "rader"
             | "radar"
+            | "roll"
+            | "r"
+            | "rd"
+            | "rap"
+            | "rab"
+            | "nn"
             | "set"
             | "unset"
             | "ops"
@@ -177,11 +212,69 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_default_dot_commands_before_core_dispatch() {
+        let prefix = CommandPrefix::default();
+        assert_eq!(
+            prefix.normalize_with_dot_compat(".r2d6xxx").as_deref(),
+            Some("/r2d6xxx")
+        );
+        assert_eq!(
+            prefix.normalize_with_dot_compat("。r2d6xxx").as_deref(),
+            Some("/r2d6xxx")
+        );
+        assert!(prefix.is_candidate_with_dot_compat(".rd优势"));
+        assert!(prefix.is_candidate_with_dot_compat("。rd优势"));
+        assert_eq!(
+            prefix.normalize_with_dot_compat(".r测试").as_deref(),
+            Some("/r测试")
+        );
+        assert!(prefix.is_candidate_with_dot_compat(".rap 原因"));
+        assert_eq!(
+            prefix.normalize_with_dot_compat(".nn emmm").as_deref(),
+            Some("/nn emmm")
+        );
+        assert_eq!(
+            prefix.normalize_with_dot_compat(".nn").as_deref(),
+            Some("/nn")
+        );
+        assert_eq!(
+            prefix.normalize_with_dot_compat(".help").as_deref(),
+            Some("/help")
+        );
+        assert_eq!(
+            prefix.normalize_with_dot_compat(".rename").as_deref(),
+            Some("/rename")
+        );
+        assert_eq!(prefix.normalize_with_dot_compat("."), None);
+        assert_eq!(prefix.normalize_with_dot_compat("。"), None);
+        assert_eq!(prefix.normalize_with_dot_compat("..help"), None);
+        assert_eq!(prefix.normalize_with_dot_compat("。。help"), None);
+        assert_eq!(prefix.normalize_with_dot_compat("./clear"), None);
+        assert_eq!(prefix.normalize_with_dot_compat("。/new"), None);
+        assert_eq!(
+            CommandPrefix::parse("#")
+                .unwrap()
+                .normalize_with_dot_compat(".r2d6"),
+            None
+        );
+        assert_eq!(
+            CommandPrefix::parse("#")
+                .unwrap()
+                .normalize_with_dot_compat("。r2d6"),
+            None
+        );
+    }
+
+    #[test]
     fn renders_generated_commands_without_changing_urls() {
         let prefix = CommandPrefix::parse("*").unwrap();
         assert_eq!(
             prefix.render("发送 `/rss add https://example.com/feed` 或 /天气 杭州"),
             "发送 `*rss add https://example.com/feed` 或 *天气 杭州"
+        );
+        assert_eq!(
+            prefix.render("骰点使用 /roll 或 /r"),
+            "骰点使用 *roll 或 *r"
         );
         assert_eq!(
             prefix.render("文件位于 /home/maid/app.db"),

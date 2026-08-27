@@ -286,6 +286,24 @@ fn group_command_content_strips_platform_prefixes() {
 }
 
 #[test]
+fn group_dot_commands_are_preserved_for_core_dispatch() {
+    for input in [".help", ".nn", ".r2d6xxx"] {
+        assert_eq!(
+            build_group_respond_content(&group_message(input, Some("member1")), &[]),
+            input
+        );
+        assert_eq!(
+            build_group_command_content_with_prefix(
+                &group_message(input, Some("member1")),
+                &[],
+                CommandPrefix::default(),
+            ),
+            input
+        );
+    }
+}
+
+#[test]
 fn group_content_normalization_uses_configured_prefix_only() {
     let prefix = CommandPrefix::parse("#").unwrap();
     let keywords = vec!["机器人".to_owned()];
