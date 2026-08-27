@@ -1,9 +1,9 @@
 //! `/set` / `/unset` 用户偏好设置指令处理（#326）。
 //!
 //! `/set` 是通用的用户偏好设置入口，避免每新增一个设置项就要新增一个独立命令。
-//! 当前唯一支持的设置项是“手动展示名 / 昵称”：在平台成员信息接口不可用时，
-//! 让用户主动声明“我在这个会话里叫什么”。展示名只用于显示和帮助 LLM 理解上下文，
-//! 不参与权限判断、owner 或稳定身份认证。
+//! 当前支持“手动展示名 / 昵称”和 conversation 级骰子规则。展示名只用于显示和帮助
+//! LLM 理解上下文，不参与权限判断、owner 或稳定身份认证；骰子规则的具体语义仍收敛
+//! 在 Roll domain，本模块只负责通用设置命令编排。
 //!
 //! 查看和设置走 `/set`（另有 `/nn` 昵称快捷别名），清除走 `/unset`，语义分离更直观。
 //!
@@ -29,7 +29,7 @@ const DISPLAY_NAME_MIN_CHARS: usize = 1;
 const DISPLAY_NAME_MAX_CHARS: usize = 32;
 
 /// `/set` 无参数时的用法提示。
-const SET_USAGE_REPLY: &str = "用法：\n- /set 昵称 脸脸：设置当前会话里的展示名\n- /nn 脸脸：设置当前会话里的展示名（/set 昵称的快捷别名）\n- /set 昵称：查看当前展示名\n- /nn：查看当前展示名\n- /unset 昵称：清除展示名";
+const SET_USAGE_REPLY: &str = "用法：\n- /set 昵称 脸脸：设置当前会话里的展示名\n- /nn 脸脸：设置当前会话里的展示名（/set 昵称的快捷别名）\n- /set 昵称：查看当前展示名\n- /nn：查看当前展示名\n- /unset 昵称：清除展示名\n- /set dnd：默认使用 D20，Entertainment DM 点数 ≥ DC 成功\n- /set coc：默认使用 D100，Entertainment DM 点数 ≤ 目标值成功\n- /set 骰子：查看当前骰子规则";
 
 /// `/unset` 无参数时的用法提示。
 const UNSET_USAGE_REPLY: &str = "用法：/unset 昵称\n清除当前会话里你设置的展示名。";
@@ -41,16 +41,21 @@ const UNSET_USAGE_REPLY: &str = "用法：/unset 昵称\n清除当前会话里�
 enum SettingKind {
     /// 手动展示名 / 昵称，按稳定身份绑定在当前会话空间。
     DisplayName,
+    /// conversation 级骰子规则；存储和判定语义均由 Roll domain 提供。
+    DiceRule,
 }
 
 /// 各设置项接受的命令别名分组。
 ///
 /// 每组至少保留一个中文别名和一个英文 key，符合 issue 命令入口收敛要求。
 /// 顺序即帮助与匹配优先级；新增项追加在末尾即可。
-const SETTING_KEYS: &[(SettingKind, &[&str])] = &[(
-    SettingKind::DisplayName,
-    &["昵称", "nickname", "display_name"],
-)];
+const SETTING_KEYS: &[(SettingKind, &[&str])] = &[
+    (
+        SettingKind::DisplayName,
+        &["昵称", "nickname", "display_name"],
+    ),
+    (SettingKind::DiceRule, &["骰子", "dice", "dice_rule"]),
+];
 
 impl RustRespondService {
     /// 处理 `/set` 指令。
@@ -176,6 +181,7 @@ fn view_setting_body(
 ) -> Result<super::common::CommandBody, LlmError> {
     match kind {
         SettingKind::DisplayName => Ok(view_display_name_body(service, current_user_id, session)),
+        SettingKind::DiceRule => Ok(view_dice_rule_body(service, session)),
     }
 }
 
@@ -203,6 +209,19 @@ fn apply_setting_body(
                 Err(reason) => Ok(invalid_display_name_body(reason)),
             }
         }
+        SettingKind::DiceRule => {
+            let Some(rule_system) = crate::runtime::tools::roll::RollRuleSystem::parse(value)
+            else {
+                return Ok(usage_body(SET_USAGE_REPLY));
+            };
+            match service
+                .roll_preference_store
+                .set(&session.scope_key, rule_system)
+            {
+                Ok(()) => Ok(set_dice_rule_success_body(rule_system, session)),
+                Err(error) => Ok(set_dice_rule_failure_body(error.message())),
+            }
+        }
     }
 }
 
@@ -226,7 +245,61 @@ fn unset_setting_body(
                 Err(err) => Ok(set_failure_body(&err)),
             }
         }
+        // 骰子规则通过 `/set dnd|coc` 切换，不为 `/unset` 定义含糊的隐式默认值。
+        SettingKind::DiceRule => Ok(usage_body(UNSET_USAGE_REPLY)),
     }
+}
+
+fn view_dice_rule_body(
+    service: &RustRespondService,
+    session: &SessionRecord,
+) -> super::common::CommandBody {
+    match service.roll_preference_store.get(&session.scope_key) {
+        Ok(rule_system) => {
+            let mut render = CommandRender::new();
+            render.title("🎲 当前骰子规则");
+            render.blank();
+            render.bullet(&format!("规则：{}", rule_system.display_name()));
+            render.bullet(&format!("默认骰：D{}", rule_system.default_die_sides()));
+            render.bullet(match rule_system {
+                crate::runtime::tools::roll::RollRuleSystem::Dnd => "判定：点数 ≥ DC 时成功",
+                crate::runtime::tools::roll::RollRuleSystem::Coc => "判定：点数 ≤ 目标值时成功",
+            });
+            render.build()
+        }
+        Err(error) => set_dice_rule_failure_body(error.message()),
+    }
+}
+
+fn set_dice_rule_success_body(
+    rule_system: crate::runtime::tools::roll::RollRuleSystem,
+    session: &SessionRecord,
+) -> super::common::CommandBody {
+    let mut render = CommandRender::new();
+    render.title("✅ 骰子规则已设置");
+    render.blank();
+    render.bullet(&format!("当前规则：{}", rule_system.display_name()));
+    render.bullet(&format!("默认骰：D{}", rule_system.default_die_sides()));
+    render.bullet(&format!("作用域：{}", scope_label(session)));
+    render.blank();
+    render.paragraph(match rule_system {
+        crate::runtime::tools::roll::RollRuleSystem::Dnd => {
+            "裸 d 使用 D20；Entertainment DM 中点数达到或超过 DC 时成功。"
+        }
+        crate::runtime::tools::roll::RollRuleSystem::Coc => {
+            "裸 d 使用 D100；Entertainment DM 中点数不高于目标值时成功。"
+        }
+    });
+    render.paragraph("该设置不包含人物卡、属性或完整 DND5E / CoC7 规则。");
+    render.build()
+}
+
+fn set_dice_rule_failure_body(message: &str) -> super::common::CommandBody {
+    let mut render = CommandRender::new();
+    render.title("⚠️ 骰子规则设置失败");
+    render.blank();
+    render.paragraph(message);
+    render.build()
 }
 
 /// 校验展示名：非空、不含换行、长度在 1~32 个 Unicode 字符之间。
@@ -382,6 +455,14 @@ pub(super) fn parse_set_command(text: &str) -> Option<ParsedCommand> {
             format!("昵称 {}", command.argument)
         };
     }
+    if command.raw_command == "set"
+        && let Some(rule_system) =
+            crate::runtime::tools::roll::RollRuleSystem::parse(&command.argument)
+    {
+        // SealDice 的 `.set dnd` / `.set coc` 是动作式写法；规范化成通用设置项和值，
+        // 后续仍复用同一个 set 分发与 session 记录流程。
+        command.argument = format!("骰子 {}", rule_system.key());
+    }
     (command.action == "set").then_some(command)
 }
 
@@ -437,6 +518,19 @@ mod tests {
         let command = parse_set_command("/Nn初墨").expect("compact nn should ignore case");
         assert_eq!(command.argument, "昵称 初墨");
         assert_eq!(parse_set_command("/rename emmm"), None);
+    }
+
+    #[test]
+    fn parse_sealdice_rule_aliases_as_the_dice_setting() {
+        for (input, expected) in [("/set dnd", "骰子 dnd"), ("/set COC", "骰子 coc")] {
+            let command = parse_set_command(input).expect("dice rule setting should parse");
+            assert_eq!(command.action, "set");
+            assert_eq!(command.argument, expected);
+        }
+        assert_eq!(
+            parse_set_command("/set dnd extra").unwrap().argument,
+            "dnd extra"
+        );
     }
 
     #[test]

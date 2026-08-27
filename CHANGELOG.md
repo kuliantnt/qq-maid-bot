@@ -2,6 +2,20 @@
 
 本文档基于 [keep a changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式，记录每个已发布版本的变更。
 
+## [Unreleased]
+
+### Added
+
+* **骰子规则偏好**：兼容 `.set dnd` / `.set coc`，按 conversation 持久化 D20/D100 默认骰面数；裸 `d` 与 `.r2#d+1` 等重复表达式使用当前设置。
+
+### Fixed
+
+* **DND / CoC 判定方向**：Entertainment DM 在 DND 模式使用点数 `≥ DC`，在 CoC 模式使用点数 `≤ 目标值`，同一难度使用互补阈值以保持成功概率方向一致。
+
+### Compatibility
+
+* 新增幂等 SQLite migration `roll_preference_schema_v1`；不新增必填环境变量，未设置的历史会话继续默认使用 DND/D20。
+
 ## [v0.24.3] - 2026-08-27
 
 ### Release Focus

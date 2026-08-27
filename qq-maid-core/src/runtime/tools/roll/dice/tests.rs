@@ -18,6 +18,7 @@ fn spec(input: &str) -> DiceRollSpec {
 fn parses_common_sealdice_expression_shapes() {
     for input in [
         "d20",
+        "d+1",
         "2d6",
         "1d20+3",
         "2d6 + 1",

@@ -18,10 +18,14 @@ use ast::{DiceNode, format_node, legacy_modifier};
 use evaluator::{evaluate_node, node_range, node_roll_count};
 
 pub(crate) use ast::{DiceKeep, DiceTerm};
-#[cfg(test)]
-pub(crate) use parser::parse_expression_prefix;
 pub(crate) use parser::{
-    parse_expression, parse_roll_spec, parse_roll_spec_compact_prefix, parse_roll_spec_prefix,
+    parse_expression, parse_roll_spec_compact_prefix_with_default_die_sides,
+    parse_roll_spec_prefix_with_default_die_sides, parse_roll_spec_with_default_die_sides,
+};
+#[cfg(test)]
+pub(crate) use parser::{
+    parse_expression_prefix, parse_roll_spec, parse_roll_spec_compact_prefix,
+    parse_roll_spec_prefix,
 };
 
 /// 默认娱乐骰子的面数。
@@ -62,8 +66,12 @@ pub(crate) struct DiceExpression {
 
 impl DiceExpression {
     pub(crate) fn default_d20() -> Self {
+        Self::default_die(DEFAULT_DIE_SIDES)
+    }
+
+    pub(crate) fn default_die(sides: u8) -> Self {
         Self {
-            root: DiceNode::Dice(DiceTerm::plain(1, DEFAULT_DIE_SIDES)),
+            root: DiceNode::Dice(DiceTerm::plain(1, sides)),
         }
     }
 

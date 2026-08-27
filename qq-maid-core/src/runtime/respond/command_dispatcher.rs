@@ -134,7 +134,30 @@ impl<'a> CommandDispatcher<'a> {
 
         // 正式命令始终优先；未注册命令只有命中显式白名单时才返回 Codex 彩蛋。
         // 两类兜底都在读取 session 和进入 pending 前收口，避免娱乐反馈消费交互状态。
-        let registered_slash_command = command_text.and_then(RegisteredSlashCommand::parse);
+        let mut roll_rule_system = crate::runtime::tools::roll::RollRuleSystem::default();
+        let mut registered_slash_command = command_text.and_then(RegisteredSlashCommand::parse);
+        if matches!(
+            registered_slash_command,
+            Some(RegisteredSlashCommand::Roll(_))
+        ) {
+            roll_rule_system = self
+                .service
+                .roll_preference_store
+                .get(&meta.scope_key)
+                .map_err(|error| {
+                    LlmError::new(error.code(), error.message(), "roll_preferences")
+                })?;
+            // 首次解析只负责确认这是 Roll 命令；读取 conversation 偏好后重新解析，
+            // 让裸 `d` 和 `.r2#d+1` 使用当前规则的默认面数。
+            registered_slash_command = command_text
+                .and_then(|text| {
+                    crate::runtime::tools::roll::parse_roll_command_with_default_die_sides(
+                        text,
+                        roll_rule_system.default_die_sides(),
+                    )
+                })
+                .map(RegisteredSlashCommand::Roll);
+        }
         if registered_slash_command.is_none()
             && let Some(response) =
                 command_text.and_then(|text| codex_easter_egg::try_respond(text, &req))
@@ -185,14 +208,16 @@ impl<'a> CommandDispatcher<'a> {
                 None
             };
             let display_name = roll_display_name(self.service, &req);
-            let execution = crate::runtime::tools::roll::execute_roll_command_with_display_name(
-                &self.service.provider,
-                model,
-                command.clone(),
-                self.service.request_timeout,
-                display_name,
-            )
-            .await;
+            let execution =
+                crate::runtime::tools::roll::execute_roll_command_with_rule_system_and_display_name(
+                    &self.service.provider,
+                    model,
+                    command.clone(),
+                    self.service.request_timeout,
+                    display_name,
+                    roll_rule_system,
+                )
+                .await;
             let diagnostics = execution.diagnostics();
             let mut response = command_response(execution.reply, None, Some("roll"));
             response.metrics = execution.metrics;

@@ -317,6 +317,28 @@ fn parses_sealdice_compact_commands_and_aliases() {
 }
 
 #[test]
+fn repeated_bare_d_expression_uses_the_configured_default_die_sides() {
+    for (rule_system, expected) in [
+        (RollRuleSystem::Dnd, "1d20+1"),
+        (RollRuleSystem::Coc, "1d100+1"),
+    ] {
+        let parsed =
+            parse_roll_command_with_default_die_sides(".r2#d+1", rule_system.default_die_sides());
+        assert!(
+            matches!(
+                parsed,
+                Some(RollCommand::DiceBatch {
+                    ref expression,
+                    repetitions: 2,
+                    reason: None,
+                }) if expression.to_string() == expected
+            ),
+            "{rule_system:?}: {parsed:?}"
+        );
+    }
+}
+
+#[test]
 fn rejects_oversized_or_controlled_local_reasons_before_building_a_batch() {
     let oversized = "x".repeat(LOCAL_ROLL_REASON_MAX_CHARS + 1);
     for alias in ["r", "rd", "rap", "rab"] {
@@ -733,6 +755,38 @@ async fn default_d20_entertainment_context_precedes_roll_and_request_contains_no
     let serialized = serde_json::to_string(&requests[0]).unwrap();
     assert!(!serialized.contains("\"roll\""));
     assert!(!serialized.contains("投掷：14"));
+}
+
+#[tokio::test]
+async fn coc_entertainment_check_uses_d100_and_roll_under_diagnostics() {
+    let provider = MockProvider::replying(fortune_json());
+    let requests = provider.requests.clone();
+    let provider = Arc::new(provider) as DynLlmProvider;
+    let reply = execute_roll_command_with_rule_system_and_roller(
+        &provider,
+        None,
+        RollCommand::DmCheck {
+            expression: None,
+            query: "能否成功".to_owned(),
+        },
+        Duration::from_secs(1),
+        RollRuleSystem::Coc,
+        |sides| {
+            assert_eq!(sides, 100);
+            40
+        },
+    )
+    .await;
+
+    assert!(reply.reply.contains("目标值 50，需 ≤ 50"));
+    assert!(reply.reply.contains("✅ 成功"));
+    assert_eq!(reply.diagnostics()["dice_expression"], "1d100");
+    assert_eq!(reply.diagnostics()["computed_dc"], 50);
+    assert_eq!(reply.diagnostics()["rule_system"], "coc");
+    assert_eq!(reply.diagnostics()["dc_comparison"], "less_or_equal");
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests[0].metadata["rule_system"], "coc");
+    assert_eq!(requests[0].metadata["dc_comparison"], "less_or_equal");
 }
 
 #[tokio::test]

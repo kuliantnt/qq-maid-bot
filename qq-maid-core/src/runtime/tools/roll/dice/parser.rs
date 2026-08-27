@@ -11,15 +11,26 @@ use super::{
 
 /// 解析一个单轮骰子表达式。
 pub(crate) fn parse_expression(input: &str) -> DiceExpressionParse {
+    parse_expression_with_default_die_sides(input, DEFAULT_DIE_SIDES)
+}
+
+/// 使用当前 conversation 配置的默认面数解析裸 `d`。
+fn parse_expression_with_default_die_sides(
+    input: &str,
+    default_die_sides: u8,
+) -> DiceExpressionParse {
     let input = input.trim();
     if !looks_like_dice_expression(input) {
         return DiceExpressionParse::NotDiceExpression;
+    }
+    if !(1..=MAX_DIE_SIDES).contains(&u32::from(default_die_sides)) {
+        return DiceExpressionParse::Invalid(DiceExpressionError::SidesOutOfRange);
     }
     if input.chars().count() > MAX_EXPRESSION_CHARS {
         return DiceExpressionParse::Invalid(DiceExpressionError::TooLong);
     }
 
-    let mut parser = Parser::new(input);
+    let mut parser = Parser::new(input, default_die_sides);
     match parser.parse() {
         Ok(root) => {
             let expression = DiceExpression { root };
@@ -33,7 +44,15 @@ pub(crate) fn parse_expression(input: &str) -> DiceExpressionParse {
 }
 
 /// 解析可能带 N# 重复前缀的命令骰式。
+#[cfg(test)]
 pub(crate) fn parse_roll_spec(input: &str) -> DiceRollSpecParse {
+    parse_roll_spec_with_default_die_sides(input, DEFAULT_DIE_SIDES)
+}
+
+pub(crate) fn parse_roll_spec_with_default_die_sides(
+    input: &str,
+    default_die_sides: u8,
+) -> DiceRollSpecParse {
     let input = input.trim();
     let (repetitions, expression_text) = match input.find('#') {
         Some(hash)
@@ -55,7 +74,7 @@ pub(crate) fn parse_roll_spec(input: &str) -> DiceRollSpecParse {
         Err(error) => return DiceRollSpecParse::Invalid(error),
     };
 
-    match parse_expression(expression_text) {
+    match parse_expression_with_default_die_sides(expression_text, default_die_sides) {
         DiceExpressionParse::NotDiceExpression => DiceRollSpecParse::NotDiceExpression,
         DiceExpressionParse::Invalid(error) => DiceRollSpecParse::Invalid(error),
         DiceExpressionParse::Parsed(expression) => {
@@ -79,7 +98,15 @@ pub(crate) fn parse_expression_prefix(input: &str) -> Option<(DiceExpression, &s
 }
 
 /// parse_expression_prefix 的重复投掷版本。
+#[cfg(test)]
 pub(crate) fn parse_roll_spec_prefix(input: &str) -> Option<(DiceRollSpec, &str)> {
+    parse_roll_spec_prefix_with_default_die_sides(input, DEFAULT_DIE_SIDES)
+}
+
+pub(crate) fn parse_roll_spec_prefix_with_default_die_sides(
+    input: &str,
+    default_die_sides: u8,
+) -> Option<(DiceRollSpec, &str)> {
     let input = input.trim();
     let max_boundary = prefix_boundary_limit(input)?;
     for (boundary, _) in input
@@ -93,7 +120,8 @@ pub(crate) fn parse_roll_spec_prefix(input: &str) -> Option<(DiceRollSpec, &str)
         {
             continue;
         }
-        if let DiceRollSpecParse::Parsed(spec) = parse_roll_spec(expression_text)
+        if let DiceRollSpecParse::Parsed(spec) =
+            parse_roll_spec_with_default_die_sides(expression_text, default_die_sides)
             && spec.expression.total_dice() > 0
         {
             return Some((spec, reason));
@@ -106,13 +134,21 @@ pub(crate) fn parse_roll_spec_prefix(input: &str) -> Option<(DiceRollSpec, &str)
 ///
 /// SealDice 用户经常把短命令和骰式连写；表达式本身仍先按完整语法解析，只有完整解析
 /// 失败时才从字符边界回退寻找合法骰式前缀，避免把 `2d6k1` 等合法后缀误当成原因。
+#[cfg(test)]
 pub(crate) fn parse_roll_spec_compact_prefix(input: &str) -> Option<(DiceRollSpec, &str)> {
+    parse_roll_spec_compact_prefix_with_default_die_sides(input, DEFAULT_DIE_SIDES)
+}
+
+pub(crate) fn parse_roll_spec_compact_prefix_with_default_die_sides(
+    input: &str,
+    default_die_sides: u8,
+) -> Option<(DiceRollSpec, &str)> {
     let input = input.trim();
     let max_boundary = prefix_boundary_limit(input)?;
     // 完整骰式已经识别出范围或计算语义错误时，不得通过截短前缀绕过。
     // `InvalidSyntax` 和长度错误仍可由后续边界扫描区分“骰式 + 原因”。
     if matches!(
-        parse_roll_spec(input),
+        parse_roll_spec_with_default_die_sides(input, default_die_sides),
         DiceRollSpecParse::Invalid(error)
             if !matches!(error, DiceExpressionError::InvalidSyntax | DiceExpressionError::TooLong)
     ) {
@@ -157,7 +193,8 @@ pub(crate) fn parse_roll_spec_compact_prefix(input: &str) -> Option<(DiceRollSpe
         {
             continue;
         }
-        if let DiceRollSpecParse::Parsed(spec) = parse_roll_spec(expression_text)
+        if let DiceRollSpecParse::Parsed(spec) =
+            parse_roll_spec_with_default_die_sides(expression_text, default_die_sides)
             && spec.expression.total_dice() > 0
         {
             return Some((spec, reason));
@@ -230,7 +267,11 @@ fn looks_like_dice_expression(input: &str) -> bool {
         Some('d' | 'D') => {
             skip_whitespace(&mut characters);
             characters.peek().is_some_and(|character| {
-                character.is_ascii_digit() || *character == '优' || *character == '劣'
+                character.is_ascii_digit()
+                    || matches!(
+                        character,
+                        '优' | '劣' | '+' | '-' | '*' | '/' | ')' | 'k' | 'K' | 'q' | 'Q'
+                    )
             }) || characters.peek().is_none()
         }
         Some('b' | 'B' | 'p' | 'P' | 'f' | 'F') => {
@@ -292,10 +333,11 @@ struct Parser {
     depth: usize,
     dice_terms: usize,
     total_dice: u32,
+    default_die_sides: u8,
 }
 
 impl Parser {
-    fn new(input: &str) -> Self {
+    fn new(input: &str, default_die_sides: u8) -> Self {
         Self {
             characters: input.chars().collect(),
             cursor: 0,
@@ -303,6 +345,7 @@ impl Parser {
             depth: 0,
             dice_terms: 0,
             total_dice: 0,
+            default_die_sides,
         }
     }
 
@@ -436,7 +479,7 @@ impl Parser {
             .peek()
             .is_some_and(|character| character.is_ascii_digit())
         {
-            u32::from(DEFAULT_DIE_SIDES)
+            u32::from(self.default_die_sides)
         } else {
             self.parse_unsigned()?
         };
