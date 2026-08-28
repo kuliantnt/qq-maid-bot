@@ -27,7 +27,7 @@ use crate::{
             knowledge::{KnowledgeIndex, KnowledgeSemanticConfig, KnowledgeStore},
             memory::MemoryStore,
             ops::{OpsExecutionStore, OpsTaskRegistry},
-            roll::RollPreferenceStore,
+            roll::RollPreferenceService,
             rss::{RssFetchConfig, RssFetcher, RssStore},
             todo::TodoStore,
             train::{DynTrainExecutor, build_train_executor},
@@ -46,8 +46,8 @@ pub struct CoreStores {
     pub session_store: SessionStore,
     pub todo_store: TodoStore,
     pub voice_store: VoicePreferenceStore,
-    /// conversation 级骰子规则与默认面数偏好。
-    pub roll_preference_store: RollPreferenceStore,
+    /// conversation 级骰子规则偏好领域门面。
+    pub roll_preference_service: RollPreferenceService,
     pub notification_store: NotificationOutboxStore,
     pub ops_execution_store: OpsExecutionStore,
     pub ops_task_registry: OpsTaskRegistry,
@@ -122,7 +122,7 @@ impl CoreRuntimeState {
             session_store: SessionStore::new(database.clone()),
             todo_store: TodoStore::new(database.clone()),
             voice_store: VoicePreferenceStore::new(database.clone()),
-            roll_preference_store: RollPreferenceStore::new(database.clone()),
+            roll_preference_service: RollPreferenceService::new(database.clone()),
             notification_store: NotificationOutboxStore::new(database.clone()),
             ops_execution_store: OpsExecutionStore::new(database.clone()),
             ops_task_registry: OpsTaskRegistry::default(),

@@ -142,8 +142,9 @@ impl<'a> CommandDispatcher<'a> {
         ) {
             roll_rule_system = self
                 .service
-                .roll_preference_store
-                .get(&meta.scope_key)
+                .roll_preference_service
+                .query(&meta.scope_key)
+                .map(crate::runtime::tools::roll::RollPreferenceSnapshot::rule_system)
                 .map_err(|error| {
                     LlmError::new(error.code(), error.message(), "roll_preferences")
                 })?;

@@ -210,15 +210,16 @@ fn apply_setting_body(
             }
         }
         SettingKind::DiceRule => {
-            let Some(rule_system) = crate::runtime::tools::roll::RollRuleSystem::parse(value)
-            else {
-                return Ok(usage_body(SET_USAGE_REPLY));
-            };
             match service
-                .roll_preference_store
-                .set(&session.scope_key, rule_system)
+                .roll_preference_service
+                .set_rule_system(&session.scope_key, value)
             {
-                Ok(()) => Ok(set_dice_rule_success_body(rule_system, session)),
+                Ok(crate::runtime::tools::roll::RollPreferenceSetOutcome::Updated(preference)) => {
+                    Ok(set_dice_rule_success_body(preference, session))
+                }
+                Ok(
+                    crate::runtime::tools::roll::RollPreferenceSetOutcome::UnsupportedRuleSystem,
+                ) => Ok(usage_body(SET_USAGE_REPLY)),
                 Err(error) => Ok(set_dice_rule_failure_body(error.message())),
             }
         }
@@ -254,17 +255,14 @@ fn view_dice_rule_body(
     service: &RustRespondService,
     session: &SessionRecord,
 ) -> super::common::CommandBody {
-    match service.roll_preference_store.get(&session.scope_key) {
-        Ok(rule_system) => {
+    match service.roll_preference_service.query(&session.scope_key) {
+        Ok(preference) => {
             let mut render = CommandRender::new();
             render.title("🎲 当前骰子规则");
             render.blank();
-            render.bullet(&format!("规则：{}", rule_system.display_name()));
-            render.bullet(&format!("默认骰：D{}", rule_system.default_die_sides()));
-            render.bullet(match rule_system {
-                crate::runtime::tools::roll::RollRuleSystem::Dnd => "判定：点数 ≥ DC 时成功",
-                crate::runtime::tools::roll::RollRuleSystem::Coc => "判定：点数 ≤ 目标值时成功",
-            });
+            render.bullet(&format!("规则：{}", preference.display_name()));
+            render.bullet(&format!("默认骰：D{}", preference.default_die_sides()));
+            render.bullet(&format!("判定：{}", preference.comparison_summary()));
             render.build()
         }
         Err(error) => set_dice_rule_failure_body(error.message()),
@@ -272,24 +270,17 @@ fn view_dice_rule_body(
 }
 
 fn set_dice_rule_success_body(
-    rule_system: crate::runtime::tools::roll::RollRuleSystem,
+    preference: crate::runtime::tools::roll::RollPreferenceSnapshot,
     session: &SessionRecord,
 ) -> super::common::CommandBody {
     let mut render = CommandRender::new();
     render.title("✅ 骰子规则已设置");
     render.blank();
-    render.bullet(&format!("当前规则：{}", rule_system.display_name()));
-    render.bullet(&format!("默认骰：D{}", rule_system.default_die_sides()));
+    render.bullet(&format!("当前规则：{}", preference.display_name()));
+    render.bullet(&format!("默认骰：D{}", preference.default_die_sides()));
     render.bullet(&format!("作用域：{}", scope_label(session)));
     render.blank();
-    render.paragraph(match rule_system {
-        crate::runtime::tools::roll::RollRuleSystem::Dnd => {
-            "裸 d 使用 D20；Entertainment DM 中点数达到或超过 DC 时成功。"
-        }
-        crate::runtime::tools::roll::RollRuleSystem::Coc => {
-            "裸 d 使用 D100；Entertainment DM 中点数不高于目标值时成功。"
-        }
-    });
+    render.paragraph(preference.setting_effect());
     render.paragraph("该设置不包含人物卡、属性或完整 DND5E / CoC7 规则。");
     render.build()
 }
@@ -456,12 +447,12 @@ pub(super) fn parse_set_command(text: &str) -> Option<ParsedCommand> {
         };
     }
     if command.raw_command == "set"
-        && let Some(rule_system) =
-            crate::runtime::tools::roll::RollRuleSystem::parse(&command.argument)
+        && let Some(rule_system_key) =
+            crate::runtime::tools::roll::normalize_rule_system_setting(&command.argument)
     {
         // SealDice 的 `.set dnd` / `.set coc` 是动作式写法；规范化成通用设置项和值，
         // 后续仍复用同一个 set 分发与 session 记录流程。
-        command.argument = format!("骰子 {}", rule_system.key());
+        command.argument = format!("骰子 {rule_system_key}");
     }
     (command.action == "set").then_some(command)
 }

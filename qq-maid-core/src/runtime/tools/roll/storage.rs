@@ -6,11 +6,11 @@
 use rusqlite::{OptionalExtension, params};
 
 use crate::storage::{
-    database::{DatabaseError, SqliteDatabase, SqliteMigration},
+    database::{SqliteDatabase, SqliteMigration},
     session::now_iso_cn,
 };
 
-use super::RollRuleSystem;
+use super::{RollPreferenceError, RollRuleSystem};
 
 /// 骰子规则偏好表，由应用统一 migration 流程在启动时创建。
 pub const ROLL_PREFERENCE_SCHEMA_V1: SqliteMigration = SqliteMigration {
@@ -23,17 +23,17 @@ pub const ROLL_PREFERENCE_SCHEMA_V1: SqliteMigration = SqliteMigration {
 };
 
 #[derive(Debug, Clone)]
-pub struct RollPreferenceStore {
+pub(super) struct RollPreferenceStore {
     database: SqliteDatabase,
 }
 
 impl RollPreferenceStore {
-    pub fn new(database: SqliteDatabase) -> Self {
+    pub(super) fn new(database: SqliteDatabase) -> Self {
         Self { database }
     }
 
     /// 读取当前 conversation 的规则设置；未设置时保持兼容默认值 DND/D20。
-    pub(crate) fn get(&self, scope_key: &str) -> Result<RollRuleSystem, RollPreferenceError> {
+    pub(super) fn get(&self, scope_key: &str) -> Result<RollRuleSystem, RollPreferenceError> {
         let scope_key = validate_scope_key(scope_key)?;
         let connection = self.connection()?;
         let stored = connection
@@ -51,7 +51,7 @@ impl RollPreferenceStore {
     }
 
     /// 设置 conversation 级规则系统；骰面数和判定方向由规则系统确定性派生。
-    pub(crate) fn set(
+    pub(super) fn set(
         &self,
         scope_key: &str,
         rule_system: RollRuleSystem,
@@ -89,58 +89,6 @@ fn validate_scope_key(scope_key: &str) -> Result<&str, RollPreferenceError> {
     }
     Ok(scope_key)
 }
-
-#[derive(Debug, Clone)]
-pub struct RollPreferenceError {
-    code: &'static str,
-    message: String,
-}
-
-impl RollPreferenceError {
-    pub fn code(&self) -> &'static str {
-        self.code
-    }
-
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-
-    fn bad_request(message: impl Into<String>) -> Self {
-        Self {
-            code: "bad_request",
-            message: message.into(),
-        }
-    }
-
-    fn invalid_data(message: impl Into<String>) -> Self {
-        Self {
-            code: "invalid_data",
-            message: message.into(),
-        }
-    }
-
-    fn from_database(error: DatabaseError) -> Self {
-        Self {
-            code: error.code(),
-            message: error.message().to_owned(),
-        }
-    }
-
-    fn from_sql(error: rusqlite::Error) -> Self {
-        Self {
-            code: "io_error",
-            message: format!("sqlite failed: {error}"),
-        }
-    }
-}
-
-impl std::fmt::Display for RollPreferenceError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for RollPreferenceError {}
 
 #[cfg(test)]
 mod tests {

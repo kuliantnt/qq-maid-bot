@@ -304,7 +304,7 @@ pub(crate) fn test_service_with_provider_base_title_query_weather_train_models_a
             session_store: SessionStore::new(database.clone()),
             task_store: TodoStore::new(database.clone()),
             voice_store: crate::runtime::tools::voice::VoicePreferenceStore::new(database.clone()),
-            roll_preference_store: crate::runtime::tools::roll::RollPreferenceStore::new(
+            roll_preference_service: crate::runtime::tools::roll::RollPreferenceService::new(
                 database.clone(),
             ),
             notification_store: crate::storage::notification::NotificationOutboxStore::new(

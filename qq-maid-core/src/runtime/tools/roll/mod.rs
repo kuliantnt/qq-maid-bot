@@ -19,9 +19,14 @@ use crate::{
 mod dice;
 mod dm;
 mod outcome;
+mod preference;
 mod storage;
 
-pub(crate) use storage::{ROLL_PREFERENCE_SCHEMA_V1, RollPreferenceStore};
+pub(crate) use preference::{
+    RollPreferenceError, RollPreferenceService, RollPreferenceSetOutcome, RollPreferenceSnapshot,
+    normalize_rule_system_setting,
+};
+pub(crate) use storage::ROLL_PREFERENCE_SCHEMA_V1;
 
 use dice::{DiceExpression, DiceExpressionParse, DiceRollSpec, RollResult, Roller};
 use dm::{DmCheckPlan, prepare_dm_check};

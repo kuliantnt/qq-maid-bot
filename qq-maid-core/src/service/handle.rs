@@ -53,7 +53,7 @@ impl CoreHandle {
                 session_store: state.stores.session_store.clone(),
                 task_store: state.stores.todo_store.clone(),
                 voice_store: state.stores.voice_store.clone(),
-                roll_preference_store: state.stores.roll_preference_store.clone(),
+                roll_preference_service: state.stores.roll_preference_service.clone(),
                 notification_store: state.stores.notification_store.clone(),
                 ops_execution_store: state.stores.ops_execution_store.clone(),
                 ops_task_registry: state.stores.ops_task_registry.clone(),
