@@ -18,11 +18,9 @@ use ast::{DiceNode, format_node, legacy_modifier};
 use evaluator::{evaluate_node, node_range, node_roll_count};
 
 pub(crate) use ast::{DiceKeep, DiceTerm};
+pub(crate) use parser::{parse_expression, parse_roll_argument_with_default_die_sides};
 #[cfg(test)]
-pub(crate) use parser::parse_expression_prefix;
-pub(crate) use parser::{
-    parse_expression, parse_roll_spec, parse_roll_spec_compact_prefix, parse_roll_spec_prefix,
-};
+pub(crate) use parser::{parse_roll_argument, parse_roll_spec};
 
 /// 默认娱乐骰子的面数。
 pub(crate) const DEFAULT_DIE_SIDES: u8 = 20;
@@ -62,8 +60,12 @@ pub(crate) struct DiceExpression {
 
 impl DiceExpression {
     pub(crate) fn default_d20() -> Self {
+        Self::default_die(DEFAULT_DIE_SIDES)
+    }
+
+    pub(crate) fn default_die(sides: u8) -> Self {
         Self {
-            root: DiceNode::Dice(DiceTerm::plain(1, DEFAULT_DIE_SIDES)),
+            root: DiceNode::Dice(DiceTerm::plain(1, sides)),
         }
     }
 
@@ -144,6 +146,17 @@ pub(crate) struct RollResult {
 }
 
 impl RollResult {
+    /// 取单个未修正骰子的实际结果，供本地回执和默认 fallback 文案共用。
+    ///
+    /// 默认骰 fallback 必须从已经执行的 `RollResult` 取面数，不能重新根据规则系统
+    /// 推导一份文案；这样规则系统新增默认骰式时，提示和实际结果仍保持一致。
+    pub(crate) fn single_unmodified_roll(&self) -> Option<&DieRoll> {
+        if !self.expression.is_single_unmodified() {
+            return None;
+        }
+        self.rolls.first()
+    }
+
     pub(crate) fn calculation(&self) -> String {
         self.calculation.clone()
     }
@@ -154,6 +167,17 @@ impl RollResult {
 pub(crate) struct DiceRollSpec {
     pub(crate) expression: DiceExpression,
     pub(crate) repetitions: u8,
+}
+
+/// Roll 命令参数的一次性解析结果；公式解析、重复次数和可选原因都由 Dice 层统一识别。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DiceRollArgumentParse<'a> {
+    NotDiceExpression,
+    Parsed {
+        spec: DiceRollSpec,
+        reason: Option<&'a str>,
+    },
+    Invalid(DiceExpressionError),
 }
 
 /// 供生产随机源和测试替身共同实现的骰值生成接口。

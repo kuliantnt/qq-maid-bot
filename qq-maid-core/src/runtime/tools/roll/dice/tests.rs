@@ -14,10 +14,18 @@ fn spec(input: &str) -> DiceRollSpec {
     }
 }
 
+fn argument(input: &str) -> (DiceRollSpec, Option<&str>) {
+    match parse_roll_argument(input) {
+        DiceRollArgumentParse::Parsed { spec, reason } => (spec, reason),
+        other => panic!("expected roll argument {input}, got {other:?}"),
+    }
+}
+
 #[test]
 fn parses_common_sealdice_expression_shapes() {
     for input in [
         "d20",
+        "d+1",
         "2d6",
         "1d20+3",
         "2d6 + 1",
@@ -122,8 +130,10 @@ fn rejects_invalid_expression_and_complexity_limits() {
 #[test]
 fn bounds_prefix_scans_before_trying_expression_boundaries() {
     let oversized = format!("d20 {}", "原因".repeat(MAX_PREFIX_INPUT_CHARS));
-    assert!(parse_roll_spec_prefix(&oversized).is_none());
-    assert!(parse_roll_spec_compact_prefix(&oversized).is_none());
+    assert_eq!(
+        parse_roll_argument(&oversized),
+        DiceRollArgumentParse::Invalid(DiceExpressionError::TooLong)
+    );
 }
 
 #[test]
@@ -149,44 +159,42 @@ fn parses_repetitions_and_enforces_limits() {
 }
 
 #[test]
-fn parses_expression_prefix_without_consuming_reason() {
-    let (expression, reason) = parse_expression_prefix("1d20 + 3 能否通过").expect("prefix");
-    assert_eq!(expression.to_string(), "1d20+3");
-    assert_eq!(reason, "能否通过");
-    let (spec, reason) = parse_roll_spec_prefix("2#d10 原因").expect("repeated prefix");
+fn parses_roll_argument_without_consuming_reason() {
+    let (spec, reason) = argument("1d20 + 3 能否通过");
+    assert_eq!(spec.expression.to_string(), "1d20+3");
+    assert_eq!(reason, Some("能否通过"));
+
+    let (spec, reason) = argument("2#d10 原因");
     assert_eq!(spec.repetitions, 2);
-    assert_eq!(reason, "原因");
+    assert_eq!(reason, Some("原因"));
 
-    let (spec, reason) = parse_roll_spec_compact_prefix("2d6原因").expect("compact prefix");
+    let (spec, reason) = argument("2d6原因");
     assert_eq!(spec.expression.to_string(), "2d6");
-    assert_eq!(reason, "原因");
+    assert_eq!(reason, Some("原因"));
 
-    let (spec, reason) = parse_roll_spec_prefix("4d6 k5 原因").expect("oversized keep with reason");
+    let (spec, reason) = argument("4d6 k5 原因");
     assert_eq!(spec.expression.to_string(), "4d6k5");
-    assert_eq!(reason, "原因");
+    assert_eq!(reason, Some("原因"));
 
-    let (spec, reason) =
-        parse_roll_spec_compact_prefix("4d6k5原因").expect("compact oversized keep");
+    let (spec, reason) = argument("4d6k5原因");
     assert_eq!(spec.expression.to_string(), "4d6k5");
-    assert_eq!(reason, "原因");
+    assert_eq!(reason, Some("原因"));
 
     for input in ["d20dh1", "4d6kh0"] {
         assert!(
-            parse_roll_spec_compact_prefix(input).is_none(),
+            matches!(
+                parse_roll_argument(input),
+                DiceRollArgumentParse::Invalid(_)
+            ),
             "非法取骰后缀不能降级为原因：{input}"
         );
     }
 
-    for input in ["20 days", "2 dogs"] {
-        assert!(
-            parse_roll_spec_prefix(input).is_none(),
-            "纯数字不能作为骰式前缀：{input}"
-        );
-    }
-    for input in ["battle", "Please pass", "difficult"] {
-        assert!(
-            parse_roll_spec_compact_prefix(input).is_none(),
-            "ASCII 单词不能从单字母骰式处拆开：{input}"
+    for input in ["20 days", "2 dogs", "battle", "Please pass", "difficult"] {
+        assert_eq!(
+            parse_roll_argument(input),
+            DiceRollArgumentParse::NotDiceExpression,
+            "自然语言不能被拆成骰式与原因：{input}"
         );
     }
 }

@@ -19,10 +19,67 @@ use crate::{
 mod dice;
 mod dm;
 mod outcome;
+mod preference;
+mod storage;
+
+pub(crate) use preference::{
+    RollPreferenceError, RollPreferenceService, RollPreferenceSetOutcome, RollPreferenceSnapshot,
+    normalize_rule_system_setting,
+};
+pub(crate) use storage::ROLL_PREFERENCE_SCHEMA_V1;
 
 use dice::{DiceExpression, DiceExpressionParse, DiceRollSpec, RollResult, Roller};
 use dm::{DmCheckPlan, prepare_dm_check};
 use outcome::render_dm_result;
+
+/// 当前 conversation 使用的轻量骰子规则。
+///
+/// 这里仅决定裸 `d` 的默认面数与 Entertainment DM 的阈值比较方向，不宣称已经实现
+/// DND5E 或 CoC7 的人物卡、属性、成功等级等完整规则。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RollRuleSystem {
+    #[default]
+    Dnd,
+    Coc,
+}
+
+impl RollRuleSystem {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "dnd" => Some(Self::Dnd),
+            "coc" => Some(Self::Coc),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn key(self) -> &'static str {
+        match self {
+            Self::Dnd => "dnd",
+            Self::Coc => "coc",
+        }
+    }
+
+    pub(crate) const fn display_name(self) -> &'static str {
+        match self {
+            Self::Dnd => "DND（D20）",
+            Self::Coc => "CoC（D100）",
+        }
+    }
+
+    pub(crate) const fn default_die_sides(self) -> u8 {
+        match self {
+            Self::Dnd => 20,
+            Self::Coc => 100,
+        }
+    }
+
+    pub(crate) const fn comparison_key(self) -> &'static str {
+        match self {
+            Self::Dnd => "greater_or_equal",
+            Self::Coc => "less_or_equal",
+        }
+    }
+}
 
 /// AI DM 问题的字符数上限；超过上限时拒绝请求，不做静默截断。
 pub(crate) const DM_QUERY_MAX_CHARS: usize = 500;
@@ -33,7 +90,6 @@ const DM_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 /// 必须早于 Core 整轮超时结束 AI 调用，给日志、随机数生成和响应投影保留收口时间。
 const DM_FALLBACK_RESERVE: Duration = Duration::from_millis(250);
 
-const DM_FALLBACK_PREFIX: &str = "AI DM 暂时无法判断本次检定难度，本次仅进行普通 D20 投掷。";
 const DM_EXPRESSION_FALLBACK_PREFIX: &str =
     "AI DM 暂时无法判断本次检定难度，本次仅进行指定骰子表达式投掷。";
 const INVALID_DICE_EXPRESSION_REPLY: &str = "骰子表达式无效。示例：d20、2d6、1d20+3、1d8+1d6+4；单段骰子数量和面数均为 1–100，总骰子数不超过 100，最多 8 段，表达式不超过 64 个字符，修正值范围为 -1000 到 +1000。";
@@ -87,12 +143,15 @@ struct RollDcDiagnostics {
     difficulty: &'static str,
     computed_dc: i32,
     dc_strategy: &'static str,
+    rule_system: &'static str,
+    dc_comparison: &'static str,
 }
 
 impl RollDcDiagnostics {
     fn from_plan(expression: &DiceExpression, plan: &DmCheckPlan) -> Self {
         let (dice_minimum, dice_maximum) = expression.total_range();
-        let computed = dm::compute_dc(expression, plan.difficulty);
+        let computed =
+            dm::compute_dc_for_rule_system(expression, plan.difficulty, plan.rule_system);
         debug_assert_eq!(computed.value, plan.dc);
         Self {
             dice_expression: expression.to_string(),
@@ -101,6 +160,8 @@ impl RollDcDiagnostics {
             difficulty: plan.difficulty.key(),
             computed_dc: computed.value,
             dc_strategy: computed.strategy.as_str(),
+            rule_system: plan.rule_system.key(),
+            dc_comparison: plan.rule_system.comparison_key(),
         }
     }
 
@@ -111,6 +172,8 @@ impl RollDcDiagnostics {
         diagnostics["difficulty"] = json!(self.difficulty);
         diagnostics["computed_dc"] = json!(self.computed_dc);
         diagnostics["dc_strategy"] = json!(self.dc_strategy);
+        diagnostics["rule_system"] = json!(self.rule_system);
+        diagnostics["dc_comparison"] = json!(self.dc_comparison);
     }
 }
 
@@ -167,6 +230,15 @@ impl RollExecutionResult {
 /// `/r`、`/rd` 的表达式尾随文本是本地骰点原因，不会调用模型；保留 `/roll` 的表达式加
 /// 文本作为显式 Entertainment DM 语法，避免归一化命令时丢失用户原始入口语义。
 pub(crate) fn parse_roll_command(text: &str) -> Option<RollCommand> {
+    parse_roll_command_with_default_die_sides(text, dice::DEFAULT_DIE_SIDES)
+}
+
+/// 按 conversation 规则解析骰点命令；显式 `d20` / `d100` 不受设置影响，只有裸 `d`
+/// 与无参数 `/r` 使用这里传入的默认面数。
+pub(crate) fn parse_roll_command_with_default_die_sides(
+    text: &str,
+    default_die_sides: u8,
+) -> Option<RollCommand> {
     let command = parse_slash_command(text)
         .or_else(|| parse_compact_roll_command(text))
         .or_else(|| parse_dot_roll_command(text))?;
@@ -178,36 +250,43 @@ pub(crate) fn parse_roll_command(text: &str) -> Option<RollCommand> {
         return parse_bonus_penalty_alias(&command);
     }
     if command.argument.is_empty() {
-        Some(RollCommand::Default)
+        if default_die_sides == dice::DEFAULT_DIE_SIDES {
+            Some(RollCommand::Default)
+        } else {
+            Some(RollCommand::DiceExpression {
+                expression: DiceExpression::default_die(default_die_sides),
+            })
+        }
     } else {
         let local_reason_syntax =
             matches!(command.raw_command.as_str(), "r" | "rd" | "rap" | "rab");
-        if let Some((spec, reason)) = parse_local_roll_argument(&command.argument) {
-            if local_reason_syntax {
-                return Some(local_roll_command(spec, reason));
-            }
-            if let Some(reason) = reason {
-                // Entertainment DM 当前只接受一次表达式；重复骰点带问题不能静默丢掉
-                // 问题并退化为本地骰点，否则用户会误以为模型已完成判定。
-                if spec.repetitions != 1 {
-                    return Some(RollCommand::RepeatedDmCheckUnsupported);
+        match dice::parse_roll_argument_with_default_die_sides(&command.argument, default_die_sides)
+        {
+            dice::DiceRollArgumentParse::Parsed { spec, reason } => {
+                let reason = reason.map(str::to_owned);
+                if local_reason_syntax {
+                    return Some(local_roll_command(spec, reason));
                 }
-                return Some(RollCommand::DmCheck {
-                    expression: Some(spec.expression),
-                    query: reason,
-                });
+                if let Some(reason) = reason {
+                    // Entertainment DM 当前只接受一次表达式；重复骰点带问题不能静默丢掉
+                    // 问题并退化为本地骰点，否则用户会误以为模型已完成判定。
+                    if spec.repetitions != 1 {
+                        return Some(RollCommand::RepeatedDmCheckUnsupported);
+                    }
+                    return Some(RollCommand::DmCheck {
+                        expression: Some(spec.expression),
+                        query: reason,
+                    });
+                }
+                Some(local_roll_command(spec, None))
             }
-            return Some(local_roll_command(spec, None));
-        }
-        match dice::parse_roll_spec(&command.argument) {
-            dice::DiceRollSpecParse::Parsed(spec) => Some(local_roll_command(spec, None)),
-            dice::DiceRollSpecParse::NotDiceExpression => {
+            dice::DiceRollArgumentParse::NotDiceExpression => {
                 if matches!(command.raw_command.as_str(), "r" | "rd") {
                     // SealDice 的 `/r 原因`、`/rd 原因` 与无空格写法语义一致：使用
-                    // 默认 d20 在本地投掷，尾随文本只作为展示原因，不进入 AI DM。
+                    // 当前会话的默认骰在本地投掷，尾随文本只作为展示原因，不进入 AI DM。
                     return Some(local_roll_command(
                         DiceRollSpec {
-                            expression: DiceExpression::default_d20(),
+                            expression: DiceExpression::default_die(default_die_sides),
                             repetitions: 1,
                         },
                         Some(command.argument),
@@ -218,22 +297,9 @@ pub(crate) fn parse_roll_command(text: &str) -> Option<RollCommand> {
                     query: command.argument,
                 })
             }
-            dice::DiceRollSpecParse::Invalid(_) => Some(RollCommand::InvalidDiceExpression),
+            dice::DiceRollArgumentParse::Invalid(_) => Some(RollCommand::InvalidDiceExpression),
         }
     }
-}
-
-fn parse_local_roll_argument(argument: &str) -> Option<(DiceRollSpec, Option<String>)> {
-    if let dice::DiceRollSpecParse::Parsed(spec) = dice::parse_roll_spec(argument) {
-        return Some((spec, None));
-    }
-    if let Some((spec, reason)) = dice::parse_roll_spec_prefix(argument) {
-        return Some((spec, Some(reason.to_owned())));
-    }
-    if let Some((spec, reason)) = dice::parse_roll_spec_compact_prefix(argument) {
-        return Some((spec, Some(reason.to_owned())));
-    }
-    None
 }
 
 fn local_roll_command(spec: DiceRollSpec, reason: Option<String>) -> RollCommand {
@@ -317,15 +383,15 @@ fn parse_compact_roll_command(text: &str) -> Option<ParsedCommand> {
     } else {
         return None;
     };
-    // `/rd优势`、`/rd劣势` 是 SealDice 的默认 D20 特殊表达式；其余 CJK 尾缀与
-    // `/r原因` 一致，按默认 D20 的本地原因处理，不能落到未知命令。
+    // `/rd优势`、`/rd劣势` 是 SealDice 的 D20 特殊表达式；其余 CJK 尾缀与
+    // `/r原因` 一致，按当前会话的默认骰处理，不能落到未知命令。
     let local_reason_suffix = is_cjk_reason_start(suffix)
         && (raw_command == "r" || !(suffix.starts_with("优势") || suffix.starts_with("劣势")));
     if !looks_like_compact_roll_suffix(suffix) && !local_reason_suffix {
         return None;
     }
     let expression = if local_reason_suffix {
-        "d20".to_owned()
+        "d".to_owned()
     } else if raw_command == "rd" {
         compact_rd_expression(suffix)
     } else {
@@ -333,7 +399,7 @@ fn parse_compact_roll_command(text: &str) -> Option<ParsedCommand> {
     };
     let argument = if local_reason_suffix {
         let reason = join_compact_argument(suffix, remainder);
-        join_compact_argument("d20", &reason)
+        join_compact_argument(&expression, &reason)
     } else {
         join_compact_argument(&expression, remainder)
     };
@@ -416,7 +482,7 @@ fn compact_rd_expression(suffix: &str) -> String {
     {
         suffix.to_owned()
     } else {
-        format!("d20{suffix}")
+        format!("d{suffix}")
     }
 }
 
@@ -424,12 +490,32 @@ fn compact_rd_expression(suffix: &str) -> String {
 ///
 /// `prepare_dm_check` 的 API 不接收骰值；只有它返回已校验的不可变方案后，才会调用
 /// 本地 roller。这个调用顺序是防止模型看到骰值后调整 DC 的核心安全边界。
+#[cfg(test)]
 pub(crate) async fn execute_roll_command_with_display_name(
     provider: &DynLlmProvider,
     model: Option<String>,
     command: RollCommand,
     request_budget: Duration,
     display_name: Option<String>,
+) -> RollExecutionResult {
+    execute_roll_command_with_rule_system_and_display_name(
+        provider,
+        model,
+        command,
+        request_budget,
+        display_name,
+        RollRuleSystem::Dnd,
+    )
+    .await
+}
+
+pub(crate) async fn execute_roll_command_with_rule_system_and_display_name(
+    provider: &DynLlmProvider,
+    model: Option<String>,
+    command: RollCommand,
+    request_budget: Duration,
+    display_name: Option<String>,
+    rule_system: RollRuleSystem,
 ) -> RollExecutionResult {
     execute_roll_command_with_roller_factory(
         provider,
@@ -438,6 +524,7 @@ pub(crate) async fn execute_roll_command_with_display_name(
         dm_timeout_for_request(request_budget),
         thread_roller,
         display_name,
+        rule_system,
     )
     .await
 }
@@ -463,8 +550,40 @@ async fn execute_roll_command_with_roller<F>(
 where
     F: Roller,
 {
-    execute_roll_command_with_roller_factory(provider, model, command, dm_timeout, || roller, None)
-        .await
+    execute_roll_command_with_roller_factory(
+        provider,
+        model,
+        command,
+        dm_timeout,
+        || roller,
+        None,
+        RollRuleSystem::Dnd,
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn execute_roll_command_with_rule_system_and_roller<F>(
+    provider: &DynLlmProvider,
+    model: Option<String>,
+    command: RollCommand,
+    dm_timeout: Duration,
+    rule_system: RollRuleSystem,
+    roller: F,
+) -> RollExecutionResult
+where
+    F: Roller,
+{
+    execute_roll_command_with_roller_factory(
+        provider,
+        model,
+        command,
+        dm_timeout,
+        || roller,
+        None,
+        rule_system,
+    )
+    .await
 }
 
 async fn execute_roll_command_with_roller_factory<RF, F>(
@@ -474,6 +593,7 @@ async fn execute_roll_command_with_roller_factory<RF, F>(
     dm_timeout: Duration,
     roller_factory: RF,
     display_name: Option<String>,
+    rule_system: RollRuleSystem,
 ) -> RollExecutionResult
 where
     RF: FnOnce() -> F,
@@ -531,11 +651,18 @@ where
     }
 
     let requested_expression = expression.is_some();
-    let expression = expression.unwrap_or_else(DiceExpression::default_d20);
+    let expression =
+        expression.unwrap_or_else(|| DiceExpression::default_die(rule_system.default_die_sides()));
     let started_at = Instant::now();
     let prepared = tokio::time::timeout(
         dm_timeout,
-        prepare_dm_check(provider, model.clone(), query.as_str(), &expression),
+        prepare_dm_check(
+            provider,
+            model.clone(),
+            query.as_str(),
+            &expression,
+            rule_system,
+        ),
     )
     .await;
     match prepared {
@@ -721,8 +848,7 @@ fn roll_context_prefix(display_name: Option<&str>, reason: Option<&str>) -> Stri
 }
 
 fn roll_detail(result: &RollResult) -> String {
-    if result.expression.is_single_unmodified() {
-        let roll = result.rolls.first().expect("单骰表达式必须产生一个骰值");
+    if let Some(roll) = result.single_unmodified_roll() {
         return format!("掷出了 {} / {}", roll.value, roll.sides);
     }
 
@@ -736,9 +862,17 @@ fn roll_fallback_reply_from_result(
     display_name: Option<&str>,
 ) -> String {
     let prefix = if requested_expression {
-        DM_EXPRESSION_FALLBACK_PREFIX
+        DM_EXPRESSION_FALLBACK_PREFIX.to_owned()
     } else {
-        DM_FALLBACK_PREFIX
+        // 默认骰面由 conversation 规则决定；这里从已实际执行的结果取骰面，避免
+        // fallback 文案与 CoC 的 D100（或后续新增的默认骰式）发生漂移。
+        let roll = result
+            .single_unmodified_roll()
+            .expect("默认骰式必须产生一个骰值");
+        format!(
+            "AI DM 暂时无法判断本次检定难度，本次仅进行普通 D{} 投掷。",
+            roll.sides
+        )
     };
     format!(
         "{prefix}\n\n{}",

@@ -1,6 +1,6 @@
 //! 本地骰子判定与确定性回执。
 
-use super::{dice::RollResult, dm::DmCheckPlan};
+use super::{RollRuleSystem, dice::RollResult, dm::DmCheckPlan};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RollOutcome {
@@ -11,15 +11,19 @@ enum RollOutcome {
 }
 
 impl RollOutcome {
-    fn resolve(result: &RollResult, dc: i32) -> Self {
-        if result.expression.is_default_d20() {
+    fn resolve(result: &RollResult, dc: i32, rule_system: RollRuleSystem) -> Self {
+        if rule_system == RollRuleSystem::Dnd && result.expression.is_default_d20() {
             match result.rolls[0].value {
                 20 => return Self::CriticalSuccess,
                 1 => return Self::CriticalFailure,
                 _ => {}
             }
         }
-        if result.total >= dc {
+        let succeeds = match rule_system {
+            RollRuleSystem::Dnd => result.total >= dc,
+            RollRuleSystem::Coc => result.total <= dc,
+        };
+        if succeeds {
             Self::Success
         } else {
             Self::Failure
@@ -30,8 +34,12 @@ impl RollOutcome {
 pub(super) fn render_dm_result(plan: &DmCheckPlan, result: &RollResult) -> String {
     let dc = plan.dc;
     let (dice_minimum, dice_maximum) = result.expression.total_range();
-    let computed_dc = super::dm::compute_dc(&result.expression, plan.difficulty);
-    let outcome = RollOutcome::resolve(result, dc);
+    let computed_dc = super::dm::compute_dc_for_rule_system(
+        &result.expression,
+        plan.difficulty,
+        plan.rule_system,
+    );
+    let outcome = RollOutcome::resolve(result, dc, plan.rule_system);
     let check_name = display_check_name(&plan.check_name);
     let check_type = match plan.check_type {
         super::dm::CheckType::Ability => "ability",
@@ -45,6 +53,8 @@ pub(super) fn render_dm_result(plan: &DmCheckPlan, result: &RollResult) -> Strin
         dice_maximum,
         computed_dc = computed_dc.value,
         dc_strategy = computed_dc.strategy.as_str(),
+        rule_system = plan.rule_system.key(),
+        dc_comparison = plan.rule_system.comparison_key(),
         roll_expression = %result.expression,
         roll_total = result.total,
         result = outcome.as_str(),
@@ -68,14 +78,18 @@ pub(super) fn render_dm_result(plan: &DmCheckPlan, result: &RollResult) -> Strin
         )
     };
     let meaning = sentence(meaning);
+    let threshold = match plan.rule_system {
+        RollRuleSystem::Dnd => format!("DC {dc}"),
+        RollRuleSystem::Coc => format!("目标值 {dc}，需 ≤ {dc}"),
+    };
     match outcome {
         RollOutcome::CriticalSuccess | RollOutcome::CriticalFailure => format!(
-            "{heading}\n\n🎲 {check_name}\n难度：{}（DC {dc}）\n投掷：{roll}\n\n{meaning}",
+            "{heading}\n\n🎲 {check_name}\n难度：{}（{threshold}）\n投掷：{roll}\n\n{meaning}",
             plan.difficulty.display_name(),
             roll = roll_display
         ),
         RollOutcome::Success | RollOutcome::Failure => format!(
-            "🎲 {check_name}\n难度：{}（DC {dc}）\n投掷：{roll}\n\n{heading}\n\n{meaning}",
+            "🎲 {check_name}\n难度：{}（{threshold}）\n投掷：{roll}\n\n{heading}\n\n{meaning}",
             plan.difficulty.display_name(),
             roll = roll_display
         ),
@@ -123,8 +137,16 @@ mod tests {
             check_name: "命运检定".to_owned(),
             difficulty,
             dc,
+            rule_system: RollRuleSystem::Dnd,
             success_meaning: "适合行动".to_owned(),
             failure_meaning: "暂缓行动".to_owned(),
+        }
+    }
+
+    fn coc_plan(difficulty: Difficulty, target: i32) -> DmCheckPlan {
+        DmCheckPlan {
+            rule_system: RollRuleSystem::Coc,
+            ..plan(difficulty, target)
         }
     }
 
@@ -176,5 +198,22 @@ mod tests {
         assert!(rendered.contains("投掷：2d20：20 + 20 = 40"));
         assert!(rendered.contains("✅ 成功"));
         assert!(!rendered.contains("Natural 20"));
+    }
+
+    #[test]
+    fn coc_uses_roll_under_and_has_no_dnd_natural_override() {
+        let expression = match super::super::dice::parse_expression("d100") {
+            super::super::dice::DiceExpressionParse::Parsed(expression) => expression,
+            other => panic!("expected a valid percentile expression, got {other:?}"),
+        };
+        let success = expression.roll(&mut |_| 40).unwrap();
+        let rendered = render_dm_result(&coc_plan(Difficulty::Medium, 50), &success);
+        assert!(rendered.contains("目标值 50，需 ≤ 50"));
+        assert!(rendered.contains("✅ 成功"));
+        assert!(!rendered.contains("Natural"));
+
+        let failure = expression.roll(&mut |_| 60).unwrap();
+        let rendered = render_dm_result(&coc_plan(Difficulty::Medium, 50), &failure);
+        assert!(rendered.contains("❌ 失败"));
     }
 }

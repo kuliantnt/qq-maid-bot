@@ -94,6 +94,8 @@ pub struct RespondStores {
     pub task_store: TaskStore,
     /// 会话级语音回复偏好。
     pub voice_store: crate::runtime::tools::voice::VoicePreferenceStore,
+    /// conversation 级骰子规则偏好领域门面。
+    pub roll_preference_service: crate::runtime::tools::roll::RollPreferenceService,
     /// 统一通知 Outbox 存储
     pub notification_store: NotificationOutboxStore,
     /// Ops 入站执行原子领取存储。
@@ -284,6 +286,8 @@ pub struct RustRespondService {
     pub(crate) task_store: TaskStore,
     /// 语音偏好领域门面，统一处理配置、权限与持久化。
     pub(crate) voice_service: crate::runtime::tools::voice::VoicePreferenceService,
+    /// 骰子规则偏好领域门面，Respond 只编排查询和设置结果。
+    pub(crate) roll_preference_service: crate::runtime::tools::roll::RollPreferenceService,
     /// 统一通知 Outbox 存储
     pub(crate) notification_store: NotificationOutboxStore,
     /// `/ops` 权限、白名单执行和结果通知门面。
@@ -374,6 +378,7 @@ impl RustRespondService {
             session_store: stores.session_store,
             task_store: stores.task_store,
             voice_service,
+            roll_preference_service: stores.roll_preference_service,
             notification_store: stores.notification_store,
             ops_service,
             rss_store: stores.rss_store,

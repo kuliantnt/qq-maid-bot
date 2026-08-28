@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::{error::LlmError, util::metrics::LlmMetrics};
 
-use super::dice::DiceExpression;
+use super::{RollRuleSystem, dice::DiceExpression};
 
 const DM_SYSTEM_PROMPT: &str = r#"你是 Entertainment DM，只负责制定娱乐骰子判定方案。
 处理二选一、运气和无人物卡的轻量行动检定。
@@ -106,13 +106,27 @@ pub(super) struct ComputedDc {
 ///
 /// 所有表达式都按区间位置计算，并统一向上取整，避免浮点误差或截断导致难度意外降低。
 /// 宽度为零时不存在区间内部阈值，公式结果为唯一可表示的理论范围端点。
+#[cfg(test)]
 pub(super) fn compute_dc(expression: &DiceExpression, difficulty: Difficulty) -> ComputedDc {
+    compute_dc_for_rule_system(expression, difficulty, RollRuleSystem::Dnd)
+}
+
+/// DND 采用 roll-over，CoC 采用 roll-under；两者使用互补区间位置，确保同一娱乐难度
+/// 的成功概率方向一致，而不是只翻转比较符后把“容易”和“困难”也颠倒。
+pub(super) fn compute_dc_for_rule_system(
+    expression: &DiceExpression,
+    difficulty: Difficulty,
+    rule_system: RollRuleSystem,
+) -> ComputedDc {
     let (minimum, maximum) = expression.total_range();
     let width = i64::from(maximum) - i64::from(minimum);
     let (numerator, denominator) = difficulty.entertainment_position();
     let offset =
         (width * i64::from(numerator) + i64::from(denominator) - 1) / i64::from(denominator);
-    let value = i64::from(minimum) + offset;
+    let value = match rule_system {
+        RollRuleSystem::Dnd => i64::from(minimum) + offset,
+        RollRuleSystem::Coc => i64::from(maximum) - offset,
+    };
     debug_assert!(value >= i64::from(i32::MIN) && value <= i64::from(i32::MAX));
     ComputedDc {
         value: value as i32,
@@ -137,6 +151,7 @@ pub(super) struct DmCheckPlan {
     pub(super) check_name: String,
     pub(super) difficulty: Difficulty,
     pub(super) dc: i32,
+    pub(super) rule_system: RollRuleSystem,
     pub(super) success_meaning: String,
     pub(super) failure_meaning: String,
 }
@@ -161,6 +176,7 @@ pub(super) async fn prepare_dm_check(
     model: Option<String>,
     query: &str,
     expression: &DiceExpression,
+    rule_system: RollRuleSystem,
 ) -> Result<PreparedDmCheck, Box<DmCheckFailure>> {
     let (minimum, maximum) = expression.total_range();
     let dm_context =
@@ -182,6 +198,11 @@ pub(super) async fn prepare_dm_check(
             ("dice_expression".to_owned(), expression.to_string()),
             ("dice_minimum".to_owned(), minimum.to_string()),
             ("dice_maximum".to_owned(), maximum.to_string()),
+            ("rule_system".to_owned(), rule_system.key().to_owned()),
+            (
+                "dc_comparison".to_owned(),
+                rule_system.comparison_key().to_owned(),
+            ),
         ]),
     };
     let outcome = provider.chat(request).await.map_err(|error| {
@@ -192,14 +213,15 @@ pub(super) async fn prepare_dm_check(
             provider_fallback_used: None,
         })
     })?;
-    let plan = parse_dm_check_plan(&outcome.reply, expression).map_err(|error| {
-        Box::new(DmCheckFailure {
-            error,
-            metrics: Some(outcome.metrics.clone()),
-            usage: outcome.usage.clone(),
-            provider_fallback_used: Some(outcome.fallback_used),
-        })
-    })?;
+    let plan = parse_dm_check_plan_for_rule_system(&outcome.reply, expression, rule_system)
+        .map_err(|error| {
+            Box::new(DmCheckFailure {
+                error,
+                metrics: Some(outcome.metrics.clone()),
+                usage: outcome.usage.clone(),
+                provider_fallback_used: Some(outcome.fallback_used),
+            })
+        })?;
     Ok(PreparedDmCheck {
         plan,
         metrics: outcome.metrics,
@@ -208,7 +230,16 @@ pub(super) async fn prepare_dm_check(
     })
 }
 
+#[cfg(test)]
 fn parse_dm_check_plan(raw: &str, expression: &DiceExpression) -> Result<DmCheckPlan, LlmError> {
+    parse_dm_check_plan_for_rule_system(raw, expression, RollRuleSystem::Dnd)
+}
+
+fn parse_dm_check_plan_for_rule_system(
+    raw: &str,
+    expression: &DiceExpression,
+    rule_system: RollRuleSystem,
+) -> Result<DmCheckPlan, LlmError> {
     let raw = raw.trim();
     // 部分模型即使被要求只返回 JSON，仍会把完整对象包在 Markdown 代码块中。
     // 这里只兼容单个完整外层代码块，不从解释文本中截取对象，避免放宽结构化输出边界。
@@ -220,12 +251,13 @@ fn parse_dm_check_plan(raw: &str, expression: &DiceExpression) -> Result<DmCheck
             "roll_dm",
         )
     })?;
-    let computed_dc = compute_dc(expression, raw.difficulty);
+    let computed_dc = compute_dc_for_rule_system(expression, raw.difficulty, rule_system);
     Ok(DmCheckPlan {
         check_type: raw.check_type,
         check_name: validate_text_field(raw.check_name, "check_name", CHECK_NAME_MAX_CHARS)?,
         difficulty: raw.difficulty,
         dc: computed_dc.value,
+        rule_system,
         success_meaning: validate_text_field(
             raw.success_meaning,
             "success_meaning",
@@ -412,6 +444,23 @@ mod tests {
         let computed = compute_dc(&expression, Difficulty::Easy);
         assert_eq!(computed.value, 20);
         assert_eq!(computed.strategy, DcStrategy::EntertainmentRange);
+    }
+
+    #[test]
+    fn coc_roll_under_thresholds_reverse_without_reversing_difficulty() {
+        let expression = expression("d100");
+        let cases = [
+            (Difficulty::VeryEasy, 80),
+            (Difficulty::Easy, 65),
+            (Difficulty::Medium, 50),
+            (Difficulty::Hard, 35),
+            (Difficulty::VeryHard, 20),
+            (Difficulty::NearlyImpossible, 5),
+        ];
+        for (difficulty, target) in cases {
+            let computed = compute_dc_for_rule_system(&expression, difficulty, RollRuleSystem::Coc);
+            assert_eq!(computed.value, target, "{difficulty:?}");
+        }
     }
 
     #[test]

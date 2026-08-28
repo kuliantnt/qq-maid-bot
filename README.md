@@ -17,7 +17,7 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.24.3`，项目处于 `24.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.24.4`，项目处于 `24.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
@@ -135,11 +135,12 @@ runtime/botctl.sh status
 
 ## 24.x 版本线更新
 
-当前稳定版本为 `v0.24.3`。需要查看本版本线的详细变更和配置迁移提示时，再展开下面的更新记录：
+当前稳定版本为 `v0.24.4`。需要查看本版本线的详细变更和配置迁移提示时，再展开下面的更新记录：
 
 <details>
 <summary>展开查看 24.x 版本更新</summary>
 
+- **DND / CoC 骰子规则偏好与 fallback 修复**（v0.24.4，PR #686）：`.set dnd` / `.set coc` 按 conversation 保存默认骰式，分别使用 D20 / D100 和对应的判定方向；AI DM 超时、Provider 错误或非法结构化输出时，fallback 文案从实际 `RollResult` 派生，CoC 不再显示矛盾的 D20，显式骰式仍保持“指定骰子表达式投掷”。
 - **AI DM D20 判定与简单骰子表达式**（v0.24.2，PR #679）：`/roll d100`、`/roll 2d6` 等 `dM` / `NdM` 表达式由 Core 本地结算；`/roll <问题>` 由独立 AI DM 先制定并校验判定方案，再由 Core 使用 CSPRNG 掷骰和确定性模板结算。AI DM 看不到骰值，Provider 异常、超时或非法输出会明确降级为普通本地 D20。
 - **通用骰子表达式与 SealDice 兼容**（v0.24.3，PR #683）：支持修正、多段骰子、重复投掷、取骰、优势/劣势、奖励/惩罚骰，以及 `/r`、`/rd`、`/rap`、`/rab`、`/r2d6`、`.r2d6` 等常见写法。`/r` / `/rd` 尾随文本只作为本地原因；只有 `/roll <骰式> <问题>` 进入 Entertainment DM。完整示例与限制见 [骰子使用教程](./docs/guides/dice.md)。
 - **默认 D20 娱乐命令**（v0.24.1，PR #676）：私聊或群聊发送 `/roll` 即可由程序本地掷出 1–20；不调用模型、不创建 session，也不消费 pending 状态。
