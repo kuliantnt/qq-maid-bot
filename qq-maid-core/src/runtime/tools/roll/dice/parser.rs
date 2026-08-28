@@ -3,10 +3,10 @@
 use super::ast::{BinaryOperator, SpecialDice, UnaryOperator};
 use super::{
     DEFAULT_DIE_SIDES, DiceExpression, DiceExpressionError, DiceExpressionParse, DiceKeep,
-    DiceNode, DiceRollSpec, DiceRollSpecParse, DiceTerm, MAX_AST_NODES, MAX_DICE_COUNT_PER_TERM,
-    MAX_DICE_TERMS, MAX_DIE_SIDES, MAX_EXPRESSION_CHARS, MAX_MODIFIER, MAX_NESTING_DEPTH,
-    MAX_PREFIX_INPUT_CHARS, MAX_REPETITIONS, MAX_SPECIAL_DICE_COUNT, MAX_TOTAL_DICE,
-    MAX_TOTAL_ROLLS_PER_COMMAND,
+    DiceNode, DiceRollArgumentParse, DiceRollSpec, DiceRollSpecParse, DiceTerm, MAX_AST_NODES,
+    MAX_DICE_COUNT_PER_TERM, MAX_DICE_TERMS, MAX_DIE_SIDES, MAX_EXPRESSION_CHARS, MAX_MODIFIER,
+    MAX_NESTING_DEPTH, MAX_PREFIX_INPUT_CHARS, MAX_REPETITIONS, MAX_SPECIAL_DICE_COUNT,
+    MAX_TOTAL_DICE, MAX_TOTAL_ROLLS_PER_COMMAND,
 };
 
 /// 解析一个单轮骰子表达式。
@@ -49,10 +49,7 @@ pub(crate) fn parse_roll_spec(input: &str) -> DiceRollSpecParse {
     parse_roll_spec_with_default_die_sides(input, DEFAULT_DIE_SIDES)
 }
 
-pub(crate) fn parse_roll_spec_with_default_die_sides(
-    input: &str,
-    default_die_sides: u8,
-) -> DiceRollSpecParse {
+fn parse_roll_spec_with_default_die_sides(input: &str, default_die_sides: u8) -> DiceRollSpecParse {
     let input = input.trim();
     let (repetitions, expression_text) = match input.find('#') {
         Some(hash)
@@ -90,23 +87,47 @@ pub(crate) fn parse_roll_spec_with_default_die_sides(
     }
 }
 
-/// 尝试解析骰子表达式加空格和自由文本原因的前缀形式。
 #[cfg(test)]
-pub(crate) fn parse_expression_prefix(input: &str) -> Option<(DiceExpression, &str)> {
-    parse_roll_spec_prefix(input)
-        .and_then(|(spec, reason)| (spec.repetitions == 1).then_some((spec.expression, reason)))
+pub(crate) fn parse_roll_argument(input: &str) -> DiceRollArgumentParse<'_> {
+    parse_roll_argument_with_default_die_sides(input, DEFAULT_DIE_SIDES)
 }
 
-/// parse_expression_prefix 的重复投掷版本。
-#[cfg(test)]
-pub(crate) fn parse_roll_spec_prefix(input: &str) -> Option<(DiceRollSpec, &str)> {
-    parse_roll_spec_prefix_with_default_die_sides(input, DEFAULT_DIE_SIDES)
-}
-
-pub(crate) fn parse_roll_spec_prefix_with_default_die_sides(
+/// 统一解析 Roll 命令参数中的公式、`N#` 重复次数和可选原因。
+///
+/// 完整公式、空格分隔原因和 SealDice 紧凑原因最终都复用同一个表达式解析器；调用方
+/// 不需要维护多套尝试顺序，也不会因命令别名不同而绕过当前 conversation 的默认骰面。
+pub(crate) fn parse_roll_argument_with_default_die_sides(
     input: &str,
     default_die_sides: u8,
-) -> Option<(DiceRollSpec, &str)> {
+) -> DiceRollArgumentParse<'_> {
+    let input = input.trim();
+    let exact_error = match parse_roll_spec_with_default_die_sides(input, default_die_sides) {
+        DiceRollSpecParse::Parsed(spec) => {
+            return DiceRollArgumentParse::Parsed { spec, reason: None };
+        }
+        DiceRollSpecParse::NotDiceExpression => None,
+        DiceRollSpecParse::Invalid(error) => Some(error),
+    };
+    if let Some((spec, reason)) = parse_roll_spec_prefix(input, default_die_sides) {
+        return DiceRollArgumentParse::Parsed {
+            spec,
+            reason: Some(reason),
+        };
+    }
+    if let Some((spec, reason)) = parse_roll_spec_compact_prefix(input, default_die_sides) {
+        return DiceRollArgumentParse::Parsed {
+            spec,
+            reason: Some(reason),
+        };
+    }
+    match exact_error {
+        Some(error) => DiceRollArgumentParse::Invalid(error),
+        None => DiceRollArgumentParse::NotDiceExpression,
+    }
+}
+
+/// 尝试解析骰子表达式加空格和自由文本原因的前缀形式。
+fn parse_roll_spec_prefix(input: &str, default_die_sides: u8) -> Option<(DiceRollSpec, &str)> {
     let input = input.trim();
     let max_boundary = prefix_boundary_limit(input)?;
     for (boundary, _) in input
@@ -134,12 +155,7 @@ pub(crate) fn parse_roll_spec_prefix_with_default_die_sides(
 ///
 /// SealDice 用户经常把短命令和骰式连写；表达式本身仍先按完整语法解析，只有完整解析
 /// 失败时才从字符边界回退寻找合法骰式前缀，避免把 `2d6k1` 等合法后缀误当成原因。
-#[cfg(test)]
-pub(crate) fn parse_roll_spec_compact_prefix(input: &str) -> Option<(DiceRollSpec, &str)> {
-    parse_roll_spec_compact_prefix_with_default_die_sides(input, DEFAULT_DIE_SIDES)
-}
-
-pub(crate) fn parse_roll_spec_compact_prefix_with_default_die_sides(
+fn parse_roll_spec_compact_prefix(
     input: &str,
     default_die_sides: u8,
 ) -> Option<(DiceRollSpec, &str)> {
@@ -220,7 +236,7 @@ fn starts_with_dice_keep_suffix(text: &str) -> bool {
 
 /// 返回不超过表达式字符上限的候选边界。
 ///
-/// `parse_roll_spec_prefix` 和紧凑前缀解析都要对候选前缀重新走一次完整解析；这里先
+/// 空格前缀和紧凑前缀解析都要对候选前缀重新走一次完整解析；这里先
 /// 对整段输入做一次长度限制，再限制边界范围，确保重复解析的输入规模有固定上界。
 fn prefix_boundary_limit(input: &str) -> Option<usize> {
     if input.chars().count() > MAX_PREFIX_INPUT_CHARS {

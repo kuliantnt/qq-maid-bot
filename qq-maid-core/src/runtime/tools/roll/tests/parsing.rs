@@ -244,6 +244,43 @@ fn repeated_bare_d_expression_uses_the_configured_default_die_sides() {
 }
 
 #[test]
+fn compact_bare_d_syntax_uses_the_configured_default_die_sides() {
+    for (rule_system, expected) in [
+        (RollRuleSystem::Dnd, "1d20"),
+        (RollRuleSystem::Coc, "1d100"),
+    ] {
+        for input in [".r测试", "/r测试", ".rd测试", "/rd测试"] {
+            let parsed =
+                parse_roll_command_with_default_die_sides(input, rule_system.default_die_sides());
+            assert!(
+                matches!(
+                    parsed,
+                    Some(RollCommand::DiceBatch {
+                        ref expression,
+                        repetitions: 1,
+                        reason: Some(ref reason),
+                    }) if expression.to_string() == expected && reason == "测试"
+                ),
+                "{rule_system:?} {input}: {parsed:?}"
+            );
+        }
+
+        for input in [".rd+1", "/rd+1"] {
+            let parsed =
+                parse_roll_command_with_default_die_sides(input, rule_system.default_die_sides());
+            assert!(
+                matches!(
+                    parsed,
+                    Some(RollCommand::DiceExpression { ref expression })
+                        if expression.to_string() == format!("{expected}+1")
+                ),
+                "{rule_system:?} {input}: {parsed:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn rejects_oversized_or_controlled_local_reasons_before_building_a_batch() {
     let oversized = "x".repeat(LOCAL_ROLL_REASON_MAX_CHARS + 1);
     for alias in ["r", "rd", "rap", "rab"] {

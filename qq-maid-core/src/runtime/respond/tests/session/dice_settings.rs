@@ -1,7 +1,7 @@
 use super::super::support::*;
 
 #[tokio::test]
-async fn sealdice_set_commands_switch_the_default_die_for_repeated_bare_d() {
+async fn sealdice_set_commands_switch_the_default_die_for_bare_d_syntax() {
     let service = test_service();
 
     let response = service.respond(message(".set coc")).await.unwrap();
@@ -16,6 +16,17 @@ async fn sealdice_set_commands_switch_the_default_die_for_repeated_bare_d() {
     assert!(text.contains("1d100+1"), "{text}");
     assert!(text.contains("第1轮"));
     assert!(text.contains("第2轮"));
+
+    for (input, expected) in [
+        (".r测试", "/ 100"),
+        ("/r测试", "/ 100"),
+        (".rd+1", "1d100+1"),
+    ] {
+        let response = service.respond(message(input)).await.unwrap();
+        let text = response.text.unwrap();
+        assert_eq!(response.command.as_deref(), Some("roll"));
+        assert!(text.contains(expected), "{input}: {text}");
+    }
 
     let response = service.respond(message(".set dnd")).await.unwrap();
     let text = response.text.unwrap();

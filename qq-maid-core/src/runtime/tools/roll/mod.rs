@@ -255,31 +255,30 @@ pub(crate) fn parse_roll_command_with_default_die_sides(
     } else {
         let local_reason_syntax =
             matches!(command.raw_command.as_str(), "r" | "rd" | "rap" | "rab");
-        if let Some((spec, reason)) =
-            parse_local_roll_argument(&command.argument, default_die_sides)
+        match dice::parse_roll_argument_with_default_die_sides(&command.argument, default_die_sides)
         {
-            if local_reason_syntax {
-                return Some(local_roll_command(spec, reason));
-            }
-            if let Some(reason) = reason {
-                // Entertainment DM 当前只接受一次表达式；重复骰点带问题不能静默丢掉
-                // 问题并退化为本地骰点，否则用户会误以为模型已完成判定。
-                if spec.repetitions != 1 {
-                    return Some(RollCommand::RepeatedDmCheckUnsupported);
+            dice::DiceRollArgumentParse::Parsed { spec, reason } => {
+                let reason = reason.map(str::to_owned);
+                if local_reason_syntax {
+                    return Some(local_roll_command(spec, reason));
                 }
-                return Some(RollCommand::DmCheck {
-                    expression: Some(spec.expression),
-                    query: reason,
-                });
+                if let Some(reason) = reason {
+                    // Entertainment DM 当前只接受一次表达式；重复骰点带问题不能静默丢掉
+                    // 问题并退化为本地骰点，否则用户会误以为模型已完成判定。
+                    if spec.repetitions != 1 {
+                        return Some(RollCommand::RepeatedDmCheckUnsupported);
+                    }
+                    return Some(RollCommand::DmCheck {
+                        expression: Some(spec.expression),
+                        query: reason,
+                    });
+                }
+                Some(local_roll_command(spec, None))
             }
-            return Some(local_roll_command(spec, None));
-        }
-        match dice::parse_roll_spec_with_default_die_sides(&command.argument, default_die_sides) {
-            dice::DiceRollSpecParse::Parsed(spec) => Some(local_roll_command(spec, None)),
-            dice::DiceRollSpecParse::NotDiceExpression => {
+            dice::DiceRollArgumentParse::NotDiceExpression => {
                 if matches!(command.raw_command.as_str(), "r" | "rd") {
                     // SealDice 的 `/r 原因`、`/rd 原因` 与无空格写法语义一致：使用
-                    // 默认 d20 在本地投掷，尾随文本只作为展示原因，不进入 AI DM。
+                    // 当前会话的默认骰在本地投掷，尾随文本只作为展示原因，不进入 AI DM。
                     return Some(local_roll_command(
                         DiceRollSpec {
                             expression: DiceExpression::default_die(default_die_sides),
@@ -293,31 +292,9 @@ pub(crate) fn parse_roll_command_with_default_die_sides(
                     query: command.argument,
                 })
             }
-            dice::DiceRollSpecParse::Invalid(_) => Some(RollCommand::InvalidDiceExpression),
+            dice::DiceRollArgumentParse::Invalid(_) => Some(RollCommand::InvalidDiceExpression),
         }
     }
-}
-
-fn parse_local_roll_argument(
-    argument: &str,
-    default_die_sides: u8,
-) -> Option<(DiceRollSpec, Option<String>)> {
-    if let dice::DiceRollSpecParse::Parsed(spec) =
-        dice::parse_roll_spec_with_default_die_sides(argument, default_die_sides)
-    {
-        return Some((spec, None));
-    }
-    if let Some((spec, reason)) =
-        dice::parse_roll_spec_prefix_with_default_die_sides(argument, default_die_sides)
-    {
-        return Some((spec, Some(reason.to_owned())));
-    }
-    if let Some((spec, reason)) =
-        dice::parse_roll_spec_compact_prefix_with_default_die_sides(argument, default_die_sides)
-    {
-        return Some((spec, Some(reason.to_owned())));
-    }
-    None
 }
 
 fn local_roll_command(spec: DiceRollSpec, reason: Option<String>) -> RollCommand {
@@ -401,15 +378,15 @@ fn parse_compact_roll_command(text: &str) -> Option<ParsedCommand> {
     } else {
         return None;
     };
-    // `/rd优势`、`/rd劣势` 是 SealDice 的默认 D20 特殊表达式；其余 CJK 尾缀与
-    // `/r原因` 一致，按默认 D20 的本地原因处理，不能落到未知命令。
+    // `/rd优势`、`/rd劣势` 是 SealDice 的 D20 特殊表达式；其余 CJK 尾缀与
+    // `/r原因` 一致，按当前会话的默认骰处理，不能落到未知命令。
     let local_reason_suffix = is_cjk_reason_start(suffix)
         && (raw_command == "r" || !(suffix.starts_with("优势") || suffix.starts_with("劣势")));
     if !looks_like_compact_roll_suffix(suffix) && !local_reason_suffix {
         return None;
     }
     let expression = if local_reason_suffix {
-        "d20".to_owned()
+        "d".to_owned()
     } else if raw_command == "rd" {
         compact_rd_expression(suffix)
     } else {
@@ -417,7 +394,7 @@ fn parse_compact_roll_command(text: &str) -> Option<ParsedCommand> {
     };
     let argument = if local_reason_suffix {
         let reason = join_compact_argument(suffix, remainder);
-        join_compact_argument("d20", &reason)
+        join_compact_argument(&expression, &reason)
     } else {
         join_compact_argument(&expression, remainder)
     };
@@ -500,7 +477,7 @@ fn compact_rd_expression(suffix: &str) -> String {
     {
         suffix.to_owned()
     } else {
-        format!("d20{suffix}")
+        format!("d{suffix}")
     }
 }
 
