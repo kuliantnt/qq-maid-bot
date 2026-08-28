@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+后续变更将在下一个版本发布时记录。
+
+## [v0.24.4] - 2026-08-28
+
+### Release Focus
+
+* **DND / CoC 轻量骰子规则**：按 conversation 保存默认骰式和 Entertainment DM 判定方向，并确保 AI DM 失败回退的用户文案与实际骰值一致。
+
 ### Added
 
 * **骰子规则偏好**：兼容 `.set dnd` / `.set coc`，按 conversation 持久化 D20/D100 默认骰面数；裸 `d` 与 `.r2#d+1` 等重复表达式使用当前设置。
@@ -11,10 +19,13 @@
 ### Fixed
 
 * **DND / CoC 判定方向**：Entertainment DM 在 DND 模式使用点数 `≥ DC`，在 CoC 模式使用点数 `≤ 目标值`，同一难度使用互补阈值以保持成功概率方向一致。
+* **AI DM fallback 骰面文案**：Provider 错误、超时或非法结构化输出时，默认 fallback 文案从实际 `RollResult` 派生；CoC 实际使用 D100 时不再声称使用 D20，显式骰式仍保持原有投掷语义。
 
 ### Compatibility
 
+* 根包 `qq-maid-bot` 提升到 `0.24.4`，本次实际变更的 `qq-maid-core` 提升到 `0.1.28`；其他 workspace crate 版本保持不变。
 * 新增幂等 SQLite migration `roll_preference_schema_v1`；不新增必填环境变量，未设置的历史会话继续默认使用 DND/D20。
+* 显式骰式不受默认规则影响；正常成功判定、DC/目标值计算、随机逻辑和已有 DND D20 fallback 行为保持兼容。
 
 ## [v0.24.3] - 2026-08-27
 

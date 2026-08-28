@@ -146,6 +146,17 @@ pub(crate) struct RollResult {
 }
 
 impl RollResult {
+    /// 取单个未修正骰子的实际结果，供本地回执和默认 fallback 文案共用。
+    ///
+    /// 默认骰 fallback 必须从已经执行的 `RollResult` 取面数，不能重新根据规则系统
+    /// 推导一份文案；这样规则系统新增默认骰式时，提示和实际结果仍保持一致。
+    pub(crate) fn single_unmodified_roll(&self) -> Option<&DieRoll> {
+        if !self.expression.is_single_unmodified() {
+            return None;
+        }
+        self.rolls.first()
+    }
+
     pub(crate) fn calculation(&self) -> String {
         self.calculation.clone()
     }

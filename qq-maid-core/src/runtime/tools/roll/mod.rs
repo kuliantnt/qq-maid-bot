@@ -848,8 +848,7 @@ fn roll_context_prefix(display_name: Option<&str>, reason: Option<&str>) -> Stri
 }
 
 fn roll_detail(result: &RollResult) -> String {
-    if result.expression.is_single_unmodified() {
-        let roll = result.rolls.first().expect("单骰表达式必须产生一个骰值");
+    if let Some(roll) = result.single_unmodified_roll() {
         return format!("掷出了 {} / {}", roll.value, roll.sides);
     }
 
@@ -867,7 +866,9 @@ fn roll_fallback_reply_from_result(
     } else {
         // 默认骰面由 conversation 规则决定；这里从已实际执行的结果取骰面，避免
         // fallback 文案与 CoC 的 D100（或后续新增的默认骰式）发生漂移。
-        let roll = result.rolls.first().expect("默认骰式必须产生一个骰值");
+        let roll = result
+            .single_unmodified_roll()
+            .expect("默认骰式必须产生一个骰值");
         format!(
             "AI DM 暂时无法判断本次检定难度，本次仅进行普通 D{} 投掷。",
             roll.sides

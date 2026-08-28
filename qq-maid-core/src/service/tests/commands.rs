@@ -629,6 +629,43 @@ async fn core_roll_dm_short_request_timeout_keeps_local_fallback() {
 }
 
 #[tokio::test]
+async fn core_roll_dm_coc_provider_error_keeps_fallback_copy_on_d100() {
+    let provider = TestProvider::failing(LlmError::provider("roll unavailable", "provider"));
+    let state = test_state(provider.clone(), 5);
+    let service = CoreHandle::new(state);
+
+    let CoreRespondOutput::Complete(set_response) =
+        service.respond(private_request("/set coc")).await.unwrap()
+    else {
+        panic!("setting the CoC rule should complete synchronously");
+    };
+    assert_eq!(set_response.command.as_deref(), Some("set"));
+
+    let CoreRespondOutput::Complete(response) = service
+        .respond(private_request("/roll 今晚出门吗"))
+        .await
+        .unwrap()
+    else {
+        panic!("failed CoC roll DM should complete with a local fallback");
+    };
+
+    let text = response
+        .text_content()
+        .expect("CoC fallback should return text");
+    assert!(text.contains("本次仅进行普通 D100 投掷"), "{text}");
+    assert!(!text.contains("D20"), "{text}");
+    assert!(text.contains(" / 100"), "{text}");
+    assert_eq!(response.command.as_deref(), Some("roll"));
+    let diagnostics = response
+        .diagnostics
+        .as_ref()
+        .expect("CoC fallback should expose diagnostics");
+    assert_eq!(diagnostics["roll_execution_kind"], "ai_dm_fallback");
+    assert_eq!(diagnostics["roll_fallback_reason"], "provider_error");
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn core_codex_easter_egg_does_not_create_session_or_override_registered_command() {
     let provider = TestProvider::replying("不应调用");
     let state = test_state(provider.clone(), 5);
