@@ -85,7 +85,6 @@ const DM_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 /// 必须早于 Core 整轮超时结束 AI 调用，给日志、随机数生成和响应投影保留收口时间。
 const DM_FALLBACK_RESERVE: Duration = Duration::from_millis(250);
 
-const DM_FALLBACK_PREFIX: &str = "AI DM 暂时无法判断本次检定难度，本次仅进行普通 D20 投掷。";
 const DM_EXPRESSION_FALLBACK_PREFIX: &str =
     "AI DM 暂时无法判断本次检定难度，本次仅进行指定骰子表达式投掷。";
 const INVALID_DICE_EXPRESSION_REPLY: &str = "骰子表达式无效。示例：d20、2d6、1d20+3、1d8+1d6+4；单段骰子数量和面数均为 1–100，总骰子数不超过 100，最多 8 段，表达式不超过 64 个字符，修正值范围为 -1000 到 +1000。";
@@ -882,9 +881,15 @@ fn roll_fallback_reply_from_result(
     display_name: Option<&str>,
 ) -> String {
     let prefix = if requested_expression {
-        DM_EXPRESSION_FALLBACK_PREFIX
+        DM_EXPRESSION_FALLBACK_PREFIX.to_owned()
     } else {
-        DM_FALLBACK_PREFIX
+        // 默认骰面由 conversation 规则决定；这里从已实际执行的结果取骰面，避免
+        // fallback 文案与 CoC 的 D100（或后续新增的默认骰式）发生漂移。
+        let roll = result.rolls.first().expect("默认骰式必须产生一个骰值");
+        format!(
+            "AI DM 暂时无法判断本次检定难度，本次仅进行普通 D{} 投掷。",
+            roll.sides
+        )
     };
     format!(
         "{prefix}\n\n{}",
