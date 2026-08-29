@@ -127,8 +127,8 @@ async fn help_all_lists_public_commands_by_module() {
     let text_len = text.chars().count();
     // 新增公开命令时允许帮助页适度增长，同时保留上限避免内容无边界膨胀。
     assert!(
-        text_len <= 2000,
-        "full help text has {text_len} characters, exceeding the 2000-character limit"
+        text_len <= 2500,
+        "full help text has {text_len} characters, exceeding the 2500-character limit"
     );
     assert_unimplemented_rss_commands_absent(&text);
 }

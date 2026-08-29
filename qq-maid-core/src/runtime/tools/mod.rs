@@ -5,6 +5,7 @@
 
 pub(crate) mod agent_presenters;
 pub(crate) mod agent_turn;
+pub(crate) mod iching;
 pub mod knowledge;
 pub mod memory;
 pub mod ops;
