@@ -151,6 +151,30 @@ async fn explicit_roll_command_is_not_taken_by_weather_shortcut() {
 }
 
 #[tokio::test]
+async fn iching_command_with_arguments_is_ignored_before_weather_shortcut() {
+    let weather_calls = Arc::new(AtomicUsize::new(0));
+    let (service, _) = test_service_with_provider_base_title_query_weather_train_models_and_options(
+        MockProvider::new(),
+        None,
+        Arc::new(MockWebSearchExecutor),
+        Arc::new(MockWeatherExecutor::with_counter(weather_calls.clone())),
+        Arc::new(MockTrainExecutor::new()),
+        TestModelOptions::default(),
+        TestToolCallingOptions::default(),
+    );
+
+    let response = service.respond(message("/算卦 明天天气")).await.unwrap();
+
+    assert!(response.text.is_none());
+    assert!(response.markdown.is_none());
+    assert_eq!(response.command, None);
+    let diagnostics = response.diagnostics.unwrap();
+    assert_eq!(diagnostics["suppressed"], true);
+    assert_eq!(diagnostics["reason"], "iching_arguments_ignored");
+    assert_eq!(weather_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn weather_command_ignores_plain_city_weather_suffix() {
     let provider_calls = Arc::new(AtomicUsize::new(0));
     let weather_calls = Arc::new(AtomicUsize::new(0));

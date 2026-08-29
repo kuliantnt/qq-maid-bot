@@ -22,10 +22,19 @@ pub(crate) enum IChingCommand {
     Cast,
 }
 
-/// 只接受无参数 `/算卦`；参数存在时交给统一未知命令收口，避免默默忽略用户输入。
+/// 只接受无参数 `/算卦`；带参数的同名命令仍由分派器识别，再静默忽略，
+/// 避免继续落入天气快捷解析。
 pub(crate) fn parse_iching_command(text: &str) -> Option<IChingCommand> {
     let command = parse_slash_command(text)?;
     (command.action == "iching" && command.argument.is_empty()).then_some(IChingCommand::Cast)
+}
+
+/// 判断输入是否显式使用了算卦动作（包括带参数的无效形式）。
+///
+/// 分派器需要区分“不是算卦命令”和“算卦命令但带了参数”，否则后者会被天气
+/// 的 `/城市天气` 快捷解析误认成天气查询。
+pub(crate) fn is_iching_command(text: &str) -> bool {
+    parse_slash_command(text).is_some_and(|command| command.action == "iching")
 }
 
 /// 执行一次六爻起卦，骰值全部来自现有 Roll 领域。

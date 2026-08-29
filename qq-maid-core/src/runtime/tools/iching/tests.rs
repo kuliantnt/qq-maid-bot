@@ -144,4 +144,7 @@ fn iching_uses_the_existing_roll_parser_and_multi_round_roller() {
     assert_eq!(calls, vec![2; 18]);
     assert_eq!(parse_iching_command("/算卦"), Some(IChingCommand::Cast));
     assert_eq!(parse_iching_command("/算卦 额外参数"), None);
+    assert!(is_iching_command("/算卦 额外参数"));
+    assert!(is_iching_command("/iching 额外参数"));
+    assert!(!is_iching_command("/天气 杭州"));
 }
