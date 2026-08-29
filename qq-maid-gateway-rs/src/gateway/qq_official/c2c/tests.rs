@@ -15,6 +15,32 @@ fn empty_reply_fallback_uses_configured_bot_display_name() {
         "唔，小助手刚刚没整理出可用回复。可以再说一次。"
     );
 }
+
+#[tokio::test]
+async fn suppressed_c2c_response_skips_fallback_and_sender() {
+    let sender = FakeOutboundSender::default();
+    let mut response = respond_response("");
+    response.output = None;
+    response.diagnostics = Some(json!({
+        "suppressed": true,
+        "reason": "test_suppressed_response"
+    }));
+
+    let (sent_ids, fallback_text) = send_c2c_respond_response_with_sender(
+        &sender,
+        &c2c_message(),
+        &response,
+        &test_config(),
+        &ReplyCapability::qq_official_c2c(&test_config()),
+    )
+    .await
+    .unwrap();
+
+    assert!(sent_ids.is_empty());
+    assert!(fallback_text.is_empty());
+    assert!(sender.calls().is_empty());
+}
+
 use crate::{
     api::{ApiError, C2cReplyTarget, SendFuture},
     config::AppConfig,
