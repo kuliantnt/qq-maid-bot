@@ -28,7 +28,7 @@ fn identifies_hexagram_from_bottom_to_top_values() {
     assert_eq!(result.moving_mask, 0);
     assert!(result.lines[0].yang);
     assert!(!result.lines[5].yang);
-    assert!(rendered.find("上六  ⚋ 8").unwrap() < rendered.find("初九  ⚊ 7").unwrap());
+    assert!(rendered.find("上六  ⚋").unwrap() < rendered.find("初九  ⚊").unwrap());
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn one_old_yang_changes_the_first_line_into_sheng() {
     assert_eq!(result.changed.unwrap().short_name, "升");
     assert_eq!(result.changed.unwrap().number, 46);
     assert_eq!(result.moving_mask, 0b000001);
-    assert!(rendered.contains("初九  ⚊ 9 ○"));
+    assert!(rendered.contains("初九  ⚊ ○"));
     assert!(rendered.contains("动爻：初九"));
     assert!(rendered.contains("之卦：地风升（第46卦）"));
 }
@@ -59,11 +59,13 @@ fn one_old_yang_changes_the_first_line_into_sheng() {
 #[test]
 fn one_old_yin_changes_the_first_line_into_tai() {
     let result = calculate_cast([6, 7, 7, 8, 8, 8]).unwrap();
+    let rendered = render_cast(&result);
 
     assert_eq!(result.original.short_name, "升");
     assert_eq!(result.original.number, 46);
     assert_eq!(result.changed.unwrap().short_name, "泰");
     assert_eq!(result.changed.unwrap().number, 11);
+    assert!(rendered.contains("初六  ⚋ ×"));
 }
 
 #[test]

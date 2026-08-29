@@ -78,8 +78,13 @@ pub(crate) fn render_cast(result: &CastResult) -> String {
 fn format_line(line: CastLine, position: usize) -> String {
     let title = line_title(line.yang, position);
     let glyph = if line.yang { "⚊" } else { "⚋" };
-    let moving = if line.moving { " ○" } else { "" };
-    format!("{title}  {glyph} {}{moving}", line.value)
+    // 三钱法中老阳（9）用圆圈标记，老阴（6）用叉号标记，不能只按动爻状态区分。
+    let moving = match (line.moving, line.yang) {
+        (true, true) => " ○",
+        (true, false) => " ×",
+        (false, _) => "",
+    };
+    format!("{title}  {glyph}{moving}")
 }
 
 fn line_title(yang: bool, position: usize) -> String {
