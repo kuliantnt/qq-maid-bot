@@ -362,13 +362,13 @@ fn xml_field(xml: &str, wanted: &str) -> Option<String> {
     loop {
         match reader.read_event().ok()? {
             Event::Start(event) => {
-                current = Some(String::from_utf8_lossy(event.name().as_ref()).into_owned());
+                current = Some(event.name().as_ref().to_owned());
             }
             Event::Text(text) if current.as_deref() == Some(wanted) => {
-                return text.xml10_content().ok().map(|value| value.into_owned());
+                return Some(text.xml10_content().into_owned());
             }
             Event::CData(text) if current.as_deref() == Some(wanted) => {
-                return text.decode().ok().map(|value| value.into_owned());
+                return Some(text.xml10_content().into_owned());
             }
             Event::End(_) => current = None,
             Event::Eof => return None,

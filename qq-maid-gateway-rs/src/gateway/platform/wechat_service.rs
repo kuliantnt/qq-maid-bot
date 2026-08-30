@@ -228,22 +228,16 @@ pub(crate) fn parse_encrypted_message_xml(xml: &str) -> Result<String, WechatXml
     loop {
         match reader.read_event() {
             Ok(Event::Start(event)) => {
-                current = Some(String::from_utf8_lossy(event.name().as_ref()).into_owned());
+                current = Some(event.name().as_ref().to_owned());
             }
             Ok(Event::Text(text)) => {
-                let value = text
-                    .xml10_content()
-                    .map_err(|err| WechatXmlError::InvalidXml(err.to_string()))?
-                    .into_owned();
+                let value = text.xml10_content().into_owned();
                 if current.as_deref() == Some("Encrypt") {
                     append_value(&mut raw.encrypted, &value);
                 }
             }
             Ok(Event::CData(text)) => {
-                let value = text
-                    .decode()
-                    .map_err(|err| WechatXmlError::InvalidXml(err.to_string()))?
-                    .into_owned();
+                let value = text.xml10_content().into_owned();
                 if current.as_deref() == Some("Encrypt") {
                     append_value(&mut raw.encrypted, &value);
                 }
@@ -405,20 +399,14 @@ fn parse_raw_xml(xml: &str) -> Result<RawWechatMessage, WechatXmlError> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(event)) => {
-                current = Some(String::from_utf8_lossy(event.name().as_ref()).into_owned());
+                current = Some(event.name().as_ref().to_owned());
             }
             Ok(Event::Text(text)) => {
-                let value = text
-                    .xml10_content()
-                    .map_err(|err| WechatXmlError::InvalidXml(err.to_string()))?
-                    .into_owned();
+                let value = text.xml10_content().into_owned();
                 append_field(&mut raw, current.as_deref(), &value);
             }
             Ok(Event::CData(text)) => {
-                let value = text
-                    .decode()
-                    .map_err(|err| WechatXmlError::InvalidXml(err.to_string()))?
-                    .into_owned();
+                let value = text.xml10_content().into_owned();
                 append_field(&mut raw, current.as_deref(), &value);
             }
             Ok(Event::GeneralRef(reference)) => {
@@ -450,10 +438,8 @@ fn decode_general_ref(reference: &BytesRef<'_>) -> Result<String, WechatXmlError
         return Ok(value.to_string());
     }
 
-    let name = reference
-        .decode()
-        .map_err(|err| WechatXmlError::InvalidXml(err.to_string()))?;
-    resolve_xml_entity(&name)
+    let name = reference.xml10_content();
+    resolve_xml_entity(name.as_ref())
         .map(str::to_owned)
         .ok_or_else(|| WechatXmlError::InvalidXml(format!("unrecognized entity `{name}`")))
 }
@@ -478,7 +464,7 @@ fn append_field(raw: &mut RawWechatMessage, field: Option<&str>, value: &str) {
 }
 
 fn append_value(field: &mut Option<String>, value: &str) {
-    // quick-xml 0.41 将实体引用拆成独立事件，同一字段的各片段必须按读取顺序合并。
+    // quick-xml 将实体引用拆成独立事件，同一字段的各片段必须按读取顺序合并。
     field.get_or_insert_with(String::new).push_str(value);
 }
 
