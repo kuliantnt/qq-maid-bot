@@ -1,4 +1,4 @@
-use qq_maid_llm::provider::ToolCallingProtocol;
+use qq_maid_llm::provider::{ToolCallingProtocol, types::ChatRole};
 use serde_json::json;
 
 use super::support::*;
@@ -197,6 +197,49 @@ async fn iching_is_a_deterministic_command_outside_pending_and_tool_loop() {
     assert!(text.contains("本卦："));
     assert!(text.contains("【卦辞】"));
     assert_provider_unused(&provider);
+}
+
+#[tokio::test]
+async fn iching_receipt_is_available_to_followup_without_recasting() {
+    let provider = MockProvider::new();
+    let service = test_service_with_provider(provider.clone());
+
+    let cast = service.respond(private_message("/算卦")).await.unwrap();
+    let cast_text = cast.text.clone().unwrap();
+
+    assert_eq!(cast.command.as_deref(), Some("iching"));
+    assert!(cast.session_id.is_some());
+    assert!(provider.requests().is_empty());
+
+    let followup = service
+        .respond(private_message("解释一下上一卦"))
+        .await
+        .unwrap();
+
+    assert_eq!(followup.text.as_deref(), Some("回复：解释一下上一卦"));
+    assert_eq!(followup.session_id, cast.session_id);
+    assert_eq!(provider.tool_call_count(), 0);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| { message.role == ChatRole::Assistant && message.content == cast_text })
+    );
+
+    let session = service
+        .session_store
+        .get_or_create_active(&private_test_meta())
+        .unwrap();
+    assert_eq!(
+        session
+            .history
+            .iter()
+            .filter(|message| message.role == "assistant" && message.content == cast_text)
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
