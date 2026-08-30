@@ -22,10 +22,11 @@ pub(super) fn log_core_output_success(
                 handled = response.handled.unwrap_or(false),
                 handled_present = response.handled.is_some(),
                 command = response.command.as_deref().unwrap_or(""),
-                reply_len = response
+                reply_chars = response
                     .text_content()
                     .map(|text| text.chars().count())
                     .unwrap_or(0),
+                reply_bytes = response.text_content().map(str::len).unwrap_or(0),
                 transport = "complete",
                 response_delivery_mode = output_policy,
                 "Core 回复请求成功"

@@ -65,7 +65,7 @@ fn normalize_command(command: &str) -> Option<String> {
         "weather" | "天气" => "weather",
         "rader" | "radar" | "雷达" => "radar",
         "roll" | "r" | "rd" | "rap" | "rab" => "roll",
-        "算卦" | "iching" => "iching",
+        "起卦" | "算卦" | "卜卦" | "iching" => "iching",
         "set" | "设置" | "nn" => "set",
         "unset" | "取消设置" | "清除设置" => "unset",
         _ => return None,

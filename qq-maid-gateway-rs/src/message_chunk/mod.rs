@@ -696,6 +696,44 @@ fn chunk_plain_text(text: &str, limit: usize) -> Vec<OutboundChunk> {
         .collect()
 }
 
+/// 按 UTF-8 编码后的字节数安全切分纯文本。
+///
+/// 微信客服文本接口按 `text.content` 的 UTF-8 字节数限制长度，而不是按 Rust
+/// `char` 数量限制。这里使用 `char_indices` 选择边界，保证每段都是合法 UTF-8；
+/// `max_bytes` 由调用方保证至少能容纳一个 Unicode scalar（微信的 2048 字节上限
+/// 满足该条件）。
+pub(crate) fn chunk_plain_text_by_utf8_bytes(text: &str, max_bytes: usize) -> Vec<&str> {
+    assert!(max_bytes > 0, "text chunk byte limit must be positive");
+
+    if text.is_empty() || text.len() <= max_bytes {
+        return vec![text];
+    }
+
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = start;
+        for (relative, ch) in text[start..].char_indices() {
+            let next = relative + ch.len_utf8();
+            if next > max_bytes {
+                break;
+            }
+            end = start + next;
+        }
+
+        // 每轮都必须消费至少一个字符；若调用方给出的上限连下一个 Unicode
+        // scalar 都放不下，则不存在满足该上限的合法 UTF-8 分片，直接报告配置错误，
+        // 避免在生产构建中因空分片进入死循环。
+        assert!(
+            end > start,
+            "text chunk byte limit cannot fit the next character"
+        );
+        chunks.push(&text[start..end]);
+        start = end;
+    }
+    chunks
+}
+
 #[cfg(test)]
 fn chunk_markdown(markdown: &str, limits: &ChunkLimits) -> Vec<OutboundChunk> {
     let fallback_text = to_chat_text(markdown);

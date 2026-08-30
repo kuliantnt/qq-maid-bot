@@ -17,13 +17,17 @@ pub(crate) use receipt::render_cast;
 
 const ICHING_ROLL_COMMAND: &str = "/r6#(3d2+3)";
 
+/// 带问题文本时不把问题公开给起卦流程，引导用户把问题留在心里后重新正式起卦。
+pub(crate) const ICHING_ARGUMENT_HINT: &str =
+    "所问之事藏在心里就好。默念三遍后，请直接发送 /算卦。";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IChingCommand {
     Cast,
 }
 
-/// 只接受无参数 `/算卦`；带参数的同名命令仍由分派器识别，再静默忽略，
-/// 避免继续落入天气快捷解析。
+/// 只接受无参数的起卦别名；带参数的同名命令仍由分派器识别并返回提示，
+/// 避免继续落入天气快捷解析，也不把问题文本交给起卦流程。
 pub(crate) fn parse_iching_command(text: &str) -> Option<IChingCommand> {
     let command = parse_slash_command(text)?;
     (command.action == "iching" && command.argument.is_empty()).then_some(IChingCommand::Cast)

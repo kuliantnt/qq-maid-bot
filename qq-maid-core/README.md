@@ -110,7 +110,7 @@ Todo 管理接口复用同一管理员 Session、同源和 CSRF 安全边界，�
 
 - 会话：`/new`、`/rename`、`/resume`、`/clear`、`/state`、`/compact`、`/help`。`/list` 仅作为 deprecated 兼容别名保留，推荐 `/resume` 或 `/恢复`。
 - 娱乐：`/roll`（别名 `/r`、`/rd`）无参数时使用当前 conversation 的默认骰，常用表达式、`N#expr` 多轮、`k/q` 取骰和优势/劣势也在 Core 本地解析、掷骰和结算；`/r d50 开锁`、`/r2d6xxx` 的尾随文本仅作为骰点原因展示，不调用模型。`.set dnd` 使用 D20/roll-over，`.set coc` 使用 D100/roll-under，裸 `d`（包括 `.r2#d+1`）跟随该持久化设置；这不等于启用完整 DND5E/CoC7 规则。奖励/惩罚骰可用 `/rab` / `/rap`，玩家展示名沿用 `/set 昵称`，也可用 `/nn emmm` 或 `.nn emmm`；默认前缀下点号命令与 slash 命令由同一条 Core 命令通道处理。带自然语言问题的 `/roll <骰子表达式> <问题>` 保留为显式 Entertainment DM，AI 只选择 difficulty，Core 再按当前规则的比较方向计算阈值并掷骰；本地骰点、原因和多轮路径都不进入普通 session 或 Tool Loop，也不调用模型。
-- 周易：`/算卦`（别名 `/iching`）使用固定六轮三钱法在 Core 本地计算 64 卦、动爻和之卦，并返回卦辞、译文与注释；只接受无参数形式，带参数命令静默忽略，不调用 Provider、不进入 pending 或 Tool Loop，结果写入当前 conversation session 供后续自然语言引用。
+- 周易：`/起卦`、`/算卦`、`/卜卦`（别名 `/iching`）使用固定六轮三钱法在 Core 本地计算 64 卦、动爻和之卦，并返回卦辞、译文与注释；无参数形式执行起卦，带参数命令不执行起卦或复述问题，只提示用户默念三遍后重新发送 `/算卦`，也不调用 Provider、不进入 pending 或 Tool Loop，结果写入当前 conversation session 供后续自然语言引用。
 - 记忆：`/memory`、`/memory 内容`、`/memory show 1`、`/memory edit 1 新内容`、`/memory delete 1`；中文别名 `/记忆`、`/记`。
 - 待办：slash 入口只保留查询（`/todo`、`/todo all`、`/todo search 关键词`、`/todo done`、`/todo undo`；中文别名 `/待办`、`/任务`），新增、完成、恢复、修改、取消和永久删除请直接用自然语言触发 Todo Tool。火车时刻请使用 `/火车 车次 [日期]` 查询。
 - RSS：`/rss`、`/rss recent [数量]`、`/rss add RSS地址 [名称]`、`/rss delete 1`、`/rss test RSS地址`；中文别名 `/订阅`。

@@ -3,8 +3,12 @@
 //! 当前实现 text-only 同步回复和长任务客服消息补发；模板消息、素材和媒体消息均留给后续任务。
 
 use std::{
+    collections::HashMap,
     net::SocketAddr,
-    sync::Arc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -19,7 +23,11 @@ use axum::{
 };
 use qq_maid_core::service::CoreRespondOutput;
 use serde::Deserialize;
-use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
+use tokio::{
+    net::TcpListener,
+    sync::{Mutex as AsyncMutex, oneshot},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -47,7 +55,10 @@ use crate::{
 
 mod customer;
 
-use customer::{WechatCustomerMessenger, build_customer_messenger};
+use customer::{
+    WECHAT_CUSTOMER_REQUEST_TIMEOUT, WECHAT_CUSTOMER_TEXT_MAX_BYTES, WechatCustomerMessageError,
+    WechatCustomerMessenger, build_customer_messenger,
+};
 
 const FALLBACK_ERROR_TEXT: &str = "服务暂时不可用，请稍后再试。";
 const SLOW_SYNC_FALLBACK_TEXT: &str = "这次处理需要更久一点，已收到请求，请稍后查看回复。";
@@ -60,7 +71,90 @@ struct WechatServiceState {
     respond: RespondClient,
     dedupe: Arc<MessageDedupe>,
     customer_messenger: Option<Arc<dyn WechatCustomerMessenger>>,
+    customer_send_locks: Arc<WechatCustomerSendLocks>,
     commands: Option<GatewayCommandService>,
+}
+
+/// 为每个收件人复用一把异步锁，避免同一用户的多轮慢回复在客服接口中交错。
+///
+/// 锁表只在进程内共享，不记录日志；不同收件人仍可并行发送。客服消息额度由微信
+/// 侧控制，因此锁必须覆盖一整组分片，而不能只包住单个 send_text 调用。引用计数
+/// 让没有持有者或等待者的收件人锁及时从表中移除，避免长期运行时无界保留 openid。
+#[derive(Default)]
+struct WechatCustomerSendLocks {
+    inner: Mutex<HashMap<String, Arc<WechatCustomerSendLockEntry>>>,
+}
+
+struct WechatCustomerSendLockEntry {
+    lock: AsyncMutex<()>,
+    active_handles: AtomicUsize,
+}
+
+struct WechatCustomerSendLock {
+    owner: Arc<WechatCustomerSendLocks>,
+    touser: String,
+    entry: Arc<WechatCustomerSendLockEntry>,
+}
+
+impl WechatCustomerSendLocks {
+    fn lock_for(self: &Arc<Self>, touser: &str) -> WechatCustomerSendLock {
+        let mut locks = self
+            .inner
+            .lock()
+            .expect("wechat customer send lock map should not be poisoned");
+        let entry = locks
+            .entry(touser.to_owned())
+            .or_insert_with(|| {
+                Arc::new(WechatCustomerSendLockEntry {
+                    lock: AsyncMutex::new(()),
+                    active_handles: AtomicUsize::new(0),
+                })
+            })
+            .clone();
+        // 在持有表锁时增加引用，避免最后一个 handle 正在回收时新请求拿到同一
+        // entry 却被误判为空闲。
+        entry.active_handles.fetch_add(1, Ordering::Relaxed);
+        WechatCustomerSendLock {
+            owner: Arc::clone(self),
+            touser: touser.to_owned(),
+            entry,
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("wechat customer send lock map should not be poisoned")
+            .len()
+    }
+}
+
+impl WechatCustomerSendLock {
+    async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.entry.lock.lock().await
+    }
+}
+
+impl Drop for WechatCustomerSendLock {
+    fn drop(&mut self) {
+        if self.entry.active_handles.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
+        }
+
+        let mut locks = self
+            .owner
+            .inner
+            .lock()
+            .expect("wechat customer send lock map should not be poisoned");
+        let is_current_and_idle = locks.get(&self.touser).is_some_and(|entry| {
+            Arc::ptr_eq(entry, &self.entry)
+                && self.entry.active_handles.load(Ordering::Acquire) == 0
+        });
+        if is_current_and_idle {
+            locks.remove(&self.touser);
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,6 +185,7 @@ pub(super) async fn spawn_callback_server(
     let message_crypto = build_message_crypto(&config)?;
     let state = WechatServiceState {
         customer_messenger: build_customer_messenger(&config),
+        customer_send_locks: Arc::new(WechatCustomerSendLocks::default()),
         message_crypto,
         config,
         respond,
@@ -243,11 +338,14 @@ async fn handle_slow_job_completion(
     message: &WechatTextMessage,
     reply: &str,
 ) {
+    let reply_chars = reply.chars().count();
+    let reply_bytes = reply.len();
     let Some(messenger) = state.customer_messenger.as_ref() else {
         info!(
             message_id = %message.msg_id,
             user = %mask_openid(&message.from_user_name),
-            reply_len = reply.chars().count(),
+            reply_chars,
+            reply_bytes,
             "微信服务号慢回复已完成，但未启用客服消息能力"
         );
         return;
@@ -260,12 +358,24 @@ async fn handle_slow_job_completion(
         );
         return;
     }
-    match messenger.send_text(&message.from_user_name, reply).await {
-        Ok(()) => {
+    // 锁覆盖整个回复的所有分片；否则多个慢任务可能分别发送首片并把两轮回复交错给用户。
+    let send_lock = state.customer_send_locks.lock_for(&message.from_user_name);
+    let _send_guard = send_lock.lock().await;
+    match send_customer_text_reply(
+        messenger.as_ref(),
+        &message.msg_id,
+        &message.from_user_name,
+        reply,
+    )
+    .await
+    {
+        Ok(chunk_count) => {
             info!(
                 message_id = %message.msg_id,
                 user = %mask_openid(&message.from_user_name),
-                reply_len = reply.chars().count(),
+                reply_chars,
+                reply_bytes,
+                chunk_count,
                 "微信客服文本消息已发送"
             );
         }
@@ -273,12 +383,64 @@ async fn handle_slow_job_completion(
             warn!(
                 message_id = %message.msg_id,
                 user = %mask_openid(&message.from_user_name),
-                reply_len = reply.chars().count(),
+                reply_chars,
+                reply_bytes,
                 error = %error.log_summary(),
                 "微信客服文本消息发送失败"
             );
         }
     }
+}
+
+/// 在调用微信客服接口前按 `text.content` 的 UTF-8 字节上限安全分片。
+///
+/// 这是顺序发送：当前分片返回成功后才会调用下一片；一旦失败立即停止，保留真实
+/// API 错误给调用方，并通过日志标出失败分片，避免把部分送达记成整轮成功。
+async fn send_customer_text_reply(
+    messenger: &dyn WechatCustomerMessenger,
+    message_id: &str,
+    touser: &str,
+    reply: &str,
+) -> Result<usize, WechatCustomerMessageError> {
+    let chunks =
+        crate::message_chunk::chunk_plain_text_by_utf8_bytes(reply, WECHAT_CUSTOMER_TEXT_MAX_BYTES);
+    let chunk_count = chunks.len();
+    if chunk_count > 1 {
+        info!(
+            message_id = %message_id,
+            original_chars = reply.chars().count(),
+            original_bytes = reply.len(),
+            chunk_count,
+            max_chunk_bytes = WECHAT_CUSTOMER_TEXT_MAX_BYTES,
+            "微信客服文本消息超过单片限制，已安全分片"
+        );
+    }
+
+    for (index, chunk) in chunks.iter().enumerate() {
+        let result = tokio::time::timeout(
+            WECHAT_CUSTOMER_REQUEST_TIMEOUT,
+            messenger.send_text(touser, chunk),
+        )
+        .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(_) => Err(WechatCustomerMessageError::Timeout),
+        };
+        if let Err(error) = result {
+            warn!(
+                message_id = %message_id,
+                chunk_index = index + 1,
+                chunk_count,
+                chunk_chars = chunk.chars().count(),
+                chunk_bytes = chunk.len(),
+                error = %error.log_summary(),
+                "微信客服文本消息分片发送失败，已停止后续分片"
+            );
+            return Err(error);
+        }
+    }
+
+    Ok(chunk_count)
 }
 
 fn reserve_wechat_message(

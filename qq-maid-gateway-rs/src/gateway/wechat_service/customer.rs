@@ -16,6 +16,14 @@ use crate::{
 };
 
 const WECHAT_TOKEN_REFRESH_MARGIN: Duration = Duration::from_secs(60);
+/// 每次客服接口调用的上限；客服补发在独立任务中执行，不能无限占住收件人串行锁。
+pub(super) const WECHAT_CUSTOMER_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 微信公众号客服文本消息 `text.content` 的单条 UTF-8 字节上限。
+///
+/// 该限制来自微信公众平台客服接口的文本消息约定；它不是 JSON 请求体的字符数，
+/// 也不是 Rust `str::chars().count()` 的结果。
+pub(super) const WECHAT_CUSTOMER_TEXT_MAX_BYTES: usize = 2048;
 
 pub(super) fn build_customer_messenger(
     config: &WechatServiceConfig,
@@ -43,6 +51,7 @@ pub(super) struct WechatCustomerMessageClient {
     api_base: String,
     app_id: String,
     app_secret: String,
+    request_timeout: Duration,
     token: Mutex<Option<CachedWechatAccessToken>>,
 }
 
@@ -56,6 +65,8 @@ struct CachedWechatAccessToken {
 pub(super) enum WechatCustomerMessageError {
     #[error("WeChat API request failed: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("WeChat API request timed out")]
+    Timeout,
     #[error("WeChat API returned {status}")]
     Status {
         status: StatusCode,
@@ -73,6 +84,7 @@ impl WechatCustomerMessageError {
     pub(super) fn log_summary(&self) -> String {
         match self {
             Self::Http(error) => reqwest_error_summary(error),
+            Self::Timeout => "request timed out".to_owned(),
             Self::Status {
                 status,
                 body_summary,
@@ -124,11 +136,28 @@ impl WechatCustomerMessageClient {
         app_id: String,
         app_secret: String,
     ) -> Self {
+        Self::new_with_request_timeout(
+            client,
+            api_base,
+            app_id,
+            app_secret,
+            WECHAT_CUSTOMER_REQUEST_TIMEOUT,
+        )
+    }
+
+    pub(super) fn new_with_request_timeout(
+        client: reqwest::Client,
+        api_base: String,
+        app_id: String,
+        app_secret: String,
+        request_timeout: Duration,
+    ) -> Self {
         Self {
             client,
             api_base: api_base.trim_end_matches('/').to_owned(),
             app_id,
             app_secret,
+            request_timeout,
             token: Mutex::new(None),
         }
     }
@@ -146,6 +175,7 @@ impl WechatCustomerMessageClient {
         let response = self
             .client
             .get(url)
+            .timeout(self.request_timeout)
             .send()
             .await
             .map_err(WechatCustomerMessageError::Http)?;
@@ -235,6 +265,7 @@ impl WechatCustomerMessageClient {
             .client
             .post(url)
             .json(&payload)
+            .timeout(self.request_timeout)
             .send()
             .await
             .map_err(WechatCustomerMessageError::Http)?;
