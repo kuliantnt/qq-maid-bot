@@ -1,7 +1,7 @@
 # qq-maid-core 项目清单 —— 定义包元信息和依赖项。
 [package]
 name = "qq-maid-core"
-version = "0.1.28"
+version = "0.1.29"
 edition = "2024"
 
 # 主运行依赖
@@ -9,7 +9,7 @@ edition = "2024"
 # 错误处理与 Result 简化
 anyhow = "1"
 # 部署管理员密码只保存 Argon2id 哈希，不复用聊天身份或明文凭据。
-argon2 = "0.5"
+argon2 = "0.6.0"
 # 主密钥文件采用可移植文本格式，原文只在进程内解码。
 base64 = "0.23"
 # 异步 trait 支持
@@ -30,7 +30,7 @@ feed-rs = "2.4.0"
 # 娱乐命令使用线程级 CSPRNG 在本地生成结果，不经过模型生成骰值。
 rand = "0.10"
 # 可选本地语义召回；默认配置关闭，启用后模型与推理均留在本机。
-fastembed = { version = "5.17.3", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
+fastembed = { version = "6.0.2", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
 # 异步数据流工具
 futures = "0.3"
 # HTML 摘要转纯文本

@@ -4,7 +4,7 @@
 
 use std::sync::OnceLock;
 
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
+use argon2::{Argon2, PasswordHasher, PasswordVerifier, password_hash::phc::PasswordHash};
 use chacha20poly1305::XChaCha20Poly1305;
 use chacha20poly1305::aead::{Generate, Key};
 use sha2::{Digest, Sha256};
@@ -26,11 +26,10 @@ pub(super) fn dummy_password_hash() -> Result<&'static str, AdminAuthError> {
 }
 
 pub(super) fn hash_password(password: &str) -> Result<String, AdminAuthError> {
-    let random = Key::<XChaCha20Poly1305>::generate();
-    let salt = SaltString::encode_b64(&random[..16])
-        .map_err(|_| AdminAuthError::storage("failed to encode password salt"))?;
+    // Argon2 0.6 由 password-hash 使用系统安全随机源生成推荐长度 salt；保留
+    // Argon2 默认 Argon2id 参数，历史 PHC 字符串仍由 verify_password 兼容读取。
     Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map(|hash| hash.to_string())
         .map_err(|_| AdminAuthError::storage("failed to hash administrator password"))
 }
