@@ -23,7 +23,7 @@
 
 想直接使用骰点功能，可查看 [骰子使用教程](./docs/guides/dice.md)。
 
-想试试周易起卦，可发送 `/算卦`（别名 `/iching`）；这是不调用模型的本地无状态命令，完整使用说明见 Wiki [使用说明](https://github.com/kuliantnt/qq-maid-bot/wiki/使用说明)。
+想试试周易起卦，可发送 `/算卦`（别名 `/iching`）；这是不调用模型的本地确定性命令，结果会作为当前会话回执保存，之后可以直接追问，完整使用说明见 Wiki [使用说明](https://github.com/kuliantnt/qq-maid-bot/wiki/使用说明)。
 
 ## 快速开始
 
@@ -142,7 +142,7 @@ runtime/botctl.sh status
 <details>
 <summary>展开查看 24.x 版本更新</summary>
 
-- **周易起卦命令**（v0.24.5，PR #687）：发送 `/算卦` 或 `/iching` 使用固定六轮三钱法（`3d2+3`）在本地起卦，展示六爻、本卦、动爻、之卦和卦辞/译文/注释；不调用模型、不进入 session、pending 或 Tool Loop，带参数形式静默忽略。
+- **周易起卦命令**（v0.24.5，PR #687）：发送 `/算卦` 或 `/iching` 使用固定六轮三钱法（`3d2+3`）在本地起卦，展示六爻、本卦、动爻、之卦和卦辞/译文/注释；不调用模型、不进入 pending 或 Tool Loop，结果作为当前会话回执保存，后续可用自然语言继续追问，带参数形式静默忽略。
 - **DND / CoC 骰子规则偏好与 fallback 修复**（v0.24.4，PR #686）：`.set dnd` / `.set coc` 按 conversation 保存默认骰式，分别使用 D20 / D100 和对应的判定方向；AI DM 超时、Provider 错误或非法结构化输出时，fallback 文案从实际 `RollResult` 派生，CoC 不再显示矛盾的 D20，显式骰式仍保持“指定骰子表达式投掷”。
 - **AI DM D20 判定与简单骰子表达式**（v0.24.2，PR #679）：`/roll d100`、`/roll 2d6` 等 `dM` / `NdM` 表达式由 Core 本地结算；`/roll <问题>` 由独立 AI DM 先制定并校验判定方案，再由 Core 使用 CSPRNG 掷骰和确定性模板结算。AI DM 看不到骰值，Provider 异常、超时或非法输出会明确降级为普通本地 D20。
 - **通用骰子表达式与 SealDice 兼容**（v0.24.3，PR #683）：支持修正、多段骰子、重复投掷、取骰、优势/劣势、奖励/惩罚骰，以及 `/r`、`/rd`、`/rap`、`/rab`、`/r2d6`、`.r2d6` 等常见写法。`/r` / `/rd` 尾随文本只作为本地原因；只有 `/roll <骰式> <问题>` 进入 Entertainment DM。完整示例与限制见 [骰子使用教程](./docs/guides/dice.md)。

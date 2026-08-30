@@ -192,9 +192,9 @@ impl<'a> CommandDispatcher<'a> {
             return Ok(DispatchOutcome::Respond(Box::new(response)));
         }
 
-        // `/算卦` 是无状态确定性命令；起卦在读取 pending/session 前完成，避免把
-        // 原文数据或骰值计算送入普通 Agent / Tool Loop。带参数的算卦命令也在这里
-        // 静默收口，不能继续落入天气快捷解析。
+        // `/算卦` 仍在 pending/Tool Loop 分派前本地完成，避免把原文数据或骰值计算
+        // 送入普通 Agent / Tool Loop；但已渲染的结果要作为会话回执保存，供下一轮
+        // 自然语言继续引用。带参数的算卦命令在这里静默收口，不能继续落入天气快捷解析。
         if matches!(
             registered_slash_command,
             Some(RegisteredSlashCommand::IChingIgnored)
@@ -204,9 +204,24 @@ impl<'a> CommandDispatcher<'a> {
             ))));
         }
         if let Some(RegisteredSlashCommand::IChing(command)) = registered_slash_command.as_ref() {
+            let mut session = self
+                .service
+                .session_store
+                .get_or_create_active(&meta)
+                .map_err(session_error)?;
+            session.set_turn_actor(shared_session_turn_actor(
+                &self.service.display_name_store,
+                &meta,
+                &req,
+            ));
+            let reply = crate::runtime::tools::iching::execute_iching_command(*command);
+            self.service
+                .session_store
+                .append_exchange(&mut session, &user_text, &reply)
+                .map_err(session_error)?;
             return Ok(DispatchOutcome::Respond(Box::new(command_response(
-                crate::runtime::tools::iching::execute_iching_command(*command),
-                None,
+                reply,
+                Some(session.session_id),
                 Some("iching"),
             ))));
         }
