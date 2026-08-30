@@ -47,7 +47,10 @@ use crate::{
 
 mod customer;
 
-use customer::{WechatCustomerMessenger, build_customer_messenger};
+use customer::{
+    WECHAT_CUSTOMER_TEXT_MAX_BYTES, WechatCustomerMessageError, WechatCustomerMessenger,
+    build_customer_messenger,
+};
 
 const FALLBACK_ERROR_TEXT: &str = "服务暂时不可用，请稍后再试。";
 const SLOW_SYNC_FALLBACK_TEXT: &str = "这次处理需要更久一点，已收到请求，请稍后查看回复。";
@@ -243,11 +246,14 @@ async fn handle_slow_job_completion(
     message: &WechatTextMessage,
     reply: &str,
 ) {
+    let reply_chars = reply.chars().count();
+    let reply_bytes = reply.len();
     let Some(messenger) = state.customer_messenger.as_ref() else {
         info!(
             message_id = %message.msg_id,
             user = %mask_openid(&message.from_user_name),
-            reply_len = reply.chars().count(),
+            reply_chars,
+            reply_bytes,
             "微信服务号慢回复已完成，但未启用客服消息能力"
         );
         return;
@@ -260,12 +266,21 @@ async fn handle_slow_job_completion(
         );
         return;
     }
-    match messenger.send_text(&message.from_user_name, reply).await {
-        Ok(()) => {
+    match send_customer_text_reply(
+        messenger.as_ref(),
+        &message.msg_id,
+        &message.from_user_name,
+        reply,
+    )
+    .await
+    {
+        Ok(chunk_count) => {
             info!(
                 message_id = %message.msg_id,
                 user = %mask_openid(&message.from_user_name),
-                reply_len = reply.chars().count(),
+                reply_chars,
+                reply_bytes,
+                chunk_count,
                 "微信客服文本消息已发送"
             );
         }
@@ -273,12 +288,55 @@ async fn handle_slow_job_completion(
             warn!(
                 message_id = %message.msg_id,
                 user = %mask_openid(&message.from_user_name),
-                reply_len = reply.chars().count(),
+                reply_chars,
+                reply_bytes,
                 error = %error.log_summary(),
                 "微信客服文本消息发送失败"
             );
         }
     }
+}
+
+/// 在调用微信客服接口前按 `text.content` 的 UTF-8 字节上限安全分片。
+///
+/// 这是顺序发送：当前分片返回成功后才会调用下一片；一旦失败立即停止，保留真实
+/// API 错误给调用方，并通过日志标出失败分片，避免把部分送达记成整轮成功。
+async fn send_customer_text_reply(
+    messenger: &dyn WechatCustomerMessenger,
+    message_id: &str,
+    touser: &str,
+    reply: &str,
+) -> Result<usize, WechatCustomerMessageError> {
+    let chunks =
+        crate::message_chunk::chunk_plain_text_by_utf8_bytes(reply, WECHAT_CUSTOMER_TEXT_MAX_BYTES);
+    let chunk_count = chunks.len();
+    if chunk_count > 1 {
+        info!(
+            message_id = %message_id,
+            original_chars = reply.chars().count(),
+            original_bytes = reply.len(),
+            chunk_count,
+            max_chunk_bytes = WECHAT_CUSTOMER_TEXT_MAX_BYTES,
+            "微信客服文本消息超过单片限制，已安全分片"
+        );
+    }
+
+    for (index, chunk) in chunks.iter().enumerate() {
+        if let Err(error) = messenger.send_text(touser, chunk).await {
+            warn!(
+                message_id = %message_id,
+                chunk_index = index + 1,
+                chunk_count,
+                chunk_chars = chunk.chars().count(),
+                chunk_bytes = chunk.len(),
+                error = %error.log_summary(),
+                "微信客服文本消息分片发送失败，已停止后续分片"
+            );
+            return Err(error);
+        }
+    }
+
+    Ok(chunk_count)
 }
 
 fn reserve_wechat_message(

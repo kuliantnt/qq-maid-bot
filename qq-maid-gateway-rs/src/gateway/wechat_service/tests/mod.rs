@@ -8,20 +8,17 @@ use std::{
 };
 
 use async_trait::async_trait;
-use axum::{Router, body::to_bytes, routing::get};
+use axum::{body::to_bytes, response::Response};
 use qq_maid_common::output_part::AssistantOutput;
 use qq_maid_core::service::{
     CoreError, CoreHealthSnapshot, CoreInboundClassification, CoreInboundKind, CoreRequest,
     CoreRespondOutput, CoreResponse, CoreService, UpstreamStatusSnapshot,
 };
 use quick_xml::{Reader, events::Event};
-use tokio::{net::TcpListener, sync::Notify};
+use tokio::sync::Notify;
 
 use super::{
-    customer::{
-        WechatCustomerMessageClient, WechatCustomerMessageError, WechatCustomerMessenger,
-        is_wechat_access_token_invalid_errcode, parse_wechat_api_status, wechat_api_body_summary,
-    },
+    customer::{WechatCustomerMessageError, WechatCustomerMessenger},
     *,
 };
 
@@ -736,142 +733,6 @@ async fn customer_message_error_is_not_recorded_as_success() {
     assert_eq!(customer.failure_count(), 1);
 }
 
-#[test]
-fn customer_message_api_errcode_is_reported_as_failure() {
-    let err = parse_wechat_api_status(r#"{"errcode":40003,"errmsg":"invalid openid"}"#)
-        .expect_err("non-zero errcode should fail");
-
-    assert!(matches!(
-        err,
-        WechatCustomerMessageError::Api { errcode: 40003, .. }
-    ));
-    assert!(err.log_summary().contains("errcode=40003"));
-}
-
-#[test]
-fn customer_message_status_missing_errcode_is_failure() {
-    let err = parse_wechat_api_status(r#"{}"#).expect_err("missing errcode should fail");
-
-    assert!(matches!(
-        err,
-        WechatCustomerMessageError::Api { errcode: -1, .. }
-    ));
-    assert!(err.log_summary().contains("missing errcode"));
-}
-
-#[test]
-fn customer_message_token_errcodes_are_retryable() {
-    for errcode in [40001, 40014, 42001] {
-        assert!(is_wechat_access_token_invalid_errcode(errcode));
-    }
-    assert!(!is_wechat_access_token_invalid_errcode(40003));
-    assert!(!is_wechat_access_token_invalid_errcode(45015));
-}
-
-#[derive(Clone)]
-struct TokenRefreshApiState {
-    issued_tokens: Arc<Mutex<Vec<String>>>,
-    message_tokens: Arc<Mutex<Vec<String>>>,
-}
-
-async fn token_refresh_token_handler(
-    State(state): State<TokenRefreshApiState>,
-) -> axum::Json<serde_json::Value> {
-    let mut issued_tokens = state.issued_tokens.lock().unwrap();
-    let token = if issued_tokens.is_empty() {
-        "stale-token"
-    } else {
-        "fresh-token"
-    };
-    issued_tokens.push(token.to_owned());
-    axum::Json(serde_json::json!({
-        "access_token": token,
-        "expires_in": 7200
-    }))
-}
-
-async fn token_refresh_message_handler(
-    State(state): State<TokenRefreshApiState>,
-    Query(query): Query<HashMap<String, String>>,
-) -> axum::Json<serde_json::Value> {
-    let token = query.get("access_token").cloned().unwrap_or_default();
-    state.message_tokens.lock().unwrap().push(token.clone());
-    if token == "stale-token" {
-        return axum::Json(serde_json::json!({
-            "errcode": 40001,
-            "errmsg": "invalid credential"
-        }));
-    }
-    axum::Json(serde_json::json!({
-        "errcode": 0,
-        "errmsg": "ok"
-    }))
-}
-
-#[tokio::test]
-async fn customer_message_refreshes_token_and_retries_once_when_token_invalid() {
-    let api_state = TokenRefreshApiState {
-        issued_tokens: Arc::new(Mutex::new(Vec::new())),
-        message_tokens: Arc::new(Mutex::new(Vec::new())),
-    };
-    let app = Router::new()
-        .route("/cgi-bin/token", get(token_refresh_token_handler))
-        .route(
-            "/cgi-bin/message/custom/send",
-            axum::routing::post(token_refresh_message_handler),
-        )
-        .with_state(api_state.clone());
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    let client = WechatCustomerMessageClient::new(
-        qq_maid_common::http_client::client(),
-        format!("http://{addr}"),
-        "appid".to_owned(),
-        "secret".to_owned(),
-    );
-
-    client.send_text("openid", "hello").await.unwrap();
-    server.abort();
-
-    assert_eq!(
-        *api_state.issued_tokens.lock().unwrap(),
-        vec!["stale-token".to_owned(), "fresh-token".to_owned()]
-    );
-    assert_eq!(
-        *api_state.message_tokens.lock().unwrap(),
-        vec!["stale-token".to_owned(), "fresh-token".to_owned()]
-    );
-}
-
-#[test]
-fn wechat_api_body_summary_redacts_token_and_secret() {
-    let summary = wechat_api_body_summary(
-        r#"{"errcode":1,"access_token":"token-value","nested":{"app_secret":"secret-value"},"url":"https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=url-token&debug=1"}"#,
-    );
-
-    assert!(!summary.contains("token-value"));
-    assert!(!summary.contains("secret-value"));
-    assert!(!summary.contains("url-token"));
-    assert!(summary.contains(r#""access_token":"<redacted>""#));
-    assert!(summary.contains(r#""app_secret":"<redacted>""#));
-    assert!(summary.contains("access_token=***"));
-}
-
-#[test]
-fn wechat_api_body_summary_redacts_query_like_plain_text() {
-    let summary = wechat_api_body_summary(
-        "proxy echoed https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&secret=secret-value access_token=token-value",
-    );
-
-    assert!(!summary.contains("secret-value"));
-    assert!(!summary.contains("token-value"));
-    assert!(summary.contains("secret=***"));
-    assert!(summary.contains("access_token=<redacted>"));
-}
-
 #[tokio::test]
 async fn unsupported_message_type_returns_empty_ok_without_core() {
     let core = Arc::new(MockCore::default());
@@ -913,3 +774,4 @@ async fn empty_text_message_returns_empty_ok_without_core() {
 }
 
 mod command;
+mod customer_message;

@@ -17,6 +17,12 @@ use crate::{
 
 const WECHAT_TOKEN_REFRESH_MARGIN: Duration = Duration::from_secs(60);
 
+/// 微信公众号客服文本消息 `text.content` 的单条 UTF-8 字节上限。
+///
+/// 该限制来自微信公众平台客服接口的文本消息约定；它不是 JSON 请求体的字符数，
+/// 也不是 Rust `str::chars().count()` 的结果。
+pub(super) const WECHAT_CUSTOMER_TEXT_MAX_BYTES: usize = 2048;
+
 pub(super) fn build_customer_messenger(
     config: &WechatServiceConfig,
 ) -> Option<Arc<dyn WechatCustomerMessenger>> {
