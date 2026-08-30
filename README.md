@@ -17,7 +17,7 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.24.5`，项目处于 `24.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.24.6`，项目处于 `24.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
@@ -137,12 +137,13 @@ runtime/botctl.sh status
 
 ## 24.x 版本线更新
 
-当前稳定版本为 `v0.24.5`。需要查看本版本线的详细变更和配置迁移提示时，再展开下面的更新记录：
+当前稳定版本为 `v0.24.6`。需要查看本版本线的详细变更和配置迁移提示时，再展开下面的更新记录：
 
 <details>
 <summary>展开查看 24.x 版本更新</summary>
 
-- **周易起卦命令**（v0.24.5，PR #687）：发送 `/起卦`、`/算卦`、`/卜卦` 或 `/iching` 使用固定六轮三钱法（`3d2+3`）在本地起卦，展示六爻、本卦、动爻、之卦和卦辞/译文/注释；不调用模型、不进入 pending 或 Tool Loop，结果作为当前会话回执保存，后续可用自然语言继续追问。带问题形式（如 `/算卦 xxxx`）不会起卦或复述问题，只提示用户默念三遍后重新发送 `/算卦`。
+- **微信服务号客服长文本与周易起卦别名**（v0.24.6，PR #690）：慢请求客服补发按 2048 个 UTF-8 字节安全分片并对同一收件人串行发送，避免长文本丢失或多轮回复交错；新增 `/起卦`、`/卜卦` 中文别名，带参数时不回显问题，只提示默念后重新起卦。
+- **周易起卦命令**（v0.24.5，PR #687）：发送 `/算卦` 或 `/iching` 使用固定六轮三钱法（`3d2+3`）在本地起卦，展示六爻、本卦、动爻、之卦和卦辞/译文/注释；不调用模型、不进入 pending 或 Tool Loop，结果作为当前会话回执保存，后续可用自然语言继续追问，带参数形式静默忽略。
 - **DND / CoC 骰子规则偏好与 fallback 修复**（v0.24.4，PR #686）：`.set dnd` / `.set coc` 按 conversation 保存默认骰式，分别使用 D20 / D100 和对应的判定方向；AI DM 超时、Provider 错误或非法结构化输出时，fallback 文案从实际 `RollResult` 派生，CoC 不再显示矛盾的 D20，显式骰式仍保持“指定骰子表达式投掷”。
 - **AI DM D20 判定与简单骰子表达式**（v0.24.2，PR #679）：`/roll d100`、`/roll 2d6` 等 `dM` / `NdM` 表达式由 Core 本地结算；`/roll <问题>` 由独立 AI DM 先制定并校验判定方案，再由 Core 使用 CSPRNG 掷骰和确定性模板结算。AI DM 看不到骰值，Provider 异常、超时或非法输出会明确降级为普通本地 D20。
 - **通用骰子表达式与 SealDice 兼容**（v0.24.3，PR #683）：支持修正、多段骰子、重复投掷、取骰、优势/劣势、奖励/惩罚骰，以及 `/r`、`/rd`、`/rap`、`/rab`、`/r2d6`、`.r2d6` 等常见写法。`/r` / `/rd` 尾随文本只作为本地原因；只有 `/roll <骰式> <问题>` 进入 Entertainment DM。完整示例与限制见 [骰子使用教程](./docs/guides/dice.md)。
@@ -172,7 +173,7 @@ runtime/botctl.sh status
 | --- | --- | --- |
 | QQ 官方机器人 | 主要入口 | C2C、群聊、图片理解、引用上下文、流式回复和主动推送 |
 | OneBot 11 | 可选 | 单账号反向 WebSocket，支持私聊、群聊、图片理解、文件摘要和纯文本主动推送 |
-| 微信服务号 | 可选 | 明文/AES 文本回调、同步回复和慢请求客服补发 |
+| 微信服务号 | 可选 | 明文/AES 文本回调、同步回复和按 UTF-8 字节安全分片的慢请求客服补发 |
 
 OneBot 11 当前主要面向 NapCat，详细限制与接入步骤见 Wiki [用 NapCat 接入小女仆](https://github.com/kuliantnt/qq-maid-bot/wiki/Napcat接入)（仓库技术版：[OneBot 11 接入文档](./docs/development/onebot11-napcat.md)）。微信服务号默认关闭，配置方式见 [runtime 运行文档](./runtime/README.md#微信服务号文本回调配置)。
 
