@@ -142,9 +142,13 @@ fn iching_uses_the_existing_roll_parser_and_multi_round_roller() {
 
     assert_eq!(totals, [6, 7, 7, 8, 8, 9]);
     assert_eq!(calls, vec![2; 18]);
-    assert_eq!(parse_iching_command("/算卦"), Some(IChingCommand::Cast));
-    assert_eq!(parse_iching_command("/算卦 额外参数"), None);
-    assert!(is_iching_command("/算卦 额外参数"));
-    assert!(is_iching_command("/iching 额外参数"));
+    for alias in ["起卦", "算卦", "卜卦", "iching"] {
+        assert_eq!(
+            parse_iching_command(&format!("/{alias}")),
+            Some(IChingCommand::Cast)
+        );
+        assert_eq!(parse_iching_command(&format!("/{alias} 额外参数")), None);
+        assert!(is_iching_command(&format!("/{alias} 额外参数")));
+    }
     assert!(!is_iching_command("/天气 杭州"));
 }

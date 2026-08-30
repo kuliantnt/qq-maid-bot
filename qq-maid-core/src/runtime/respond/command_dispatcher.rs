@@ -38,8 +38,8 @@ enum RegisteredSlashCommand {
     Train(train_flow::ParsedTrainCommand),
     Radar(ParsedCommand),
     IChing(crate::runtime::tools::iching::IChingCommand),
-    /// 已识别的算卦命令但带有参数；按命令约定静默忽略，不能交给天气快捷解析。
-    IChingIgnored,
+    /// 已识别的算卦命令但带有参数；只返回仪式提示，不能交给天气快捷解析。
+    IChingWithArguments,
     Roll(crate::runtime::tools::roll::RollCommand),
     WebSearch(ParsedCommand),
     Rss,
@@ -75,7 +75,7 @@ impl RegisteredSlashCommand {
             return Some(Self::IChing(command));
         }
         if crate::runtime::tools::iching::is_iching_command(text) {
-            return Some(Self::IChingIgnored);
+            return Some(Self::IChingWithArguments);
         }
         if let Some(command) = crate::runtime::tools::roll::parse_roll_command(text) {
             return Some(Self::Roll(command));
@@ -192,15 +192,17 @@ impl<'a> CommandDispatcher<'a> {
             return Ok(DispatchOutcome::Respond(Box::new(response)));
         }
 
-        // `/算卦` 仍在 pending/Tool Loop 分派前本地完成，避免把原文数据或骰值计算
-        // 送入普通 Agent / Tool Loop；但已渲染的结果要作为会话回执保存，供下一轮
-        // 自然语言继续引用。带参数的算卦命令在这里静默收口，不能继续落入天气快捷解析。
+        // 起卦命令仍在 pending/Tool Loop 分派前本地完成，避免把问题文本或骰值计算
+        // 送入普通 Agent / Tool Loop；无参数命令保存起卦结果作为会话回执，带参数命令
+        // 直接返回仪式提示，不能继续落入天气快捷解析。
         if matches!(
             registered_slash_command,
-            Some(RegisteredSlashCommand::IChingIgnored)
+            Some(RegisteredSlashCommand::IChingWithArguments)
         ) {
-            return Ok(DispatchOutcome::Respond(Box::new(suppressed_response(
-                "iching_arguments_ignored",
+            return Ok(DispatchOutcome::Respond(Box::new(command_response(
+                crate::runtime::tools::iching::ICHING_ARGUMENT_HINT,
+                None,
+                Some("iching"),
             ))));
         }
         if let Some(RegisteredSlashCommand::IChing(command)) = registered_slash_command.as_ref() {
@@ -581,7 +583,7 @@ mod tests {
             Some(RegisteredSlashCommand::Train(_)) => "train",
             Some(RegisteredSlashCommand::Radar(_)) => "radar",
             Some(RegisteredSlashCommand::IChing(_)) => "iching",
-            Some(RegisteredSlashCommand::IChingIgnored) => "iching_ignored",
+            Some(RegisteredSlashCommand::IChingWithArguments) => "iching_with_arguments",
             Some(RegisteredSlashCommand::Roll(_)) => "roll",
             Some(RegisteredSlashCommand::WebSearch(_)) => "web_search",
             Some(RegisteredSlashCommand::Rss) => "rss",
@@ -604,7 +606,9 @@ mod tests {
             ("/train G123天气", "train"),
             ("/rader codex天气", "radar"),
             ("/算卦", "iching"),
-            ("/算卦 明天天气", "iching_ignored"),
+            ("/起卦", "iching"),
+            ("/卜卦", "iching"),
+            ("/算卦 明天天气", "iching_with_arguments"),
             ("/roll 明天有个好天气", "roll"),
             ("/查 杭州天气", "web_search"),
             ("/rss list天气", "rss"),

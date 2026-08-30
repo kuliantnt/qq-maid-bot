@@ -189,13 +189,18 @@ async fn iching_is_a_deterministic_command_outside_pending_and_tool_loop() {
     let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
     let service = test_service_with_provider_and_tool_calling(provider.clone(), true);
 
-    let response = service.respond(private_message("/算卦")).await.unwrap();
+    for alias in ["起卦", "算卦", "卜卦"] {
+        let response = service
+            .respond(private_message(&format!("/{alias}")))
+            .await
+            .unwrap();
 
-    assert_eq!(response.command.as_deref(), Some("iching"));
-    let text = response.text.as_deref().unwrap();
-    assert!(text.starts_with("🎴 周易起卦\n\n"));
-    assert!(text.contains("本卦："));
-    assert!(text.contains("【卦辞】"));
+        assert_eq!(response.command.as_deref(), Some("iching"));
+        let text = response.text.as_deref().unwrap();
+        assert!(text.starts_with("🎴 周易起卦\n\n"));
+        assert!(text.contains("本卦："));
+        assert!(text.contains("【卦辞】"));
+    }
     assert_provider_unused(&provider);
 }
 
