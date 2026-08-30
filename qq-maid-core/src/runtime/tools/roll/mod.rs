@@ -539,6 +539,39 @@ fn thread_roller() -> impl Roller {
     dice::csprng_roller()
 }
 
+/// 为其他确定性娱乐命令提供同一套 Roll 解析、随机源和多轮投掷适配。
+///
+/// 算卦把自身的固定骰式写成 `/r6#(3d2+3)`，然后通过这个适配器取得六轮总值；
+/// 这样不会在算卦领域复制 `3d2+3` 的语法、随机数或重复投掷实现。
+pub(crate) fn roll_local_command_totals(command_text: &str) -> Option<Vec<i32>> {
+    let mut roller = thread_roller();
+    roll_local_command_totals_with_roller(command_text, &mut roller)
+}
+
+pub(crate) fn roll_local_command_totals_with_roller<R: Roller>(
+    command_text: &str,
+    roller: &mut R,
+) -> Option<Vec<i32>> {
+    let command = parse_roll_command(command_text)?;
+    let RollCommand::DiceBatch {
+        expression,
+        repetitions,
+        reason,
+    } = command
+    else {
+        return None;
+    };
+    if reason.is_some() {
+        return None;
+    }
+    Some(
+        roll_expression_results(expression, repetitions, roller)
+            .into_iter()
+            .map(|result| result.total)
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 async fn execute_roll_command_with_roller<F>(
     provider: &DynLlmProvider,

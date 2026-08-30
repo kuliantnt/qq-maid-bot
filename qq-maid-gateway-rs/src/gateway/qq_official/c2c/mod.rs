@@ -136,6 +136,16 @@ pub(crate) async fn send_c2c_respond_response_with_sender<S: OutboundSender + ?S
     capability: &ReplyCapability,
 ) -> anyhow::Result<(Vec<SendMessageIds>, String)> {
     let masked_user = mask_openid(&message.user_openid);
+    // `suppressed` 是 Core 与 Gateway 之间的显式静默契约；必须在空正文降级、TTS
+    // 和分片发送前收口，否则无正文的静默响应会被误发成本地兜底文案。
+    if response.suppresses_reply() {
+        debug!(
+            message_id = %message.message_id,
+            user = %masked_user,
+            "C2C 回复已被 Core 抑制"
+        );
+        return Ok((Vec::new(), String::new()));
+    }
     let target = ReplyTarget::qq_c2c(
         message.user_openid.clone(),
         Some(message.message_id.clone()),
