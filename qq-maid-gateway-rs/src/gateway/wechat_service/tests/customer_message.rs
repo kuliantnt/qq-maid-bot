@@ -11,19 +11,20 @@ use async_trait::async_trait;
 use axum::{
     Router,
     extract::{Query, State},
+    response::Response,
     routing::get,
 };
 use tokio::{net::TcpListener, sync::Notify};
 
 use super::super::{
     customer::{
-        WECHAT_CUSTOMER_TEXT_MAX_BYTES, WechatCustomerMessageClient, WechatCustomerMessageError,
-        WechatCustomerMessenger, is_wechat_access_token_invalid_errcode, parse_wechat_api_status,
-        wechat_api_body_summary,
+        WECHAT_CUSTOMER_REQUEST_TIMEOUT, WECHAT_CUSTOMER_TEXT_MAX_BYTES,
+        WechatCustomerMessageClient, WechatCustomerMessageError, WechatCustomerMessenger,
+        is_wechat_access_token_invalid_errcode, parse_wechat_api_status, wechat_api_body_summary,
     },
     handle_slow_job_completion, send_customer_text_reply,
 };
-use super::{MockCore, state_with_customer};
+use super::{BlockingCustomerMessenger, MockCore, state_with_customer};
 use crate::gateway::platform::wechat_service::WechatTextMessage;
 
 struct RecordingCustomerMessenger {
@@ -287,6 +288,60 @@ async fn customer_message_chunks_are_serialized_per_recipient() {
     assert!(attempts[1].starts_with('a'));
     assert!(attempts[2].starts_with('b'));
     assert!(attempts[3].starts_with('b'));
+    assert_eq!(state.customer_send_locks.len(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn customer_message_send_timeout_releases_recipient_lock() {
+    let messenger = Arc::new(BlockingCustomerMessenger::default());
+    let state = state_with_customer(
+        Arc::new(MockCore::default()),
+        Some(messenger.clone() as Arc<dyn WechatCustomerMessenger>),
+    );
+    let message = customer_text_message("message-timeout");
+    let reply = "timeout".to_owned();
+    let task_state = state.clone();
+    let task = tokio::spawn(async move {
+        handle_slow_job_completion(&task_state, &message, &reply).await;
+    });
+
+    messenger.wait_for_attempt_count(1).await;
+    tokio::time::advance(WECHAT_CUSTOMER_REQUEST_TIMEOUT + Duration::from_millis(1)).await;
+    task.await.unwrap();
+
+    // 超时会取消当前 send_text future；最后一个 handle 释放后，收件人键也应从表中移除。
+    assert_eq!(state.customer_send_locks.len(), 0);
+}
+
+async fn hanging_customer_api_handler() -> Response {
+    std::future::pending().await
+}
+
+#[tokio::test]
+async fn customer_message_http_request_has_bounded_timeout() {
+    let app = Router::new().route("/cgi-bin/token", get(hanging_customer_api_handler));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let client = WechatCustomerMessageClient::new_with_request_timeout(
+        qq_maid_common::http_client::client(),
+        format!("http://{addr}"),
+        "appid".to_owned(),
+        "secret".to_owned(),
+        Duration::from_millis(25),
+    );
+
+    let error = tokio::time::timeout(Duration::from_secs(1), client.send_text("openid", "hello"))
+        .await
+        .expect("客服请求应在测试超时时限内结束")
+        .expect_err("挂起的客服 HTTP 请求应超时");
+    assert!(matches!(
+        error,
+        WechatCustomerMessageError::Http(error) if error.is_timeout()
+    ));
+    server.abort();
 }
 
 #[test]

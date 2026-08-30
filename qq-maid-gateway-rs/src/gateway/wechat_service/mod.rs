@@ -5,7 +5,10 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -53,8 +56,8 @@ use crate::{
 mod customer;
 
 use customer::{
-    WECHAT_CUSTOMER_TEXT_MAX_BYTES, WechatCustomerMessageError, WechatCustomerMessenger,
-    build_customer_messenger,
+    WECHAT_CUSTOMER_REQUEST_TIMEOUT, WECHAT_CUSTOMER_TEXT_MAX_BYTES, WechatCustomerMessageError,
+    WechatCustomerMessenger, build_customer_messenger,
 };
 
 const FALLBACK_ERROR_TEXT: &str = "服务暂时不可用，请稍后再试。";
@@ -75,22 +78,82 @@ struct WechatServiceState {
 /// 为每个收件人复用一把异步锁，避免同一用户的多轮慢回复在客服接口中交错。
 ///
 /// 锁表只在进程内共享，不记录日志；不同收件人仍可并行发送。客服消息额度由微信
-/// 侧控制，因此锁必须覆盖一整组分片，而不能只包住单个 send_text 调用。
+/// 侧控制，因此锁必须覆盖一整组分片，而不能只包住单个 send_text 调用。引用计数
+/// 让没有持有者或等待者的收件人锁及时从表中移除，避免长期运行时无界保留 openid。
 #[derive(Default)]
 struct WechatCustomerSendLocks {
-    inner: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    inner: Mutex<HashMap<String, Arc<WechatCustomerSendLockEntry>>>,
+}
+
+struct WechatCustomerSendLockEntry {
+    lock: AsyncMutex<()>,
+    active_handles: AtomicUsize,
+}
+
+struct WechatCustomerSendLock {
+    owner: Arc<WechatCustomerSendLocks>,
+    touser: String,
+    entry: Arc<WechatCustomerSendLockEntry>,
 }
 
 impl WechatCustomerSendLocks {
-    fn lock_for(&self, touser: &str) -> Arc<AsyncMutex<()>> {
+    fn lock_for(self: &Arc<Self>, touser: &str) -> WechatCustomerSendLock {
         let mut locks = self
             .inner
             .lock()
             .expect("wechat customer send lock map should not be poisoned");
-        locks
+        let entry = locks
             .entry(touser.to_owned())
-            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-            .clone()
+            .or_insert_with(|| {
+                Arc::new(WechatCustomerSendLockEntry {
+                    lock: AsyncMutex::new(()),
+                    active_handles: AtomicUsize::new(0),
+                })
+            })
+            .clone();
+        // 在持有表锁时增加引用，避免最后一个 handle 正在回收时新请求拿到同一
+        // entry 却被误判为空闲。
+        entry.active_handles.fetch_add(1, Ordering::Relaxed);
+        WechatCustomerSendLock {
+            owner: Arc::clone(self),
+            touser: touser.to_owned(),
+            entry,
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("wechat customer send lock map should not be poisoned")
+            .len()
+    }
+}
+
+impl WechatCustomerSendLock {
+    async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.entry.lock.lock().await
+    }
+}
+
+impl Drop for WechatCustomerSendLock {
+    fn drop(&mut self) {
+        if self.entry.active_handles.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
+        }
+
+        let mut locks = self
+            .owner
+            .inner
+            .lock()
+            .expect("wechat customer send lock map should not be poisoned");
+        let is_current_and_idle = locks.get(&self.touser).is_some_and(|entry| {
+            Arc::ptr_eq(entry, &self.entry)
+                && self.entry.active_handles.load(Ordering::Acquire) == 0
+        });
+        if is_current_and_idle {
+            locks.remove(&self.touser);
+        }
     }
 }
 
@@ -354,7 +417,16 @@ async fn send_customer_text_reply(
     }
 
     for (index, chunk) in chunks.iter().enumerate() {
-        if let Err(error) = messenger.send_text(touser, chunk).await {
+        let result = tokio::time::timeout(
+            WECHAT_CUSTOMER_REQUEST_TIMEOUT,
+            messenger.send_text(touser, chunk),
+        )
+        .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(_) => Err(WechatCustomerMessageError::Timeout),
+        };
+        if let Err(error) = result {
             warn!(
                 message_id = %message_id,
                 chunk_index = index + 1,
