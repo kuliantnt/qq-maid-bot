@@ -252,6 +252,7 @@ fn aes_state_with_credentials(
         respond: RespondClient::new(core),
         dedupe: Arc::new(MessageDedupe::new(Duration::from_secs(10 * 60))),
         customer_messenger: None,
+        customer_send_locks: Arc::new(WechatCustomerSendLocks::default()),
         commands: None,
     }
 }
@@ -282,6 +283,7 @@ fn state_with_customer_and_dedupe_ttl(
         respond: RespondClient::new(core),
         dedupe: Arc::new(MessageDedupe::new(dedupe_ttl)),
         customer_messenger,
+        customer_send_locks: Arc::new(WechatCustomerSendLocks::default()),
         commands: None,
     }
 }

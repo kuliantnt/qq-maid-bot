@@ -1,6 +1,10 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -9,7 +13,7 @@ use axum::{
     extract::{Query, State},
     routing::get,
 };
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Notify};
 
 use super::super::{
     customer::{
@@ -17,8 +21,10 @@ use super::super::{
         WechatCustomerMessenger, is_wechat_access_token_invalid_errcode, parse_wechat_api_status,
         wechat_api_body_summary,
     },
-    send_customer_text_reply,
+    handle_slow_job_completion, send_customer_text_reply,
 };
+use super::{MockCore, state_with_customer};
+use crate::gateway::platform::wechat_service::WechatTextMessage;
 
 struct RecordingCustomerMessenger {
     attempts: Mutex<Vec<String>>,
@@ -54,6 +60,61 @@ impl WechatCustomerMessenger for RecordingCustomerMessenger {
             });
         }
         Ok(())
+    }
+}
+
+struct BlockingGroupMessenger {
+    attempts: Mutex<Vec<String>>,
+    attempted: Notify,
+    release_first: Notify,
+    block_first: AtomicBool,
+}
+
+impl BlockingGroupMessenger {
+    fn new() -> Self {
+        Self {
+            attempts: Mutex::new(Vec::new()),
+            attempted: Notify::new(),
+            release_first: Notify::new(),
+            block_first: AtomicBool::new(true),
+        }
+    }
+
+    fn attempts(&self) -> Vec<String> {
+        self.attempts.lock().unwrap().clone()
+    }
+
+    async fn wait_for_attempt_count(&self, expected: usize) {
+        loop {
+            let notified = self.attempted.notified();
+            if self.attempts.lock().unwrap().len() >= expected {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[async_trait]
+impl WechatCustomerMessenger for BlockingGroupMessenger {
+    async fn send_text(&self, _touser: &str, text: &str) -> Result<(), WechatCustomerMessageError> {
+        let is_first = self.block_first.swap(false, Ordering::SeqCst);
+        self.attempts.lock().unwrap().push(text.to_owned());
+        self.attempted.notify_waiters();
+        if is_first {
+            self.release_first.notified().await;
+        }
+        Ok(())
+    }
+}
+
+fn customer_text_message(message_id: &str) -> WechatTextMessage {
+    WechatTextMessage {
+        to_user_name: "gh_service".to_owned(),
+        from_user_name: "same-openid".to_owned(),
+        create_time: Some("1".to_owned()),
+        content: "request".to_owned(),
+        msg_id: message_id.to_owned(),
     }
 }
 
@@ -182,6 +243,50 @@ async fn customer_chunk_failure_stops_follow_up_sends_and_returns_error() {
     assert_eq!(attempts.len(), 2, "the third chunk must not be sent");
     assert_eq!(attempts[0].len(), WECHAT_CUSTOMER_TEXT_MAX_BYTES);
     assert_eq!(attempts[1].len(), WECHAT_CUSTOMER_TEXT_MAX_BYTES);
+}
+
+#[tokio::test]
+async fn customer_message_chunks_are_serialized_per_recipient() {
+    let messenger = Arc::new(BlockingGroupMessenger::new());
+    let state = state_with_customer(
+        Arc::new(MockCore::default()),
+        Some(messenger.clone() as Arc<dyn WechatCustomerMessenger>),
+    );
+    let first_message = customer_text_message("message-first");
+    let second_message = customer_text_message("message-second");
+    let first_reply = "a".repeat(WECHAT_CUSTOMER_TEXT_MAX_BYTES + 1);
+    let second_reply = "b".repeat(WECHAT_CUSTOMER_TEXT_MAX_BYTES + 1);
+
+    let first_state = state.clone();
+    let first = tokio::spawn(async move {
+        handle_slow_job_completion(&first_state, &first_message, &first_reply).await;
+    });
+    messenger.wait_for_attempt_count(1).await;
+
+    let second_state = state.clone();
+    let second = tokio::spawn(async move {
+        handle_slow_job_completion(&second_state, &second_message, &second_reply).await;
+    });
+    let second_attempt = tokio::time::timeout(
+        Duration::from_millis(100),
+        messenger.wait_for_attempt_count(2),
+    )
+    .await;
+
+    messenger.release_first.notify_one();
+    first.await.unwrap();
+    second.await.unwrap();
+
+    assert!(
+        second_attempt.is_err(),
+        "同一收件人的第二轮客服分片不应在第一轮完成前发送"
+    );
+    let attempts = messenger.attempts();
+    assert_eq!(attempts.len(), 4);
+    assert!(attempts[0].starts_with('a'));
+    assert!(attempts[1].starts_with('a'));
+    assert!(attempts[2].starts_with('b'));
+    assert!(attempts[3].starts_with('b'));
 }
 
 #[test]

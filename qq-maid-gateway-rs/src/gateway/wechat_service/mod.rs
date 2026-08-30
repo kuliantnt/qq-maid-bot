@@ -3,8 +3,9 @@
 //! 当前实现 text-only 同步回复和长任务客服消息补发；模板消息、素材和媒体消息均留给后续任务。
 
 use std::{
+    collections::HashMap,
     net::SocketAddr,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -19,7 +20,11 @@ use axum::{
 };
 use qq_maid_core::service::CoreRespondOutput;
 use serde::Deserialize;
-use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
+use tokio::{
+    net::TcpListener,
+    sync::{Mutex as AsyncMutex, oneshot},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -63,7 +68,30 @@ struct WechatServiceState {
     respond: RespondClient,
     dedupe: Arc<MessageDedupe>,
     customer_messenger: Option<Arc<dyn WechatCustomerMessenger>>,
+    customer_send_locks: Arc<WechatCustomerSendLocks>,
     commands: Option<GatewayCommandService>,
+}
+
+/// 为每个收件人复用一把异步锁，避免同一用户的多轮慢回复在客服接口中交错。
+///
+/// 锁表只在进程内共享，不记录日志；不同收件人仍可并行发送。客服消息额度由微信
+/// 侧控制，因此锁必须覆盖一整组分片，而不能只包住单个 send_text 调用。
+#[derive(Default)]
+struct WechatCustomerSendLocks {
+    inner: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+}
+
+impl WechatCustomerSendLocks {
+    fn lock_for(&self, touser: &str) -> Arc<AsyncMutex<()>> {
+        let mut locks = self
+            .inner
+            .lock()
+            .expect("wechat customer send lock map should not be poisoned");
+        locks
+            .entry(touser.to_owned())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,6 +122,7 @@ pub(super) async fn spawn_callback_server(
     let message_crypto = build_message_crypto(&config)?;
     let state = WechatServiceState {
         customer_messenger: build_customer_messenger(&config),
+        customer_send_locks: Arc::new(WechatCustomerSendLocks::default()),
         message_crypto,
         config,
         respond,
@@ -266,6 +295,9 @@ async fn handle_slow_job_completion(
         );
         return;
     }
+    // 锁覆盖整个回复的所有分片；否则多个慢任务可能分别发送首片并把两轮回复交错给用户。
+    let send_lock = state.customer_send_locks.lock_for(&message.from_user_name);
+    let _send_guard = send_lock.lock().await;
     match send_customer_text_reply(
         messenger.as_ref(),
         &message.msg_id,
