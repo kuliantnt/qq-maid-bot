@@ -69,7 +69,7 @@ const FORBIDDEN_LOCAL_KEYS: &[&str] = &[
 /// [`ModelProvider`](crate::provider::types::ModelProvider) 的 `google -> gemini`、
 /// `glm/zhipu -> bigmodel` 等 Connection alias。一个 Catalog Provider 后续可以映射到
 /// 多个 Connection，但 ID 本身不因连接规则被改写。
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct CatalogProviderId(String);
 
@@ -87,6 +87,18 @@ impl CatalogProviderId {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for CatalogProviderId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // 反序列化也必须经过 parse()，确保进入 Catalog 的 ID 已是 trim +
+        // lowercase 的 canonical 形式，而不是保留 `Google` / 首尾空白等原始外观。
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(|error| serde::de::Error::custom(error.message))
     }
 }
 
@@ -334,7 +346,7 @@ pub struct LocalModelOverrides {
 #[serde(deny_unknown_fields)]
 pub struct LocalModelEntry {
     /// Catalog Provider ID；不受运行时 `google -> gemini` 等 alias 影响。
-    pub provider: String,
+    pub provider: CatalogProviderId,
     pub id: String,
     #[serde(default)]
     pub display_name: Option<String>,
@@ -402,13 +414,8 @@ pub(crate) fn validate_snapshot(snapshot: &CatalogSnapshot) -> Result<(), LlmErr
     }
     let mut provider_ids = Vec::new();
     for provider in &snapshot.providers {
-        // 反序列化只保证字符串外观，这里再做一次类型级校验，防止调用方手工构造非法值。
-        CatalogProviderId::parse(provider.id.as_str()).map_err(|_| {
-            LlmError::config(format!(
-                "内置模型目录存在非法 provider id：`{}`",
-                provider.id.as_str()
-            ))
-        })?;
+        // CatalogProviderId 自身在反序列化时已保证 canonical；这里只需按该类型去重，
+        // `Google` 与 `google` 会因同 id 被拒绝共存。
         provider_ids.push(provider.id.as_str().to_owned());
         let mut model_ids = Vec::new();
         for model in &provider.models {
@@ -497,12 +504,6 @@ pub fn parse_local_overrides(bytes: &[u8]) -> Result<LocalModelOverrides, LlmErr
         if entry.id.trim().is_empty() {
             return Err(LlmError::config("models.json 存在缺少 id 的模型条目"));
         }
-        CatalogProviderId::parse(&entry.provider).map_err(|_| {
-            LlmError::config(format!(
-                "models.json 条目 `{}` 的 provider 非法：`{}`",
-                entry.id, entry.provider
-            ))
-        })?;
     }
     Ok(overrides)
 }
@@ -565,16 +566,10 @@ impl EffectiveModelCatalog {
 
         if let Some(local) = local {
             for entry in &local.models {
-                let provider_id = CatalogProviderId::parse(&entry.provider).map_err(|_| {
-                    LlmError::config(format!(
-                        "models.json 条目 `{}` 的 provider 非法：`{}`",
-                        entry.id, entry.provider
-                    ))
-                })?;
                 let target = ensure_effective_provider_id(
                     &mut providers,
-                    &provider_id,
-                    provider_id.as_str(),
+                    &entry.provider,
+                    entry.provider.as_str(),
                 );
                 upsert_local_entry(target, entry);
             }

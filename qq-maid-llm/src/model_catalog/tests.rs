@@ -12,6 +12,26 @@ fn catalog_provider_id(value: &str) -> CatalogProviderId {
     CatalogProviderId::parse(value).expect("测试 provider id 应合法")
 }
 
+/// 构造仅含给定 provider id、每个 provider 带一个合法模型的快照 JSON；
+/// 用于验证反序列化阶段的 provider id canonical 不变量。
+fn snapshot_with_provider_ids(provider_ids: &[&str]) -> String {
+    let providers = provider_ids
+        .iter()
+        .map(|id| {
+            format!(
+                r#"{{"id":"{id}","name":"Provider","models":[
+                    {{"id":"model","display_name":"Model"}}]}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        r#"{{"schema_version":1,"source":{{"name":"x","upstream_license":"MIT",
+        "source_url":"u","source_version":"v","fetched_at":"2025-01-01",
+        "source_hash":"h","converter_version":"v1"}},"providers":[{providers}]}}"#
+    )
+}
+
 fn provider<'a>(snapshot: &'a CatalogSnapshot, id: &str) -> &'a CatalogProvider {
     snapshot
         .providers
@@ -30,7 +50,7 @@ fn local_entry(
     mut patch: impl FnMut(&mut LocalModelEntry),
 ) -> LocalModelEntry {
     let mut entry = LocalModelEntry {
-        provider: provider.to_owned(),
+        provider: catalog_provider_id(provider),
         id: id.to_owned(),
         display_name: None,
         context_window: None,
@@ -155,6 +175,73 @@ fn catalog_provider_ids_do_not_apply_runtime_connection_aliases() {
             .find_by_provider(&catalog_provider_id("bigmodel"), "glm-4.5")
             .is_none()
     );
+}
+
+#[test]
+fn deserialized_catalog_provider_ids_are_canonical() {
+    let canonical: CatalogProviderId =
+        serde_json::from_str(r#""google""#).expect("canonical 应可解析");
+    assert_eq!(canonical, catalog_provider_id("google"));
+    assert_eq!(canonical.as_str(), "google");
+
+    // `Google` 与带首尾空白的 ID 在反序列化时必须归一为同一个 canonical ID，
+    // 不能以非 canonical 外观进入 Catalog 领域模型。
+    for raw_id in ["Google", " google", "google ", "  Google  "] {
+        let parsed: CatalogProviderId =
+            serde_json::from_str(&format!(r#""{raw_id}""#)).expect("应归一为合法 provider id");
+        assert_eq!(parsed, canonical, "raw id `{raw_id}` 应归一为 google");
+    }
+
+    // 快照入口同样只产出 canonical provider id；分别验证大写与首尾空白两种输入。
+    for raw_id in ["Google", " google "] {
+        let snapshot = parse_snapshot(snapshot_with_provider_ids(&[raw_id]).as_bytes())
+            .expect("provider id 应被归一且模型条目合法");
+        assert!(
+            snapshot
+                .providers
+                .iter()
+                .all(|provider| provider.id == canonical),
+            "raw id `{raw_id}` 的快照应只包含 google provider"
+        );
+    }
+}
+
+#[test]
+fn canonical_aliases_cannot_coexist_as_separate_providers() {
+    let error =
+        parse_snapshot(snapshot_with_provider_ids(&["Google", "google"]).as_bytes()).unwrap_err();
+    assert!(
+        error.message.contains("provider id 重复"),
+        "`Google` 与 `google` 应被视为同一 provider，不能共存，实际：{}",
+        error.message
+    );
+}
+
+#[test]
+fn local_overrides_share_catalog_provider_identity_rules() {
+    let raw = br#"{"schema_version":1,"models":[
+        {"provider":"Google","id":"catalog-identity-model","display_name":"First"},
+        {"provider":" google ","id":"catalog-identity-model","display_name":"Second"}
+    ]}"#;
+    let local = parse_local_overrides(raw).expect("本地覆盖中的 provider id 应归一化");
+    let google = catalog_provider_id("google");
+    assert!(local.models.iter().all(|entry| entry.provider == google));
+
+    // 本地 override 与 embedded/cache/patch 使用同一 identity：两个写法只会命中
+    // 同一个 Catalog Provider，而不会额外创建 `Google` Provider。
+    let catalog = EffectiveModelCatalog::from_embedded(Some(&local)).expect("合并应当成功");
+    assert_eq!(
+        catalog
+            .providers()
+            .iter()
+            .filter(|provider| provider.id == google)
+            .count(),
+        1
+    );
+    let model = catalog
+        .find_by_provider(&google, "catalog-identity-model")
+        .expect("两条本地条目应合并到同一个 google Provider");
+    assert_eq!(model.display_name, "Second");
 }
 
 #[test]
@@ -329,7 +416,7 @@ fn local_config_rejects_unknown_fields_and_bad_provider() {
     assert!(parse_local_overrides(bad_field).is_err());
     let bad_provider = br#"{"schema_version":1,"models":[{"provider":"!!","id":"x"}]}"#;
     let error = parse_local_overrides(bad_provider).unwrap_err();
-    assert!(error.message.contains("provider 非法"));
+    assert!(error.message.contains("provider id `!!` 非法"));
 }
 
 #[test]
