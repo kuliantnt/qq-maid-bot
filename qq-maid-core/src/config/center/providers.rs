@@ -67,7 +67,14 @@ impl ConfigCenter {
                 .find(|value| !value.is_empty())
                 .unwrap_or(default_url);
             let responses = id == "openai"
-                && environment.get("OPENAI_API_MODE").map(String::as_str) != Some("chat_only");
+                && crate::config::parse_openai_api_mode(
+                    environment
+                        .get("OPENAI_API_MODE")
+                        .map(String::as_str)
+                        .unwrap_or("auto"),
+                )
+                .map_err(|error| ConfigCenterError::invalid(error.message))?
+                    != crate::config::OpenAiApiMode::ChatOnly;
             return qq_maid_llm::provider::openai::diagnostics::test_connection(
                 base,
                 responses,

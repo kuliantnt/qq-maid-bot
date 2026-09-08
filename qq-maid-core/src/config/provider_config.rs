@@ -4,7 +4,7 @@
 //! 避免把 API Key 写回 Agent 文档。
 
 use qq_maid_llm::config::{
-    HttpAuthConfig, OpenAiCompatibleProviderConfig, OpenAiResponsesProviderConfig,
+    HttpAuthConfig, OpenAiCompatibleProviderConfig, OpenAiResponsesProviderConfig, ProviderMode,
 };
 
 use super::{
@@ -25,12 +25,14 @@ pub(super) fn validate_builtin_connection_environment(
     environment: &std::collections::HashMap<String, String>,
 ) -> Result<(), crate::error::LlmError> {
     let _guard = super::ValidationEnvironmentGuard::install(environment.clone());
-    validate_builtin_connections(agent)
+    // AppConfig 固定使用 Auto；LLM_PROVIDER 已移除，不能在诊断中恢复另一套入口。
+    validate_builtin_connections(agent, &ProviderMode::Auto)
 }
 
-/// 内置连接保留原存储来源；停用仍检查全部显式模型/搜索引用，不能变成候选链静默跳过。
+/// 内置连接保留原存储来源；停用仍检查全部模型/搜索引用，不能变成候选链静默跳过。
 pub(super) fn validate_builtin_connections(
     agent: &AgentRuntimeConfig,
+    mode: &ProviderMode,
 ) -> Result<(), crate::error::LlmError> {
     use qq_maid_llm::provider::types::{ModelId, ModelProvider};
     let mut disabled = Vec::new();
@@ -39,16 +41,15 @@ pub(super) fn validate_builtin_connections(
             disabled.push(name);
         }
     }
+    let default_provider = mode.default_provider();
     let mut invalid = Vec::new();
     let mut check = |model: &ModelId, location: String, search: bool| {
-        let provider = model.provider.as_ref().or(if search {
-            Some(&ModelProvider::OpenAi)
+        let provider = model.provider.as_ref().unwrap_or(if search {
+            &ModelProvider::OpenAi
         } else {
-            None
+            &default_provider
         });
-        if let Some(provider) = provider
-            && disabled.contains(&provider.as_str())
-        {
+        if disabled.contains(&provider.as_str()) {
             invalid.push(format!(
                 "{location}: provider `{}` is disabled",
                 provider.as_str()

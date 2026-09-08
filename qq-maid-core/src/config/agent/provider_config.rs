@@ -124,11 +124,25 @@ pub(super) fn provider_from_file(
 pub(super) fn validate_connection_references(
     document: &AgentConfigDocument,
 ) -> Result<(), LlmError> {
+    // 旧手工 TOML key 保持原样，只在引用查找时按模型前缀规则规范化。
+    let mut providers = HashMap::new();
+    for (name, provider) in &document.providers {
+        let id = ModelProvider::parse_prefix(name).map_err(|err| {
+            LlmError::config(format!("invalid providers.{name}: {}", err.message))
+        })?;
+        // 大小写别名不能覆盖另一项的 enabled 状态，否则停用引用可能被漏检。
+        if providers.insert(id.clone(), provider).is_some() {
+            return Err(LlmError::config(format!(
+                "duplicate provider `{}`",
+                id.as_str()
+            )));
+        }
+    }
     let mut invalid = Vec::new();
     let mut check = |value: &str, location: String| -> Result<(), LlmError> {
         let model = ModelId::parse_config(value, &location)?;
         if let Some(ModelProvider::Custom(id)) = model.provider {
-            match document.providers.get(&id) {
+            match providers.get(&ModelProvider::Custom(id.clone())) {
                 Some(provider) if provider.enabled => {}
                 Some(_) => invalid.push(format!("{location}: provider `{id}` is disabled")),
                 None => invalid.push(format!("{location}: providers.{id} is not configured")),

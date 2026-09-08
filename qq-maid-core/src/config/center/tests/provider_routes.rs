@@ -288,3 +288,91 @@ fn save_and_reload_preserves_provider_qualified_same_model_candidates() {
         "routera:gpt-5.6-luna,routerb:gpt-5.6-luna"
     );
 }
+
+#[test]
+fn bare_route_disable_is_rejected_during_setup_without_writes() {
+    let (center, _database, _directory) = test_center();
+    let (file, _running, _agent_database, path) = test_agent_file();
+    let initial = file.snapshot().unwrap();
+    file.update(
+        &initial.revision,
+        &[AgentConfigChange::SetModelRoute {
+            name: "private_main".into(),
+            candidates: vec!["test-model".into()],
+        }],
+    )
+    .unwrap();
+    let center = center
+        .with_running_agent_config(file.current_runtime().unwrap())
+        .unwrap()
+        .with_incomplete_setup_writes();
+    let initial = center.current_snapshot().unwrap().agent.unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let environment = HashMap::from([
+        ("OPENAI_ENABLED".into(), "false".into()),
+        ("DEEPSEEK_API_KEY".into(), "test-key".into()),
+    ]);
+    let error = center
+        .validate_candidate_for_write(&environment, None)
+        .unwrap_err();
+    assert!(
+        error
+            .message()
+            .contains("model_routes.private_main.candidates[0]: provider `openai` is disabled")
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(
+        center.current_snapshot().unwrap().agent.unwrap().revision,
+        initial.revision
+    );
+}
+
+#[tokio::test]
+async fn builtin_diagnostics_use_formal_chat_only_aliases() {
+    use axum::{Json, Router, routing::post};
+    use qq_maid_llm::provider::openai::diagnostics::ProbeState;
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async { Json(serde_json::json!({"choices": [{"message": {"content": "OK"}}]})) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    for mode in ["chat_only", "CHAT_ONLY", "chat-only", "  ChAt-OnLy  "] {
+        let (center, _database, _directory) = test_center();
+        let center = center.with_external_environment(HashMap::from([
+            ("OPENAI_API_MODE".into(), mode.into()),
+            ("OPENAI_BASE_URLS".into(), base.clone()),
+            ("OPENAI_API_KEY".into(), "test-key".into()),
+        ]));
+        let revision = center.managed_file.load().unwrap().revision;
+        let result = center
+            .test_provider_connection("openai", &revision, "test-model")
+            .await
+            .unwrap();
+        assert_eq!(result.model_call, ProbeState::Success, "{mode}: {result:?}");
+    }
+    server.abort();
+}
+
+#[test]
+fn console_still_rejects_new_mixed_case_connection_ids() {
+    let (center, _database, _directory) = test_center();
+    let (_file, running, _agent_database, _path) = test_agent_file();
+    let center = center.with_running_agent_config(running).unwrap();
+    let initial = center.current_snapshot().unwrap().agent.unwrap();
+    let error = center
+        .update_agent(
+            &initial.revision,
+            &[AgentConfigChange::SetProvider {
+                id: "MyProxy".into(),
+                provider: managed_provider(true),
+            }],
+        )
+        .unwrap_err();
+    assert!(error.message().contains("小写"));
+    assert_eq!(
+        center.current_snapshot().unwrap().agent.unwrap().revision,
+        initial.revision
+    );
+}

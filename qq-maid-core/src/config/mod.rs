@@ -327,7 +327,10 @@ impl AppConfig {
         )?;
         let effective_environment = effective_environment();
         let agent_config = AgentRuntimeConfig::load_from_environment(&effective_environment)?;
-        provider_config::validate_builtin_connections(&agent_config)?;
+        provider_config::validate_builtin_connections(
+            &agent_config,
+            &qq_maid_llm::config::ProviderMode::Auto,
+        )?;
         let ops_config =
             crate::runtime::tools::ops::OpsConfig::load_from_environment(&effective_environment)?;
         let command_prefix = CommandPrefix::parse(&env_string("CHAT_COMMAND_PREFIX", "/"))
@@ -521,7 +524,10 @@ impl AppConfig {
         if let Some(candidate_agent) = candidate_agent {
             config.agent_config = candidate_agent.clone();
         }
-        provider_config::validate_builtin_connections(&config.agent_config)?;
+        provider_config::validate_builtin_connections(
+            &config.agent_config,
+            &config.llm_config().provider,
+        )?;
         qq_maid_llm::provider::preflight_provider_config(&config.llm_config())
     }
 
