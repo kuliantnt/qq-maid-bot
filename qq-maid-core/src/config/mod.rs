@@ -19,6 +19,7 @@ use crate::{
 pub mod agent;
 pub mod center;
 mod managed;
+mod model_management;
 mod provider_config;
 mod voice;
 pub use agent::{
@@ -539,6 +540,7 @@ impl AppConfig {
             &config.agent_config,
             &config.llm_config().provider,
         )?;
+        model_management::validate_disabled_models(&config.agent_config, &config.model_catalog)?;
         qq_maid_llm::provider::preflight_provider_config(&config.llm_config())
     }
 

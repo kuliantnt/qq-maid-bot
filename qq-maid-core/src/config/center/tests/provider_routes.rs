@@ -477,3 +477,168 @@ fn console_still_rejects_new_mixed_case_connection_ids() {
         initial.revision
     );
 }
+
+#[tokio::test]
+async fn connection_discovery_reads_saved_credentials_without_mutating_routes() {
+    use axum::{Router, http::HeaderMap, routing::get};
+    use qq_maid_llm::provider::discovery::DiscoveryState;
+    let app = Router::new().route(
+        "/private/models",
+        get(|headers: HeaderMap| async move {
+            assert_eq!(headers["x-connection-key"], "test-discovery-key");
+            r#"{"data":[{"id":"not-in-catalog/private"}]}"#
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/private", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (center, _database, _directory) = test_center();
+    let (_file, running, _agent_database, path) = test_agent_file();
+    let center = center.with_running_agent_config(running).unwrap();
+    let initial = center.current_snapshot().unwrap().agent.unwrap();
+    let mut provider = managed_provider(true);
+    provider.base_url = base;
+    provider.auth_header = "x-connection-key".into();
+    // TOML 省略 scheme 表示默认 Bearer；显式空字符串才表示无 scheme。
+    provider.auth_scheme = Some(String::new());
+    provider.request_timeout_seconds = Some(2);
+    let saved = center
+        .update_agent(
+            &initial.revision,
+            &[AgentConfigChange::SetProvider {
+                id: "private_proxy".into(),
+                provider: provider.clone(),
+            }],
+        )
+        .unwrap();
+    assert!(
+        center
+            .discover_connection_models("private_proxy", &initial.revision)
+            .await
+            .is_err()
+    );
+    assert!(
+        center
+            .discover_connection_models("private_proxy", &saved.revision)
+            .await
+            .is_err()
+    );
+    center
+        .update_connection_credential(
+            "private_proxy",
+            &saved.revision,
+            "missing",
+            Some("test-discovery-key"),
+        )
+        .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let result = center
+        .discover_connection_models("private_proxy", &saved.revision)
+        .await
+        .unwrap();
+    assert_eq!(result.state, DiscoveryState::Success);
+    assert_eq!(result.models.unwrap()[0].id, "not-in-catalog/private");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(
+        center.current_snapshot().unwrap().agent.unwrap().revision,
+        saved.revision
+    );
+    provider.enabled = false;
+    let disabled = center
+        .update_agent(
+            &saved.revision,
+            &[AgentConfigChange::SetProvider {
+                id: "private_proxy".into(),
+                provider,
+            }],
+        )
+        .unwrap();
+    assert!(
+        center
+            .discover_connection_models("private_proxy", &disabled.revision)
+            .await
+            .is_err()
+    );
+    assert!(
+        center
+            .discover_connection_models("missing", &disabled.revision)
+            .await
+            .is_err()
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn builtin_discovery_uses_protocol_and_classifies_endpoint_support() {
+    use axum::{
+        Router,
+        http::{HeaderMap, StatusCode},
+        routing::get,
+    };
+    use qq_maid_llm::provider::discovery::DiscoveryState;
+    let app = Router::new()
+        .route(
+            "/v1/models",
+            get(|headers: HeaderMap| async move {
+                assert_eq!(headers["authorization"], "Bearer test-key");
+                r#"{"data":[]}"#
+            }),
+        )
+        .route(
+            "/method/models",
+            get(|| async { StatusCode::METHOD_NOT_ALLOWED }),
+        )
+        .route(
+            "/unimplemented/models",
+            get(|| async { StatusCode::NOT_IMPLEMENTED }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    // 覆盖实际协议组合；所有连接只访问本地上游，不依赖真实凭证。
+    for (id, mode, base_env, key_env) in [
+        ("openai", "auto", "OPENAI_BASE_URLS", "OPENAI_API_KEY"),
+        ("openai", "chat_only", "OPENAI_BASE_URLS", "OPENAI_API_KEY"),
+        ("deepseek", "auto", "DEEPSEEK_BASE_URL", "DEEPSEEK_API_KEY"),
+        ("gemini", "auto", "GEMINI_BASE_URL", "GEMINI_API_KEY"),
+        ("bigmodel", "auto", "BIGMODEL_BASE_URL", "BIGMODEL_API_KEY"),
+    ] {
+        for (path, status) in [
+            ("v1", 200),
+            ("missing", 404),
+            ("method", 405),
+            ("unimplemented", 501),
+        ] {
+            let (center, _database, _directory) = test_center();
+            let endpoint = format!("{base}/{path}");
+            let center = center.with_external_environment(HashMap::from([
+                (base_env.into(), format!("{endpoint},http://127.0.0.1:1")),
+                (key_env.into(), "test-key".into()),
+                ("OPENAI_API_MODE".into(), mode.into()),
+                ("LLM_REQUEST_TIMEOUT_SECONDS".into(), "3".into()),
+            ]));
+            let revision = center.managed_file.load().unwrap().revision;
+            assert!(
+                center
+                    .discover_connection_models(id, "stale")
+                    .await
+                    .is_err()
+            );
+            let result = center
+                .discover_connection_models(id, &revision)
+                .await
+                .unwrap();
+            assert_eq!(result.http_status, Some(status), "{id}/{mode}/{path}");
+            if status == 200 {
+                assert_eq!(result.state, DiscoveryState::Success);
+                assert_eq!(result.category, "model_list");
+                assert!(result.models.unwrap().is_empty());
+            } else {
+                assert_eq!(result.state, DiscoveryState::Unsupported);
+                assert_eq!(result.category, "endpoint_unsupported");
+                assert!(result.models.is_none());
+            }
+        }
+    }
+    server.abort();
+}

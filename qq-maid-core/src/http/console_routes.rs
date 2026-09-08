@@ -176,6 +176,21 @@ const CONSOLE_ASSETS: &[(&str, &str, &str)] = &[
         "text/javascript; charset=utf-8",
     ),
     (
+        "views/configuration/model-form.js",
+        include_str!("../../../web-console/dist/views/configuration/model-form.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/configuration/model-data.js",
+        include_str!("../../../web-console/dist/views/configuration/model-data.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "views/configuration/models.js",
+        include_str!("../../../web-console/dist/views/configuration/models.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
         "views/configuration/providers.js",
         include_str!("../../../web-console/dist/views/configuration/providers.js"),
         "text/javascript; charset=utf-8",

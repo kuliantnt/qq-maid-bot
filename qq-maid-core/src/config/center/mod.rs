@@ -6,6 +6,7 @@
 mod agent_file;
 mod field;
 mod managed_file;
+mod models;
 mod provider_presets;
 mod providers;
 mod registry;
@@ -600,6 +601,12 @@ impl ConfigCenter {
             None
         };
         if let Some(agent) = candidate_agent.or(saved_agent.as_ref()) {
+            let (_, local) = self.load_models()?;
+            let catalog =
+                qq_maid_llm::model_catalog::EffectiveModelCatalog::from_embedded(Some(&local))
+                    .map_err(|error| ConfigCenterError::invalid(error.message))?;
+            super::model_management::validate_disabled_models(agent, &catalog)
+                .map_err(|error| ConfigCenterError::invalid(error.message))?;
             super::provider_config::validate_builtin_connection_environment(agent, environment)
                 .map_err(|error| ConfigCenterError::invalid(error.message))?;
         }

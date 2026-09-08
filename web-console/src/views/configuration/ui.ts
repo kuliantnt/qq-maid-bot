@@ -35,6 +35,6 @@ export function setButtonsDisabled(disabled: boolean): void {
     button.disabled = disabled || current?.agent?.editable !== true;
   }
   for (const button of document.querySelectorAll<HTMLButtonElement>(".provider-action")) {
-    button.disabled = disabled || current?.agent?.editable !== true;
+    button.disabled = disabled || current?.agent?.editable !== true || button.dataset.modelDisabled === "true";
   }
 }

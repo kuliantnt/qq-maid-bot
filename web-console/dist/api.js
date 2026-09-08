@@ -747,3 +747,16 @@ function valueState(value) {
         ? value
         : "unknown";
 }
+export async function discoverConnectionModels(id, revision) {
+    return record(record(await mutatingJson("/api/v1/console/configuration/providers/models", "POST", {
+        id, expected_revision: revision,
+    })).discovery);
+}
+export async function fetchModelMetadata(id) {
+    return record(record(await mutatingJson("/api/v1/console/configuration/providers/model-metadata", "POST", { id })).metadata);
+}
+export async function updateModelOverride(id, revision, model) {
+    return parseConfigurationPayload(await mutatingJson("/api/v1/console/configuration/providers/model-override", "PATCH", {
+        id, expected_revision: revision, model,
+    }));
+}

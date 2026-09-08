@@ -31,6 +31,6 @@ export function setButtonsDisabled(disabled) {
         button.disabled = disabled || current?.agent?.editable !== true;
     }
     for (const button of document.querySelectorAll(".provider-action")) {
-        button.disabled = disabled || current?.agent?.editable !== true;
+        button.disabled = disabled || current?.agent?.editable !== true || button.dataset.modelDisabled === "true";
     }
 }

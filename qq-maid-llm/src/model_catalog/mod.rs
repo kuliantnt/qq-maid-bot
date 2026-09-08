@@ -249,7 +249,7 @@ pub enum FieldSource {
 }
 
 /// 模型逐字段来源；`capabilities` 再按能力项细分，用于后续展示声明来源。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct ModelProvenance {
     pub display_name: FieldSource,
     pub context_window: FieldSource,
@@ -260,7 +260,7 @@ pub struct ModelProvenance {
     pub capabilities: CapabilityProvenance,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct CapabilityProvenance {
     pub reasoning: FieldSource,
     pub tool_calling: FieldSource,
@@ -314,7 +314,7 @@ pub struct EffectiveCatalogProvider {
     pub models: Vec<EffectiveCatalogModel>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EffectiveCatalogModel {
     pub id: String,
     pub display_name: String,
