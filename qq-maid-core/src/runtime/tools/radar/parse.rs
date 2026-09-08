@@ -73,8 +73,12 @@ const CODEX_STATION_MODEL_IDS: [&str; 7] = [
 /// 应用 Codex Radar `/api/intelligence-efficiency-metrics` 的实时 IQ 数据。
 ///
 /// 新接口出现后 current.json 里的旧 model_iq 不再持续覆盖 Astra；因此只要新接口
-/// 返回本站白名单内的有效模型，就用它整体替换旧 IQ 列表与顶部模型摘要，避免把
+/// 返回本站白名单内的有效模型，就用它整体替换旧 IQ 列表，避免把
 /// 两种统计口径混在同一张榜单。接口无有效白名单模型时保持旧数据不动。
+///
+/// 新版接口没有等价的独立 `latest` 语义，因此只更新 `iq_models`（榜单/最高模型
+/// 由渲染层从该列表计算），并清空旧 `current.json` 的 latest 摘要字段，避免把
+/// 过时模型继续显示成“模型体感”。
 pub(super) fn apply_codex_metrics(summary: &mut CodexRadarSummary, metrics: &Value) {
     let Some(points) = metrics.get("points").and_then(Value::as_array) else {
         return;
@@ -83,30 +87,20 @@ pub(super) fn apply_codex_metrics(summary: &mut CodexRadarSummary, metrics: &Val
         .iter()
         .filter_map(codex_metrics_model_metric)
         .collect::<Vec<_>>();
-    let Some(top) = models
-        .iter()
-        .max_by(|left, right| {
-            left.score
-                .unwrap_or(f64::NEG_INFINITY)
-                .partial_cmp(&right.score.unwrap_or(f64::NEG_INFINITY))
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left.label.cmp(&right.label))
-        })
-        .cloned()
-    else {
+    if models.is_empty() {
         return;
-    };
+    }
 
     if let Some(updated_at) = str_value(metrics.get("source_updated_at")) {
         summary.updated_at = Some(updated_at);
     }
     summary.iq_models = models;
-    summary.model_label = Some(top.label);
-    summary.model_score = top.score;
-    // 效能接口不返回旧 model_iq 的红黄绿状态；更新后不沿用旧摘要里的状态。
+    // 新版榜单不携带 legacy latest 字段；清空后“最高模型 / IQ 前五”只由 iq_models 承担。
+    summary.model_label = None;
+    summary.model_score = None;
+    summary.model_passed = None;
+    summary.model_tasks = None;
     summary.model_status = None;
-    summary.model_passed = top.passed;
-    summary.model_tasks = top.tasks;
 }
 
 fn codex_metrics_model_metric(value: &Value) -> Option<CodexModelMetric> {

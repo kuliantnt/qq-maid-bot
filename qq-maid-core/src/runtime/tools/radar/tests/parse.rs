@@ -137,12 +137,23 @@ fn apply_codex_metrics_replaces_legacy_iq_with_astra_and_filters_station_models(
         summary.updated_at.as_deref(),
         Some("2026-09-08T12:32:03+00:00")
     );
-    assert_eq!(summary.model_label.as_deref(), Some("GPT-6 Astra high"));
-    assert_eq!(summary.model_score, Some(107.89));
-    assert_eq!(summary.model_passed, Some(82));
-    assert_eq!(summary.model_tasks, Some(114));
+    // 新版接口没有独立 latest 语义，旧 current.json 的摘要不得被“最高 IQ”顶替或残留。
+    assert_eq!(summary.model_label, None);
+    assert_eq!(summary.model_score, None);
+    assert_eq!(summary.model_passed, None);
+    assert_eq!(summary.model_tasks, None);
     assert_eq!(summary.model_status, None);
     assert_eq!(summary.iq_models.len(), 4);
+    let highest = summary
+        .iq_models
+        .iter()
+        .filter_map(|model| model.score.map(|score| (score, model.label.as_str())))
+        .max_by(|left, right| {
+            left.0
+                .partial_cmp(&right.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    assert_eq!(highest.map(|(_, label)| label), Some("GPT-6 Astra high"));
     assert!(
         summary
             .iq_models
@@ -187,6 +198,9 @@ fn apply_codex_metrics_without_station_models_keeps_legacy_fallback() {
         Some("2026-08-02T19:35:13+08:00")
     );
     assert_eq!(summary.model_label.as_deref(), Some("GPT-5.5 xhigh"));
+    assert_eq!(summary.model_score, Some(60.0));
+    assert_eq!(summary.model_passed, Some(4));
+    assert_eq!(summary.model_tasks, Some(10));
     assert_eq!(summary.model_status.as_deref(), Some("green"));
     assert_eq!(summary.iq_models.len(), 1);
 }

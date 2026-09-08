@@ -3,6 +3,7 @@ use crate::runtime::tools::{
     RadarSnapshot, RadarSourceFailure, RadarSourceKind,
 };
 
+use super::super::parse::{apply_codex_metrics, parse_codex_summary};
 use super::*;
 
 #[test]
@@ -224,6 +225,49 @@ fn format_codex_detail_shows_ranked_iq_quota_and_cross_vendor_ratings() {
     assert!(body.text.contains("模型数据：2026-06-30 18:39:12"));
     assert!(body.text.contains("额度数据：2026-07-30 16:20:35"));
     assert!(body.text.contains("社区评分：2026-08-02 20:42:22"));
+}
+
+#[test]
+fn format_codex_detail_after_metrics_update_uses_iq_list_without_legacy_latest_summary() {
+    let mut summary = parse_codex_summary(&serde_json::json!({
+        "model_iq": {
+            "updated_at": "2026-08-02T19:35:13+08:00",
+            "latest": {"score": 60.0, "status": "green", "passed": 4, "tasks": 10, "model": "gpt-5.5", "reasoning_effort": "xhigh"},
+            "comparisons": {}
+        }
+    }));
+    apply_codex_metrics(
+        &mut summary,
+        &serde_json::json!({
+            "source_updated_at": "2026-09-08T12:32:03+00:00",
+            "points": [
+                {"model": "gpt-6-astra", "effort": "high", "passed": 82, "total": 114, "iq": 107.89},
+                {"model": "gpt-6-astra", "effort": "max", "passed": 76, "total": 106, "iq": 107.55},
+                {"model": "gpt-5.6-sol", "effort": "max", "passed": 239, "total": 336, "iq": 106.7},
+                {"model": "claude-sonnet-5", "effort": "high", "passed": 2, "total": 2, "iq": 150.0}
+            ]
+        }),
+    );
+
+    let body = format_radar_reply(
+        &RadarSnapshot {
+            codex: Some(summary),
+            claude: None,
+            failures: Vec::new(),
+        },
+        RadarTarget::Codex,
+    );
+
+    assert!(
+        body.text
+            .contains("最高模型：GPT-6 Astra high · IQ 107.89 · 82/114")
+    );
+    assert!(body.text.contains("IQ 前五配置："));
+    assert!(body.text.contains("GPT-6 Astra high"));
+    // 新版榜单只由 iq_models 呈现，不再把旧 latest 摘要或最高 IQ 伪装成“模型体感”。
+    assert!(!body.text.contains("模型体感："));
+    assert!(!body.text.contains("GPT-5.5 xhigh"));
+    assert!(!body.text.contains("green"));
 }
 
 #[test]
