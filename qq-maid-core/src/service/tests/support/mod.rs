@@ -807,6 +807,8 @@ fn test_state_with_group_tool_calling_and_query_executor(
                 tool_calling_group_enabled,
                 3,
             ),
+            model_catalog: qq_maid_llm::model_catalog::EffectiveModelCatalog::from_embedded(None)
+                .expect("embedded model catalog must parse"),
             ops_config: crate::runtime::tools::ops::OpsConfig::default(),
             command_prefix: Default::default(),
             voice: crate::config::VoiceFeatureConfig::default(),

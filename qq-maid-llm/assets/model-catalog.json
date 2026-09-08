@@ -1,0 +1,3342 @@
+{
+  "schema_version": 1,
+  "source": {
+    "name": "models.dev",
+    "upstream_license": "MIT",
+    "source_url": "https://models.dev/api.json",
+    "source_version": "3f48b2f81c94abd5531fbc460772a4941c2a3046",
+    "fetched_at": "2026-09-08T12:11:50Z",
+    "source_hash": "sha256:6eae46b2e08e7c79a5dc534cf14f44be92e518f8c40b7f270d7ab7a4b5cdb605",
+    "converter_version": "modelsdev-converter-v1"
+  },
+  "providers": [
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "models": [
+        {
+          "id": "deepseek-v4-flash",
+          "display_name": "DeepSeek V4 Flash",
+          "context_window": 1000000,
+          "max_output_tokens": 384000,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.14,
+            "output_per_million_usd": 0.28
+          }
+        },
+        {
+          "id": "deepseek-v4-flash-vision-exp",
+          "display_name": "DeepSeek V4 Flash Vision Exp",
+          "context_window": 1000000,
+          "max_output_tokens": 384000,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "beta",
+          "price": {
+            "input_per_million_usd": 0.14,
+            "output_per_million_usd": 0.28
+          }
+        },
+        {
+          "id": "deepseek-v4-pro",
+          "display_name": "DeepSeek V4 Pro",
+          "context_window": 1000000,
+          "max_output_tokens": 384000,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.435,
+            "output_per_million_usd": 0.87
+          }
+        }
+      ]
+    },
+    {
+      "id": "google",
+      "name": "Google",
+      "models": [
+        {
+          "id": "deep-research-max-preview-04-2026",
+          "display_name": "Deep Research Max Preview (Apr-21-2026)",
+          "context_window": 131072,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "image",
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 2.0,
+            "output_per_million_usd": 12.0
+          }
+        },
+        {
+          "id": "deep-research-preview-04-2026",
+          "display_name": "Deep Research Preview (Apr-21-2026)",
+          "context_window": 131072,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "image",
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 2.0,
+            "output_per_million_usd": 12.0
+          }
+        },
+        {
+          "id": "gemini-2.5-computer-use-preview-10-2025",
+          "display_name": "Gemini 2.5 Computer Use Preview 10-2025",
+          "context_window": 131072,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 1.25,
+            "output_per_million_usd": 10.0
+          }
+        },
+        {
+          "id": "gemini-2.5-flash",
+          "display_name": "Gemini 2.5 Flash",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.3,
+            "output_per_million_usd": 2.5
+          }
+        },
+        {
+          "id": "gemini-2.5-flash-image",
+          "display_name": "Nano Banana",
+          "context_window": 32768,
+          "max_output_tokens": 32768,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "image",
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.3,
+            "output_per_million_usd": 30.0
+          }
+        },
+        {
+          "id": "gemini-2.5-flash-lite",
+          "display_name": "Gemini 2.5 Flash-Lite",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.1,
+            "output_per_million_usd": 0.4
+          }
+        },
+        {
+          "id": "gemini-2.5-flash-preview-tts",
+          "display_name": "Gemini 2.5 Flash Preview TTS",
+          "context_window": 8192,
+          "max_output_tokens": 16384,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "audio"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.5,
+            "output_per_million_usd": 10.0
+          }
+        },
+        {
+          "id": "gemini-2.5-pro",
+          "display_name": "Gemini 2.5 Pro",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 1.25,
+            "output_per_million_usd": 10.0
+          }
+        },
+        {
+          "id": "gemini-2.5-pro-preview-tts",
+          "display_name": "Gemini 2.5 Pro Preview TTS",
+          "context_window": 8192,
+          "max_output_tokens": 16384,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "audio"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 1.0,
+            "output_per_million_usd": 20.0
+          }
+        },
+        {
+          "id": "gemini-3-flash-preview",
+          "display_name": "Gemini 3 Flash Preview",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.5,
+            "output_per_million_usd": 3.0
+          }
+        },
+        {
+          "id": "gemini-3-pro-image",
+          "display_name": "Nano Banana Pro",
+          "context_window": 131072,
+          "max_output_tokens": 32768,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "image",
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 2.0,
+            "output_per_million_usd": 120.0
+          }
+        },
+        {
+          "id": "gemini-3-pro-image-preview",
+          "display_name": "Nano Banana Pro",
+          "context_window": 131072,
+          "max_output_tokens": 32768,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "image",
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 2.0,
+            "output_per_million_usd": 120.0
+          }
+        },
+        {
+          "id": "gemini-3.1-flash-image",
+          "display_name": "Nano Banana 2",
+          "context_window": 65536,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "image",
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.5,
+            "output_per_million_usd": 60.0
+          }
+        },
+        {
+          "id": "gemini-3.1-flash-image-preview",
+          "display_name": "Nano Banana 2",
+          "context_window": 65536,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text"
+            ],
+            "output": [
+              "image",
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.5,
+            "output_per_million_usd": 60.0
+          }
+        },
+        {
+          "id": "gemini-3.1-flash-lite",
+          "display_name": "Gemini 3.1 Flash Lite",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.25,
+            "output_per_million_usd": 1.5
+          }
+        },
+        {
+          "id": "gemini-3.1-flash-lite-image",
+          "display_name": "Nano Banana 2 Lite",
+          "context_window": 65536,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "image",
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.25,
+            "output_per_million_usd": 30.0
+          }
+        },
+        {
+          "id": "gemini-3.1-flash-lite-preview",
+          "display_name": "Gemini 3.1 Flash Lite Preview",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "deprecated",
+          "price": {
+            "input_per_million_usd": 0.25,
+            "output_per_million_usd": 1.5
+          }
+        },
+        {
+          "id": "gemini-3.1-flash-live-preview",
+          "display_name": "Gemini 3.1 Flash Live Preview",
+          "context_window": 131072,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "text",
+              "video"
+            ],
+            "output": [
+              "audio",
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.75,
+            "output_per_million_usd": 4.5
+          }
+        },
+        {
+          "id": "gemini-3.1-flash-tts-preview",
+          "display_name": "Gemini 3.1 Flash TTS Preview",
+          "context_window": 8192,
+          "max_output_tokens": 16384,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "audio"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 1.0,
+            "output_per_million_usd": 20.0
+          }
+        },
+        {
+          "id": "gemini-3.1-pro-preview",
+          "display_name": "Gemini 3.1 Pro Preview",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 2.0,
+            "output_per_million_usd": 12.0
+          }
+        },
+        {
+          "id": "gemini-3.1-pro-preview-customtools",
+          "display_name": "Gemini 3.1 Pro Preview Custom Tools",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 2.0,
+            "output_per_million_usd": 12.0
+          }
+        },
+        {
+          "id": "gemini-3.5-flash",
+          "display_name": "Gemini 3.5 Flash",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 1.5,
+            "output_per_million_usd": 9.0
+          }
+        },
+        {
+          "id": "gemini-3.5-flash-lite",
+          "display_name": "Gemini 3.5 Flash Lite",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.3,
+            "output_per_million_usd": 2.5
+          }
+        },
+        {
+          "id": "gemini-3.5-live-translate-preview",
+          "display_name": "Gemini 3.5 Live Translate Preview",
+          "context_window": 16384,
+          "max_output_tokens": 32768,
+          "modalities": {
+            "input": [
+              "audio"
+            ],
+            "output": [
+              "audio",
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 3.5,
+            "output_per_million_usd": 21.0
+          }
+        },
+        {
+          "id": "gemini-3.6-flash",
+          "display_name": "Gemini 3.6 Flash",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.75,
+            "output_per_million_usd": 3.75
+          }
+        },
+        {
+          "id": "gemini-3.7-flash",
+          "display_name": "Gemini 3.7 Flash",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.75,
+            "output_per_million_usd": 3.75
+          }
+        },
+        {
+          "id": "gemini-3.8-flash",
+          "display_name": "Gemini 3.8 Flash",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.75,
+            "output_per_million_usd": 3.75
+          }
+        },
+        {
+          "id": "gemini-embedding-001",
+          "display_name": "Gemini Embedding 001",
+          "context_window": 2048,
+          "max_output_tokens": 1,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.15,
+            "output_per_million_usd": 0.0
+          }
+        },
+        {
+          "id": "gemini-embedding-2",
+          "display_name": "Gemini Embedding 2",
+          "context_window": 8192,
+          "max_output_tokens": 1,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.2,
+            "output_per_million_usd": 0.0
+          }
+        },
+        {
+          "id": "gemini-flash-latest",
+          "display_name": "Gemini Flash Latest",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.75,
+            "output_per_million_usd": 3.75
+          }
+        },
+        {
+          "id": "gemini-flash-lite-latest",
+          "display_name": "Gemini Flash-Lite Latest",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.3,
+            "output_per_million_usd": 2.5
+          }
+        },
+        {
+          "id": "gemini-omni-flash-preview",
+          "display_name": "Gemini Omni Flash Preview",
+          "context_window": 131072,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "image",
+              "text",
+              "video"
+            ],
+            "output": [
+              "video"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 1.5,
+            "output_per_million_usd": 17.5
+          }
+        },
+        {
+          "id": "gemma-4-26b-a4b-it",
+          "display_name": "Gemma 4 26B A4B IT",
+          "context_window": 262144,
+          "max_output_tokens": 32768,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": null
+        },
+        {
+          "id": "gemma-4-31b-it",
+          "display_name": "Gemma 4 31B IT",
+          "context_window": 262144,
+          "max_output_tokens": 32768,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": null
+        },
+        {
+          "id": "lyria-3-clip-preview",
+          "display_name": "Lyria 3 Clip Preview",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "audio",
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.0,
+            "output_per_million_usd": 0.0
+          }
+        },
+        {
+          "id": "lyria-3-pro-preview",
+          "display_name": "Lyria 3 Pro Preview",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "audio",
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.0,
+            "output_per_million_usd": 0.0
+          }
+        },
+        {
+          "id": "veo-3.1-fast-generate-preview",
+          "display_name": "Veo 3.1 fast",
+          "context_window": 480,
+          "max_output_tokens": 8192,
+          "modalities": {
+            "input": [
+              "image",
+              "text",
+              "video"
+            ],
+            "output": [
+              "video"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": null
+        },
+        {
+          "id": "veo-3.1-generate-preview",
+          "display_name": "Veo 3.1",
+          "context_window": 480,
+          "max_output_tokens": 8192,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "video"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "beta",
+          "price": null
+        },
+        {
+          "id": "veo-3.1-lite-generate-preview",
+          "display_name": "Veo 3.1 lite",
+          "context_window": 480,
+          "max_output_tokens": 8192,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "video"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": null
+        }
+      ]
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "models": [
+        {
+          "id": "chatgpt-image-latest",
+          "display_name": "chatgpt-image-latest",
+          "context_window": null,
+          "max_output_tokens": null,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "image",
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": null
+        },
+        {
+          "id": "gpt-3.5-turbo",
+          "display_name": "GPT-3.5-turbo",
+          "context_window": 16385,
+          "max_output_tokens": 4096,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "deprecated",
+          "price": {
+            "input_per_million_usd": 0.5,
+            "output_per_million_usd": 1.5
+          }
+        },
+        {
+          "id": "gpt-4",
+          "display_name": "GPT-4",
+          "context_window": 8192,
+          "max_output_tokens": 8192,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "deprecated",
+          "price": {
+            "input_per_million_usd": 30.0,
+            "output_per_million_usd": 60.0
+          }
+        },
+        {
+          "id": "gpt-4-turbo",
+          "display_name": "GPT-4 Turbo",
+          "context_window": 128000,
+          "max_output_tokens": 4096,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "deprecated",
+          "price": {
+            "input_per_million_usd": 10.0,
+            "output_per_million_usd": 30.0
+          }
+        },
+        {
+          "id": "gpt-4.1",
+          "display_name": "GPT-4.1",
+          "context_window": 1047576,
+          "max_output_tokens": 32768,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 2.0,
+            "output_per_million_usd": 8.0
+          }
+        },
+        {
+          "id": "gpt-4.1-mini",
+          "display_name": "GPT-4.1 mini",
+          "context_window": 1047576,
+          "max_output_tokens": 32768,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.4,
+            "output_per_million_usd": 1.6
+          }
+        },
+        {
+          "id": "gpt-4.1-nano",
+          "display_name": "GPT-4.1 nano",
+          "context_window": 1047576,
+          "max_output_tokens": 32768,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "deprecated",
+          "price": {
+            "input_per_million_usd": 0.1,
+            "output_per_million_usd": 0.4
+          }
+        },
+        {
+          "id": "gpt-4o",
+          "display_name": "GPT-4o",
+          "context_window": 128000,
+          "max_output_tokens": 16384,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 2.5,
+            "output_per_million_usd": 10.0
+          }
+        },
+        {
+          "id": "gpt-4o-2024-05-13",
+          "display_name": "GPT-4o (2024-05-13)",
+          "context_window": 128000,
+          "max_output_tokens": 4096,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "deprecated",
+          "price": {
+            "input_per_million_usd": 5.0,
+            "output_per_million_usd": 15.0
+          }
+        },
+        {
+          "id": "gpt-4o-2024-08-06",
+          "display_name": "GPT-4o (2024-08-06)",
+          "context_window": 128000,
+          "max_output_tokens": 16384,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 2.5,
+            "output_per_million_usd": 10.0
+          }
+        },
+        {
+          "id": "gpt-4o-2024-11-20",
+          "display_name": "GPT-4o (2024-11-20)",
+          "context_window": 128000,
+          "max_output_tokens": 16384,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 2.5,
+            "output_per_million_usd": 10.0
+          }
+        },
+        {
+          "id": "gpt-4o-mini",
+          "display_name": "GPT-4o mini",
+          "context_window": 128000,
+          "max_output_tokens": 16384,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.15,
+            "output_per_million_usd": 0.6
+          }
+        },
+        {
+          "id": "gpt-5",
+          "display_name": "GPT-5",
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 1.25,
+            "output_per_million_usd": 10.0
+          }
+        },
+        {
+          "id": "gpt-5-mini",
+          "display_name": "GPT-5 Mini",
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.25,
+            "output_per_million_usd": 2.0
+          }
+        },
+        {
+          "id": "gpt-5-nano",
+          "display_name": "GPT-5 Nano",
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.05,
+            "output_per_million_usd": 0.4
+          }
+        },
+        {
+          "id": "gpt-5-pro",
+          "display_name": "GPT-5 Pro",
+          "context_window": 400000,
+          "max_output_tokens": 272000,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 15.0,
+            "output_per_million_usd": 120.0
+          }
+        },
+        {
+          "id": "gpt-5.1",
+          "display_name": "GPT-5.1",
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 1.25,
+            "output_per_million_usd": 10.0
+          }
+        },
+        {
+          "id": "gpt-5.2",
+          "display_name": "GPT-5.2",
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 1.75,
+            "output_per_million_usd": 14.0
+          }
+        },
+        {
+          "id": "gpt-5.2-chat-latest",
+          "display_name": "GPT-5.2 Chat",
+          "context_window": 128000,
+          "max_output_tokens": 16384,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "deprecated",
+          "price": {
+            "input_per_million_usd": 1.75,
+            "output_per_million_usd": 14.0
+          }
+        },
+        {
+          "id": "gpt-5.2-pro",
+          "display_name": "GPT-5.2 Pro",
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 21.0,
+            "output_per_million_usd": 168.0
+          }
+        },
+        {
+          "id": "gpt-5.3-chat-latest",
+          "display_name": "GPT-5.3 Chat (latest)",
+          "context_window": 128000,
+          "max_output_tokens": 16384,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "deprecated",
+          "price": {
+            "input_per_million_usd": 1.75,
+            "output_per_million_usd": 14.0
+          }
+        },
+        {
+          "id": "gpt-5.3-codex",
+          "display_name": "GPT-5.3 Codex",
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 1.75,
+            "output_per_million_usd": 14.0
+          }
+        },
+        {
+          "id": "gpt-5.3-codex-spark",
+          "display_name": "GPT-5.3 Codex Spark",
+          "context_window": 128000,
+          "max_output_tokens": 32000,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 1.75,
+            "output_per_million_usd": 14.0
+          }
+        },
+        {
+          "id": "gpt-5.4",
+          "display_name": "GPT-5.4",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 2.5,
+            "output_per_million_usd": 15.0
+          }
+        },
+        {
+          "id": "gpt-5.4-mini",
+          "display_name": "GPT-5.4 mini",
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.75,
+            "output_per_million_usd": 4.5
+          }
+        },
+        {
+          "id": "gpt-5.4-nano",
+          "display_name": "GPT-5.4 nano",
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.2,
+            "output_per_million_usd": 1.25
+          }
+        },
+        {
+          "id": "gpt-5.4-pro",
+          "display_name": "GPT-5.4 Pro",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 30.0,
+            "output_per_million_usd": 180.0
+          }
+        },
+        {
+          "id": "gpt-5.5",
+          "display_name": "GPT-5.5",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 5.0,
+            "output_per_million_usd": 30.0
+          }
+        },
+        {
+          "id": "gpt-5.5-pro",
+          "display_name": "GPT-5.5 Pro",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 30.0,
+            "output_per_million_usd": 180.0
+          }
+        },
+        {
+          "id": "gpt-5.6",
+          "display_name": "GPT-5.6",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 4.0,
+            "output_per_million_usd": 20.0
+          }
+        },
+        {
+          "id": "gpt-5.6-luna",
+          "display_name": "GPT-5.6 Luna",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.2,
+            "output_per_million_usd": 1.2
+          }
+        },
+        {
+          "id": "gpt-5.6-sol",
+          "display_name": "GPT-5.6 Sol",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 4.0,
+            "output_per_million_usd": 20.0
+          }
+        },
+        {
+          "id": "gpt-5.6-terra",
+          "display_name": "GPT-5.6 Terra",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 2.0,
+            "output_per_million_usd": 12.0
+          }
+        },
+        {
+          "id": "gpt-6-astra",
+          "display_name": "GPT-6 Astra",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 10.0,
+            "output_per_million_usd": 50.0
+          }
+        },
+        {
+          "id": "gpt-image-1",
+          "display_name": "gpt-image-1",
+          "context_window": null,
+          "max_output_tokens": null,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "image"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "deprecated",
+          "price": null
+        },
+        {
+          "id": "gpt-image-1-mini",
+          "display_name": "gpt-image-1-mini",
+          "context_window": null,
+          "max_output_tokens": null,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "image",
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": null
+        },
+        {
+          "id": "gpt-image-1.5",
+          "display_name": "gpt-image-1.5",
+          "context_window": null,
+          "max_output_tokens": null,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "image",
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": null
+        },
+        {
+          "id": "gpt-image-2",
+          "display_name": "gpt-image-2",
+          "context_window": null,
+          "max_output_tokens": null,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "image"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 5.0,
+            "output_per_million_usd": 30.0
+          }
+        },
+        {
+          "id": "gpt-realtime-2.1",
+          "display_name": "GPT-Realtime-2.1",
+          "context_window": 128000,
+          "max_output_tokens": 32000,
+          "modalities": {
+            "input": [
+              "audio",
+              "image",
+              "text"
+            ],
+            "output": [
+              "audio",
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 4.0,
+            "output_per_million_usd": 24.0
+          }
+        },
+        {
+          "id": "o1",
+          "display_name": "o1",
+          "context_window": 200000,
+          "max_output_tokens": 100000,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "deprecated",
+          "price": {
+            "input_per_million_usd": 15.0,
+            "output_per_million_usd": 60.0
+          }
+        },
+        {
+          "id": "o1-pro",
+          "display_name": "o1-pro",
+          "context_window": 200000,
+          "max_output_tokens": 100000,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "deprecated",
+          "price": {
+            "input_per_million_usd": 150.0,
+            "output_per_million_usd": 600.0
+          }
+        },
+        {
+          "id": "o3",
+          "display_name": "o3",
+          "context_window": 200000,
+          "max_output_tokens": 100000,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 2.0,
+            "output_per_million_usd": 8.0
+          }
+        },
+        {
+          "id": "o3-mini",
+          "display_name": "o3-mini",
+          "context_window": 200000,
+          "max_output_tokens": 100000,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "deprecated",
+          "price": {
+            "input_per_million_usd": 1.1,
+            "output_per_million_usd": 4.4
+          }
+        },
+        {
+          "id": "o3-pro",
+          "display_name": "o3-pro",
+          "context_window": 200000,
+          "max_output_tokens": 100000,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 20.0,
+            "output_per_million_usd": 80.0
+          }
+        },
+        {
+          "id": "o4-mini",
+          "display_name": "o4-mini",
+          "context_window": 200000,
+          "max_output_tokens": 100000,
+          "modalities": {
+            "input": [
+              "image",
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "deprecated",
+          "price": {
+            "input_per_million_usd": 1.1,
+            "output_per_million_usd": 4.4
+          }
+        },
+        {
+          "id": "text-embedding-3-large",
+          "display_name": "text-embedding-3-large",
+          "context_window": 8191,
+          "max_output_tokens": 3072,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.13,
+            "output_per_million_usd": 0.0
+          }
+        },
+        {
+          "id": "text-embedding-3-small",
+          "display_name": "text-embedding-3-small",
+          "context_window": 8191,
+          "max_output_tokens": 1536,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.02,
+            "output_per_million_usd": 0.0
+          }
+        },
+        {
+          "id": "text-embedding-ada-002",
+          "display_name": "text-embedding-ada-002",
+          "context_window": 8192,
+          "max_output_tokens": 1536,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": false
+            },
+            "tool_calling": {
+              "advertised": false
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.1,
+            "output_per_million_usd": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "id": "zhipuai",
+      "name": "Zhipu AI",
+      "models": [
+        {
+          "id": "glm-4.5",
+          "display_name": "GLM-4.5",
+          "context_window": 131072,
+          "max_output_tokens": 98304,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.6,
+            "output_per_million_usd": 2.2
+          }
+        },
+        {
+          "id": "glm-4.5-air",
+          "display_name": "GLM-4.5-Air",
+          "context_window": 131072,
+          "max_output_tokens": 98304,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.2,
+            "output_per_million_usd": 1.1
+          }
+        },
+        {
+          "id": "glm-4.5-flash",
+          "display_name": "GLM-4.5-Flash",
+          "context_window": 131072,
+          "max_output_tokens": 98304,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.0,
+            "output_per_million_usd": 0.0
+          }
+        },
+        {
+          "id": "glm-4.5v",
+          "display_name": "GLM-4.5V",
+          "context_window": 64000,
+          "max_output_tokens": 16384,
+          "modalities": {
+            "input": [
+              "image",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.6,
+            "output_per_million_usd": 1.8
+          }
+        },
+        {
+          "id": "glm-4.6",
+          "display_name": "GLM-4.6",
+          "context_window": 204800,
+          "max_output_tokens": 131072,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.6,
+            "output_per_million_usd": 2.2
+          }
+        },
+        {
+          "id": "glm-4.6v",
+          "display_name": "GLM-4.6V",
+          "context_window": 128000,
+          "max_output_tokens": 32768,
+          "modalities": {
+            "input": [
+              "image",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.3,
+            "output_per_million_usd": 0.9
+          }
+        },
+        {
+          "id": "glm-4.7",
+          "display_name": "GLM-4.7",
+          "context_window": 204800,
+          "max_output_tokens": 131072,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.6,
+            "output_per_million_usd": 2.2
+          }
+        },
+        {
+          "id": "glm-4.7-flash",
+          "display_name": "GLM-4.7-Flash",
+          "context_window": 200000,
+          "max_output_tokens": 131072,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.0,
+            "output_per_million_usd": 0.0
+          }
+        },
+        {
+          "id": "glm-4.7-flashx",
+          "display_name": "GLM-4.7-FlashX",
+          "context_window": 200000,
+          "max_output_tokens": 131072,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.07,
+            "output_per_million_usd": 0.4
+          }
+        },
+        {
+          "id": "glm-5",
+          "display_name": "GLM-5",
+          "context_window": 204800,
+          "max_output_tokens": 131072,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 1.0,
+            "output_per_million_usd": 3.2
+          }
+        },
+        {
+          "id": "glm-5.1",
+          "display_name": "GLM-5.1",
+          "context_window": 200000,
+          "max_output_tokens": 131072,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 1.4,
+            "output_per_million_usd": 4.4
+          }
+        },
+        {
+          "id": "glm-5.2",
+          "display_name": "GLM-5.2",
+          "context_window": 1000000,
+          "max_output_tokens": 131072,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 1.4,
+            "output_per_million_usd": 4.4
+          }
+        },
+        {
+          "id": "glm-5.3",
+          "display_name": "GLM-5.3",
+          "context_window": 1000000,
+          "max_output_tokens": 131072,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": false
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 1.4,
+            "output_per_million_usd": 4.4
+          }
+        },
+        {
+          "id": "glm-5.3-flash",
+          "display_name": "GLM-5.3-Flash",
+          "context_window": 1000000,
+          "max_output_tokens": 131072,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 0.075,
+            "output_per_million_usd": 0.25
+          }
+        },
+        {
+          "id": "glm-5v-turbo",
+          "display_name": "GLM-5V-Turbo",
+          "context_window": 200000,
+          "max_output_tokens": 131072,
+          "modalities": {
+            "input": [
+              "image",
+              "pdf",
+              "text",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "capabilities": {
+            "reasoning": {
+              "advertised": true
+            },
+            "tool_calling": {
+              "advertised": true
+            },
+            "vision": {
+              "advertised": true
+            }
+          },
+          "status": "active",
+          "price": {
+            "input_per_million_usd": 5.0,
+            "output_per_million_usd": 22.0
+          }
+        }
+      ]
+    }
+  ]
+}
