@@ -1,0 +1,212 @@
+{
+  "schema_version": 1,
+  "source": {
+    "name": "models.dev",
+    "upstream_license": "MIT",
+    "fetched_at": "2025-06-01T00:00:00Z",
+    "source_hash": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "converter_version": "modelsdev-converter-v1"
+  },
+  "providers": [
+    {
+      "id": "bigmodel",
+      "name": "智谱 BigModel",
+      "models": [
+        {
+          "id": "glm-4.5",
+          "display_name": "GLM-4.5",
+          "context_window": 131072,
+          "max_output_tokens": 98304,
+          "modalities": { "input": ["text"], "output": ["text"] },
+          "capabilities": {
+            "reasoning": { "advertised": true },
+            "tool_calling": { "advertised": true },
+            "vision": { "advertised": false }
+          },
+          "status": "active",
+          "enabled": true,
+          "price": { "input_per_million_usd": 0.6, "output_per_million_usd": 2.2 },
+          "origin": "embedded"
+        },
+        {
+          "id": "glm-4.6",
+          "display_name": "GLM-4.6",
+          "context_window": 200000,
+          "max_output_tokens": 128000,
+          "modalities": { "input": ["text"], "output": ["text"] },
+          "capabilities": {
+            "reasoning": { "advertised": true },
+            "tool_calling": { "advertised": true },
+            "vision": { "advertised": false }
+          },
+          "status": "active",
+          "enabled": true,
+          "price": { "input_per_million_usd": 0.6, "output_per_million_usd": 2.2 },
+          "origin": "embedded"
+        }
+      ]
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "models": [
+        {
+          "id": "deepseek-chat",
+          "display_name": "DeepSeek Chat",
+          "context_window": 128000,
+          "max_output_tokens": 8192,
+          "modalities": { "input": ["text"], "output": ["text"] },
+          "capabilities": {
+            "reasoning": { "advertised": false },
+            "tool_calling": { "advertised": true },
+            "vision": { "advertised": false }
+          },
+          "status": "active",
+          "enabled": true,
+          "price": { "input_per_million_usd": 0.27, "output_per_million_usd": 1.1 },
+          "origin": "embedded"
+        },
+        {
+          "id": "deepseek-reasoner",
+          "display_name": "DeepSeek Reasoner",
+          "context_window": 128000,
+          "max_output_tokens": 32768,
+          "modalities": { "input": ["text"], "output": ["text"] },
+          "capabilities": {
+            "reasoning": { "advertised": true },
+            "tool_calling": { "advertised": false },
+            "vision": { "advertised": false }
+          },
+          "status": "active",
+          "enabled": true,
+          "price": { "input_per_million_usd": 0.55, "output_per_million_usd": 2.19 },
+          "origin": "embedded"
+        }
+      ]
+    },
+    {
+      "id": "gemini",
+      "name": "Google Gemini",
+      "models": [
+        {
+          "id": "gemini-2.5-flash",
+          "display_name": "Gemini 2.5 Flash",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "modalities": { "input": ["text", "image"], "output": ["text"] },
+          "capabilities": {
+            "reasoning": { "advertised": true },
+            "tool_calling": { "advertised": true },
+            "vision": { "advertised": true }
+          },
+          "status": "active",
+          "enabled": true,
+          "price": { "input_per_million_usd": 0.3, "output_per_million_usd": 2.5 },
+          "origin": "embedded"
+        },
+        {
+          "id": "gemini-2.5-pro",
+          "display_name": "Gemini 2.5 Pro",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "modalities": { "input": ["text", "image"], "output": ["text"] },
+          "capabilities": {
+            "reasoning": { "advertised": true },
+            "tool_calling": { "advertised": true },
+            "vision": { "advertised": true }
+          },
+          "status": "active",
+          "enabled": true,
+          "price": { "input_per_million_usd": 1.25, "output_per_million_usd": 10.0 },
+          "origin": "embedded"
+        }
+      ]
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "models": [
+        {
+          "id": "gpt-4-turbo",
+          "display_name": "GPT-4 Turbo",
+          "context_window": 128000,
+          "max_output_tokens": 4096,
+          "modalities": { "input": ["text", "image"], "output": ["text"] },
+          "capabilities": {
+            "reasoning": { "advertised": false },
+            "tool_calling": { "advertised": true },
+            "vision": { "advertised": true }
+          },
+          "status": "deprecated",
+          "enabled": true,
+          "price": { "input_per_million_usd": 10.0, "output_per_million_usd": 30.0 },
+          "origin": "embedded"
+        },
+        {
+          "id": "gpt-4o",
+          "display_name": "GPT-4o",
+          "context_window": 128000,
+          "max_output_tokens": 16384,
+          "modalities": { "input": ["text", "image"], "output": ["text"] },
+          "capabilities": {
+            "reasoning": { "advertised": false },
+            "tool_calling": { "advertised": true },
+            "vision": { "advertised": true }
+          },
+          "status": "active",
+          "enabled": true,
+          "price": { "input_per_million_usd": 2.5, "output_per_million_usd": 10.0 },
+          "origin": "embedded"
+        },
+        {
+          "id": "gpt-4o-mini",
+          "display_name": "GPT-4o mini",
+          "context_window": 128000,
+          "max_output_tokens": 16384,
+          "modalities": { "input": ["text", "image"], "output": ["text"] },
+          "capabilities": {
+            "reasoning": { "advertised": false },
+            "tool_calling": { "advertised": true },
+            "vision": { "advertised": true }
+          },
+          "status": "active",
+          "enabled": true,
+          "price": { "input_per_million_usd": 0.15, "output_per_million_usd": 0.6 },
+          "origin": "embedded"
+        },
+        {
+          "id": "gpt-5",
+          "display_name": "GPT-5",
+          "context_window": 272000,
+          "max_output_tokens": 128000,
+          "modalities": { "input": ["text", "image"], "output": ["text"] },
+          "capabilities": {
+            "reasoning": { "advertised": true },
+            "tool_calling": { "advertised": true },
+            "vision": { "advertised": true }
+          },
+          "status": "active",
+          "enabled": true,
+          "price": { "input_per_million_usd": 1.25, "output_per_million_usd": 10.0 },
+          "origin": "embedded"
+        },
+        {
+          "id": "o4-mini",
+          "display_name": "o4-mini",
+          "context_window": 200000,
+          "max_output_tokens": 100000,
+          "modalities": { "input": ["text", "image"], "output": ["text"] },
+          "capabilities": {
+            "reasoning": { "advertised": true },
+            "tool_calling": { "advertised": true },
+            "vision": { "advertised": true }
+          },
+          "status": "active",
+          "enabled": true,
+          "price": { "input_per_million_usd": 1.1, "output_per_million_usd": 4.4 },
+          "origin": "embedded"
+        }
+      ]
+    }
+  ]
+}

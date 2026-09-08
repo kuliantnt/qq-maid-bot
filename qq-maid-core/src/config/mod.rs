@@ -5,6 +5,7 @@ use std::{cell::RefCell, collections::HashMap, env, fmt, net::IpAddr, path::Path
 
 use qq_maid_common::command_prefix::CommandPrefix;
 use qq_maid_llm::context_budget::ContextBudgetConfig;
+use qq_maid_llm::model_catalog::EffectiveModelCatalog;
 use qq_maid_llm::provider::types::ModelRoute;
 
 use crate::{
@@ -51,6 +52,7 @@ pub const DEFAULT_SERVER_PORT: u16 = 8787; // 监听端口
 pub const DEFAULT_APP_DB_FILE: &str = "data/storage/app.db"; // 项目通用 SQLite 文件
 pub const DEFAULT_PROMPT_DIR: &str = "config/prompts"; // 提示词模板目录
 pub const DEFAULT_KNOWLEDGE_DIR: &str = "config/knowledge"; // Markdown 知识目录
+pub const DEFAULT_MODELS_CONFIG_FILE: &str = "config/models.json"; // 本地模型目录覆盖文件
 /// 控制台托管知识库的独立单文件上限。为保持现有部署兼容，默认仍为 50 MiB；处理阶段
 /// 会同时保留原文、切片、search_text 和可选向量记录，索引层另有限制切片数量。该策略
 /// 降低异常输入的放大风险，但不宣称整个处理链严格恒定有界。
@@ -155,6 +157,9 @@ impl fmt::Display for DailyReminderTime {
 pub struct AppConfig {
     /// 统一 Agent 场景运行策略，启动阶段完成解析和校验。
     pub agent_config: AgentRuntimeConfig,
+    /// Effective Model Catalog；由内嵌快照与 config/models.json 本地覆盖合并而成。
+    /// 仅承载模型元数据，不含任何 Connection / Credential 安全字段。
+    pub model_catalog: EffectiveModelCatalog,
     /// 配置驱动的 `/ops` 白名单；文件缺失或总开关关闭时不会执行任何程序。
     pub ops_config: crate::runtime::tools::ops::OpsConfig,
     /// 所有聊天入口共用的单字符命令前缀；只在进程启动时读取。
@@ -336,9 +341,15 @@ impl AppConfig {
         let command_prefix = CommandPrefix::parse(&env_string("CHAT_COMMAND_PREFIX", "/"))
             .map_err(|error| LlmError::config(format!("invalid CHAT_COMMAND_PREFIX: {error}")))?;
         let voice = VoiceFeatureConfig::from_environment(&effective_environment);
+        let models_config_file = env_optional("MODELS_CONFIG_FILE")
+            .unwrap_or_else(|| DEFAULT_MODELS_CONFIG_FILE.to_owned());
+        let local_overrides =
+            qq_maid_llm::model_catalog::load_local_overrides(Path::new(&models_config_file))?;
+        let model_catalog = EffectiveModelCatalog::from_embedded(local_overrides.as_ref())?;
 
         Ok(Self {
             agent_config,
+            model_catalog,
             ops_config,
             command_prefix,
             voice,

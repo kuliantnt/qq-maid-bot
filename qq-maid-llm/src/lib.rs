@@ -9,6 +9,7 @@ pub mod config;
 pub mod context_budget;
 pub mod error;
 pub mod metrics;
+pub mod model_catalog;
 pub mod provider;
 pub mod service;
 pub mod sse;
