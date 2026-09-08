@@ -8,6 +8,10 @@ pub(super) fn router() -> Router<OpsHttpState> {
             patch(credential),
         )
         .route("/api/v1/console/configuration/providers/test", post(test))
+        .route(
+            "/api/v1/console/configuration/providers/models",
+            post(models),
+        )
 }
 
 #[derive(Deserialize)]
@@ -116,6 +120,63 @@ async fn test(
         }
         Err(error) => {
             configuration_failure(&state, &headers, actor, "config.connection.test", error)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelsRequest {
+    id: String,
+    expected_revision: String,
+}
+
+// 显式 POST 触发只读上游请求，仍要求 Origin / CSRF，避免跨站消耗供应商配额。
+async fn models(
+    State(state): State<OpsHttpState>,
+    headers: HeaderMap,
+    Json(payload): Json<ModelsRequest>,
+) -> Response {
+    let (auth, _, _, actor) = match admin_context(&state, &headers, true) {
+        Ok(value) => value,
+        Err(response) => return respond(&state, &headers, *response),
+    };
+    let Some(center) = &state.config_center else {
+        return respond(
+            &state,
+            &headers,
+            api_error(
+                StatusCode::NOT_FOUND,
+                "configuration_unavailable",
+                "配置中心不可用",
+            ),
+        );
+    };
+    match center
+        .discover_connection_models(&payload.id, &payload.expected_revision)
+        .await
+    {
+        Ok(result) => {
+            if let Err(error) = auth.audit(Some(actor), "config.connection.models", result.category)
+            {
+                return respond(
+                    &state,
+                    &headers,
+                    api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        error.code(),
+                        error.message(),
+                    ),
+                );
+            }
+            respond(
+                &state,
+                &headers,
+                Json(json!({"ok": true, "discovery": result, "connection_id": payload.id, "revision": payload.expected_revision})).into_response(),
+            )
+        }
+        Err(error) => {
+            configuration_failure(&state, &headers, actor, "config.connection.models", error)
         }
     }
 }

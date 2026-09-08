@@ -1,6 +1,7 @@
 //! 通用 Connection 管理适配；不迁移内置配置或已有环境变量引用。
 
 use super::*;
+use qq_maid_llm::provider::discovery::DiscoveryAdapter;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use toml::Value;
@@ -30,6 +31,23 @@ fn controlled_slot(value: &str) -> bool {
 }
 
 impl ConfigCenter {
+    pub async fn discover_connection_models(
+        &self,
+        id: &str,
+        expected_revision: &str,
+    ) -> Result<qq_maid_llm::provider::discovery::ModelDiscovery, ConfigCenterError> {
+        let connection = self.resolve_connection_for_read(id, expected_revision)?;
+        qq_maid_llm::provider::discovery::discover_models(
+            connection.discovery_adapter,
+            &connection.base_url,
+            &connection.auth,
+            &connection.api_key,
+            std::time::Duration::from_secs(connection.timeout_seconds),
+        )
+        .await
+        .map_err(|error| ConfigCenterError::invalid(error.message))
+    }
+
     pub async fn test_provider_connection(
         &self,
         id: &str,
@@ -37,53 +55,30 @@ impl ConfigCenter {
         model: &str,
     ) -> Result<qq_maid_llm::provider::openai::diagnostics::ConnectionDiagnostic, ConfigCenterError>
     {
-        if let Some((base_env, key_env, default_url)) = builtin_connection(id) {
-            let saved = self.managed_file.load()?;
-            if saved.revision != expected_revision {
-                return Err(ConfigCenterError::conflict("内置连接已修改，请刷新后测试"));
-            }
-            let environment = self.current_resolved_environment()?;
-            let enabled = environment
-                .get(&format!("{}_ENABLED", id.to_ascii_uppercase()))
-                .map(String::as_str)
-                .unwrap_or("true");
-            if matches!(
-                enabled.trim().to_ascii_lowercase().as_str(),
-                "false" | "0" | "off" | "no" | "disabled" | "none"
-            ) {
-                return Err(ConfigCenterError::invalid("请先启用 Connection"));
-            }
-            let key = environment
-                .get(key_env)
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| ConfigCenterError::invalid("Credential 尚未配置"))?;
-            let base = environment
-                .get(base_env)
-                .map(String::as_str)
-                .unwrap_or(default_url);
-            let base = base
-                .split(',')
-                .map(str::trim)
-                .find(|value| !value.is_empty())
-                .unwrap_or(default_url);
-            let responses = id == "openai"
-                && crate::config::parse_openai_api_mode(
-                    environment
-                        .get("OPENAI_API_MODE")
-                        .map(String::as_str)
-                        .unwrap_or("auto"),
-                )
-                .map_err(|error| ConfigCenterError::invalid(error.message))?
-                    != crate::config::OpenAiApiMode::ChatOnly;
-            return qq_maid_llm::provider::openai::diagnostics::test_connection(
-                base,
-                responses,
-                &qq_maid_llm::config::HttpAuthConfig::default(),
-                key,
-                model,
-            )
-            .await
-            .map_err(|error| ConfigCenterError::invalid(error.message));
+        let connection = self.resolve_connection_for_read(id, expected_revision)?;
+        qq_maid_llm::provider::openai::diagnostics::test_connection(
+            &connection.base_url,
+            connection.responses,
+            &connection.auth,
+            &connection.api_key,
+            model,
+        )
+        .await
+        .map_err(|error| ConfigCenterError::invalid(error.message))
+    }
+
+    // 锁内校验 revision 并提取保存配置与凭证；网络等待不占用配置写锁。
+    fn resolve_connection_for_read(
+        &self,
+        id: &str,
+        expected_revision: &str,
+    ) -> Result<ResolvedConnection, ConfigCenterError> {
+        let _guard = self
+            .mutation_lock
+            .lock()
+            .map_err(|_| ConfigCenterError::io("configuration mutation lock is poisoned"))?;
+        if let Some(definition) = builtin_connection(id) {
+            return self.resolve_builtin_connection_for_read(id, expected_revision, definition);
         }
         let snapshot = self
             .agent_file
@@ -95,7 +90,10 @@ impl ConfigCenter {
                 "Connection 已修改，请刷新后测试",
             ));
         }
-        let providers = self.saved_providers()?;
+        let providers = snapshot
+            .saved_value
+            .and_then(|value| value.get("providers").and_then(Value::as_table).cloned())
+            .unwrap_or_default();
         let provider = providers
             .get(id)
             .ok_or_else(|| ConfigCenterError::invalid("Connection 不存在"))?;
@@ -111,18 +109,79 @@ impl ConfigCenter {
             .get(&connection.api_key_env)
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| ConfigCenterError::invalid("Credential 尚未配置"))?;
-        qq_maid_llm::provider::openai::diagnostics::test_connection(
-            &connection.base_url,
-            connection.kind == crate::config::agent::AgentProviderKind::OpenAiResponses,
-            &qq_maid_llm::config::HttpAuthConfig {
+        let responses = connection.kind == crate::config::agent::AgentProviderKind::OpenAiResponses;
+        Ok(ResolvedConnection {
+            base_url: connection.base_url,
+            responses,
+            auth: qq_maid_llm::config::HttpAuthConfig {
                 header: connection.auth_header,
                 scheme: connection.auth_scheme,
             },
-            key,
-            model,
-        )
-        .await
-        .map_err(|error| ConfigCenterError::invalid(error.message))
+            api_key: key.to_owned(),
+            timeout_seconds: discovery_timeout(&environment, connection.request_timeout_seconds)?,
+            discovery_adapter: if responses {
+                DiscoveryAdapter::OpenAiResponses
+            } else {
+                DiscoveryAdapter::OpenAiCompatible
+            },
+        })
+    }
+
+    fn resolve_builtin_connection_for_read(
+        &self,
+        id: &str,
+        expected_revision: &str,
+        (base_env, key_env, default_url): (&str, &str, &str),
+    ) -> Result<ResolvedConnection, ConfigCenterError> {
+        let saved = self.managed_file.load()?;
+        if saved.revision != expected_revision {
+            return Err(ConfigCenterError::conflict("内置连接已修改，请刷新后测试"));
+        }
+        let environment = self.current_resolved_environment()?;
+        let enabled = environment
+            .get(&format!("{}_ENABLED", id.to_ascii_uppercase()))
+            .map(String::as_str)
+            .unwrap_or("true");
+        if matches!(
+            enabled.trim().to_ascii_lowercase().as_str(),
+            "false" | "0" | "off" | "no" | "disabled" | "none"
+        ) {
+            return Err(ConfigCenterError::invalid("请先启用 Connection"));
+        }
+        let key = environment
+            .get(key_env)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| ConfigCenterError::invalid("Credential 尚未配置"))?;
+        let base = environment
+            .get(base_env)
+            .map(String::as_str)
+            .unwrap_or(default_url);
+        let base = base
+            .split(',')
+            .map(str::trim)
+            .find(|value| !value.is_empty())
+            .unwrap_or(default_url);
+        let responses = id == "openai"
+            && crate::config::parse_openai_api_mode(
+                environment
+                    .get("OPENAI_API_MODE")
+                    .map(String::as_str)
+                    .unwrap_or("auto"),
+            )
+            .map_err(|error| ConfigCenterError::invalid(error.message))?
+                != crate::config::OpenAiApiMode::ChatOnly;
+        Ok(ResolvedConnection {
+            base_url: base.to_owned(),
+            responses,
+            auth: qq_maid_llm::config::HttpAuthConfig::default(),
+            api_key: key.to_owned(),
+            timeout_seconds: discovery_timeout(&environment, None)?,
+            discovery_adapter: match id {
+                "openai" if responses => DiscoveryAdapter::OpenAiResponses,
+                "openai" | "deepseek" => DiscoveryAdapter::OpenAiCompatible,
+                _ => DiscoveryAdapter::Unsupported,
+            },
+        })
     }
 
     pub fn provider_snapshot(&self) -> Result<ProviderManagementSnapshot, ConfigCenterError> {
@@ -403,4 +462,33 @@ fn builtin_connection(id: &str) -> Option<(&'static str, &'static str, &'static 
         )),
         _ => None,
     }
+}
+
+// 含明文凭证的临时结构不可 Debug / Serialize，也不得持久化。
+struct ResolvedConnection {
+    base_url: String,
+    responses: bool,
+    auth: qq_maid_llm::config::HttpAuthConfig,
+    api_key: String,
+    timeout_seconds: u64,
+    discovery_adapter: DiscoveryAdapter,
+}
+
+fn discovery_timeout(
+    environment: &HashMap<String, String>,
+    custom: Option<u64>,
+) -> Result<u64, ConfigCenterError> {
+    let seconds = match custom {
+        Some(seconds) => seconds,
+        None => environment
+            .get("LLM_REQUEST_TIMEOUT_SECONDS")
+            .map(|value| value.trim().parse::<u64>())
+            .transpose()
+            .map_err(|_| ConfigCenterError::invalid("连接超时配置无效"))?
+            .unwrap_or(180),
+    };
+    if seconds == 0 {
+        return Err(ConfigCenterError::invalid("连接超时必须大于零"));
+    }
+    Ok(seconds)
 }

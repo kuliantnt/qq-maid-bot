@@ -477,3 +477,139 @@ fn console_still_rejects_new_mixed_case_connection_ids() {
         initial.revision
     );
 }
+
+#[tokio::test]
+async fn connection_discovery_reads_saved_credentials_without_mutating_routes() {
+    use axum::{Router, http::HeaderMap, routing::get};
+    use qq_maid_llm::provider::discovery::DiscoveryState;
+    let app = Router::new().route(
+        "/private/models",
+        get(|headers: HeaderMap| async move {
+            assert_eq!(headers["x-connection-key"], "test-discovery-key");
+            r#"{"data":[{"id":"not-in-catalog/private"}]}"#
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/private", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (center, _database, _directory) = test_center();
+    let (_file, running, _agent_database, path) = test_agent_file();
+    let center = center.with_running_agent_config(running).unwrap();
+    let initial = center.current_snapshot().unwrap().agent.unwrap();
+    let mut provider = managed_provider(true);
+    provider.base_url = base;
+    provider.auth_header = "x-connection-key".into();
+    // TOML 省略 scheme 表示默认 Bearer；显式空字符串才表示无 scheme。
+    provider.auth_scheme = Some(String::new());
+    provider.request_timeout_seconds = Some(2);
+    let saved = center
+        .update_agent(
+            &initial.revision,
+            &[AgentConfigChange::SetProvider {
+                id: "private_proxy".into(),
+                provider: provider.clone(),
+            }],
+        )
+        .unwrap();
+    assert!(
+        center
+            .discover_connection_models("private_proxy", &initial.revision)
+            .await
+            .is_err()
+    );
+    assert!(
+        center
+            .discover_connection_models("private_proxy", &saved.revision)
+            .await
+            .is_err()
+    );
+    center
+        .update_connection_credential(
+            "private_proxy",
+            &saved.revision,
+            "missing",
+            Some("test-discovery-key"),
+        )
+        .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let result = center
+        .discover_connection_models("private_proxy", &saved.revision)
+        .await
+        .unwrap();
+    assert_eq!(result.state, DiscoveryState::Success);
+    assert_eq!(result.models.unwrap()[0].id, "not-in-catalog/private");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(
+        center.current_snapshot().unwrap().agent.unwrap().revision,
+        saved.revision
+    );
+    provider.enabled = false;
+    let disabled = center
+        .update_agent(
+            &saved.revision,
+            &[AgentConfigChange::SetProvider {
+                id: "private_proxy".into(),
+                provider,
+            }],
+        )
+        .unwrap();
+    assert!(
+        center
+            .discover_connection_models("private_proxy", &disabled.revision)
+            .await
+            .is_err()
+    );
+    assert!(
+        center
+            .discover_connection_models("missing", &disabled.revision)
+            .await
+            .is_err()
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn builtin_discovery_uses_first_saved_base_and_global_timeout() {
+    use axum::{Router, http::HeaderMap, routing::get};
+    use qq_maid_llm::provider::discovery::DiscoveryState;
+    let app = Router::new().route(
+        "/v1/models",
+        get(|headers: HeaderMap| async move {
+            assert_eq!(headers["authorization"], "Bearer test-key");
+            r#"{"data":[]}"#
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (center, _database, _directory) = test_center();
+    let center = center.with_external_environment(HashMap::from([
+        (
+            "OPENAI_BASE_URLS".into(),
+            format!("{base},http://127.0.0.1:1"),
+        ),
+        ("OPENAI_API_KEY".into(), "test-key".into()),
+        ("GEMINI_API_KEY".into(), "test-key".into()),
+        ("LLM_REQUEST_TIMEOUT_SECONDS".into(), "3".into()),
+    ]));
+    let revision = center.managed_file.load().unwrap().revision;
+    assert!(
+        center
+            .discover_connection_models("openai", "stale")
+            .await
+            .is_err()
+    );
+    let result = center
+        .discover_connection_models("openai", &revision)
+        .await
+        .unwrap();
+    assert_eq!(result.state, DiscoveryState::Success);
+    assert!(result.models.unwrap().is_empty());
+    let unsupported = center
+        .discover_connection_models("gemini", &revision)
+        .await
+        .unwrap();
+    assert_eq!(unsupported.state, DiscoveryState::Unsupported);
+    assert!(unsupported.models.is_none());
+    server.abort();
+}

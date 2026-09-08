@@ -466,7 +466,18 @@ async fn configuration_snapshot_never_returns_secret_plaintext() -> Result<(), I
     state.config.web_console_enabled = true;
     let (database, directory) =
         SqliteDatabase::open_temp_directory("qq-maid-config-http", APP_MIGRATIONS).unwrap();
+    // 本地上游验证完整管理员 API 调用链，不使用真实供应商或凭证。
+    let upstream = axum::Router::new().route(
+        "/v1/models",
+        axum::routing::get(|| async {
+            axum::Json(json!({"data": [{"id": "private/proxy-model"}]}))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let discovery_base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
     let external = HashMap::from([
+        ("OPENAI_BASE_URLS".to_owned(), discovery_base),
         (
             "OPENAI_API_KEY".to_owned(),
             "must-never-reach-response".to_owned(),
@@ -540,6 +551,11 @@ async fn configuration_snapshot_never_returns_secret_plaintext() -> Result<(), I
                 "id": "test", "expected_revision": "missing", "model": "test-model"
             }),
         ),
+        (
+            "POST",
+            "/api/v1/console/configuration/providers/models",
+            json!({"id": "test", "expected_revision": "missing"}),
+        ),
     ] {
         let (status, _) = request_response(state.clone(), method, path, Some(body.clone())).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -561,6 +577,37 @@ async fn configuration_snapshot_never_returns_secret_plaintext() -> Result<(), I
 
     assert_eq!(status, axum::http::StatusCode::OK);
     assert_eq!(json["ok"], true);
+    let (discovery_status, discovery) = request_response_with_cookie(
+        state.clone(),
+        "POST",
+        "/api/v1/console/configuration/providers/models",
+        Some(json!({"id": "openai", "expected_revision": json["configuration"]["revision"]})),
+        &cookie,
+        Some(&csrf),
+    )
+    .await;
+    assert_eq!(discovery_status, StatusCode::OK);
+    assert_eq!(discovery["discovery"]["state"], "success");
+    assert_eq!(
+        discovery["discovery"]["models"][0]["id"],
+        "private/proxy-model"
+    );
+    assert_eq!(
+        discovery["discovery"]["models"][0]["source"],
+        "connection_discovery"
+    );
+    assert!(!discovery.to_string().contains("must-never-reach-response"));
+    let (stale_status, _) = request_response_with_cookie(
+        state.clone(),
+        "POST",
+        "/api/v1/console/configuration/providers/models",
+        Some(json!({"id": "openai", "expected_revision": "stale"})),
+        &cookie,
+        Some(&csrf),
+    )
+    .await;
+    assert_eq!(stale_status, StatusCode::CONFLICT);
+    server.abort();
     let serialized = json.to_string();
     assert!(!serialized.contains("must-never-reach-response"));
     assert!(!serialized.contains("tavily-must-never-reach-response"));

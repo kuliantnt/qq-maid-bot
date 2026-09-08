@@ -9,6 +9,7 @@
 
 pub mod bigmodel;
 pub mod deepseek;
+pub mod discovery;
 pub mod gemini;
 pub mod limiter;
 pub mod openai;

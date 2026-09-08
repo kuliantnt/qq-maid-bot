@@ -31,4 +31,19 @@
 
 最近测试结果仅保留在当前页面会话，连接或凭证 revision 变化后失效；重新登录/初始化后清空，不代替运行时健康状态。
 
-模型目录、本地模型覆盖和多 Key 轮换属于 #684 后续阶段，本次不引入远程目录或新的协议 Adapter。
+## Connection 模型发现
+
+`POST /api/v1/console/configuration/providers/models` 接收 `id` 和 `expected_revision`，只读取已保存连接，不写配置或路线。自定义连接使用 Agent revision，内置连接使用 runtime revision。接口仍要求管理员 Session、Origin 与 CSRF；浏览器不能提交 URL、认证或 Credential。响应包含 `connection_id`、请求的 `revision` 和 `discovery`。结果仅属于请求开始时的保存配置，不是运行值，也不缓存或热加载。
+
+自定义 `openai_compatible` / `openai_responses` 及内置 OpenAI、DeepSeek 从连接自身 Base URL 追加 `/models`，沿用 Header、Scheme 和当前解析出的 Credential。内置 OpenAI 多 Base URL 使用首个非空地址，不跨地址重试；BigModel、Gemini 内置 Adapter 暂返回 `unsupported / adapter_unsupported`，不猜测其他原生接口。协议参考 [OpenAI 模型列表](https://platform.openai.com/docs/api-reference/models/list)和 [DeepSeek 模型列表](https://api-docs.deepseek.com/api/list-models)。
+
+发现沿用自定义 `request_timeout_seconds`，缺省用 `LLM_REQUEST_TIMEOUT_SECONDS`，再限制总等待不超过 15 秒、连接不超过 5 秒。最多两个并发，忙时立即返回 `unknown / busy`；禁止重定向、自动重试与分页跳转。响应上限 1 MiB、最多 10000 个条目；model id 去重排序，仅保留 ID 及 `source=connection_discovery`，不透传额外上游字段、错误正文、URL 或凭证。
+
+| state | models | 含义 |
+| --- | --- | --- |
+| `success` | 数组（允许空） | 上游返回结构有效的模型列表；不等于真实调用成功或能力已验证 |
+| `unsupported` | `null` | Adapter 未实现发现，或端点返回 404 / 405 / 501 |
+| `failed` | `null` | 认证、限流、传输、超时、响应超限或其他 HTTP 错误 |
+| `unknown` | `null` | 并发繁忙、响应无法识别、无效条目或声明存在未读取分页 |
+
+结果另有 `category`、`http_status` 和 `elapsed_ms`；未启用、未配置凭证、连接不存在或 revision 冲突走现有配置 API 错误。发现失败不影响历史 Route，发现未知模型也保留其 ID。此阶段不推断 Connection → Catalog Provider 映射，不附加 Catalog 元数据，也不读写 `models.json`；#692 的 Catalog 语义保持不变。Web UI、显式元数据关联、本地覆盖写入、disabled Route 校验、在线刷新和多 Key 仍由 #684 后续 PR 实现。
