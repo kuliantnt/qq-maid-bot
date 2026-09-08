@@ -3,6 +3,7 @@
 //! 具体指标选择、排序、兼容文案和来源标注属于 Radar 领域规则，Respond 层只消费
 //! 已渲染的双通道命令正文。
 
+use chrono::{DateTime, Utc};
 use qq_maid_common::{
     markdown::{escape_inline, escape_text},
     time_context::format_local_time_for_display,
@@ -23,6 +24,25 @@ use super::{
 };
 
 const RADAR_SUMMARY_MAX_CHARS: usize = 110;
+
+/// 额度雷达的快照在超过该天数后不再视为“当前额度”，只按历史兼容数据展示。
+const CODEX_QUOTA_EXPIRED_AFTER_DAYS: i64 = 7;
+
+/// `five_hour_policy` 是站点给出的实时状态字段；只有配额快照足够新时才允许
+/// 把它当作当前状态输出，否则只能作为历史备注，避免把一个月前的暂停文案
+/// 当成今天的事实。
+const CODEX_QUOTA_POLICY_MAX_AGE_HOURS: i64 = 24;
+
+/// Codex Radar 额度数据的可见新鲜度分级。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexQuotaFreshness {
+    /// 更新时间可解析且未超过 `CODEX_QUOTA_EXPIRED_AFTER_DAYS`。
+    Current,
+    /// 更新时间可解析但已明显陈旧，只能作为历史估算展示。
+    Expired { age_days: i64 },
+    /// 缺少更新时间或格式无法解析；无法确认是否仍代表当前状态。
+    Unknown,
+}
 
 pub(super) fn format_radar_reply(snapshot: &RadarSnapshot, target: RadarTarget) -> CommandBody {
     let mut render = CommandRender::new();
@@ -116,21 +136,7 @@ fn append_codex_detail_card(render: &mut CommandRender, summary: &CodexRadarSumm
         render.paragraph(&prediction);
     }
 
-    render.blank();
-    render.subtitle("额度估算");
-    if !summary.quota_rows.is_empty() {
-        for quota in &summary.quota_rows {
-            render.bullet(&codex_quota_metric_line(quota));
-        }
-        if summary.quota_policy_5h.as_deref() == Some("temporarily_paused_hidden") {
-            render.bullet("5h 限制当前暂停，站点暂不展示该档额度。");
-        }
-    } else if let Some(line) = codex_quota_line(summary) {
-        render.bullet(&line);
-    } else {
-        hidden = true;
-        render.paragraph("额度雷达当前没有可展示数据。");
-    }
+    append_codex_quota_section(render, summary, &mut hidden);
 
     render.blank();
     render.subtitle("模型与社区体感");
@@ -264,7 +270,12 @@ fn claude_conclusion(summary: &ClaudeRadarSummary) -> String {
 
 fn codex_key_metrics(summary: &CodexRadarSummary) -> Option<String> {
     let mut parts = Vec::new();
-    if let Some(quota) = codex_quota_line(summary) {
+    // 过期兼容数据只留在详情卡中并明确标注，不进入“当前关键指标”。
+    if matches!(
+        codex_quota_freshness(summary.quota_updated_at.as_deref()),
+        CodexQuotaFreshness::Current
+    ) && let Some(quota) = codex_quota_line(summary)
+    {
         parts.push(quota);
     }
     if let Some(top) = codex_top_iq_line(summary).or_else(|| codex_model_line(summary)) {
@@ -376,6 +387,73 @@ fn codex_quota_metric_line(quota: &CodexQuotaMetric) -> String {
         parts.push(codex_quota_basis_label(&basis).to_owned());
     }
     parts.join(" · ")
+}
+
+fn append_codex_quota_section(
+    render: &mut CommandRender,
+    summary: &CodexRadarSummary,
+    hidden: &mut bool,
+) {
+    let freshness = codex_quota_freshness(summary.quota_updated_at.as_deref());
+    render.blank();
+    render.subtitle(match freshness {
+        CodexQuotaFreshness::Expired { .. } => "额度估算（历史数据 / 已过期）",
+        CodexQuotaFreshness::Current | CodexQuotaFreshness::Unknown => "额度估算",
+    });
+
+    let has_rows = !summary.quota_rows.is_empty();
+    if has_rows {
+        for quota in &summary.quota_rows {
+            render.bullet(&codex_quota_metric_line(quota));
+        }
+    } else if let Some(line) = codex_quota_line(summary) {
+        render.bullet(&line);
+    } else {
+        *hidden = true;
+        render.paragraph("额度雷达当前没有可展示数据。");
+        return;
+    }
+
+    match freshness {
+        CodexQuotaFreshness::Current => {
+            if summary.quota_policy_5h.as_deref() == Some("temporarily_paused_hidden")
+                && codex_quota_policy_is_recent(summary.quota_updated_at.as_deref())
+            {
+                render.bullet("5h 限制当前暂停，站点暂不展示该档额度。");
+            }
+        }
+        CodexQuotaFreshness::Expired { .. } => {
+            render.bullet("该额度估算已过期，仅作历史参考；当前 5h / 7d 额度状态无法确认。");
+        }
+        CodexQuotaFreshness::Unknown => {
+            render.bullet("额度更新时间缺失，当前额度状态无法确认。");
+        }
+    }
+}
+
+fn codex_quota_freshness(updated_at: Option<&str>) -> CodexQuotaFreshness {
+    let Some(updated_at) = codex_quota_updated_at(updated_at) else {
+        return CodexQuotaFreshness::Unknown;
+    };
+    let age_days = Utc::now().signed_duration_since(updated_at).num_days();
+    if age_days <= CODEX_QUOTA_EXPIRED_AFTER_DAYS {
+        CodexQuotaFreshness::Current
+    } else {
+        CodexQuotaFreshness::Expired { age_days }
+    }
+}
+
+fn codex_quota_policy_is_recent(updated_at: Option<&str>) -> bool {
+    let Some(updated_at) = codex_quota_updated_at(updated_at) else {
+        return false;
+    };
+    Utc::now().signed_duration_since(updated_at).num_hours() <= CODEX_QUOTA_POLICY_MAX_AGE_HOURS
+}
+
+fn codex_quota_updated_at(updated_at: Option<&str>) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(updated_at?.trim())
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
 }
 
 fn codex_quota_basis_label(value: &str) -> &str {

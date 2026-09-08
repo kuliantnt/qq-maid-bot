@@ -2,9 +2,14 @@ use crate::runtime::tools::{
     ClaudeRadarSummary, CodexModelMetric, CodexQuotaMetric, CodexRadarSummary, CodexRatingMetric,
     RadarSnapshot, RadarSourceFailure, RadarSourceKind,
 };
+use chrono::{Duration, Utc};
 
-use super::super::parse::{apply_codex_metrics, parse_codex_summary};
+use super::super::parse::{apply_codex_metrics, apply_codex_ratings, parse_codex_summary};
 use super::*;
+
+fn timestamp_seconds_ago(seconds: i64) -> String {
+    (Utc::now() - Duration::seconds(seconds)).to_rfc3339()
+}
 
 #[test]
 fn parse_radar_action_accepts_required_variants() {
@@ -125,6 +130,7 @@ fn format_codex_detail_adds_single_hidden_field_hint() {
 
 #[test]
 fn format_codex_detail_shows_ranked_iq_quota_and_cross_vendor_ratings() {
+    let fresh_quota_timestamp = timestamp_seconds_ago(300);
     let body = format_radar_reply(
         &RadarSnapshot {
             codex: Some(CodexRadarSummary {
@@ -159,7 +165,7 @@ fn format_codex_detail_shows_ranked_iq_quota_and_cross_vendor_ratings() {
                 ],
                 quota_5h_20x: None,
                 quota_7d_20x: None,
-                quota_updated_at: Some("2026-07-30T08:20:35Z".to_owned()),
+                quota_updated_at: Some(fresh_quota_timestamp),
                 quota_policy_5h: Some("temporarily_paused_hidden".to_owned()),
                 quota_rows: vec![CodexQuotaMetric {
                     tier: "Plus".to_owned(),
@@ -223,8 +229,123 @@ fn format_codex_detail_shows_ranked_iq_quota_and_cross_vendor_ratings() {
             .contains("数据来自 Codex 雷达：https://codexradar.com/")
     );
     assert!(body.text.contains("模型数据：2026-06-30 18:39:12"));
-    assert!(body.text.contains("额度数据：2026-07-30 16:20:35"));
+    assert!(body.text.contains("额度数据："));
+    assert!(!body.text.contains("历史数据 / 已过期"));
     assert!(body.text.contains("社区评分：2026-08-02 20:42:22"));
+}
+
+#[test]
+fn format_codex_detail_marks_stale_quota_as_historical_without_current_policy() {
+    let mut summary = parse_codex_summary(&serde_json::json!({
+        "model_iq": {
+            "updated_at": timestamp_seconds_ago(300),
+            "latest": {
+                "score": 107.89,
+                "passed": 82,
+                "tasks": 114,
+                "model": "gpt-6-astra",
+                "reasoning_effort": "high"
+            },
+            "comparisons": {},
+            "quota_radar": {
+                "updated_at": timestamp_seconds_ago(30 * 24 * 60 * 60),
+                "five_hour_policy": "temporarily_paused_hidden",
+                "rows": [
+                    {
+                        "tier": "20x Pro",
+                        "basis": "distributed radar",
+                        "five_h": null,
+                        "seven_d": 1649.72
+                    },
+                    {
+                        "tier": "Plus",
+                        "basis": "estimated",
+                        "five_h": null,
+                        "seven_d": 84.66
+                    }
+                ]
+            }
+        }
+    }));
+    summary.rating_updated_at = Some(timestamp_seconds_ago(300));
+    summary.rating_models = vec![CodexRatingMetric {
+        label: "GPT-6 Astra high".to_owned(),
+        average: Some(8.4),
+        count: Some(45),
+    }];
+
+    let body = format_radar_reply(
+        &RadarSnapshot {
+            codex: Some(summary),
+            claude: None,
+            failures: Vec::new(),
+        },
+        RadarTarget::Codex,
+    );
+
+    // 陈旧快照不能继续伪装成“当前暂停”；但 7d 历史估算仍可保留并明确标注。
+    assert!(body.text.contains("额度估算（历史数据 / 已过期）"));
+    assert!(body.text.contains("20x Pro · 7d 1649.72 · 分布式雷达实测"));
+    assert!(
+        body.text
+            .contains("该额度估算已过期，仅作历史参考；当前 5h / 7d 额度状态无法确认。")
+    );
+    assert!(!body.text.contains("5h 限制当前暂停"));
+    // 模型 IQ 与社区评分不依赖额度字段，仍应正常展示。
+    assert!(
+        body.text
+            .contains("最高模型：GPT-6 Astra high · IQ 107.89 · 82/114")
+    );
+    assert!(
+        body.text
+            .contains("24h 社区评分前五：\n1. GPT-6 Astra high · 8.40/10 · 45 票")
+    );
+}
+
+#[test]
+fn format_codex_detail_keeps_models_and_ratings_when_quota_is_missing() {
+    let mut summary = parse_codex_summary(&serde_json::json!({
+        "model_iq": {
+            "updated_at": timestamp_seconds_ago(300),
+            "latest": {
+                "score": 107.89,
+                "passed": 82,
+                "tasks": 114,
+                "model": "gpt-6-astra",
+                "reasoning_effort": "high"
+            },
+            "comparisons": {}
+        }
+    }));
+    apply_codex_ratings(
+        &mut summary,
+        &serde_json::json!({
+            "updated_at": timestamp_seconds_ago(300),
+            "models": [
+                {"label": "GPT-6 Astra high", "average": 8.4, "count": 45}
+            ]
+        }),
+    );
+
+    let body = format_radar_reply(
+        &RadarSnapshot {
+            codex: Some(summary),
+            claude: None,
+            failures: Vec::new(),
+        },
+        RadarTarget::Codex,
+    );
+
+    assert!(body.text.contains("额度雷达当前没有可展示数据。"));
+    assert!(
+        body.text
+            .contains("最高模型：GPT-6 Astra high · IQ 107.89 · 82/114")
+    );
+    assert!(
+        body.text
+            .contains("24h 社区评分前五：\n1. GPT-6 Astra high · 8.40/10 · 45 票")
+    );
+    assert!(!body.text.contains("读取提示"));
 }
 
 #[test]
