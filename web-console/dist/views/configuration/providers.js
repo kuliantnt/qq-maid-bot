@@ -2,6 +2,7 @@ import { testProviderConnection, updateAgentConfiguration, updateConnectionCrede
 import { current, runSave } from "./state.js";
 import { inputId, record, string } from "./fields.js";
 import { errorMessage, showResult } from "./ui.js";
+import { appendModelManager } from "./models.js";
 const recentTests = new Map();
 export function clearProviderTests() { recentTests.clear(); }
 export function providerChange(id, value, exists = false) {
@@ -173,6 +174,7 @@ function connectionCard(snapshot, id, saved, exists, onCreated) {
     return card;
 }
 function appendDiagnostic(card, id, revision, enabled, credentialRevision) {
+    appendModelManager(card, id, revision, enabled);
     const model = input(card, "测试模型 ID（将产生一次最小真实调用）", "", !enabled);
     const cacheKey = `${id}:${revision}:${credentialRevision}`;
     const status = node("p", recentTests.get(cacheKey) ?? "最近测试：尚未测试");

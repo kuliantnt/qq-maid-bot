@@ -176,3 +176,17 @@ async fn bounded_discovery_uses_connection_auth_and_classifies_failures() {
     );
     server.abort();
 }
+
+#[test]
+fn proxy_display_names_never_replace_request_ids() {
+    let models = parse_models(
+        br#"{"object":"list","data":[
+        {"id":"vendor/private-model:free","name":"Friendly Model","owned_by":"proxy"},
+        {"id":"gpt-5-mini","display_name":"Friendly GPT","object":"model"}
+    ]}"#,
+    )
+    .unwrap();
+    assert_eq!(models[0].id, "gpt-5-mini");
+    assert_eq!(models[1].id, "vendor/private-model:free");
+    assert!(parse_models(br#"{"data":[{"name":"Friendly Model"}]}"#).is_none());
+}

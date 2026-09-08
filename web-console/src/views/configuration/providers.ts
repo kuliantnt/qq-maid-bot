@@ -5,6 +5,8 @@ import { current, runSave } from "./state.js";
 import { inputId, record, string } from "./fields.js";
 import { errorMessage, showResult } from "./ui.js";
 
+import { appendModelManager } from "./models.js";
+
 const recentTests = new Map<string, string>();
 export function clearProviderTests(): void { recentTests.clear(); }
 
@@ -160,6 +162,7 @@ function connectionCard(snapshot: ConfigurationSnapshot, id: string, saved: Reco
 }
 
 function appendDiagnostic(card: HTMLElement, id: string, revision: string, enabled: boolean, credentialRevision: string): void {
+  appendModelManager(card, id, revision, enabled);
   const model = input(card, "测试模型 ID（将产生一次最小真实调用）", "", !enabled);
   const cacheKey = `${id}:${revision}:${credentialRevision}`;
   const status = node("p", recentTests.get(cacheKey) ?? "最近测试：尚未测试");

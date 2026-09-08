@@ -16,6 +16,7 @@ use crate::{
 use super::*;
 
 mod agent_file;
+mod models;
 mod opencode;
 mod provider_routes;
 mod secret_storage;

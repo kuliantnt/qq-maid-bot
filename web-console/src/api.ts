@@ -862,3 +862,17 @@ function valueState(value: unknown): ValueState {
     ? value
     : "unknown";
 }
+
+export async function discoverConnectionModels(id: string, revision: string): Promise<Record<string, unknown>> {
+  return record(record(await mutatingJson("/api/v1/console/configuration/providers/models", "POST", {
+    id, expected_revision: revision,
+  })).discovery);
+}
+export async function fetchModelMetadata(id: string): Promise<Record<string, unknown>> {
+  return record(record(await mutatingJson("/api/v1/console/configuration/providers/model-metadata", "POST", { id })).metadata);
+}
+export async function updateModelOverride(id: string, revision: string, model: unknown): Promise<ConfigurationSnapshot> {
+  return parseConfigurationPayload(await mutatingJson("/api/v1/console/configuration/providers/model-override", "PATCH", {
+    id, expected_revision: revision, model,
+  }));
+}

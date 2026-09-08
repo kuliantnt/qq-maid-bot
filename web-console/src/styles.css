@@ -613,3 +613,16 @@ textarea { width: 100%; min-height: 25rem; flex: 1; resize: vertical; padding: v
   .todo-create-form .error { grid-column: auto; }
   .todo-create-form > button[type="submit"] { grid-column: auto; width: 100%; }
 }
+
+/* 模型元数据较长时在弹窗内部换行，保持小屏和键盘操作可用。 */
+.model-manager { width: min(960px, 94vw); }
+.model-manager input:not([type="checkbox"]) { width: 100%; box-sizing: border-box; margin-block: 0.4rem; }
+.model-manager p, .model-manager h4 { overflow-wrap: anywhere; }
+.model-manager .provider-card { margin-block: 0.8rem; }
+
+.model-form-grid { display: grid; align-items: start; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 1rem; margin-block: 1rem; }
+.model-form-grid input[type="checkbox"] { width: auto; }
+
+.model-form-grid fieldset { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 1rem; border: 1px solid var(--line); }
+.model-form-grid .model-checkbox { display: flex; align-items: center; gap: .5rem; }
+.model-manager .provider-card p { font-size: .85rem; }
