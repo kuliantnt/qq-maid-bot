@@ -31,12 +31,14 @@ use super::{
 };
 
 mod auth_routes;
+mod providers;
 
 pub(super) type BoxedResponse = Box<Response>;
 
 pub(super) fn management_router() -> Router<OpsHttpState> {
     Router::new()
         .merge(auth_routes::router())
+        .merge(providers::router())
         .route(
             "/api/v1/console/configuration/runtime",
             patch(update_runtime_configuration),

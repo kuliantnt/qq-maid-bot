@@ -2,6 +2,10 @@ import { button, configurationGroup, element, string } from "./fields.js";
 import { selectedBusinessGroup, setSelectedBusinessGroup } from "./state.js";
 
 export const FIELD_LABELS: Record<string, string> = {
+  "provider.openai.enabled": "启用 OpenAI",
+  "provider.deepseek.enabled": "启用 DeepSeek",
+  "provider.bigmodel.enabled": "启用 BigModel",
+  "provider.gemini.enabled": "启用 Gemini",
   "command.prefix": "聊天命令前缀",
   "delivery.tts.provider": "语音 Provider",
   "delivery.tts.qwen_api_key": "千问 TTS API Key",
@@ -221,4 +225,3 @@ export function bindTabKeyboard(
     }
   });
 }
-

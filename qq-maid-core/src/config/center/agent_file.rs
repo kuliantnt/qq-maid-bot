@@ -75,8 +75,13 @@ pub enum AgentConfigChange {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentProviderUpdate {
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default = "default_provider_enabled")]
+    pub enabled: bool,
     pub kind: AgentProviderKind,
     pub base_url: String,
+    #[serde(default)]
     pub api_key_env: String,
     #[serde(default = "default_provider_auth_header")]
     pub auth_header: String,
@@ -127,6 +132,18 @@ impl AgentConfigFile {
     pub fn snapshot(&self) -> Result<AgentConfigSnapshot, ConfigCenterError> {
         let loaded = self.load()?;
         self.snapshot_from_loaded(loaded)
+    }
+
+    pub(super) fn current_runtime(&self) -> Result<AgentRuntimeConfig, ConfigCenterError> {
+        let document = self
+            .load()?
+            .document
+            .ok_or_else(|| ConfigCenterError::invalid("Agent 配置不可用"))?;
+        AgentRuntimeConfig::from_document(
+            document,
+            AgentConfigSource::File(self.path.to_string_lossy().into_owned()),
+        )
+        .map_err(|error| ConfigCenterError::invalid(error.message))
     }
 
     pub fn update(
@@ -255,6 +272,8 @@ fn apply_change(
             document.providers.insert(
                 id,
                 ProviderFile {
+                    display_name: provider.display_name.clone(),
+                    enabled: provider.enabled,
                     kind: provider.kind,
                     base_url: provider.base_url.clone(),
                     api_key_env: provider.api_key_env.clone(),
@@ -345,6 +364,10 @@ fn provider_entry_name(name: &str) -> Result<String, ConfigCenterError> {
 
 fn default_provider_auth_header() -> String {
     "Authorization".to_owned()
+}
+
+fn default_provider_enabled() -> bool {
+    true
 }
 
 fn default_provider_auth_scheme() -> Option<String> {

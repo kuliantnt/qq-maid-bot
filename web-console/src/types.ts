@@ -100,12 +100,19 @@ export interface RegisteredTool {
 }
 
 export interface ConfigurationSnapshot {
+  providers?: ProviderManagementSnapshot | undefined;
   revision: string;
   fileExists: boolean;
   agent: AgentConfigSnapshot | null;
   fields: ConfigFieldSnapshot[];
   registeredTools: RegisteredTool[];
   restartAvailable: boolean;
+}
+
+export interface ProviderManagementSnapshot {
+  presets: Array<{ id: string; name: string; kind: string; base_url: string; auth_header: string; auth_scheme: string }>;
+  adapters: string[];
+  credentials: Record<string, { configured: boolean; editable: boolean; revision: string; pending_restart: boolean }>;
 }
 
 export interface ProviderStatus {

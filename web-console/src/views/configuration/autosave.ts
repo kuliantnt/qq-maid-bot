@@ -1,6 +1,6 @@
 import type { ConfigFieldSnapshot, ConfigurationSnapshot } from "../../types.js";
 import { array, element, inputId, inputValue, isEmptyInputValue, record, string } from "./fields.js";
-import { agentSceneConfig, saveAgent, saveAgentScene, saveOpenCodeProvider } from "./agent-fields.js";
+import { agentSceneConfig, saveAgent, saveAgentScene } from "./agent-fields.js";
 import { agentWebSearchInputValue, agentWebSearchKey, readAgentWebSearchConfig } from "./web-search.js";
 import { autosaveBound, current, queuedFocusRestoreId, setAutosaveBound, setQueuedFocusRestoreId } from "./state.js";
 import { savePublicFields } from "./public-fields.js";
@@ -49,7 +49,7 @@ export function shouldDeferAutosaveToButton(
   }
   if (related.id === "save-public-config") return target.dataset.autosaveScope === "public";
   if (related.id === "save-agent-config") return target.dataset.autosaveScope === "agent";
-  return target.dataset.autosaveProvider !== undefined && related.matches(".provider-action");
+  return false;
 }
 
 export async function autosaveBlur(target: HTMLInputElement | HTMLSelectElement): Promise<void> {
@@ -74,11 +74,6 @@ export async function autosaveBlur(target: HTMLInputElement | HTMLSelectElement)
     if (!(target instanceof HTMLInputElement) || !field || !field.editable || !target.checked) return;
     if (!secretIsDirty(field, element(inputId(field.key), HTMLInputElement).value, true)) return;
     await saveSecrets();
-    return;
-  }
-  const providerId = target.dataset.autosaveProvider;
-  if (providerId) {
-    await saveOpenCodeProvider(providerId);
     return;
   }
   if (scene) {
@@ -116,4 +111,3 @@ export function agentFieldChanged(id: string): boolean {
     : null;
   return currentValue !== null && shouldAutosaveOnBlur({ scope: "agent", value: currentValue, baseline });
 }
-

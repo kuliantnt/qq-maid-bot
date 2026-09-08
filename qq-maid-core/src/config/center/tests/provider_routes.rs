@@ -1,5 +1,235 @@
 use super::*;
 
+fn managed_provider(enabled: bool) -> AgentProviderUpdate {
+    AgentProviderUpdate {
+        display_name: None,
+        enabled,
+        kind: AgentProviderKind::OpenAiResponses,
+        base_url: "https://provider.example/v1".into(),
+        api_key_env: String::new(),
+        auth_header: "Authorization".into(),
+        auth_scheme: Some("Bearer".into()),
+        request_timeout_seconds: Some(15),
+        chat_fallback: Some(false),
+    }
+}
+
+#[test]
+fn builtin_disable_is_rejected_even_during_incomplete_setup() {
+    let (_old_center, database, directory) = test_center();
+    let (_file, running, _agent_database, _path) = test_agent_file();
+    let center = ConfigCenter::open(
+        crate::config::managed_config_fields(),
+        ConfigCenterPaths {
+            managed_config_file: directory.join("config/runtime.toml"),
+            master_key_file: directory.join("config/secrets/master.key"),
+        },
+        database,
+    )
+    .unwrap()
+    .with_running_agent_config(running)
+    .unwrap()
+    .with_incomplete_setup_writes();
+    let initial = center.current_snapshot().unwrap();
+    let error = center
+        .update_managed(
+            &initial.revision,
+            &[ManagedConfigChange::Set {
+                key: "provider.openai.enabled".into(),
+                value: Value::Boolean(false),
+            }],
+        )
+        .unwrap_err();
+    assert!(error.message().contains("disabled"));
+    assert!(error.message().contains("model_routes"));
+    assert!(error.message().contains("tools.web_search.routes"));
+    assert_eq!(
+        center.current_snapshot().unwrap().revision,
+        initial.revision
+    );
+}
+
+#[test]
+fn trusted_presets_keep_existing_ids_and_supported_adapters_without_credentials() {
+    let presets = provider_presets();
+    for id in [
+        "opencode_zen",
+        "opencode_zen_chat",
+        "opencode_go",
+        "openai_custom",
+        "deepseek_custom",
+        "bigmodel_custom",
+        "gemini_custom",
+    ] {
+        assert!(presets.iter().any(|preset| preset.id == id));
+    }
+    let serialized = serde_json::to_string(&presets).unwrap();
+    assert!(!serialized.contains("api_key"));
+    assert!(!serialized.contains("credential"));
+    assert_eq!(presets[0].kind, AgentProviderKind::OpenAiResponses);
+    assert_eq!(presets[1].kind, AgentProviderKind::OpenAiCompatible);
+    assert_eq!(presets[2].base_url, "https://opencode.ai/zen/go/v1");
+}
+
+#[test]
+fn managed_connection_credentials_are_isolated_revision_checked_and_never_reused() {
+    let (center, _database, _directory) = test_center();
+    let (_file, running, _agent_database, _path) = test_agent_file();
+    let center = center.with_running_agent_config(running).unwrap();
+    let initial = center.current_snapshot().unwrap().agent.unwrap();
+    let saved = center
+        .update_agent(
+            &initial.revision,
+            &[AgentConfigChange::SetProvider {
+                id: "custom_test".into(),
+                provider: managed_provider(true),
+            }],
+        )
+        .unwrap();
+    let slot = saved.saved_value.as_ref().unwrap()["providers"]["custom_test"]["api_key_env"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(slot.starts_with("QQ_MAID_CONNECTION_"));
+    center
+        .update_connection_credential(
+            "custom_test",
+            &saved.revision,
+            "missing",
+            Some("test-only-placeholder-key"),
+        )
+        .unwrap();
+    let snapshot = center.current_snapshot().unwrap();
+    assert!(snapshot.providers.credentials["custom_test"].configured);
+    assert!(snapshot.providers.credentials["custom_test"].pending_restart);
+    assert!(
+        !serde_json::to_string(&snapshot)
+            .unwrap()
+            .contains("test-only-placeholder-key")
+    );
+    assert_eq!(
+        center.current_resolved_environment().unwrap()[&slot],
+        "test-only-placeholder-key"
+    );
+    assert!(
+        center
+            .update_connection_credential(
+                "custom_test",
+                &saved.revision,
+                "missing",
+                Some("stale-key")
+            )
+            .is_err()
+    );
+    let removed = center
+        .update_agent(
+            &saved.revision,
+            &[AgentConfigChange::RemoveProvider {
+                id: "custom_test".into(),
+            }],
+        )
+        .unwrap();
+    let recreated = center
+        .update_agent(
+            &removed.revision,
+            &[AgentConfigChange::SetProvider {
+                id: "custom_test".into(),
+                provider: managed_provider(true),
+            }],
+        )
+        .unwrap();
+    assert_ne!(
+        recreated.saved_value.unwrap()["providers"]["custom_test"]["api_key_env"]
+            .as_str()
+            .unwrap(),
+        slot
+    );
+    assert!(!center.provider_snapshot().unwrap().credentials["custom_test"].configured);
+}
+
+#[test]
+fn managed_connection_rejects_arbitrary_credential_namespace_and_rebinding() {
+    let (center, _database, _directory) = test_center();
+    let (_file, running, _agent_database, _path) = test_agent_file();
+    let center = center.with_running_agent_config(running).unwrap();
+    let initial = center.current_snapshot().unwrap().agent.unwrap();
+    let mut provider = managed_provider(true);
+    provider.api_key_env = "QQ_BOT_APP_SECRET".into();
+    assert!(
+        center
+            .update_agent(
+                &initial.revision,
+                &[AgentConfigChange::SetProvider {
+                    id: "unsafe".into(),
+                    provider
+                }]
+            )
+            .is_err()
+    );
+    assert_eq!(
+        center.current_snapshot().unwrap().agent.unwrap().revision,
+        initial.revision
+    );
+}
+
+#[test]
+fn disabling_and_removing_connection_reports_all_route_references_without_writes() {
+    let (file, _running, _database, path) = test_agent_file();
+    let initial = file.snapshot().unwrap();
+    let mut provider = managed_provider(true);
+    provider.api_key_env = "TEST_API_KEY".into();
+    let saved = file
+        .update(
+            &initial.revision,
+            &[
+                AgentConfigChange::SetProvider {
+                    id: "test_connection".into(),
+                    provider: provider.clone(),
+                },
+                AgentConfigChange::SetModelRoute {
+                    name: "private_main".into(),
+                    candidates: vec!["test_connection:test-model".into()],
+                },
+                AgentConfigChange::SetSearchRoute {
+                    name: "unused_search".into(),
+                    model: "test_connection:test-model".into(),
+                },
+            ],
+        )
+        .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    provider.enabled = false;
+    for change in [
+        AgentConfigChange::SetProvider {
+            id: "test_connection".into(),
+            provider,
+        },
+        AgentConfigChange::RemoveProvider {
+            id: "test_connection".into(),
+        },
+    ] {
+        let error = file.update(&saved.revision, &[change]).unwrap_err();
+        assert!(error.message().contains("model_routes.private_main"));
+        assert!(
+            error
+                .message()
+                .contains("tools.web_search.routes.unused_search")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+    // 直接加载手工修改的配置也走相同预检，不依赖 Web 写接口。
+    let text = String::from_utf8(before)
+        .unwrap()
+        .replace("enabled = true\nkind", "enabled = false\nkind");
+    assert!(
+        crate::config::agent::AgentRuntimeConfig::from_toml(
+            &text,
+            crate::config::agent::AgentConfigSource::File("test.toml".into())
+        )
+        .is_err()
+    );
+}
+
 #[test]
 fn save_and_reload_preserves_provider_qualified_same_model_candidates() {
     let (file, _running, _database, path) = test_agent_file();
@@ -7,6 +237,8 @@ fn save_and_reload_preserves_provider_qualified_same_model_candidates() {
     let provider = |id: &str| AgentConfigChange::SetProvider {
         id: id.to_owned(),
         provider: AgentProviderUpdate {
+            display_name: None,
+            enabled: true,
             kind: AgentProviderKind::OpenAiCompatible,
             base_url: format!("https://{id}.example/v1"),
             api_key_env: format!("{}_API_KEY", id.to_ascii_uppercase()),

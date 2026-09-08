@@ -63,6 +63,8 @@ runtime 或 secret 保存前会构造候选最终环境视图：未修改的当�
 
 ## 管理接口边界
 
+通用供应商预设、连接启停、凭证与真实诊断的使用及 API 见[供应商管理](./provider-management.md)。
+
 启用控制台后，`GET /api/v1/console/configuration` 返回 runtime 与 agent 两个配置域的安全快照，但必须先通过独立部署管理员会话。HTTP 写接口分别接受 runtime 普通值 set/remove、agent 结构化变更和带 expected revision 的 secret replace/clear/批量修改，不能把脱敏占位符当作真实 secret 保存。所有认证与配置写操作要求同源 Origin、HttpOnly 服务端会话、轮换 CSRF、权限和脱敏审计；现有跨域 allowlist 只保留给只读状态与 Markdown 兼容接口，不授予管理 API 跨域凭据能力。
 
 `setup_required` 降级态允许按向导分步保存“字段自身合法、整体启动候选尚缺其他域”的配置，以支持首次配置中断后继续；此放宽不跳过字段类型/语义、Agent schema、revision 冲突、文件权限、原子写入或 secret CAS。正常运行态仍要求每次变更通过完整启动预检。配置页的安全校验只执行与正式启动一致的本地预检，不发起外部网络请求，也不修改现有配置。

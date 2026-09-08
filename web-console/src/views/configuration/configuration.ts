@@ -12,7 +12,7 @@
  * - tts.ts           TTS 配置
  * - navigation.ts    配置页 tab 导航与分组
  * - ui.ts            状态提示与按钮反馈
- * - opencode-providers.ts / model-route-editor.ts / theme-selector.ts
+ * - providers.ts / model-route-editor.ts / theme-selector.ts
  *                    模型 Provider 卡片、路线 Chip 编辑器、主题/背景选择
  */
 import type { ThemeController } from "../../theme.js";
@@ -37,6 +37,7 @@ import { bindTtsProviderState } from "./tts.js";
 import { renderPublicFields } from "./public-fields.js";
 import { renderSecretFields } from "./secret-fields.js";
 import { renderAgent } from "./agent-fields.js";
+import { clearProviderTests } from "./providers.js";
 import { renderConfigurationNavigation } from "./navigation.js";
 import { errorMessage, showResult } from "./ui.js";
 
@@ -65,6 +66,7 @@ export async function initializeConfiguration(
   // 每次（重新）初始化都清空跨登录会话残留的 Secret 已保存状态：服务端不回传明文，
   // 旧会话记录的 value/revision 可能与新会话的实际配置不一致，残留会导致脏判断失真。
   secretSavedStates.clear();
+  clearProviderTests();
   const snapshot = await fetchConfiguration();
   setCurrent(snapshot);
   bindAutosave();

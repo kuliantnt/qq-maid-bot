@@ -7,6 +7,7 @@ import { bindTtsProviderState } from "./tts.js";
 import { renderPublicFields } from "./public-fields.js";
 import { renderSecretFields } from "./secret-fields.js";
 import { renderAgent } from "./agent-fields.js";
+import { clearProviderTests } from "./providers.js";
 import { renderConfigurationNavigation } from "./navigation.js";
 import { errorMessage, showResult } from "./ui.js";
 export async function initializeConfiguration(themeController, backgroundController, userData = null) {
@@ -16,6 +17,7 @@ export async function initializeConfiguration(themeController, backgroundControl
     // 每次（重新）初始化都清空跨登录会话残留的 Secret 已保存状态：服务端不回传明文，
     // 旧会话记录的 value/revision 可能与新会话的实际配置不一致，残留会导致脏判断失真。
     secretSavedStates.clear();
+    clearProviderTests();
     const snapshot = await fetchConfiguration();
     setCurrent(snapshot);
     bindAutosave();

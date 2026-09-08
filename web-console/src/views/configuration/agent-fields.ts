@@ -5,7 +5,7 @@ import { array, button, checkboxField, configurationGroup, element, fieldGroup, 
 import { current, runSave } from "./state.js";
 import { errorMessage, showResult } from "./ui.js";
 import { isWebSearchBackend, readAgentWebSearchConfig, updateTavilyCredentialStatus, webSearchBackendLabel, webSearchConfigChange, webSearchFormConfig, webSearchRouteChanges } from "./web-search.js";
-import { openCodeProviderChange, readOpenCodeProviders, renderOpenCodeProviders, renderOpenCodeRouteHints } from "./opencode-providers.js";
+import { renderProviders } from "./providers.js";
 import { renderModelRouteEditor } from "./model-route-editor.js";
 import { shouldAutosaveOnBlur } from "./autosave.js";
 
@@ -96,28 +96,7 @@ export function renderAgent(snapshot: ConfigurationSnapshot): void {
   };
   backendSelect.addEventListener("change", refreshCredentialStatus);
   refreshCredentialStatus();
-  target.append(configurationGroup("models-providers", "agent", renderOpenCodeProviders(
-    snapshot,
-    async (form) => {
-      let change: Record<string, unknown>;
-      try {
-        change = openCodeProviderChange(form);
-      } catch (cause) {
-        showResult(errorMessage(cause), true);
-        return;
-      }
-      await runSave(async () => updateAgentConfiguration(current!.agent!.revision, [change]));
-    },
-    async (id) => {
-      await runSave(async () => updateAgentConfiguration(current!.agent!.revision, [{
-        action: "remove_provider",
-        id,
-      }]));
-    },
-  )));
-  const openCodeKeyConfigured = snapshot.fields.some(
-    (field) => field.key === "provider.opencode.api_key" && field.configured,
-  );
+  target.append(configurationGroup("models-providers", "agent", renderProviders(snapshot)));
   const modelRoutes = record(documentValue.model_routes);
   const routes = document.createElement("div");
   const conversationRoutes = fieldGroup("聊天与辅助路线", [
@@ -145,11 +124,6 @@ export function renderAgent(snapshot: ConfigurationSnapshot): void {
   searchRoutes.classList.add("model-route-field-group");
   // 聊天候选链与搜索模型的编辑方式不同，分组后避免奇数项跨行混排造成的视觉错位。
   routes.append(conversationRoutes, searchRoutes);
-  routes.append(renderOpenCodeRouteHints(
-    !agent.editable,
-    readOpenCodeProviders(documentValue).filter((provider) => provider.enabled).map((provider) => provider.id),
-    openCodeKeyConfigured,
-  ));
   target.append(configurationGroup("model-routing", "agent", routes));
   const scenes = record(documentValue.scenes);
   for (const sceneName of ["private", "group"]) {
@@ -249,30 +223,6 @@ export async function saveAgentScene(sceneName: string): Promise<void> {
     scene: sceneName,
     config: agentSceneConfig(sceneName, scenes),
   }]));
-}
-
-export async function saveOpenCodeProvider(id: string): Promise<void> {
-  if (!current?.agent) return;
-  const baseUrl = element(`${id}-base-url`, HTMLInputElement);
-  const timeout = element(`${id}-timeout`, HTMLInputElement);
-  const saved = readOpenCodeProviders(current.agent.savedValue).find((provider) => provider.id === id);
-  // 未添加的预设只能通过“添加 Provider”显式启用，浏览默认字段不能改变配置。
-  if (!saved?.enabled) return;
-  const form = {
-    ...saved,
-    baseUrl: baseUrl.value,
-    requestTimeoutSeconds: timeout.value.trim() ? Number(timeout.value) : null,
-    enabled: true,
-  };
-  if (!shouldAutosaveOnBlur({ scope: "agent", value: form, baseline: saved })) return;
-  let change: Record<string, unknown>;
-  try {
-    change = openCodeProviderChange(form);
-  } catch (cause) {
-    showResult(errorMessage(cause), true);
-    return;
-  }
-  await runSave(async () => updateAgentConfiguration(current?.agent?.revision ?? "missing", [change]));
 }
 
 export function agentSceneConfig(sceneName: string, scenes: Record<string, unknown>): Record<string, unknown> {

@@ -525,6 +525,30 @@ async fn configuration_snapshot_never_returns_secret_plaintext() -> Result<(), I
         request_response(state.clone(), "GET", "/api/v1/console/configuration", None).await;
     assert_eq!(unauthenticated_status, StatusCode::UNAUTHORIZED);
 
+    for (method, path, body) in [
+        (
+            "PATCH",
+            "/api/v1/console/configuration/providers/credential",
+            json!({
+                "id": "test", "expected_agent_revision": "missing", "expected_revision": "missing", "value": "test-only-key"
+            }),
+        ),
+        (
+            "POST",
+            "/api/v1/console/configuration/providers/test",
+            json!({
+                "id": "test", "expected_revision": "missing", "model": "test-model"
+            }),
+        ),
+    ] {
+        let (status, _) = request_response(state.clone(), method, path, Some(body.clone())).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) =
+            request_response_with_cookie(state.clone(), method, path, Some(body), &cookie, None)
+                .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
     let (status, json) = request_response_with_cookie(
         state.clone(),
         "GET",

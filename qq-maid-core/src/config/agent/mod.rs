@@ -165,6 +165,7 @@ pub struct AgentScenes {
 
 #[derive(Debug, Clone)]
 pub struct AgentProviderConfig {
+    pub enabled: bool,
     pub id: ModelProvider,
     pub kind: AgentProviderKind,
     pub base_url: String,
@@ -281,6 +282,11 @@ pub(in crate::config) struct RouteFile {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(in crate::config) struct ProviderFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(in crate::config) display_name: Option<String>,
+    /// 旧文件未声明时保持启用；停用项仍保留元数据，但禁止任何路线引用。
+    #[serde(default = "default_true")]
+    pub(in crate::config) enabled: bool,
     pub(in crate::config) kind: AgentProviderKind,
     pub(in crate::config) base_url: String,
     pub(in crate::config) api_key_env: String,
@@ -426,6 +432,7 @@ impl AgentRuntimeConfig {
         }
 
         let document = file.clone();
+        provider_config::validate_connection_references(&document)?;
         let web_search = web_search_from_file(&file.tools.web_search)?;
         let mut providers = HashMap::new();
         for (name, provider) in file.providers {

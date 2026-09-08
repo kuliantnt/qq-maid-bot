@@ -327,6 +327,7 @@ impl AppConfig {
         )?;
         let effective_environment = effective_environment();
         let agent_config = AgentRuntimeConfig::load_from_environment(&effective_environment)?;
+        provider_config::validate_builtin_connections(&agent_config)?;
         let ops_config =
             crate::runtime::tools::ops::OpsConfig::load_from_environment(&effective_environment)?;
         let command_prefix = CommandPrefix::parse(&env_string("CHAT_COMMAND_PREFIX", "/"))
@@ -338,14 +339,14 @@ impl AppConfig {
             ops_config,
             command_prefix,
             voice,
-            openai_api_key: env_optional("OPENAI_API_KEY"),
+            openai_api_key: provider_config::builtin_api_key("OPENAI")?,
             openai_base_url: openai_base_url_from_env(),
             openai_api_mode: parse_openai_api_mode(&env_string("OPENAI_API_MODE", "auto"))?,
-            deepseek_api_key: env_optional("DEEPSEEK_API_KEY"),
+            deepseek_api_key: provider_config::builtin_api_key("DEEPSEEK")?,
             deepseek_base_url: env_string("DEEPSEEK_BASE_URL", DEFAULT_DEEPSEEK_BASE_URL),
-            bigmodel_api_key: env_optional("BIGMODEL_API_KEY"),
+            bigmodel_api_key: provider_config::builtin_api_key("BIGMODEL")?,
             bigmodel_base_url: env_string("BIGMODEL_BASE_URL", DEFAULT_BIGMODEL_BASE_URL),
-            gemini_api_key: env_optional("GEMINI_API_KEY"),
+            gemini_api_key: provider_config::builtin_api_key("GEMINI")?,
             gemini_base_url: env_string("GEMINI_BASE_URL", DEFAULT_GEMINI_BASE_URL),
             stream: env_bool("LLM_STREAM", true)?,
             request_timeout_seconds: env_u64(
@@ -520,6 +521,7 @@ impl AppConfig {
         if let Some(candidate_agent) = candidate_agent {
             config.agent_config = candidate_agent.clone();
         }
+        provider_config::validate_builtin_connections(&config.agent_config)?;
         qq_maid_llm::provider::preflight_provider_config(&config.llm_config())
     }
 
