@@ -148,6 +148,107 @@ fn managed_connection_credentials_are_isolated_revision_checked_and_never_reused
 }
 
 #[test]
+fn management_api_updates_exact_legacy_key_but_rejects_case_rename() {
+    let (center, _database, _directory) = test_center();
+    let (file, _running, _agent_database, path) = test_agent_file();
+    let initial = file.snapshot().unwrap();
+    let mut historical = managed_provider(true);
+    historical.api_key_env = "TEST_PROXY_KEY".into();
+    file.update(
+        &initial.revision,
+        &[AgentConfigChange::SetProvider {
+            id: "MyProxy".into(),
+            provider: historical,
+        }],
+    )
+    .unwrap();
+    let center = center
+        .with_external_environment(HashMap::from([(
+            "TEST_PROXY_KEY".into(),
+            "test-only-placeholder-key".into(),
+        )]))
+        .with_running_agent_config(file.current_runtime().unwrap())
+        .unwrap();
+    let initial = center.current_snapshot().unwrap().agent.unwrap();
+    let mut update = managed_provider(false);
+    update.display_name = Some("历史代理".into());
+    update.base_url = "https://legacy-proxy.example/v1".into();
+    let saved = center
+        .update_agent(
+            &initial.revision,
+            &[AgentConfigChange::SetProvider {
+                id: "MyProxy".into(),
+                provider: update,
+            }],
+        )
+        .unwrap();
+    let provider = &saved.saved_value.unwrap()["providers"]["MyProxy"];
+    assert_eq!(provider["display_name"].as_str(), Some("历史代理"));
+    assert_eq!(provider["enabled"].as_bool(), Some(false));
+    assert_eq!(
+        provider["base_url"].as_str(),
+        Some("https://legacy-proxy.example/v1")
+    );
+    assert_eq!(provider["api_key_env"].as_str(), Some("TEST_PROXY_KEY"));
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("[providers.MyProxy]")
+    );
+
+    let error = center
+        .update_agent(
+            &saved.revision,
+            &[AgentConfigChange::SetProvider {
+                id: "myproxy".into(),
+                provider: managed_provider(true),
+            }],
+        )
+        .unwrap_err();
+    assert!(error.message().contains("原始 ID"));
+
+    let update = managed_provider(true);
+    let error = center
+        .update_agent(
+            &saved.revision,
+            &[
+                AgentConfigChange::SetProvider {
+                    id: "MyProxy".into(),
+                    provider: update.clone(),
+                },
+                AgentConfigChange::SetProvider {
+                    id: "myproxy".into(),
+                    provider: update,
+                },
+            ],
+        )
+        .unwrap_err();
+    assert!(error.message().contains("同一请求不能重复修改"));
+}
+
+#[test]
+fn management_api_still_rejects_bad_new_connection_id() {
+    let (center, _database, _directory) = test_center();
+    let (_file, running, _agent_database, _path) = test_agent_file();
+    let center = center.with_running_agent_config(running).unwrap();
+    let initial = center.current_snapshot().unwrap().agent.unwrap();
+    let error = center
+        .update_agent(
+            &initial.revision,
+            &[AgentConfigChange::SetProvider {
+                id: "BadID".into(),
+                provider: managed_provider(true),
+            }],
+        )
+        .unwrap_err();
+    assert!(error.message().contains("小写"));
+    assert_eq!(
+        center.current_snapshot().unwrap().agent.unwrap().revision,
+        initial.revision
+    );
+}
+
+#[test]
 fn managed_connection_rejects_arbitrary_credential_namespace_and_rebinding() {
     let (center, _database, _directory) = test_center();
     let (_file, running, _agent_database, _path) = test_agent_file();

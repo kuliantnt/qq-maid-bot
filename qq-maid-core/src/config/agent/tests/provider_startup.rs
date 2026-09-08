@@ -179,7 +179,7 @@ fn startup_rejects_bare_openai_route_even_with_deepseek_fallback() {
     let path = directory.0.join("agent.toml");
     std::fs::write(
         &path,
-        &format!("{DEFAULT_AGENT_CONFIG}\n[model_routes.unused]\ncandidates = [\"test-model\"]\n"),
+        format!("{DEFAULT_AGENT_CONFIG}\n[model_routes.unused]\ncandidates = [\"test-model\"]\n"),
     )
     .unwrap();
     let environment = HashMap::from([

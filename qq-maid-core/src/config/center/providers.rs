@@ -193,22 +193,45 @@ impl ConfigCenter {
         changes: &[AgentConfigChange],
     ) -> Result<Vec<AgentConfigChange>, ConfigCenterError> {
         let saved = self.saved_providers()?;
+        // agent.toml 历史手工配置允许非 canonical key；管理 API 只按精确匹配编辑，
+        // canonical ID 用于拒绝 MyProxy / myproxy 这类大小写别名重复。
+        let mut saved_by_canonical_id = HashMap::new();
+        for saved_id in saved.keys() {
+            let canonical_id = provider_canonical_id(saved_id)?;
+            if saved_by_canonical_id
+                .insert(canonical_id.clone(), saved_id.clone())
+                .is_some()
+            {
+                return Err(ConfigCenterError::invalid(format!(
+                    "duplicate provider `{canonical_id}`"
+                )));
+            }
+        }
         let mut seen = HashSet::new();
         let mut changes = changes.to_vec();
         for change in &mut changes {
             match change {
                 AgentConfigChange::SetProvider { id, provider } => {
-                    if !seen.insert(id.clone()) {
+                    let parsed = qq_maid_llm::provider::types::ModelProvider::parse_prefix(id)
+                        .map_err(|_| ConfigCenterError::invalid("Connection ID 格式无效"))?;
+                    let canonical_id = parsed.as_str().to_owned();
+                    if !seen.insert(canonical_id.clone()) {
                         return Err(ConfigCenterError::invalid(
                             "同一请求不能重复修改 Connection",
                         ));
                     }
-                    let parsed = qq_maid_llm::provider::types::ModelProvider::parse_prefix(id)
-                        .map_err(|_| ConfigCenterError::invalid("Connection ID 格式无效"))?;
-                    if parsed.as_str() != id || id.len() > 64 {
+                    if id.len() > 64 || id.trim() != id {
                         return Err(ConfigCenterError::invalid(
-                            "Connection ID 必须为小写，且不超过 64 字符",
+                            "Connection ID 不能包含首尾空白，且不超过 64 字符",
                         ));
+                    }
+                    if !matches!(
+                        parsed,
+                        qq_maid_llm::provider::types::ModelProvider::Custom(_)
+                    ) {
+                        return Err(ConfigCenterError::invalid(format!(
+                            "provider `{id}` cannot override a built-in provider"
+                        )));
                     }
                     if let Some(existing) = saved.get(id) {
                         let slot = existing
@@ -221,6 +244,14 @@ impl ConfigCenter {
                             ));
                         }
                         provider.api_key_env = slot.to_owned();
+                    } else if saved_by_canonical_id.contains_key(&canonical_id) {
+                        return Err(ConfigCenterError::invalid(
+                            "Connection 已存在，必须使用保存配置中的原始 ID，且不能改名",
+                        ));
+                    } else if parsed.as_str() != id {
+                        return Err(ConfigCenterError::invalid(
+                            "Connection ID 必须为小写，且不超过 64 字符",
+                        ));
                     } else {
                         // 旧版三个预设请求继续兼容；新通用页面不提交任意环境变量名。
                         let legacy_opencode = ["opencode_zen", "opencode_zen_chat", "opencode_go"]
@@ -239,10 +270,20 @@ impl ConfigCenter {
                 }
                 // 专属密文归档留在加密存储中。重建同名 Connection 分配新的随机 Slot，
                 // 永不重新绑定旧密文；避免跨 TOML / SQLite 非原子删除造成凭证丢失。
-                AgentConfigChange::RemoveProvider { id } if !seen.insert(id.clone()) => {
-                    return Err(ConfigCenterError::invalid(
-                        "同一请求不能重复修改 Connection",
-                    ));
+                AgentConfigChange::RemoveProvider { id } => {
+                    let canonical_id = provider_canonical_id(id)?;
+                    let exact_saved = saved.contains_key(id);
+                    let canonical_saved = saved_by_canonical_id.contains_key(&canonical_id);
+                    if !seen.insert(canonical_id) {
+                        return Err(ConfigCenterError::invalid(
+                            "同一请求不能重复修改 Connection",
+                        ));
+                    }
+                    if !exact_saved && canonical_saved {
+                        return Err(ConfigCenterError::invalid(
+                            "Connection 已存在，必须使用保存配置中的原始 ID，且不能改名",
+                        ));
+                    }
                 }
                 _ => {}
             }
@@ -321,6 +362,20 @@ impl ConfigCenter {
         }
         Ok(())
     }
+}
+
+fn provider_canonical_id(id: &str) -> Result<String, ConfigCenterError> {
+    let parsed = qq_maid_llm::provider::types::ModelProvider::parse_prefix(id)
+        .map_err(|_| ConfigCenterError::invalid("Connection ID 格式无效"))?;
+    if !matches!(
+        parsed,
+        qq_maid_llm::provider::types::ModelProvider::Custom(_)
+    ) {
+        return Err(ConfigCenterError::invalid(format!(
+            "provider `{id}` cannot override a built-in provider"
+        )));
+    }
+    Ok(parsed.as_str().to_owned())
 }
 
 /// 内置 Connection 继续使用原 runtime / Secret 字段；诊断不触发任何配置迁移。

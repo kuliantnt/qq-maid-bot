@@ -6,7 +6,7 @@
 
 在“模型与供应商”点击“＋ 新建供应商”，在弹窗中选择受信预设或自定义连接，填写不可变 Connection ID、显示名称、协议与 Base URL。创建后可新增或替换 API Key，再填写真实模型 ID 执行服务端测试。模型路线继续填写 `provider:model-id`，保存后重启生效。
 
-所有自定义供应商（包括 OpenCode 预设）使用同一表单，可编辑、启停和删除。删除或停用前须迁移全部模型及搜索路线引用；错误会列出引用位置，服务端不会自动改写路线。手工配置与启动预检遵守相同约束。旧配置未写 `enabled` 时保持启用。
+所有自定义供应商（包括 OpenCode 预设）使用同一表单，可编辑、启停和删除。删除或停用前须迁移全部模型及搜索路线引用；错误会列出引用位置，服务端不会自动改写路线。手工配置与启动预检遵守相同约束。旧配置未写 `enabled` 时保持启用。新建 Connection 必须使用小写 canonical ID；历史非小写 key 只能在原始 key 精确匹配时编辑或删除，不能改成 canonical 小写，也不能与另一个仅大小写不同的 key 共存。
 
 内置 OpenAI、DeepSeek、BigModel、Gemini 的字段在同一页面展示，继续使用原 runtime/Secret 存储和自动保存；内置定义不可删除，但可停用并显式清除凭证。新增 `provider.<id>.enabled` 对应公开模板中的 `<PROVIDER>_ENABLED`，默认启用，停用同样拒绝所有显式路线引用。内置 OpenAI `auto` 测试采用 Responses，`chat_only` 测试采用 Chat Completions；不自动测试跨协议 fallback。Gemini 在此测试其现有 Chat Adapter，不代表原生搜索已经验证。
 

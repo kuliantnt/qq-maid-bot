@@ -4,10 +4,16 @@ import { inputId, record, string } from "./fields.js";
 import { errorMessage, showResult } from "./ui.js";
 const recentTests = new Map();
 export function clearProviderTests() { recentTests.clear(); }
-export function providerChange(id, value) {
-    if (!/^[a-z_][a-z0-9_-]{0,63}$/.test(id))
-        throw new Error("Connection ID 必须为小写字母、数字、下划线或连字符");
+export function providerChange(id, value, exists = false) {
+    // 新建 key 统一 canonical 为小写；已有 key 只允许请求与 agent.toml 原始 key 精确一致。
+    const pattern = exists ? /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/ : /^[a-z_][a-z0-9_-]{0,63}$/;
+    if (!pattern.test(id))
+        throw new Error(exists ? "已有 Connection ID 只能与保存配置中的原始 key 完全一致" : "Connection ID 必须为小写字母、数字、下划线或连字符");
     return { action: "set_provider", id, provider: value };
+}
+function hasCanonicalProvider(saved, id) {
+    const requested = id.toLowerCase();
+    return Object.keys(saved).some(key => key.toLowerCase() === requested);
 }
 export function renderProviders(snapshot) {
     const section = node("section", "");
@@ -122,9 +128,9 @@ function connectionCard(snapshot, id, saved, exists, onCreated) {
         };
         if (kind.value === "openai_responses")
             provider.chat_fallback = false;
-        if (!exists && identity.value.trim() in record(record(current?.agent?.savedValue).providers))
-            throw new Error("该 Connection ID 已存在，请使用新的 ID");
-        const change = providerChange(identity.value.trim(), provider);
+        if (!exists && hasCanonicalProvider(record(record(current?.agent?.savedValue).providers), identity.value.trim()))
+            throw new Error("该 Connection ID 已存在（大小写不敏感），请使用新的 ID");
+        const change = providerChange(identity.value.trim(), provider, exists);
         const resetInputs = new Set(exists ? [] : Array.from(card.querySelectorAll("input, select"), input => `id:${input.id}`));
         const result = await runSave(async () => {
             try {
