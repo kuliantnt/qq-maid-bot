@@ -314,6 +314,8 @@ impl RadarExecutor for MockRadarExecutor {
 }
 
 pub(crate) fn mock_radar_snapshot() -> RadarSnapshot {
+    // 额度状态展示按数据新鲜度判定，固定旧时间会导致“当前关键指标”被历史数据规则隐藏。
+    let recent_quota_updated_at = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
     RadarSnapshot {
         codex: Some(CodexRadarSummary {
             status: Some("community_confirmed".to_owned()),
@@ -347,7 +349,7 @@ pub(crate) fn mock_radar_snapshot() -> RadarSnapshot {
             ],
             quota_5h_20x: Some(281.91),
             quota_7d_20x: Some(1691.46),
-            quota_updated_at: Some("2026-07-30T08:20:35+00:00".to_owned()),
+            quota_updated_at: Some(recent_quota_updated_at),
             quota_policy_5h: None,
             quota_rows: Vec::new(),
             rating_updated_at: Some("2026-08-02T12:42:22Z".to_owned()),

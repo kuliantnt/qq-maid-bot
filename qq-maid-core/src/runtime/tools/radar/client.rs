@@ -8,10 +8,11 @@ use crate::error::LlmError;
 use super::{
     ClaudeRadarSummary, CodexRadarSummary, DynRadarExecutor, RadarExecutor, RadarIssueTarget,
     RadarSnapshot, RadarSourceFailure, RadarSourceKind, RadarTarget,
-    parse::{apply_codex_ratings, parse_claude_summary, parse_codex_summary},
+    parse::{apply_codex_metrics, apply_codex_ratings, parse_claude_summary, parse_codex_summary},
 };
 
 const CODEX_CURRENT_URL: &str = "https://codexradar.com/current.json";
+const CODEX_METRICS_URL: &str = "https://codexradar.com/api/intelligence-efficiency-metrics";
 const CODEX_RATINGS_URL: &str = "https://codexradar.com/api/model-ratings";
 pub(super) const CODEX_SITE_URL: &str = "https://codexradar.com/";
 pub(super) const CODEX_FEEDBACK_URL: &str = "https://codexradar.com/";
@@ -63,10 +64,17 @@ impl HttpRadarExecutor {
         let json = self.fetch_json(CODEX_CURRENT_URL, "radar_codex").await?;
         let mut summary = parse_codex_summary(&json);
         let mut failures = Vec::new();
-        match self
-            .fetch_json(CODEX_RATINGS_URL, "radar_codex_ratings")
-            .await
-        {
+        // Codex Radar 改版后，含 Astra 的模型 IQ 与社区评分都是可选增强接口；
+        // 两个请求互不依赖，失败也各自保留旧数据，因此并发读取避免串行放大超时。
+        let (metrics_result, ratings_result) = tokio::join!(
+            self.fetch_json(CODEX_METRICS_URL, "radar_codex_metrics"),
+            self.fetch_json(CODEX_RATINGS_URL, "radar_codex_ratings"),
+        );
+        match metrics_result {
+            Ok(metrics) => apply_codex_metrics(&mut summary, &metrics),
+            Err(err) => failures.push(failure(RadarSourceKind::Codex, &err)),
+        }
+        match ratings_result {
             Ok(ratings) => apply_codex_ratings(&mut summary, &ratings),
             Err(err) => failures.push(failure(RadarSourceKind::Codex, &err)),
         }
