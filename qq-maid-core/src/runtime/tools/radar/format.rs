@@ -3,10 +3,10 @@
 //! 具体指标选择、排序、兼容文案和来源标注属于 Radar 领域规则，Respond 层只消费
 //! 已渲染的双通道命令正文。
 
-use chrono::{DateTime, Utc};
+use chrono::{Duration, Utc};
 use qq_maid_common::{
     markdown::{escape_inline, escape_text},
-    time_context::format_local_time_for_display,
+    time_context::{format_local_time_for_display, parse_local_datetime_for_comparison},
 };
 
 use crate::{
@@ -26,21 +26,21 @@ use super::{
 const RADAR_SUMMARY_MAX_CHARS: usize = 110;
 
 /// 额度雷达的快照在超过该天数后不再视为“当前额度”，只按历史兼容数据展示。
-const CODEX_QUOTA_EXPIRED_AFTER_DAYS: i64 = 7;
+const CODEX_QUOTA_MAX_AGE: Duration = Duration::days(7);
 
 /// `five_hour_policy` 是站点给出的实时状态字段；只有配额快照足够新时才允许
 /// 把它当作当前状态输出，否则只能作为历史备注，避免把一个月前的暂停文案
 /// 当成今天的事实。
-const CODEX_QUOTA_POLICY_MAX_AGE_HOURS: i64 = 24;
+const CODEX_QUOTA_POLICY_MAX_AGE: Duration = Duration::hours(24);
 
 /// Codex Radar 额度数据的可见新鲜度分级。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CodexQuotaFreshness {
-    /// 更新时间可解析且未超过 `CODEX_QUOTA_EXPIRED_AFTER_DAYS`。
+    /// 更新时间可解析、不早于当前时间且未超过 `CODEX_QUOTA_MAX_AGE`。
     Current,
     /// 更新时间可解析但已明显陈旧，只能作为历史估算展示。
-    Expired { age_days: i64 },
-    /// 缺少更新时间或格式无法解析；无法确认是否仍代表当前状态。
+    Expired,
+    /// 缺少更新时间、格式无法解析或时间戳位于未来；无法确认是否仍代表当前状态。
     Unknown,
 }
 
@@ -397,7 +397,7 @@ fn append_codex_quota_section(
     let freshness = codex_quota_freshness(summary.quota_updated_at.as_deref());
     render.blank();
     render.subtitle(match freshness {
-        CodexQuotaFreshness::Expired { .. } => "额度估算（历史数据 / 已过期）",
+        CodexQuotaFreshness::Expired => "额度估算（历史数据 / 已过期）",
         CodexQuotaFreshness::Current | CodexQuotaFreshness::Unknown => "额度估算",
     });
 
@@ -422,38 +422,37 @@ fn append_codex_quota_section(
                 render.bullet("5h 限制当前暂停，站点暂不展示该档额度。");
             }
         }
-        CodexQuotaFreshness::Expired { .. } => {
+        CodexQuotaFreshness::Expired => {
             render.bullet("该额度估算已过期，仅作历史参考；当前 5h / 7d 额度状态无法确认。");
         }
         CodexQuotaFreshness::Unknown => {
-            render.bullet("额度更新时间缺失，当前额度状态无法确认。");
+            render.bullet("额度更新时间缺失或不可信，当前额度状态无法确认。");
         }
     }
 }
 
 fn codex_quota_freshness(updated_at: Option<&str>) -> CodexQuotaFreshness {
-    let Some(updated_at) = codex_quota_updated_at(updated_at) else {
+    let Some(updated_at) = updated_at.and_then(parse_local_datetime_for_comparison) else {
         return CodexQuotaFreshness::Unknown;
     };
-    let age_days = Utc::now().signed_duration_since(updated_at).num_days();
-    if age_days <= CODEX_QUOTA_EXPIRED_AFTER_DAYS {
+    let age = Utc::now().signed_duration_since(updated_at);
+    if age < Duration::zero() {
+        // 未来时间戳不能用于证明“当前”状态，按不可信数据处理。
+        return CodexQuotaFreshness::Unknown;
+    }
+    if age <= CODEX_QUOTA_MAX_AGE {
         CodexQuotaFreshness::Current
     } else {
-        CodexQuotaFreshness::Expired { age_days }
+        CodexQuotaFreshness::Expired
     }
 }
 
 fn codex_quota_policy_is_recent(updated_at: Option<&str>) -> bool {
-    let Some(updated_at) = codex_quota_updated_at(updated_at) else {
+    let Some(updated_at) = updated_at.and_then(parse_local_datetime_for_comparison) else {
         return false;
     };
-    Utc::now().signed_duration_since(updated_at).num_hours() <= CODEX_QUOTA_POLICY_MAX_AGE_HOURS
-}
-
-fn codex_quota_updated_at(updated_at: Option<&str>) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(updated_at?.trim())
-        .ok()
-        .map(|value| value.with_timezone(&Utc))
+    let age = Utc::now().signed_duration_since(updated_at);
+    age >= Duration::zero() && age <= CODEX_QUOTA_POLICY_MAX_AGE
 }
 
 fn codex_quota_basis_label(value: &str) -> &str {
@@ -707,5 +706,39 @@ fn format_number(value: Option<f64>) -> Option<String> {
         Some(format!("{value:.0}"))
     } else {
         Some(format!("{value:.2}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn quota_freshness_rejects_seven_days_plus_one_second() {
+        let updated_at = (Utc::now() - Duration::days(7) - Duration::seconds(1)).to_rfc3339();
+
+        assert_eq!(
+            codex_quota_freshness(Some(&updated_at)),
+            CodexQuotaFreshness::Expired
+        );
+    }
+
+    #[test]
+    fn quota_policy_rejects_twenty_four_hours_plus_one_second() {
+        let updated_at = (Utc::now() - Duration::hours(24) - Duration::seconds(1)).to_rfc3339();
+
+        assert!(!codex_quota_policy_is_recent(Some(&updated_at)));
+    }
+
+    #[test]
+    fn quota_freshness_treats_future_timestamp_as_untrusted() {
+        let updated_at = (Utc::now() + Duration::hours(1)).to_rfc3339();
+
+        assert_eq!(
+            codex_quota_freshness(Some(&updated_at)),
+            CodexQuotaFreshness::Unknown
+        );
+        assert!(!codex_quota_policy_is_recent(Some(&updated_at)));
     }
 }
