@@ -1,7 +1,27 @@
 use super::*;
+use crate::model_catalog::converter::{ModelsDevSourceManifest, convert_snapshot};
+
+const UPSTREAM_FIXTURE: &[u8] = include_bytes!("../../assets/models-dev/upstream.json");
+const SOURCE_MANIFEST: &[u8] = include_bytes!("../../assets/models-dev/manifest.json");
 
 fn embedded_snapshot() -> CatalogSnapshot {
     parse_snapshot(EMBEDDED_SNAPSHOT_BYTES).expect("嵌入式快照必须可解析")
+}
+
+fn catalog_provider_id(value: &str) -> CatalogProviderId {
+    CatalogProviderId::parse(value).expect("测试 provider id 应合法")
+}
+
+fn provider<'a>(snapshot: &'a CatalogSnapshot, id: &str) -> &'a CatalogProvider {
+    snapshot
+        .providers
+        .iter()
+        .find(|provider| provider.id.as_str() == id)
+        .unwrap_or_else(|| panic!("快照应包含 provider `{id}`"))
+}
+
+fn first_catalog_model(snapshot: &CatalogSnapshot, id: &str) -> CatalogModel {
+    provider(snapshot, id).models[0].clone()
 }
 
 fn local_entry(
@@ -32,44 +52,133 @@ fn overrides(entries: Vec<LocalModelEntry>) -> LocalModelOverrides {
     }
 }
 
+fn source(name: &str, source_version: &str) -> CatalogSource {
+    CatalogSource {
+        name: name.to_owned(),
+        upstream_license: "MIT".to_owned(),
+        source_url: "https://models.dev/api.json".to_owned(),
+        source_version: source_version.to_owned(),
+        fetched_at: "2026-01-01T00:00:00Z".to_owned(),
+        source_hash: "sha256:test".to_owned(),
+        converter_version: CONVERTER_VERSION.to_owned(),
+    }
+}
+
 #[test]
-fn embedded_snapshot_parses_with_metadata() {
+fn embedded_snapshot_metadata_is_real_and_regeneratable() {
     let snapshot = embedded_snapshot();
     assert_eq!(snapshot.schema_version, CATALOG_SCHEMA_VERSION);
     assert_eq!(snapshot.source.name, "models.dev");
+    assert!(
+        snapshot
+            .source
+            .source_url
+            .starts_with("https://models.dev/")
+    );
     assert_eq!(snapshot.source.converter_version, CONVERTER_VERSION);
     assert!(!snapshot.source.source_hash.is_empty());
     assert!(!snapshot.source.fetched_at.is_empty());
+    assert!(!snapshot.source.source_version.is_empty());
     assert!(!snapshot.providers.is_empty());
     for provider in &snapshot.providers {
         assert!(!provider.models.is_empty());
         for model in &provider.models {
             assert!(!model.display_name.is_empty());
-            // 远程目录声明能力时必须保持 verified=unknown，不伪造验证结果。
-            for claim in [
-                &model.capabilities.reasoning,
-                &model.capabilities.tool_calling,
-                &model.capabilities.vision,
-            ] {
-                if claim.advertised {
-                    assert_eq!(claim.verified, Verified::Unknown);
-                }
-            }
         }
     }
+
+    // 转换器必须能从仓库内固定上游输入原样复现已提交快照。
+    let manifest: ModelsDevSourceManifest =
+        serde_json::from_slice(SOURCE_MANIFEST).expect("来源清单应可解析");
+    assert_eq!(manifest.source_version, snapshot.source.source_version);
+    let generated = convert_snapshot(UPSTREAM_FIXTURE, &manifest).expect("转换应当成功");
+    assert_eq!(generated, EMBEDDED_SNAPSHOT_BYTES);
+
+    // Catalog 基础层不得携带 Connection/Adapter 判定或伪 verified 状态。
+    let raw = std::str::from_utf8(EMBEDDED_SNAPSHOT_BYTES).expect("快照应为 UTF-8");
+    assert!(!raw.contains("adapter_supported"));
+    assert!(!raw.contains("verified"));
+    assert!(!raw.contains("\"enabled\""));
 }
 
 #[test]
-fn snapshot_rejects_unknown_fields_and_wrong_schema_version() {
+fn catalog_provider_ids_do_not_apply_runtime_connection_aliases() {
+    let google = catalog_provider_id("google");
+    let gemini = catalog_provider_id("gemini");
+    assert_ne!(google, gemini);
+
+    let zhipuai = catalog_provider_id("zhipuai");
+    assert_ne!(zhipuai, catalog_provider_id("bigmodel"));
+    assert_ne!(zhipuai, catalog_provider_id("glm"));
+    assert_ne!(zhipuai, catalog_provider_id("zhipu"));
+
+    // Catalog 内实际保留 Models.dev Provider ID，而不是改写为运行时 Connection 名。
+    let snapshot = embedded_snapshot();
+    assert!(
+        provider(&snapshot, "google")
+            .models
+            .iter()
+            .any(|m| m.id == "gemini-2.5-flash")
+    );
+    assert!(
+        provider(&snapshot, "zhipuai")
+            .models
+            .iter()
+            .any(|m| m.id == "glm-4.5")
+    );
+    assert!(!snapshot.providers.iter().any(|p| p.id.as_str() == "gemini"));
+    assert!(
+        !snapshot
+            .providers
+            .iter()
+            .any(|p| p.id.as_str() == "bigmodel")
+    );
+
+    let catalog = EffectiveModelCatalog::from_embedded(None).expect("合并应当成功");
+    assert!(
+        catalog
+            .find_by_provider(&google, "gemini-2.5-flash")
+            .is_some()
+    );
+    assert!(
+        catalog
+            .find_by_provider(&gemini, "gemini-2.5-flash")
+            .is_none()
+    );
+    assert!(
+        catalog
+            .find_by_provider(&catalog_provider_id("zhipuai"), "glm-4.5")
+            .is_some()
+    );
+    assert!(
+        catalog
+            .find_by_provider(&catalog_provider_id("bigmodel"), "glm-4.5")
+            .is_none()
+    );
+}
+
+#[test]
+fn snapshot_rejects_unknown_fields_wrong_schema_and_remote_enabled() {
     let broken = br#"{"schema_version":1,"source":{"name":"x","upstream_license":"MIT",
-        "fetched_at":"2025-01-01","source_hash":"h","converter_version":"v1"},
+        "source_url":"u","source_version":"v","fetched_at":"2025-01-01",
+        "source_hash":"h","converter_version":"v1"},
         "providers":[],"mystery_field":1}"#;
     assert!(parse_snapshot(broken).is_err());
 
     let wrong_version = br#"{"schema_version":99,"source":{"name":"x","upstream_license":"MIT",
-        "fetched_at":"2025-01-01","source_hash":"h","converter_version":"v1"},"providers":[]}"#;
+        "source_url":"u","source_version":"v","fetched_at":"2025-01-01",
+        "source_hash":"h","converter_version":"v1"},"providers":[]}"#;
     let error = parse_snapshot(wrong_version).unwrap_err();
     assert!(error.message.contains("schema_version 不受支持"));
+
+    // 远程/规范化快照不允许携带本地 enabled 开关；enabled 只能由用户本地覆盖产生。
+    let remote_enabled = br#"{"schema_version":1,"source":{"name":"x","upstream_license":"MIT",
+        "source_url":"u","source_version":"v","fetched_at":"2025-01-01",
+        "source_hash":"h","converter_version":"v1"},
+        "providers":[{"id":"openai","name":"OpenAI","models":[
+          {"id":"m","display_name":"M","enabled":false}
+        ]}]}"#;
+    assert!(parse_snapshot(remote_enabled).is_err());
 }
 
 #[test]
@@ -93,18 +202,18 @@ fn local_overrides_can_append_and_disable_models() {
     .expect("合并应当成功");
 
     let appended = catalog
-        .find(Some("custom_mimo"), "mimo-vision-large")
+        .find_by_provider(&catalog_provider_id("custom_mimo"), "mimo-vision-large")
         .expect("不存在的模型应被本地追加");
     assert_eq!(appended.display_name, "MiMo Vision");
     assert_eq!(appended.context_window, Some(32768));
-    assert_eq!(appended.origin, CatalogOrigin::Local);
+    assert_eq!(appended.provenance.display_name, FieldSource::LocalOverride);
 
     let disabled = catalog
-        .find(Some("openai"), "gpt-4o")
+        .find_by_provider(&catalog_provider_id("openai"), "gpt-4o")
         .expect("已有模型应保留");
     assert!(!disabled.enabled);
     assert_eq!(
-        catalog.is_model_enabled(Some("openai"), "gpt-4o"),
+        catalog.is_model_enabled(Some(&catalog_provider_id("openai")), "gpt-4o"),
         Some(false)
     );
     // 禁用模型在目录中仍可见，但不出现在 active 集合中。
@@ -112,28 +221,85 @@ fn local_overrides_can_append_and_disable_models() {
 }
 
 #[test]
-fn local_overrides_patch_existing_fields_and_inherit_rest() {
-    let catalog = EffectiveModelCatalog::from_embedded(Some(&overrides(vec![local_entry(
-        "deepseek",
-        "deepseek-chat",
-        |entry| {
-            entry.context_window = Some(64000);
-        },
-    )])))
+fn local_context_override_keeps_catalog_sources_for_unpatched_fields() {
+    let snapshot = embedded_snapshot();
+    let base_model = first_catalog_model(&snapshot, "deepseek");
+    let catalog = EffectiveModelCatalog::build(
+        &snapshot,
+        &[],
+        Some(&overrides(vec![local_entry(
+            "deepseek",
+            &base_model.id,
+            |entry| {
+                entry.context_window = Some(999999);
+            },
+        )])),
+    )
     .expect("合并应当成功");
 
     let model = catalog
-        .find(Some("deepseek"), "deepseek-chat")
+        .find_by_provider(&catalog_provider_id("deepseek"), &base_model.id)
         .expect("覆盖目标应存在");
-    assert_eq!(model.context_window, Some(64000));
-    // 未覆盖字段继续继承目录值。
-    assert_eq!(model.max_output_tokens, Some(8192));
-    assert!(model.capabilities.tool_calling.advertised);
-    assert_eq!(model.capabilities.tool_calling.verified, Verified::Unknown);
+    assert_eq!(model.context_window, Some(999999));
+    assert_eq!(model.provenance.context_window, FieldSource::LocalOverride);
+    // 只覆盖 context_window 时，其余元数据仍保留 Catalog 来源。
+    assert_eq!(model.provenance.display_name, FieldSource::Catalog);
+    assert_eq!(model.provenance.max_output_tokens, FieldSource::Catalog);
+    assert_eq!(model.provenance.modalities, FieldSource::Catalog);
+    assert_eq!(
+        model.provenance.capabilities.tool_calling,
+        FieldSource::Catalog
+    );
+    assert_eq!(
+        model.provenance.capabilities.reasoning,
+        FieldSource::Catalog
+    );
+    assert_eq!(model.capabilities, base_model.capabilities);
+    assert_eq!(model.max_output_tokens, base_model.max_output_tokens);
 }
 
 #[test]
-fn local_config_rejects_secrets_and_connection_fields() {
+fn local_capability_override_only_changes_that_capability_source() {
+    let snapshot = embedded_snapshot();
+    let base_model = first_catalog_model(&snapshot, "openai");
+    let catalog = EffectiveModelCatalog::build(
+        &snapshot,
+        &[],
+        Some(&overrides(vec![local_entry(
+            "openai",
+            &base_model.id,
+            |entry| {
+                entry.capabilities = Some(LocalCapabilities {
+                    tool_calling: Some(CapabilityClaim { advertised: false }),
+                    ..LocalCapabilities::default()
+                });
+            },
+        )])),
+    )
+    .expect("合并应当成功");
+
+    let model = catalog
+        .find_by_provider(&catalog_provider_id("openai"), &base_model.id)
+        .expect("覆盖目标应存在");
+    assert!(!model.capabilities.tool_calling.advertised);
+    assert_eq!(
+        model.provenance.capabilities.tool_calling,
+        FieldSource::LocalOverride
+    );
+    // 未覆盖的 reasoning / vision 能力声明来源仍是 Catalog。
+    assert_eq!(
+        model.provenance.capabilities.reasoning,
+        FieldSource::Catalog
+    );
+    assert_eq!(model.provenance.capabilities.vision, FieldSource::Catalog);
+    assert_eq!(
+        model.capabilities.reasoning,
+        base_model.capabilities.reasoning
+    );
+}
+
+#[test]
+fn local_config_rejects_secrets_connection_fields_and_adapter_capabilities() {
     let cases = [
         r#"{"schema_version":1,"models":[{"provider":"openai","id":"x","base_url":"https://evil"}]}"#,
         r#"{"schema_version":1,"models":[{"provider":"openai","id":"x","api_key":"sk-1"}]}"#,
@@ -143,11 +309,13 @@ fn local_config_rejects_secrets_and_connection_fields() {
         r#"{"schema_version":1,"models":[{"provider":"openai","id":"x","route":"main"}]}"#,
         r#"{"schema_version":1,"models":[{"provider":"openai","id":"x","enabled_tools":["save_memory"]}]}"#,
         r#"{"schema_version":1,"models":[{"provider":"openai","id":"x","shell":"/bin/sh"}]}"#,
+        r#"{"schema_version":1,"models":[{"provider":"openai","id":"x","capabilities":{"tool_calling":{"advertised":true,"adapter_supported":true}}}]}"#,
+        r#"{"schema_version":1,"models":[{"provider":"openai","id":"x","capabilities":{"tool_calling":{"advertised":true,"verified":"yes"}}}]}"#,
     ];
     for raw in cases {
         let error = parse_local_overrides(raw.as_bytes()).unwrap_err();
         assert!(
-            error.message.contains("禁止的字段"),
+            error.message.contains("禁止的字段") || error.message.contains("Schema 校验失败"),
             "应拒绝 {raw}，实际：{}",
             error.message
         );
@@ -167,48 +335,79 @@ fn local_config_rejects_unknown_fields_and_bad_provider() {
 #[test]
 fn unknown_models_do_not_block_and_query_reports_unknown() {
     let catalog = EffectiveModelCatalog::from_embedded(None).expect("合并应当成功");
-    // Route 中可能存在但目录未收录的模型：查询返回 None，不报错、不 panic。
-    assert!(catalog.find(Some("openai"), "never-seen-model").is_none());
-    assert!(catalog.find(Some("custom_unknown"), "nope").is_none());
+    assert!(
+        catalog
+            .find_by_provider(&catalog_provider_id("openai"), "never-seen-model")
+            .is_none()
+    );
     assert_eq!(
-        catalog.is_model_enabled(Some("openai"), "never-seen-model"),
+        catalog.is_model_enabled(Some(&catalog_provider_id("openai")), "never-seen-model"),
         None
     );
-    // find 未显式指定 provider 时按模型 id 全局匹配。
-    assert!(catalog.find(None, "deepseek-chat").is_some());
 }
 
 #[test]
-fn merge_is_deterministic_and_stable() {
+fn providerless_lookup_is_ambiguous_when_model_id_repeats() {
+    let catalog = EffectiveModelCatalog::build(
+        &embedded_snapshot(),
+        &[],
+        Some(&overrides(vec![
+            local_entry("alpha_provider", "shared-model", |_| {}),
+            local_entry("beta_provider", "shared-model", |_| {}),
+        ])),
+    )
+    .expect("合并应当成功");
+
+    // 多 Provider 同 model id 时不得隐式选择字典序第一个。
+    assert_eq!(catalog.find(None, "shared-model"), None);
+    assert_eq!(catalog.is_model_enabled(None, "shared-model"), None);
+    assert!(
+        catalog
+            .find_by_provider(&catalog_provider_id("alpha_provider"), "shared-model")
+            .is_some()
+    );
+    assert!(
+        catalog
+            .find_by_provider(&catalog_provider_id("beta_provider"), "shared-model")
+            .is_some()
+    );
+
+    // 全局唯一 id 才允许无 Provider 查询返回。
+    assert!(catalog.find_unique("gpt-4o").is_some());
+}
+
+#[test]
+fn merge_is_deterministic_and_patch_precedes_local_override() {
+    let patch_model = CatalogModel {
+        id: "gpt-4o".to_owned(),
+        display_name: "GPT-4o (patched)".to_owned(),
+        context_window: Some(200000),
+        max_output_tokens: Some(20000),
+        modalities: ModelModalities {
+            input: vec![Modality::Text, Modality::Image],
+            output: vec![Modality::Text],
+        },
+        capabilities: ModelCapabilities {
+            reasoning: CapabilityClaim { advertised: false },
+            tool_calling: CapabilityClaim { advertised: true },
+            vision: CapabilityClaim { advertised: true },
+        },
+        status: ModelStatus::Active,
+        price: None,
+    };
     let patch = CatalogSnapshot {
         schema_version: CATALOG_SCHEMA_VERSION,
-        source: CatalogSource {
-            name: "official-compat".to_owned(),
-            upstream_license: "MIT".to_owned(),
-            fetched_at: "2025-06-02T00:00:00Z".to_owned(),
-            source_hash: "sha256:patch".to_owned(),
-            converter_version: CONVERTER_VERSION.to_owned(),
-        },
+        source: source("official-compat", "v1"),
         providers: vec![CatalogProvider {
-            id: "openai".to_owned(),
+            id: catalog_provider_id("openai"),
             name: "OpenAI".to_owned(),
-            models: vec![CatalogModel {
-                id: "gpt-4o".to_owned(),
-                display_name: "GPT-4o (updated)".to_owned(),
-                context_window: Some(256000),
-                max_output_tokens: None,
-                modalities: ModelModalities::default(),
-                capabilities: ModelCapabilities::default(),
-                status: ModelStatus::Active,
-                enabled: true,
-                price: None,
-                origin: CatalogOrigin::Embedded,
-            }],
+            models: vec![patch_model],
         }],
     };
-    let local = overrides(vec![local_entry("gemini", "gemini-2.5-flash", |entry| {
-        entry.max_output_tokens = Some(8192);
+    let local = overrides(vec![local_entry("openai", "gpt-4o", |entry| {
+        entry.max_output_tokens = Some(65536);
     })]);
+
     let first = EffectiveModelCatalog::build(
         &embedded_snapshot(),
         std::slice::from_ref(&patch),
@@ -219,40 +418,62 @@ fn merge_is_deterministic_and_stable() {
         .expect("合并应当成功");
     assert_eq!(first, second);
 
-    // 结果顺序稳定：provider 与 model 均按 id 字典序。
-    let provider_ids: Vec<&str> = first.providers().iter().map(|p| p.id.as_str()).collect();
+    let provider_ids: Vec<&str> = first
+        .providers()
+        .iter()
+        .map(|provider| provider.id.as_str())
+        .collect();
     let mut sorted = provider_ids.clone();
     sorted.sort();
     assert_eq!(provider_ids, sorted);
     for provider in first.providers() {
-        let ids: Vec<&str> = provider.models.iter().map(|m| m.id.as_str()).collect();
+        let ids: Vec<&str> = provider
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect();
         let mut sorted = ids.clone();
         sorted.sort();
         assert_eq!(ids, sorted);
     }
 
-    // 官方补丁先于本地覆盖生效：本地值最终胜出。
-    let gemini = first
-        .find(Some("gemini"), "gemini-2.5-flash")
-        .expect("gemini 模型应存在");
-    assert_eq!(gemini.max_output_tokens, Some(8192));
-    let openai = first.find(Some("openai"), "gpt-4o").expect("gpt-4o 应存在");
-    assert_eq!(openai.display_name, "GPT-4o (updated)");
-    assert_eq!(openai.origin, CatalogOrigin::OfficialPatch);
+    // 官方补丁先于本地覆盖生效：本地 max_output_tokens 最终胜出，未覆盖的显示名
+    // 保留官方补丁来源。
+    let openai = first
+        .find_by_provider(&catalog_provider_id("openai"), "gpt-4o")
+        .expect("gpt-4o 应存在");
+    assert_eq!(openai.display_name, "GPT-4o (patched)");
+    assert_eq!(openai.context_window, Some(200000));
+    assert_eq!(openai.max_output_tokens, Some(65536));
+    assert_eq!(openai.provenance.display_name, FieldSource::OfficialPatch);
+    assert_eq!(openai.provenance.context_window, FieldSource::OfficialPatch);
+    assert_eq!(
+        openai.provenance.max_output_tokens,
+        FieldSource::LocalOverride
+    );
+    assert_eq!(
+        openai.provenance.capabilities.tool_calling,
+        FieldSource::OfficialPatch
+    );
 }
 
 #[test]
-fn capability_effective_requires_verification() {
-    let mut claim = CapabilityClaim {
-        advertised: true,
-        adapter_supported: None,
-        verified: Verified::Unknown,
-    };
-    assert_eq!(claim.effective(), None);
-    claim.verified = Verified::Yes;
-    assert_eq!(claim.effective(), Some(true));
-    claim.adapter_supported = Some(false);
-    assert_eq!(claim.effective(), Some(false));
-    claim.verified = Verified::No;
-    assert_eq!(claim.effective(), Some(false));
+fn snapshot_rejects_adapter_and_verified_capability_fields() {
+    let with_adapter = br#"{"schema_version":1,"source":{"name":"x","upstream_license":"MIT",
+        "source_url":"u","source_version":"v","fetched_at":"2025-01-01",
+        "source_hash":"h","converter_version":"v1"},
+        "providers":[{"id":"openai","name":"OpenAI","models":[{
+          "id":"gpt-x","display_name":"GPT X",
+          "capabilities":{"tool_calling":{"advertised":true,"adapter_supported":true}}
+        }]}]}"#;
+    assert!(parse_snapshot(with_adapter).is_err());
+
+    let with_verified = br#"{"schema_version":1,"source":{"name":"x","upstream_license":"MIT",
+        "source_url":"u","source_version":"v","fetched_at":"2025-01-01",
+        "source_hash":"h","converter_version":"v1"},
+        "providers":[{"id":"openai","name":"OpenAI","models":[{
+          "id":"gpt-x","display_name":"GPT X",
+          "capabilities":{"reasoning":{"advertised":true,"verified":"yes"}}
+        }]}]}"#;
+    assert!(parse_snapshot(with_verified).is_err());
 }

@@ -8,10 +8,12 @@
 //! - Catalog 只描述模型元数据（上下文窗口、模态、能力声明、价格、状态等），
 //!   不包含 Base URL、认证头、API Key、Adapter 类型等 Connection/Credential 安全字段；
 //!   这些仍由 `agent.toml` / 配置中心与 `LlmConfig` 管理。
-//! - 能力字段区分 `advertised`（上游目录声明）、`adapter_supported`（本项目 adapter
-//!   实测支持）、`verified`（是否经过验证）与 `effective`（最终可信结论）。
-//!   远程目录声明 Tool Calling 等能力不会自动改变 Agent 行为，Tool Loop 白名单
-//!   仍由 core 的场景配置决定。
+//! - Catalog Provider 是 Models.dev 等上游用来组织模型元数据的供应商身份，独立于
+//!   运行时 Provider Connection。`google` 不会被改写成 `gemini`，`zhipuai` 也不会被
+//!   改写成 `bigmodel`；后续由 Connection 映射层按连接规则解释，而不是在 Catalog 内改写。
+//! - 规范化 Catalog 的每项能力只保留 `advertised`（上游声明）。`adapter_supported`
+//!   属于 Connection/Adapter 解析阶段，不由远程 Catalog 控制，也不允许 `models.json`
+//!   伪造；`verified` / `effective` 属于后续 resolved capability，本基础层不承接。
 //! - Catalog 不作为 Route 白名单：Route 中引用但 Catalog 未收录的模型按
 //!   “未知模型 / 能力未知”处理，不阻断启动。
 
@@ -20,11 +22,12 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::error::LlmError;
-use crate::provider::types::ModelProvider;
+
+pub mod converter;
 
 /// 当前 Catalog 规范化 Schema 版本；不兼容变更时递增。
 pub const CATALOG_SCHEMA_VERSION: u32 = 1;
-/// Models.dev 快照转换器的固定版本标识，保证快照可复现。
+/// Models.dev 快照转换器的固定版本标识；只随转换规则变更递增。
 pub const CONVERTER_VERSION: &str = "modelsdev-converter-v1";
 /// 本地 `models.json` 的 Schema 版本。
 const LOCAL_SCHEMA_VERSION: u32 = 1;
@@ -58,6 +61,50 @@ const FORBIDDEN_LOCAL_KEYS: &[&str] = &[
     "url",
 ];
 
+// ---- Catalog Provider ID ----
+
+/// Catalog 自己的 Provider ID。
+///
+/// 它只代表模型目录中的供应商身份，不经过运行时
+/// [`ModelProvider`](crate::provider::types::ModelProvider) 的 `google -> gemini`、
+/// `glm/zhipu -> bigmodel` 等 Connection alias。一个 Catalog Provider 后续可以映射到
+/// 多个 Connection，但 ID 本身不因连接规则被改写。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CatalogProviderId(String);
+
+impl CatalogProviderId {
+    /// 解析并校验 Catalog Provider ID；只做小写归一化，不应用任何 Connection alias。
+    pub fn parse(value: &str) -> Result<Self, LlmError> {
+        let normalized = value.trim().to_ascii_lowercase();
+        if !is_valid_provider_id(&normalized) {
+            return Err(LlmError::config(format!(
+                "Catalog provider id `{value}` 非法：只允许小写字母开头，包含字母/数字/下划线/连字符"
+            )));
+        }
+        Ok(Self(normalized))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for CatalogProviderId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+fn is_valid_provider_id(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+}
+
 // ---- 嵌入快照 / 官方补丁共用的规范化 Schema ----
 
 /// 规范化 Catalog 快照：内置资产、将来的远程缓存与官方兼容补丁共用此结构。
@@ -70,28 +117,31 @@ pub struct CatalogSnapshot {
     pub providers: Vec<CatalogProvider>,
 }
 
-/// 快照来源元数据；`source_hash` 标识上游原始数据批次，便于审查与缓存失效判断。
+/// 快照来源元数据；所有字段都必须来自真实生成过程，不允许占位值。
+/// `source_hash` 是转换器实际输入字节的 SHA-256，`source_version` 是上游版本/commit。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogSource {
     pub name: String,
     pub upstream_license: String,
+    pub source_url: String,
+    pub source_version: String,
     pub fetched_at: String,
     pub source_hash: String,
     pub converter_version: String,
 }
 
-/// Catalog 中的 Provider：仅是模型元数据的分组键，不代表任何连接配置。
+/// Catalog Provider 分组：模型元数据的供应商身份，不承载任何连接配置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogProvider {
-    pub id: String,
+    pub id: CatalogProviderId,
     pub name: String,
     #[serde(default)]
     pub models: Vec<CatalogModel>,
 }
 
-/// 单个模型的元数据条目。
+/// 规范化目录模型；`enabled` 是本地覆盖语义，不属于可远程控制的模型元数据。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogModel {
@@ -107,20 +157,19 @@ pub struct CatalogModel {
     pub capabilities: ModelCapabilities,
     #[serde(default)]
     pub status: ModelStatus,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
     #[serde(default)]
     pub price: Option<ModelPrice>,
-    #[serde(default)]
-    pub origin: CatalogOrigin,
 }
 
-/// 模型输入 / 输出模态；只保留项目实际关心的 text 与 image。
+/// 模型输入 / 输出模态；白名单覆盖 Models.dev 当前文本聊天相关模态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Modality {
     Text,
     Image,
+    Audio,
+    Video,
+    Pdf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -132,8 +181,8 @@ pub struct ModelModalities {
     pub output: Vec<Modality>,
 }
 
-/// 能力声明集合；每项能力单独携带可信度信息。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// 能力声明集合。Catalog 基础层每项只有 `advertised` 上游声明。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct ModelCapabilities {
     #[serde(default)]
@@ -144,49 +193,21 @@ pub struct ModelCapabilities {
     pub vision: CapabilityClaim,
 }
 
-/// 单项能力的可信度模型。
-///
-/// Models.dev 等上游目录只能提供 `advertised`；`adapter_supported` 由本项目
-/// adapter 实测填充；`verified` 表示是否完成验证。只有 `verified != unknown`
-/// 时 `effective()` 才给出结论，避免伪造验证成功。
+/// 单项能力的上游声明；只允许 Catalog 声明存在与否。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct CapabilityClaim {
     #[serde(default)]
     pub advertised: bool,
-    #[serde(default)]
-    pub adapter_supported: Option<bool>,
-    #[serde(default)]
-    pub verified: Verified,
 }
 
-impl CapabilityClaim {
-    /// 最终可信结论：仅在验证完成后给出，未知时返回 `None`。
-    pub fn effective(&self) -> Option<bool> {
-        match self.verified {
-            Verified::Yes => Some(self.advertised && self.adapter_supported.unwrap_or(true)),
-            Verified::No => Some(false),
-            Verified::Unknown => None,
-        }
-    }
-}
-
-/// 能力验证状态；快照中的远程声明一律保持 `unknown`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum Verified {
-    #[default]
-    Unknown,
-    Yes,
-    No,
-}
-
-/// 模型生命周期状态；与 `enabled`（本地禁用开关）正交。
+/// 模型生命周期状态；与本地 `enabled`（覆盖开关）正交。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelStatus {
     #[default]
     Active,
+    Beta,
     Deprecated,
 }
 
@@ -200,14 +221,100 @@ pub struct ModelPrice {
     pub output_per_million_usd: Option<f64>,
 }
 
-/// 条目数据来源，用于追溯每条模型元数据是目录自带、官方补丁还是本地覆盖。
+// ---- 字段级 provenance ----
+
+/// 字段 / 能力声明的数据来源层。
+///
+/// 模型整体不会被打上单一 `Local` 标签；本地只覆盖存在字段，未覆盖字段继续指向
+/// `Catalog` / `OfficialPatch`，从而避免“改了一个字段就变成整个模型都来自本地”。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum CatalogOrigin {
+pub enum FieldSource {
     #[default]
-    Embedded,
+    Catalog,
     OfficialPatch,
-    Local,
+    LocalOverride,
+}
+
+/// 模型逐字段来源；`capabilities` 再按能力项细分，用于后续展示声明来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ModelProvenance {
+    pub display_name: FieldSource,
+    pub context_window: FieldSource,
+    pub max_output_tokens: FieldSource,
+    pub modalities: FieldSource,
+    pub status: FieldSource,
+    pub price: FieldSource,
+    pub capabilities: CapabilityProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CapabilityProvenance {
+    pub reasoning: FieldSource,
+    pub tool_calling: FieldSource,
+    pub vision: FieldSource,
+}
+
+impl ModelProvenance {
+    fn from_catalog() -> Self {
+        Self::default()
+    }
+
+    fn from_patch() -> Self {
+        Self {
+            display_name: FieldSource::OfficialPatch,
+            context_window: FieldSource::OfficialPatch,
+            max_output_tokens: FieldSource::OfficialPatch,
+            modalities: FieldSource::OfficialPatch,
+            status: FieldSource::OfficialPatch,
+            price: FieldSource::OfficialPatch,
+            capabilities: CapabilityProvenance {
+                reasoning: FieldSource::OfficialPatch,
+                tool_calling: FieldSource::OfficialPatch,
+                vision: FieldSource::OfficialPatch,
+            },
+        }
+    }
+
+    fn from_local_override() -> Self {
+        Self {
+            display_name: FieldSource::LocalOverride,
+            context_window: FieldSource::LocalOverride,
+            max_output_tokens: FieldSource::LocalOverride,
+            modalities: FieldSource::LocalOverride,
+            status: FieldSource::LocalOverride,
+            price: FieldSource::LocalOverride,
+            capabilities: CapabilityProvenance {
+                reasoning: FieldSource::LocalOverride,
+                tool_calling: FieldSource::LocalOverride,
+                vision: FieldSource::LocalOverride,
+            },
+        }
+    }
+}
+
+// ---- Effective Catalog 输出模型 ----
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectiveCatalogProvider {
+    pub id: CatalogProviderId,
+    pub name: String,
+    pub models: Vec<EffectiveCatalogModel>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectiveCatalogModel {
+    pub id: String,
+    pub display_name: String,
+    pub context_window: Option<u64>,
+    pub max_output_tokens: Option<u64>,
+    pub modalities: ModelModalities,
+    pub capabilities: ModelCapabilities,
+    pub status: ModelStatus,
+    /// 本地禁用后的有效状态；Catalog 基础层不直接承载该字段，默认保持启用。
+    pub enabled: bool,
+    pub price: Option<ModelPrice>,
+    pub provenance: ModelProvenance,
 }
 
 // ---- config/models.json 本地覆盖 Schema ----
@@ -226,6 +333,7 @@ pub struct LocalModelOverrides {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalModelEntry {
+    /// Catalog Provider ID；不受运行时 `google -> gemini` 等 alias 影响。
     pub provider: String,
     pub id: String,
     #[serde(default)]
@@ -258,10 +366,6 @@ pub struct LocalCapabilities {
     pub vision: Option<CapabilityClaim>,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 fn default_local_schema_version() -> u32 {
     LOCAL_SCHEMA_VERSION
 }
@@ -277,24 +381,35 @@ pub fn parse_snapshot(bytes: &[u8]) -> Result<CatalogSnapshot, LlmError> {
     Ok(snapshot)
 }
 
-fn validate_snapshot(snapshot: &CatalogSnapshot) -> Result<(), LlmError> {
+pub(crate) fn validate_snapshot(snapshot: &CatalogSnapshot) -> Result<(), LlmError> {
     if snapshot.schema_version != CATALOG_SCHEMA_VERSION {
         return Err(LlmError::config(format!(
             "内置模型目录快照 schema_version 不受支持：{}（当前支持 {}）",
             snapshot.schema_version, CATALOG_SCHEMA_VERSION
         )));
     }
-    if snapshot.source.converter_version.is_empty() || snapshot.source.source_hash.is_empty() {
+    if snapshot.source.name.trim().is_empty()
+        || snapshot.source.upstream_license.trim().is_empty()
+        || snapshot.source.source_url.trim().is_empty()
+        || snapshot.source.source_version.trim().is_empty()
+        || snapshot.source.fetched_at.trim().is_empty()
+        || snapshot.source.source_hash.trim().is_empty()
+        || snapshot.source.converter_version.trim().is_empty()
+    {
         return Err(LlmError::config(
-            "内置模型目录快照缺少 source_hash 或 converter_version 元数据",
+            "内置模型目录快照来源元数据不完整，必须来自真实生成过程",
         ));
     }
     let mut provider_ids = Vec::new();
     for provider in &snapshot.providers {
-        if provider.id.trim().is_empty() {
-            return Err(LlmError::config("内置模型目录存在空 provider id"));
-        }
-        provider_ids.push(provider.id.clone());
+        // 反序列化只保证字符串外观，这里再做一次类型级校验，防止调用方手工构造非法值。
+        CatalogProviderId::parse(provider.id.as_str()).map_err(|_| {
+            LlmError::config(format!(
+                "内置模型目录存在非法 provider id：`{}`",
+                provider.id.as_str()
+            ))
+        })?;
+        provider_ids.push(provider.id.as_str().to_owned());
         let mut model_ids = Vec::new();
         for model in &provider.models {
             if model.id.trim().is_empty() || model.display_name.trim().is_empty() {
@@ -382,10 +497,10 @@ pub fn parse_local_overrides(bytes: &[u8]) -> Result<LocalModelOverrides, LlmErr
         if entry.id.trim().is_empty() {
             return Err(LlmError::config("models.json 存在缺少 id 的模型条目"));
         }
-        ModelProvider::parse_prefix(&entry.provider).map_err(|error| {
+        CatalogProviderId::parse(&entry.provider).map_err(|_| {
             LlmError::config(format!(
-                "models.json 条目 `{}` 的 provider 非法：{}",
-                entry.id, error.message
+                "models.json 条目 `{}` 的 provider 非法：`{}`",
+                entry.id, entry.provider
             ))
         })?;
     }
@@ -413,7 +528,7 @@ pub fn load_local_overrides(path: &Path) -> Result<Option<LocalModelOverrides>, 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectiveModelCatalog {
     base_source: CatalogSource,
-    providers: Vec<CatalogProvider>,
+    providers: Vec<EffectiveCatalogProvider>,
 }
 
 impl EffectiveModelCatalog {
@@ -430,33 +545,43 @@ impl EffectiveModelCatalog {
             validate_snapshot(patch)?;
         }
 
-        let mut providers = base.providers.clone();
+        let mut providers: Vec<EffectiveCatalogProvider> = Vec::new();
+        for provider in &base.providers {
+            let target = ensure_effective_provider(&mut providers, provider);
+            for model in &provider.models {
+                target.models.push(effective_from_catalog(model));
+            }
+        }
+
+        // 官方兼容补丁以完整规范化模型记录覆盖基线；local 覆盖在其后按字段生效。
         for patch in official_patches {
-            for patch_provider in &patch.providers {
-                let target = ensure_provider(&mut providers, patch_provider);
-                for model in &patch_provider.models {
-                    upsert_model(target, model.clone(), CatalogOrigin::OfficialPatch);
+            for provider in &patch.providers {
+                let target = ensure_effective_provider(&mut providers, provider);
+                for model in &provider.models {
+                    upsert_patch_model(target, model);
                 }
             }
         }
+
         if let Some(local) = local {
             for entry in &local.models {
-                let provider_id = ModelProvider::parse_prefix(&entry.provider)
-                    .map_err(|error| {
-                        LlmError::config(format!(
-                            "models.json 条目 `{}` 的 provider 非法：{}",
-                            entry.id, error.message
-                        ))
-                    })?
-                    .as_str()
-                    .to_owned();
-                let target = ensure_provider_named(&mut providers, &provider_id);
+                let provider_id = CatalogProviderId::parse(&entry.provider).map_err(|_| {
+                    LlmError::config(format!(
+                        "models.json 条目 `{}` 的 provider 非法：`{}`",
+                        entry.id, entry.provider
+                    ))
+                })?;
+                let target = ensure_effective_provider_id(
+                    &mut providers,
+                    &provider_id,
+                    provider_id.as_str(),
+                );
                 upsert_local_entry(target, entry);
             }
         }
 
         // 稳定排序：provider 与 model 均按 id 字典序，保证合并结果确定可审查。
-        providers.sort_by(|a, b| a.id.cmp(&b.id));
+        providers.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
         for provider in &mut providers {
             provider.models.sort_by(|a, b| a.id.cmp(&b.id));
         }
@@ -477,37 +602,69 @@ impl EffectiveModelCatalog {
         &self.base_source
     }
 
-    pub fn providers(&self) -> &[CatalogProvider] {
+    pub fn providers(&self) -> &[EffectiveCatalogProvider] {
         &self.providers
     }
 
-    /// 查询模型元数据；未收录时返回 `None`（未知模型 / 能力未知），
-    /// 调用方不得将其视为启动或请求失败。
-    pub fn find(&self, provider: Option<&str>, model_id: &str) -> Option<&CatalogModel> {
+    /// 按 Catalog Provider ID 查询；未收录时返回 `None`。
+    pub fn find_by_provider(
+        &self,
+        provider: &CatalogProviderId,
+        model_id: &str,
+    ) -> Option<&EffectiveCatalogModel> {
         let model_id = model_id.trim();
         if model_id.is_empty() {
             return None;
         }
-        match provider.map(str::trim).filter(|value| !value.is_empty()) {
-            Some(provider_id) => self
-                .providers
-                .iter()
-                .find(|candidate| candidate.id == provider_id.to_ascii_lowercase())
-                .and_then(|provider| provider.models.iter().find(|model| model.id == model_id)),
-            None => self
-                .providers
-                .iter()
-                .find_map(|provider| provider.models.iter().find(|model| model.id == model_id)),
+        self.providers
+            .iter()
+            .find(|candidate| candidate.id == *provider)
+            .and_then(|provider| provider.models.iter().find(|model| model.id == model_id))
+    }
+
+    /// 无 Provider 时只允许唯一匹配；同一 model id 出现在多个 Provider 中时返回
+    /// `None`（歧义），绝不隐式选择字典序第一个 Provider。
+    pub fn find(
+        &self,
+        provider: Option<&CatalogProviderId>,
+        model_id: &str,
+    ) -> Option<&EffectiveCatalogModel> {
+        match provider {
+            Some(provider) => self.find_by_provider(provider, model_id),
+            None => self.find_unique(model_id),
         }
     }
 
-    /// 模型启用状态：`None` 表示目录未收录（未知模型），不等于禁用。
-    pub fn is_model_enabled(&self, provider: Option<&str>, model_id: &str) -> Option<bool> {
+    /// 全局唯一 model id 查询；歧义或不存在均返回 `None`。
+    pub fn find_unique(&self, model_id: &str) -> Option<&EffectiveCatalogModel> {
+        let model_id = model_id.trim();
+        if model_id.is_empty() {
+            return None;
+        }
+        let mut matches = self.providers.iter().flat_map(|provider| {
+            provider
+                .models
+                .iter()
+                .filter(move |model| model.id == model_id)
+        });
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+
+    /// 模型启用状态：`None` 表示目录未收录或查询歧义（未知模型），不等于禁用。
+    pub fn is_model_enabled(
+        &self,
+        provider: Option<&CatalogProviderId>,
+        model_id: &str,
+    ) -> Option<bool> {
         self.find(provider, model_id).map(|model| model.enabled)
     }
 
-    /// 迭代所有未被本地禁用的模型条目（含 deprecated，状态由调用方区分）。
-    pub fn active_models(&self) -> impl Iterator<Item = &CatalogModel> {
+    /// 迭代所有未被本地禁用的模型条目（含 deprecated/beta，状态由调用方区分）。
+    pub fn active_models(&self) -> impl Iterator<Item = &EffectiveCatalogModel> {
         self.providers
             .iter()
             .flat_map(|provider| provider.models.iter())
@@ -515,80 +672,124 @@ impl EffectiveModelCatalog {
     }
 }
 
-fn ensure_provider<'a>(
-    providers: &'a mut Vec<CatalogProvider>,
-    patch_provider: &CatalogProvider,
-) -> &'a mut CatalogProvider {
-    ensure_provider_named(providers, &patch_provider.id)
+fn ensure_effective_provider<'a>(
+    providers: &'a mut Vec<EffectiveCatalogProvider>,
+    source: &CatalogProvider,
+) -> &'a mut EffectiveCatalogProvider {
+    ensure_effective_provider_id(providers, &source.id, &source.name)
 }
 
-fn ensure_provider_named<'a>(
-    providers: &'a mut Vec<CatalogProvider>,
-    provider_id: &str,
-) -> &'a mut CatalogProvider {
-    if let Some(index) = providers.iter().position(|p| p.id == provider_id) {
+fn ensure_effective_provider_id<'a>(
+    providers: &'a mut Vec<EffectiveCatalogProvider>,
+    provider_id: &CatalogProviderId,
+    display_name: &str,
+) -> &'a mut EffectiveCatalogProvider {
+    if let Some(index) = providers.iter().position(|p| p.id == *provider_id) {
         return &mut providers[index];
     }
-    providers.push(CatalogProvider {
-        id: provider_id.to_owned(),
-        name: provider_id.to_owned(),
+    providers.push(EffectiveCatalogProvider {
+        id: provider_id.clone(),
+        name: display_name.to_owned(),
         models: Vec::new(),
     });
     let last = providers.len() - 1;
     &mut providers[last]
 }
 
-fn upsert_model(target: &mut CatalogProvider, mut model: CatalogModel, origin: CatalogOrigin) {
-    model.origin = origin;
-    if let Some(existing) = target.models.iter_mut().find(|m| m.id == model.id) {
-        *existing = model;
+fn effective_from_catalog(model: &CatalogModel) -> EffectiveCatalogModel {
+    EffectiveCatalogModel {
+        id: model.id.clone(),
+        display_name: model.display_name.clone(),
+        context_window: model.context_window,
+        max_output_tokens: model.max_output_tokens,
+        modalities: model.modalities.clone(),
+        capabilities: model.capabilities,
+        status: model.status,
+        enabled: true,
+        price: model.price,
+        provenance: ModelProvenance::from_catalog(),
+    }
+}
+
+fn upsert_patch_model(target: &mut EffectiveCatalogProvider, model: &CatalogModel) {
+    let patched = EffectiveCatalogModel {
+        id: model.id.clone(),
+        display_name: model.display_name.clone(),
+        context_window: model.context_window,
+        max_output_tokens: model.max_output_tokens,
+        modalities: model.modalities.clone(),
+        capabilities: model.capabilities,
+        status: model.status,
+        // 官方兼容补丁不控制本地禁用状态；保留已由 local 决定的结果。
+        enabled: target
+            .models
+            .iter()
+            .find(|candidate| candidate.id == model.id)
+            .is_none_or(|candidate| candidate.enabled),
+        price: model.price,
+        provenance: ModelProvenance::from_patch(),
+    };
+    if let Some(existing) = target
+        .models
+        .iter_mut()
+        .find(|candidate| candidate.id == model.id)
+    {
+        *existing = patched;
     } else {
-        target.models.push(model);
+        target.models.push(patched);
     }
 }
 
 /// 应用本地覆盖：存在的字段覆盖，缺失字段继承目录值；模型不存在则追加，
 /// `enabled=false` 时保留条目并标记禁用。
-fn upsert_local_entry(target: &mut CatalogProvider, entry: &LocalModelEntry) {
+fn upsert_local_entry(target: &mut EffectiveCatalogProvider, entry: &LocalModelEntry) {
     if let Some(existing) = target.models.iter_mut().find(|m| m.id == entry.id) {
         if let Some(value) = &entry.display_name {
             existing.display_name = value.clone();
+            existing.provenance.display_name = FieldSource::LocalOverride;
         }
         if let Some(value) = entry.context_window {
             existing.context_window = Some(value);
+            existing.provenance.context_window = FieldSource::LocalOverride;
         }
         if let Some(value) = entry.max_output_tokens {
             existing.max_output_tokens = Some(value);
+            existing.provenance.max_output_tokens = FieldSource::LocalOverride;
         }
         if let Some(value) = &entry.modalities {
             existing.modalities = value.clone();
+            existing.provenance.modalities = FieldSource::LocalOverride;
         }
         if let Some(value) = &entry.capabilities {
             if let Some(claim) = value.reasoning {
                 existing.capabilities.reasoning = claim;
+                existing.provenance.capabilities.reasoning = FieldSource::LocalOverride;
             }
             if let Some(claim) = value.tool_calling {
                 existing.capabilities.tool_calling = claim;
+                existing.provenance.capabilities.tool_calling = FieldSource::LocalOverride;
             }
             if let Some(claim) = value.vision {
                 existing.capabilities.vision = claim;
+                existing.provenance.capabilities.vision = FieldSource::LocalOverride;
             }
         }
         if let Some(value) = entry.status {
             existing.status = value;
+            existing.provenance.status = FieldSource::LocalOverride;
         }
         if let Some(value) = entry.enabled {
             existing.enabled = value;
         }
         if let Some(value) = &entry.price {
             existing.price = Some(*value);
+            existing.provenance.price = FieldSource::LocalOverride;
         }
-        existing.origin = CatalogOrigin::Local;
         return;
     }
 
     let capabilities = entry.capabilities.clone().unwrap_or_default();
-    target.models.push(CatalogModel {
+    target.models.push(EffectiveCatalogModel {
         id: entry.id.clone(),
         display_name: entry
             .display_name
@@ -605,7 +806,7 @@ fn upsert_local_entry(target: &mut CatalogProvider, entry: &LocalModelEntry) {
         status: entry.status.unwrap_or_default(),
         enabled: entry.enabled.unwrap_or(true),
         price: entry.price,
-        origin: CatalogOrigin::Local,
+        provenance: ModelProvenance::from_local_override(),
     });
 }
 
