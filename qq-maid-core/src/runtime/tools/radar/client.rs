@@ -8,10 +8,11 @@ use crate::error::LlmError;
 use super::{
     ClaudeRadarSummary, CodexRadarSummary, DynRadarExecutor, RadarExecutor, RadarIssueTarget,
     RadarSnapshot, RadarSourceFailure, RadarSourceKind, RadarTarget,
-    parse::{apply_codex_ratings, parse_claude_summary, parse_codex_summary},
+    parse::{apply_codex_metrics, apply_codex_ratings, parse_claude_summary, parse_codex_summary},
 };
 
 const CODEX_CURRENT_URL: &str = "https://codexradar.com/current.json";
+const CODEX_METRICS_URL: &str = "https://codexradar.com/api/intelligence-efficiency-metrics";
 const CODEX_RATINGS_URL: &str = "https://codexradar.com/api/model-ratings";
 pub(super) const CODEX_SITE_URL: &str = "https://codexradar.com/";
 pub(super) const CODEX_FEEDBACK_URL: &str = "https://codexradar.com/";
@@ -63,6 +64,15 @@ impl HttpRadarExecutor {
         let json = self.fetch_json(CODEX_CURRENT_URL, "radar_codex").await?;
         let mut summary = parse_codex_summary(&json);
         let mut failures = Vec::new();
+        // Codex Radar 改版后，含 Astra 的模型 IQ 数据已独立到效能接口；
+        // 旧 current.json 的 model_iq 只作为该接口不可用时的兼容回退。
+        match self
+            .fetch_json(CODEX_METRICS_URL, "radar_codex_metrics")
+            .await
+        {
+            Ok(metrics) => apply_codex_metrics(&mut summary, &metrics),
+            Err(err) => failures.push(failure(RadarSourceKind::Codex, &err)),
+        }
         match self
             .fetch_json(CODEX_RATINGS_URL, "radar_codex_ratings")
             .await

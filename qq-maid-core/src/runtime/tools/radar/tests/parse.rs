@@ -109,6 +109,89 @@ fn apply_codex_ratings_selects_highest_24h_score() {
 }
 
 #[test]
+fn apply_codex_metrics_replaces_legacy_iq_with_astra_and_filters_station_models() {
+    let mut summary = parse_codex_summary(&json!({
+        "model_iq": {
+            "updated_at": "2026-08-02T19:35:13+08:00",
+            "latest": {"score": 60.0, "status": "green", "passed": 4, "tasks": 10, "model": "gpt-5.6-sol", "reasoning_effort": "max"},
+            "comparisons": {}
+        }
+    }));
+    assert_eq!(summary.model_label.as_deref(), Some("GPT-5.6 Sol max"));
+
+    apply_codex_metrics(
+        &mut summary,
+        &json!({
+            "source_updated_at": "2026-09-08T12:32:03+00:00",
+            "points": [
+                {"model": "gpt-6-astra", "effort": "high", "passed": 82, "total": 114, "iq": 107.89},
+                {"model": "gpt-6-astra", "effort": "max", "passed": 76, "total": 106, "iq": 107.55},
+                {"model": "gpt-5.6-sol", "effort": "max", "passed": 239, "total": 336, "iq": 106.7},
+                {"model": "deepseek-v4-flash", "effort": "off", "passed": 50, "total": 64, "iq": 88.5},
+                {"model": "claude-sonnet-5", "effort": "high", "passed": 2, "total": 2, "iq": 150.0}
+            ]
+        }),
+    );
+
+    assert_eq!(
+        summary.updated_at.as_deref(),
+        Some("2026-09-08T12:32:03+00:00")
+    );
+    assert_eq!(summary.model_label.as_deref(), Some("GPT-6 Astra high"));
+    assert_eq!(summary.model_score, Some(107.89));
+    assert_eq!(summary.model_passed, Some(82));
+    assert_eq!(summary.model_tasks, Some(114));
+    assert_eq!(summary.model_status, None);
+    assert_eq!(summary.iq_models.len(), 4);
+    assert!(
+        summary
+            .iq_models
+            .iter()
+            .any(|model| model.label == "GPT-6 Astra high")
+    );
+    assert!(
+        summary
+            .iq_models
+            .iter()
+            .any(|model| model.label == "DeepSeek V4 Flash off")
+    );
+    assert!(
+        !summary
+            .iq_models
+            .iter()
+            .any(|model| model.label.contains("claude-sonnet-5"))
+    );
+}
+
+#[test]
+fn apply_codex_metrics_without_station_models_keeps_legacy_fallback() {
+    let mut summary = parse_codex_summary(&json!({
+        "model_iq": {
+            "updated_at": "2026-08-02T19:35:13+08:00",
+            "latest": {"score": 60.0, "status": "green", "passed": 4, "tasks": 10, "model": "gpt-5.5", "reasoning_effort": "xhigh"},
+            "comparisons": {}
+        }
+    }));
+    apply_codex_metrics(
+        &mut summary,
+        &json!({
+            "source_updated_at": "2026-09-08T12:32:03+00:00",
+            "points": [
+                {"model": "claude-sonnet-5", "effort": "high", "passed": 2, "total": 2, "iq": 150.0}
+            ]
+        }),
+    );
+
+    assert_eq!(
+        summary.updated_at.as_deref(),
+        Some("2026-08-02T19:35:13+08:00")
+    );
+    assert_eq!(summary.model_label.as_deref(), Some("GPT-5.5 xhigh"));
+    assert_eq!(summary.model_status.as_deref(), Some("green"));
+    assert_eq!(summary.iq_models.len(), 1);
+}
+
+#[test]
 fn codex_display_model_name_formats_model_family() {
     assert_eq!(codex_display_model_name("gpt-5.6-sol"), "GPT-5.6 Sol");
     assert_eq!(codex_display_model_name("gpt-5.5"), "GPT-5.5");
