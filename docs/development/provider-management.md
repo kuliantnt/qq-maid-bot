@@ -35,7 +35,7 @@
 
 `POST /api/v1/console/configuration/providers/models` 接收 `id` 和 `expected_revision`，只读取已保存连接，不写配置或路线。自定义连接使用 Agent revision，内置连接使用 runtime revision。接口仍要求管理员 Session、Origin 与 CSRF；浏览器不能提交 URL、认证或 Credential。响应包含 `connection_id`、请求的 `revision` 和 `discovery`。结果仅属于请求开始时的保存配置，不是运行值，也不缓存或热加载。
 
-自定义 `openai_compatible` / `openai_responses` 及内置 OpenAI、DeepSeek 从连接自身 Base URL 追加 `/models`，沿用 Header、Scheme 和当前解析出的 Credential。内置 OpenAI 多 Base URL 使用首个非空地址，不跨地址重试；BigModel、Gemini 内置 Adapter 暂返回 `unsupported / adapter_unsupported`，不猜测其他原生接口。协议参考 [OpenAI 模型列表](https://platform.openai.com/docs/api-reference/models/list)和 [DeepSeek 模型列表](https://api-docs.deepseek.com/api/list-models)。
+模型发现依据 Connection 实际使用的协议 Adapter：内置 OpenAI Responses 使用 `OpenAiResponses`，OpenAI Chat、DeepSeek、Gemini、BigModel 使用 `OpenAiCompatible`。这些内置连接与自定义 `openai_compatible` / `openai_responses` 均从连接自身 Base URL 追加 `/models`，沿用 Header、Scheme 和当前解析出的 Credential。内置 OpenAI 多 Base URL 使用首个非空地址，不跨地址重试；端点返回 404 / 405 / 501 时由 discovery 层返回 `unsupported / endpoint_unsupported`，不按品牌预判支持情况。协议参考 [OpenAI 模型列表](https://platform.openai.com/docs/api-reference/models/list)和 [DeepSeek 模型列表](https://api-docs.deepseek.com/api/list-models)。
 
 发现沿用自定义 `request_timeout_seconds`，缺省用 `LLM_REQUEST_TIMEOUT_SECONDS`，再限制总等待不超过 15 秒、连接不超过 5 秒。最多两个并发，忙时立即返回 `unknown / busy`；禁止重定向、自动重试与分页跳转。响应上限 1 MiB、最多 10000 个条目；model id 去重排序，仅保留 ID 及 `source=connection_discovery`，不透传额外上游字段、错误正文、URL 或凭证。
 

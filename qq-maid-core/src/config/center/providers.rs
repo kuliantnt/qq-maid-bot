@@ -176,10 +176,12 @@ impl ConfigCenter {
             auth: qq_maid_llm::config::HttpAuthConfig::default(),
             api_key: key.to_owned(),
             timeout_seconds: discovery_timeout(&environment, None)?,
-            discovery_adapter: match id {
-                "openai" if responses => DiscoveryAdapter::OpenAiResponses,
-                "openai" | "deepseek" => DiscoveryAdapter::OpenAiCompatible,
-                _ => DiscoveryAdapter::Unsupported,
+            // 内置连接除 Responses 外均使用 Chat Completions adapter；
+            // /models 是否可用由端点响应判定，不按 Provider 品牌提前拒绝。
+            discovery_adapter: if responses {
+                DiscoveryAdapter::OpenAiResponses
+            } else {
+                DiscoveryAdapter::OpenAiCompatible
             },
         })
     }
