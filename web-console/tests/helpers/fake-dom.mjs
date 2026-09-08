@@ -4,7 +4,7 @@
 const REGISTERED_TAGS = new Set([
   "div", "section", "label", "input", "select", "option", "button", "span", "p",
   "fieldset", "legend", "details", "summary", "article", "h3", "h4", "code",
-  "small", "strong", "form", "main", "nav", "ul", "li",
+  "small", "strong", "form", "main", "nav", "ul", "li", "dialog",
 ]);
 
 function attributeName(prop) {

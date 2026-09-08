@@ -63,6 +63,8 @@ export function captureConfigurationInputState() {
     if (!root)
         return captured;
     for (const input of root.querySelectorAll("input, select")) {
+        if (input.dataset.transientCredential === "true")
+            continue;
         if (input instanceof HTMLInputElement && input.type === "file")
             continue;
         const key = inputCaptureKey(input);

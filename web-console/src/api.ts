@@ -329,6 +329,18 @@ export async function updateAgentConfiguration(expectedRevision: string, changes
   return parseConfigurationPayload(payload);
 }
 
+export async function updateConnectionCredential(id: string, agentRevision: string, revision: string, value: string | null): Promise<ConfigurationSnapshot> {
+  return parseConfigurationPayload(await mutatingJson("/api/v1/console/configuration/providers/credential", "PATCH", {
+    id, expected_agent_revision: agentRevision, expected_revision: revision, value,
+  }));
+}
+
+export async function testProviderConnection(id: string, revision: string, model: string): Promise<Record<string, unknown>> {
+  return record(record(await mutatingJson("/api/v1/console/configuration/providers/test", "POST", {
+    id, expected_revision: revision, model,
+  })).diagnostic);
+}
+
 export async function requestRestart(): Promise<string> {
   const payload = record(await mutatingJson(RESTART_ROUTE, "POST", {}));
   return string(payload.message, "重启命令已提交");
@@ -645,6 +657,7 @@ function parseConfigurationSnapshot(value: unknown, toolsValue: unknown = [], re
   return {
     revision: string(item.revision, "missing"),
     fileExists: item.file_exists === true,
+    providers: item.providers as ConfigurationSnapshot["providers"],
     fields: array(item.fields).map(parseConfigField),
     registeredTools: array(toolsValue).map(parseRegisteredTool),
     restartAvailable: record(restartValue).available === true,

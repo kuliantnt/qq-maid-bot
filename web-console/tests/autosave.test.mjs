@@ -381,6 +381,7 @@ test("连续修改两个 Secret：不重复提交已保存的旧 revision，后�
 
     first = env.document.getElementById("config-provider-openai-api_key");
     second = env.document.getElementById("config-provider-deepseek-api_key");
+    assert.equal(first.value, "", "已保存的供应商 Key 不留在 DOM");
     second.value = "sk-second";
     env.fireFocusOut(second);
     await waitFor(() => env.savedCounter.count === 2, "第二个 Secret 保存应完成");

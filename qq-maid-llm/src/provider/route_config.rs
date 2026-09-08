@@ -32,32 +32,17 @@ pub(crate) fn provider_build_plan(config: &LlmConfig) -> Result<ProviderBuildPla
         &configured_custom_providers,
     )?;
 
-    let (default_provider, default_route, provider_routes) = match config.provider {
-        ProviderMode::OpenAi => (
-            ModelProvider::OpenAi,
-            config.model_route.clone(),
-            config.configured_model_routes.clone(),
-        ),
-        ProviderMode::DeepSeek => (
-            ModelProvider::DeepSeek,
-            config.model_route.clone(),
-            config.configured_model_routes.clone(),
-        ),
-        ProviderMode::BigModel => (
-            ModelProvider::BigModel,
-            config.model_route.clone(),
-            config.configured_model_routes.clone(),
-        ),
-        ProviderMode::Gemini => (
-            ModelProvider::Gemini,
-            config.model_route.clone(),
-            config.configured_model_routes.clone(),
-        ),
+    let default_provider = config.provider.default_provider();
+    let (default_route, provider_routes) = match config.provider {
         ProviderMode::Auto => {
             let default_route = auto_default_route(config)?;
             let routes = auto_provider_routes(config, &default_route)?;
-            (ModelProvider::OpenAi, default_route, routes)
+            (default_route, routes)
         }
+        _ => (
+            config.model_route.clone(),
+            config.configured_model_routes.clone(),
+        ),
     };
 
     if config.provider != ProviderMode::Auto {

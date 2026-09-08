@@ -14,6 +14,8 @@ fn agent_provider_add_modify_and_remove_preserves_other_providers() {
             &[AgentConfigChange::SetProvider {
                 id: "opencode_zen".to_owned(),
                 provider: AgentProviderUpdate {
+                    display_name: None,
+                    enabled: true,
                     kind: AgentProviderKind::OpenAiResponses,
                     base_url: "https://opencode.ai/zen/v1".to_owned(),
                     api_key_env: "OPENCODE_API_KEY".to_owned(),
@@ -37,6 +39,8 @@ fn agent_provider_add_modify_and_remove_preserves_other_providers() {
             &[AgentConfigChange::SetProvider {
                 id: "opencode_zen".to_owned(),
                 provider: AgentProviderUpdate {
+                    display_name: None,
+                    enabled: true,
                     kind: AgentProviderKind::OpenAiResponses,
                     base_url: "https://gateway.example/open-code/v1".to_owned(),
                     api_key_env: "OPENCODE_API_KEY".to_owned(),
@@ -80,6 +84,8 @@ fn invalid_agent_provider_change_does_not_replace_file() {
                 &[AgentConfigChange::SetProvider {
                     id: id.to_owned(),
                     provider: AgentProviderUpdate {
+                        display_name: None,
+                        enabled: true,
                         kind: AgentProviderKind::OpenAiResponses,
                         base_url: base_url.to_owned(),
                         api_key_env: "OPENCODE_API_KEY".to_owned(),
@@ -107,6 +113,8 @@ fn chat_fallback_true_is_rejected_without_replacing_agent_file() {
             &[AgentConfigChange::SetProvider {
                 id: "custom_responses".to_owned(),
                 provider: AgentProviderUpdate {
+                    display_name: None,
+                    enabled: true,
                     kind: AgentProviderKind::OpenAiResponses,
                     base_url: "https://example.com/v1".to_owned(),
                     api_key_env: "CUSTOM_API_KEY".to_owned(),
@@ -149,6 +157,8 @@ fn provider_changes_support_all_three_opencode_presets_with_one_key_env() {
     .map(|(id, kind, base_url)| AgentConfigChange::SetProvider {
         id: id.to_owned(),
         provider: AgentProviderUpdate {
+            display_name: None,
+            enabled: true,
             kind,
             base_url: base_url.to_owned(),
             api_key_env: "OPENCODE_API_KEY".to_owned(),

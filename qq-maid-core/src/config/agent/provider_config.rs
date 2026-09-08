@@ -14,6 +14,11 @@ pub(super) fn provider_from_file(
     name: &str,
     provider: ProviderFile,
 ) -> Result<AgentProviderConfig, LlmError> {
+    if provider.display_name.as_deref().is_some_and(|name| {
+        name.trim().is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control)
+    }) {
+        return Err(LlmError::config("Provider 显示名称必须为 1～80 个可见字符"));
+    }
     let id = ModelProvider::parse_prefix(name)
         .map_err(|err| LlmError::config(format!("invalid providers.{name}: {}", err.message)))?;
     if !matches!(id, ModelProvider::Custom(_)) {
@@ -100,6 +105,7 @@ pub(super) fn provider_from_file(
         }
     };
     Ok(AgentProviderConfig {
+        enabled: provider.enabled,
         id,
         kind: provider.kind,
         base_url: base_url.to_owned(),
@@ -112,6 +118,57 @@ pub(super) fn provider_from_file(
         request_timeout_seconds: provider.request_timeout_seconds,
         chat_fallback,
     })
+}
+
+/// 检查全部保存路线，包括当前场景未使用的路线；避免留下等待启用才暴露的悬空引用。
+pub(super) fn validate_connection_references(
+    document: &AgentConfigDocument,
+) -> Result<(), LlmError> {
+    // 旧手工 TOML key 保持原样，只在引用查找时按模型前缀规则规范化。
+    let mut providers = HashMap::new();
+    for (name, provider) in &document.providers {
+        let id = ModelProvider::parse_prefix(name).map_err(|err| {
+            LlmError::config(format!("invalid providers.{name}: {}", err.message))
+        })?;
+        // 大小写别名不能覆盖另一项的 enabled 状态，否则停用引用可能被漏检。
+        if providers.insert(id.clone(), provider).is_some() {
+            return Err(LlmError::config(format!(
+                "duplicate provider `{}`",
+                id.as_str()
+            )));
+        }
+    }
+    let mut invalid = Vec::new();
+    let mut check = |value: &str, location: String| -> Result<(), LlmError> {
+        let model = ModelId::parse_config(value, &location)?;
+        if let Some(ModelProvider::Custom(id)) = model.provider {
+            match providers.get(&ModelProvider::Custom(id.clone())) {
+                Some(provider) if provider.enabled => {}
+                Some(_) => invalid.push(format!("{location}: provider `{id}` is disabled")),
+                None => invalid.push(format!("{location}: providers.{id} is not configured")),
+            }
+        }
+        Ok(())
+    };
+    for (name, route) in &document.model_routes {
+        // 沿用现有候选链解析，兼容单个配置字符串内的逗号分隔候选。
+        let route = ModelRoute::parse_config(&route.candidates.join(","), name)?;
+        for (index, model) in route.candidates().iter().enumerate() {
+            check(
+                &model.to_request_model(),
+                format!("model_routes.{name}.candidates[{index}]"),
+            )?;
+        }
+    }
+    for (name, route) in &document.tools.web_search.routes {
+        check(&route.model, format!("tools.web_search.routes.{name}"))?;
+    }
+    invalid.sort();
+    if invalid.is_empty() {
+        Ok(())
+    } else {
+        Err(LlmError::config(invalid.join("; ")))
+    }
 }
 
 fn is_http_token_byte(value: u8) -> bool {

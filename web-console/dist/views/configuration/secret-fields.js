@@ -103,6 +103,14 @@ export async function saveSecrets() {
         }
         excluded = nextExcluded;
         const snapshot = await updateSecretConfiguration(changes);
+        // 供应商凭证保存后立即清空，不进入跨渲染的已保存明文状态。
+        for (const key of dirtyKeys) {
+            if (!key.startsWith("provider."))
+                continue;
+            nextExcluded.add(`id:${inputId(key)}`);
+            nextExcluded.add(`clear:${key}`);
+            element(inputId(key), HTMLInputElement).value = "";
+        }
         rememberSecretSavedStates(snapshot, dirtyKeys, values, clearKeys);
         return snapshot;
     }, () => excluded);
@@ -122,6 +130,10 @@ export function secretIsDirty(field, value, clearChecked) {
 /** 保存成功后按提交结果记录每个 Secret 的最新已保存状态，供后续脏判断使用。 */
 export function rememberSecretSavedStates(snapshot, dirtyKeys, values, clearKeys) {
     for (const key of dirtyKeys) {
+        if (key.startsWith("provider.")) {
+            secretSavedStates.delete(key);
+            continue;
+        }
         const field = snapshot.fields.find((candidate) => candidate.key === key);
         if (!field)
             continue;

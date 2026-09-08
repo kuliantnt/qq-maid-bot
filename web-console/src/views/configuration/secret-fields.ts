@@ -113,6 +113,13 @@ export async function saveSecrets(): Promise<void> {
     }
     excluded = nextExcluded;
     const snapshot = await updateSecretConfiguration(changes);
+    // 供应商凭证保存后立即清空，不进入跨渲染的已保存明文状态。
+    for (const key of dirtyKeys) {
+      if (!key.startsWith("provider.")) continue;
+      nextExcluded.add(`id:${inputId(key)}`);
+      nextExcluded.add(`clear:${key}`);
+      element(inputId(key), HTMLInputElement).value = "";
+    }
     rememberSecretSavedStates(snapshot, dirtyKeys, values, clearKeys);
     return snapshot;
   }, () => excluded);
@@ -137,6 +144,7 @@ export function rememberSecretSavedStates(
   clearKeys: ReadonlySet<string>,
 ): void {
   for (const key of dirtyKeys) {
+    if (key.startsWith("provider.")) { secretSavedStates.delete(key); continue; }
     const field = snapshot.fields.find((candidate) => candidate.key === key);
     if (!field) continue;
     secretSavedStates.set(key, {
@@ -146,4 +154,3 @@ export function rememberSecretSavedStates(
     });
   }
 }
-

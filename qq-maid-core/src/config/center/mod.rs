@@ -6,6 +6,8 @@
 mod agent_file;
 mod field;
 mod managed_file;
+mod provider_presets;
+mod providers;
 mod registry;
 mod secret;
 
@@ -30,6 +32,8 @@ pub use field::{
     ManagedConfigApplyMode, ManagedConfigField, ManagedConfigSensitivity, ManagedConfigValueType,
 };
 pub use managed_file::{ManagedConfigChange, ManagedConfigFile, ManagedConfigSnapshot};
+pub use provider_presets::{ProviderPreset, provider_presets};
+pub use providers::ProviderManagementSnapshot;
 pub use registry::ConfigRegistry;
 pub use secret::{
     CONFIG_SECRET_SCHEMA_V1, SECRET_MISSING_REVISION, SecretConfigChange, SecretStore,
@@ -148,6 +152,7 @@ pub struct ConfigFieldSnapshot {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ConfigCenterSnapshot {
+    pub providers: ProviderManagementSnapshot,
     pub revision: String,
     pub file_exists: bool,
     /// Agent 策略使用独立 revision，不能与 runtime.toml 的 revision 混用。
@@ -369,6 +374,7 @@ impl ConfigCenter {
         }
 
         Ok(ConfigCenterSnapshot {
+            providers: self.provider_snapshot()?,
             revision: managed.revision,
             file_exists: managed.exists,
             agent: self
@@ -421,10 +427,11 @@ impl ConfigCenter {
             &secret_values,
             &self.external_environment,
         )?;
+        let changes = self.prepare_provider_changes(changes)?;
         self.agent_file
             .as_ref()
             .ok_or_else(|| ConfigCenterError::invalid("agent config domain is not initialized"))?
-            .update_with_validator(expected_revision, changes, |candidate_agent| {
+            .update_with_validator(expected_revision, &changes, |candidate_agent| {
                 self.validate_candidate_for_write(&environment, Some(candidate_agent))
             })
     }
@@ -560,6 +567,7 @@ impl ConfigCenter {
                 ManagedConfigSensitivity::Restricted => {}
             }
         }
+        self.resolve_connection_credentials(secret_values, &mut resolved)?;
         Ok(resolved)
     }
 
@@ -582,6 +590,19 @@ impl ConfigCenter {
         environment: &HashMap<String, String>,
         candidate_agent: Option<&AgentRuntimeConfig>,
     ) -> Result<(), ConfigCenterError> {
+        // 连接引用完整性不属于首次向导可放宽的“缺少其他配置”。
+        let saved_agent = if candidate_agent.is_none() {
+            self.agent_file
+                .as_ref()
+                .map(AgentConfigFile::current_runtime)
+                .transpose()?
+        } else {
+            None
+        };
+        if let Some(agent) = candidate_agent.or(saved_agent.as_ref()) {
+            super::provider_config::validate_builtin_connection_environment(agent, environment)
+                .map_err(|error| ConfigCenterError::invalid(error.message))?;
+        }
         match self.validate_candidate(environment, candidate_agent) {
             Err(_) if self.allow_incomplete_setup_writes => Ok(()),
             result => result,

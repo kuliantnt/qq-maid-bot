@@ -17,7 +17,7 @@
 | `web-search.ts` | 联网搜索配置：读取/变更校验/路由变更/Tavily 凭据状态 |
 | `tts.ts` | TTS 配置：Provider 选项、数值范围校验、字段联动 |
 | `navigation.ts` | 业务分组定义、配置键到分组的映射、tab 导航渲染与键盘行为 |
-| `opencode-providers.ts` | OpenCode 三个预设 Provider 卡片与模板插入 |
+| `providers.ts` | 通用受信预设、自定义连接、凭证和真实诊断；内置字段保留原存储 |
 | `model-route-editor.ts` | 模型候选路线 Chip 编辑器（增删/拖动排序/键盘操作） |
 | `theme-selector.ts` | 主题预设/自定义颜色与背景选择器（属于 Interface 配置组） |
 
@@ -30,7 +30,7 @@ configuration.ts（入口）
   ├── navigation.ts（分组映射）
   ├── autosave.ts ──> public/secret/agent-fields（保存函数）
   ├── public-fields.ts / secret-fields.ts / agent-fields.ts
-  │     ──> web-search.ts / tts.ts / opencode-providers.ts / model-route-editor.ts
+  │     ──> web-search.ts / tts.ts / providers.ts / model-route-editor.ts
   └── theme-selector.ts
 ```
 

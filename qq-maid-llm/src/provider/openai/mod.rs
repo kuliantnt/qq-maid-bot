@@ -6,6 +6,7 @@
 mod chat;
 mod chat_tool_loop;
 mod configured;
+pub mod diagnostics;
 mod extract;
 mod fallback;
 mod payload;

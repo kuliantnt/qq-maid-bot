@@ -85,6 +85,16 @@ pub struct OpenAiResponsesProviderConfig {
 }
 
 impl ProviderMode {
+    /// 裸模型的默认归属；配置引用校验与运行时路由必须共用此映射。
+    pub fn default_provider(&self) -> ModelProvider {
+        match self {
+            Self::Auto | Self::OpenAi => ModelProvider::OpenAi,
+            Self::DeepSeek => ModelProvider::DeepSeek,
+            Self::BigModel => ModelProvider::BigModel,
+            Self::Gemini => ModelProvider::Gemini,
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::OpenAi => "openai",

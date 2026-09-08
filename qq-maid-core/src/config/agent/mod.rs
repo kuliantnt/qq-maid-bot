@@ -165,6 +165,7 @@ pub struct AgentScenes {
 
 #[derive(Debug, Clone)]
 pub struct AgentProviderConfig {
+    pub enabled: bool,
     pub id: ModelProvider,
     pub kind: AgentProviderKind,
     pub base_url: String,
@@ -281,6 +282,11 @@ pub(in crate::config) struct RouteFile {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(in crate::config) struct ProviderFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(in crate::config) display_name: Option<String>,
+    /// 旧文件未声明时保持启用；停用项仍保留元数据，但禁止任何路线引用。
+    #[serde(default = "default_true")]
+    pub(in crate::config) enabled: bool,
     pub(in crate::config) kind: AgentProviderKind,
     pub(in crate::config) base_url: String,
     pub(in crate::config) api_key_env: String,
@@ -426,6 +432,7 @@ impl AgentRuntimeConfig {
         }
 
         let document = file.clone();
+        provider_config::validate_connection_references(&document)?;
         let web_search = web_search_from_file(&file.tools.web_search)?;
         let mut providers = HashMap::new();
         for (name, provider) in file.providers {
@@ -682,9 +689,14 @@ impl AgentRuntimeConfig {
         let model = ModelId::parse_config(value, &field_name)?;
         // 裸搜索模型只作为历史格式兼容为内置 OpenAI；显式前缀始终严格校验。
         let provider = model.provider.unwrap_or(ModelProvider::OpenAi);
+        // 运行时元数据已规范化 ID，原始 TOML key 可能保留历史大小写。
         match provider {
             ModelProvider::OpenAi | ModelProvider::Gemini => Ok(()),
-            ModelProvider::Custom(name) => match self.providers.get(&name) {
+            ModelProvider::Custom(name) => match self
+                .providers
+                .values()
+                .find(|provider| provider.id.as_str() == name)
+            {
                 Some(provider) if provider.kind == AgentProviderKind::OpenAiResponses => Ok(()),
                 Some(_) => Err(LlmError::config(format!(
                     "{field_name} references provider `{name}`, but openai_compatible does not support provider_native search; configure an openai_responses provider or Tavily"

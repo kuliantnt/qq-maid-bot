@@ -12,6 +12,38 @@ use crate::runtime::tools::weather::{DEFAULT_QWEATHER_API_HOST, DEFAULT_QWEATHER
 pub fn managed_config_fields() -> Vec<Field> {
     vec![
         Field::public(
+            "provider.openai.enabled",
+            "OPENAI_ENABLED",
+            "core.provider",
+            ValueType::Boolean,
+            Apply::Restart,
+            Some("true"),
+        ),
+        Field::public(
+            "provider.deepseek.enabled",
+            "DEEPSEEK_ENABLED",
+            "core.provider",
+            ValueType::Boolean,
+            Apply::Restart,
+            Some("true"),
+        ),
+        Field::public(
+            "provider.bigmodel.enabled",
+            "BIGMODEL_ENABLED",
+            "core.provider",
+            ValueType::Boolean,
+            Apply::Restart,
+            Some("true"),
+        ),
+        Field::public(
+            "provider.gemini.enabled",
+            "GEMINI_ENABLED",
+            "core.provider",
+            ValueType::Boolean,
+            Apply::Restart,
+            Some("true"),
+        ),
+        Field::public(
             "command.prefix",
             "CHAT_COMMAND_PREFIX",
             "core.command",

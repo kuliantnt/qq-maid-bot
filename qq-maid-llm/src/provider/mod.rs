@@ -348,7 +348,7 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
             let provider: DynLlmProvider = Arc::new(openai::OpenAiProvider::new(config)?);
             Ok(Arc::new(ModelRouteProvider::new(
                 "openai",
-                ModelProvider::OpenAi,
+                config.provider.default_provider(),
                 config.model_route.clone(),
                 vec![(ModelProvider::OpenAi, provider)],
             )?))
@@ -357,7 +357,7 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
             let provider: DynLlmProvider = Arc::new(deepseek::DeepSeekProvider::new(config)?);
             Ok(Arc::new(ModelRouteProvider::new(
                 "deepseek",
-                ModelProvider::DeepSeek,
+                config.provider.default_provider(),
                 config.model_route.clone(),
                 vec![(ModelProvider::DeepSeek, provider)],
             )?))
@@ -366,7 +366,7 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
             let provider: DynLlmProvider = Arc::new(bigmodel::BigModelProvider::new(config)?);
             Ok(Arc::new(ModelRouteProvider::new(
                 "bigmodel",
-                ModelProvider::BigModel,
+                config.provider.default_provider(),
                 config.model_route.clone(),
                 vec![(ModelProvider::BigModel, provider)],
             )?))
@@ -375,7 +375,7 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
             let provider: DynLlmProvider = Arc::new(gemini::GeminiProvider::new(config)?);
             Ok(Arc::new(ModelRouteProvider::new(
                 "gemini",
-                ModelProvider::Gemini,
+                config.provider.default_provider(),
                 config.model_route.clone(),
                 vec![(ModelProvider::Gemini, provider)],
             )?))
@@ -445,7 +445,7 @@ pub fn build_provider(config: &LlmConfig) -> Result<DynLlmProvider, LlmError> {
 
             Ok(Arc::new(ModelRouteProvider::new(
                 "auto",
-                ModelProvider::OpenAi,
+                config.provider.default_provider(),
                 route,
                 providers,
             )?))

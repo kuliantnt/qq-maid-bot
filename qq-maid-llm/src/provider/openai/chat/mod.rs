@@ -130,7 +130,7 @@ fn chat_completions_url(base_url: Option<&str>) -> String {
     format!("{}/chat/completions", base_url.trim_end_matches('/'))
 }
 
-fn chat_completions_payload(
+pub(super) fn chat_completions_payload(
     messages: &[ChatMessage],
     model: &str,
     media_max_bytes: u64,
