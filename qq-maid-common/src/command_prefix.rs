@@ -254,6 +254,10 @@ mod tests {
             prefix.normalize_with_dot_compat(".rename").as_deref(),
             Some("/rename")
         );
+        assert_eq!(
+            prefix.normalize_with_dot_compat(".ri+5 哥布林1").as_deref(),
+            Some("/ri+5 哥布林1")
+        );
         assert_eq!(prefix.normalize_with_dot_compat("."), None);
         assert_eq!(prefix.normalize_with_dot_compat("。"), None);
         assert_eq!(prefix.normalize_with_dot_compat("..help"), None);

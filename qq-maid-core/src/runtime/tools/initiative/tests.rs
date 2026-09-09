@@ -18,6 +18,75 @@ fn compact_clear_parses_like_spaced_clear() {
 }
 
 #[test]
+fn compact_modifier_records_match_spaced_records() {
+    for (compact, spaced, expected) in [
+        ("/ri+5 哥布林1", "/ri +5 哥布林1", "+5 哥布林1"),
+        (
+            "/ri+5 哥布林1，+2 哥布林2",
+            "/ri +5 哥布林1，+2 哥布林2",
+            "+5 哥布林1，+2 哥布林2",
+        ),
+        ("/ri-1 哥布林", "/ri -1 哥布林", "-1 哥布林"),
+    ] {
+        let Some(InitiativeCommand::Record(compact_input)) = parse_command(compact) else {
+            panic!("{compact} should parse as a compact initiative record");
+        };
+        let Some(InitiativeCommand::Record(spaced_input)) = parse_command(spaced) else {
+            panic!("{spaced} should parse as an initiative record");
+        };
+        assert_eq!(compact_input, expected, "{compact}");
+        assert_eq!(spaced_input, expected, "{spaced}");
+    }
+}
+
+#[test]
+fn compact_modifier_requires_a_sign_after_ri() {
+    for input in ["/rich", "/right", "/ring", "/ri5 哥布林", "/rid20"] {
+        assert!(parse_command(input).is_none(), "{input}");
+    }
+}
+
+#[test]
+fn compact_modifier_rolls_d20_and_keeps_batch_entries_in_one_table() {
+    let service = InitiativeService::default();
+    let mut rolled_sides = Vec::new();
+    let reply = service
+        .execute_with_roller(
+            "compact",
+            &parse_command("/ri+5 哥布林1，+2 哥布林2").unwrap(),
+            None,
+            &mut |sides| {
+                rolled_sides.push(sides);
+                if rolled_sides.len() == 1 { 10 } else { 3 }
+            },
+        )
+        .unwrap();
+
+    assert_eq!(rolled_sides, vec![20, 20]);
+    assert!(reply.contains("哥布林1：10 + 5 = 15"), "{reply}");
+    assert!(reply.contains("哥布林2：3 + 2 = 5"), "{reply}");
+    assert!(reply.contains("1. 哥布林1：15"), "{reply}");
+    assert!(reply.contains("2. 哥布林2：5"), "{reply}");
+
+    let service = InitiativeService::default();
+    let mut rolled_sides = Vec::new();
+    let reply = service
+        .execute_with_roller(
+            "negative",
+            &parse_command("/ri-1 哥布林").unwrap(),
+            None,
+            &mut |sides| {
+                rolled_sides.push(sides);
+                10
+            },
+        )
+        .unwrap();
+
+    assert_eq!(rolled_sides, vec![20]);
+    assert!(reply.contains("哥布林：10 - 1 = 9"), "{reply}");
+}
+
+#[test]
 fn clear_aliases_reset_table_actor_and_round_equally() {
     let service = InitiativeService::default();
     let empty = run(&service, "fresh", "/init");

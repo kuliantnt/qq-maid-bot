@@ -3,7 +3,7 @@ use crate::runtime::tools::roll::dice::{
     parse_roll_argument_with_default_die_sides,
 };
 
-pub(super) const HELP: &str = "先攻：/ri 12 张三, +2 李四, =d10+3 王五, d20+4 赵六；/ri 优势 张三, 劣势-1 李四；裸骰式省略名称时使用 /nn 或平台展示名；/init [list|end|clr]；/init set 单位 骰式；/init del 单位1 单位2。名称不含空格或逗号；同名覆盖，重启清空。";
+pub(super) const HELP: &str = "先攻：/ri 12 张三, +2 李四, =d10+3 王五, d20+4 赵六；/ri+5 哥布林1，+2 哥布林2 等价 /ri +5 哥布林1，+2 哥布林2；/ri 优势 张三, 劣势-1 李四；裸骰式省略名称时使用 /nn 或平台展示名；/init [list|end|clr]；/init set 单位 骰式；/init del 单位1 单位2。名称不含空格或逗号；同名覆盖，重启清空。";
 
 #[derive(Clone, Debug)]
 pub(crate) enum InitiativeCommand {
@@ -21,7 +21,18 @@ pub(crate) fn parse_command(text: &str) -> Option<InitiativeCommand> {
     let body = text.trim().strip_prefix('/')?;
     let (name, args) = body.split_once(char::is_whitespace).unwrap_or((body, ""));
     let args = args.trim();
-    Some(match name.to_ascii_lowercase().as_str() {
+    let name = name.to_ascii_lowercase();
+    // SealDice 用户常把首个先攻修正直接贴在命令后。只接管 `ri` 后紧接
+    // `+`/`-` 的形式，避免把 `/rich`、`/right` 等未知命令误判成先攻。
+    if let Some(modifier) = name
+        .strip_prefix("ri")
+        .filter(|suffix| suffix.starts_with(['+', '-']))
+    {
+        return Some(InitiativeCommand::Record(join_compact_record(
+            modifier, args,
+        )));
+    }
+    Some(match name.as_str() {
         "ri" if args == "help" => InitiativeCommand::Help,
         "ri" => InitiativeCommand::Record(args.to_owned()),
         // SealDice 的紧凑清空写法复用同一个领域操作，仍拒绝多余参数。
@@ -44,6 +55,14 @@ pub(crate) fn parse_command(text: &str) -> Option<InitiativeCommand> {
         }
         _ => return None,
     })
+}
+
+fn join_compact_record(modifier: &str, args: &str) -> String {
+    if args.is_empty() {
+        modifier.to_owned()
+    } else {
+        format!("{modifier} {args}")
+    }
 }
 
 pub(super) fn valid_name(name: &str) -> bool {

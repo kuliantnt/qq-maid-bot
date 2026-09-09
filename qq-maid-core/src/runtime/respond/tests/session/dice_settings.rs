@@ -128,6 +128,49 @@ async fn initiative_bare_dice_reuses_manual_display_name() {
 }
 
 #[tokio::test]
+async fn initiative_compact_modifiers_match_spaced_forms_and_dot_prefix() {
+    let service = test_service();
+
+    let response = service
+        .respond(message("/ri+5 哥布林1，+2 哥布林2"))
+        .await
+        .unwrap();
+    assert_eq!(response.command.as_deref(), Some("initiative"));
+    let text = response.text.unwrap();
+    assert!(text.contains("哥布林1："), "{text}");
+    assert!(text.contains("哥布林2："), "{text}");
+
+    let table = service
+        .respond(message("/init"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(table.contains("哥布林1："), "{table}");
+    assert!(table.contains("哥布林2："), "{table}");
+
+    for (input, expected_name) in [
+        ("/ri+5 哥布林1", "哥布林1"),
+        ("/ri-1 哥布林", "哥布林"),
+        (".ri+5 哥布林1", "哥布林1"),
+    ] {
+        let response = service.respond(message(input)).await.unwrap();
+        assert_eq!(response.command.as_deref(), Some("initiative"), "{input}");
+        let text = response.text.unwrap();
+        assert!(text.contains(expected_name), "{input}: {text}");
+    }
+
+    for input in ["/rich", "/right", "/ring"] {
+        let response = service.respond(private_message(input)).await.unwrap();
+        assert_eq!(
+            response.command.as_deref(),
+            Some("unknown_command"),
+            "{input}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn initiative_compact_clear_uses_shared_prefix_compatibility() {
     let service = test_service();
     let empty = service.respond(message("/init")).await.unwrap().text;
