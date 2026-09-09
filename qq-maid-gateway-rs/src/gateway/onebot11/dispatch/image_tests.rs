@@ -23,6 +23,7 @@ fn mixed_response() -> Box<CoreResponse> {
                     },
                 },
             ],
+            mentions: Vec::new(),
         }),
         handled: Some(true),
         session_id: None,
@@ -45,6 +46,7 @@ fn image_response() -> Box<CoreResponse> {
                     ..OutputMedia::default()
                 },
             }],
+            mentions: Vec::new(),
         }),
         handled: Some(true),
         session_id: None,

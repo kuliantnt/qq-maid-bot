@@ -2,18 +2,46 @@ use super::command::parse_entries;
 use super::*;
 
 #[test]
-fn compact_clear_parses_like_spaced_clear() {
-    for input in ["/initclr", "/init clr", "/init clear", " /INITCLR "] {
-        assert!(
-            matches!(parse_command(input), Some(InitiativeCommand::Clear)),
-            "{input}"
+fn compact_init_commands_parse_like_spaced_commands() {
+    for (compact, spaced) in [
+        ("/initlist", "/init list"),
+        ("/initend", "/init end"),
+        ("/inited", "/init ed"),
+        ("/initclr", "/init clr"),
+        ("/initclear", "/init clear"),
+        ("/inithelp", "/init help"),
+        ("/initset A d20+2", "/init set A d20+2"),
+        ("/initdel A", "/init del A"),
+        ("/initrm A", "/init rm A"),
+        (" /INITEND ", " /INIT END "),
+    ] {
+        assert_eq!(
+            format!("{:?}", parse_command(compact)),
+            format!("{:?}", parse_command(spaced)),
+            "{compact} != {spaced}"
         );
     }
-    for input in ["/initclr extra", "/init clr extra", "/init clear extra"] {
+    for input in [
+        "/initlist extra",
+        "/initend extra",
+        "/inited extra",
+        "/initclr extra",
+        "/initclear extra",
+        "/inithelp extra",
+        "/initdel",
+        "/initrm",
+    ] {
         assert!(
             matches!(parse_command(input), Some(InitiativeCommand::Invalid)),
             "{input}"
         );
+    }
+}
+
+#[test]
+fn compact_init_suffix_rejects_unknown_commands() {
+    for input in ["/initialize", "/initial", "/initabc", "/initfoo"] {
+        assert!(parse_command(input).is_none(), "{input}");
     }
 }
 
@@ -285,14 +313,118 @@ fn cloned_services_share_atomic_updates() {
 fn bare_dice_uses_default_name_and_explicit_name_prefix() {
     for (input, expected_expression) in [("d20", "1d20"), ("d20+4", "1d20+4"), ("d8+2", "1d8+2")] {
         let entries = parse_entries(input, Some("脸脸"), false).unwrap();
-        assert_eq!(entries[0].0, "脸脸", "{input}");
-        assert_eq!(entries[0].1.to_string(), expected_expression, "{input}");
+        assert_eq!(entries[0].name, "脸脸", "{input}");
+        assert_eq!(
+            entries[0].expression.to_string(),
+            expected_expression,
+            "{input}"
+        );
+        assert!(entries[0].binds_actor, "{input}");
     }
 
     let entries = parse_entries("d20+4 哥布林", Some("脸脸"), false).unwrap();
-    assert_eq!(entries[0].0, "哥布林");
-    assert_eq!(entries[0].1.to_string(), "1d20+4");
+    assert_eq!(entries[0].name, "哥布林");
+    assert_eq!(entries[0].expression.to_string(), "1d20+4");
+    assert!(!entries[0].binds_actor);
     assert!(parse_entries("d20+4", None, false).is_err());
+}
+
+fn actor(user_id: &str, display_name: &str) -> qq_maid_common::identity_context::MentionIdentity {
+    use qq_maid_common::identity_context::{
+        IdentitySource, MentionConfidence, MentionIdentity, MessageActorContext,
+    };
+
+    MentionIdentity {
+        raw_text: None,
+        target: MessageActorContext {
+            user_id: Some(user_id.to_owned()),
+            display_name: Some(display_name.to_owned()),
+            source: IdentitySource::Event,
+            ..MessageActorContext::default()
+        },
+        is_self: false,
+        confidence: MentionConfidence::Event,
+    }
+}
+
+fn run_actor(
+    service: &InitiativeService,
+    scope: &str,
+    input: &str,
+    actor: &qq_maid_common::identity_context::MentionIdentity,
+) -> super::ops::InitiativeReply {
+    service.execute_for_actor(scope, &parse_command(input).unwrap(), Some(actor))
+}
+
+#[test]
+fn end_mentions_current_default_named_player() {
+    let service = InitiativeService::default();
+    let player_a = actor("user-a", "玩家A");
+    let player_b = actor("user-b", "玩家B");
+    run_actor(&service, "mentions", "/ri18", &player_a);
+    run_actor(&service, "mentions", "/ri12", &player_b);
+
+    let reply = run_actor(&service, "mentions", "/initend", &player_a);
+    assert!(reply.text.contains("当前：玩家B"), "{}", reply.text);
+    assert_eq!(reply.mentions.len(), 1);
+    assert_eq!(reply.mentions[0].target.user_id.as_deref(), Some("user-b"));
+    assert_eq!(
+        reply.mentions[0].target.display_name.as_deref(),
+        Some("玩家B")
+    );
+}
+
+#[test]
+fn explicit_names_never_bind_the_command_actor() {
+    let service = InitiativeService::default();
+    let player = actor("user-a", "玩家A");
+    run_actor(&service, "explicit", "/ri18", &player);
+    run_actor(&service, "explicit", "/ri17 哥布林", &player);
+
+    let reply = run_actor(&service, "explicit", "/initend", &player);
+    assert!(reply.text.contains("当前：哥布林"), "{}", reply.text);
+    assert!(reply.mentions.is_empty());
+}
+
+#[test]
+fn updating_or_explicitly_replacing_an_entry_refreshes_actor_binding() {
+    let service = InitiativeService::default();
+    let player = actor("user-a", "玩家A");
+    run_actor(&service, "update", "/ri10", &player);
+    run_actor(&service, "update", "/ri20", &player);
+    let reply = run_actor(&service, "update", "/inited", &player);
+    assert_eq!(reply.mentions[0].target.user_id.as_deref(), Some("user-a"));
+
+    run_actor(&service, "replace", "/ri18", &player);
+    run_actor(
+        &service,
+        "replace",
+        "/ri18 玩家A",
+        &actor("npc-owner", "其他人"),
+    );
+    let reply = run_actor(&service, "replace", "/initend", &player);
+    assert!(reply.mentions.is_empty());
+}
+
+#[test]
+fn deleting_and_clearing_entries_do_not_leave_stale_mentions() {
+    let service = InitiativeService::default();
+    let player_a = actor("user-a", "玩家A");
+    let player_b = actor("user-b", "玩家B");
+    run_actor(&service, "lifecycle", "/ri18", &player_a);
+    run_actor(&service, "lifecycle", "/ri12", &player_b);
+    let reply = run_actor(&service, "lifecycle", "/initend", &player_a);
+    assert_eq!(reply.mentions[0].target.user_id.as_deref(), Some("user-b"));
+
+    run_actor(&service, "lifecycle", "/initdel 玩家B", &player_a);
+    let reply = run_actor(&service, "lifecycle", "/initend", &player_a);
+    assert_eq!(reply.mentions[0].target.user_id.as_deref(), Some("user-a"));
+
+    let reply = run_actor(&service, "lifecycle", "/initclear", &player_a);
+    assert!(reply.mentions.is_empty());
+    run_actor(&service, "lifecycle", "/ri5", &player_b);
+    let reply = run_actor(&service, "lifecycle", "/initend", &player_a);
+    assert_eq!(reply.mentions[0].target.user_id.as_deref(), Some("user-b"));
 }
 
 #[test]

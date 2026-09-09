@@ -568,6 +568,7 @@ async fn disabled_stream_completed_records_rendered_parts_fallback_ref_index() {
                     },
                 },
             ],
+            mentions: Vec::new(),
         }),
         handled: Some(true),
         session_id: None,

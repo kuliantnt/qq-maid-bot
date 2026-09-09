@@ -359,7 +359,12 @@ impl From<RespondResponse> for CoreResponse {
     fn from(value: RespondResponse) -> Self {
         // `RespondResponse` 仍按 text/markdown 双通道组装正文，属于 Core 内部中间结构；
         // 这里将其合成为唯一的结构化 `AssistantOutput` 输出，不再向 Gateway 暴露旧字段。
-        let output = synthesize_assistant_output(value.text, value.markdown, value.output_parts);
+        let output = synthesize_assistant_output(
+            value.text,
+            value.markdown,
+            value.output_parts,
+            value.mentions,
+        );
         Self {
             output,
             handled: value.handled,
@@ -381,6 +386,7 @@ fn synthesize_assistant_output(
     text: Option<String>,
     markdown: Option<String>,
     output_parts: Vec<qq_maid_common::output_part::OutputPart>,
+    mentions: Vec<qq_maid_common::identity_context::MentionIdentity>,
 ) -> Option<AssistantOutput> {
     use qq_maid_common::output_part::OutputPart;
 
@@ -399,39 +405,41 @@ fn synthesize_assistant_output(
         .filter(|part| !matches!(part, OutputPart::Text { .. } | OutputPart::Markdown { .. }))
         .collect::<Vec<_>>();
 
-    if media_parts.is_empty() {
-        return match (text, markdown) {
-            (Some(text), Some(markdown)) => Some(AssistantOutput::markdown(text, markdown)),
-            (Some(text), None) => Some(AssistantOutput::text(text)),
+    let mut output = if media_parts.is_empty() {
+        match (text, markdown) {
+            (Some(text), Some(markdown)) => AssistantOutput::markdown(text, markdown),
+            (Some(text), None) => AssistantOutput::text(text),
             (None, Some(markdown)) => {
                 let text = qq_maid_common::markdown::to_chat_text(&markdown);
-                Some(AssistantOutput::markdown(text, markdown))
+                AssistantOutput::markdown(text, markdown)
             }
             (None, None) if !text_parts.is_empty() => {
                 // 没有 markdown 通道时，保留 Provider 仅返回的 Text parts，避免丢正文。
-                Some(AssistantOutput::text(text_parts.join("\n\n")))
+                AssistantOutput::text(text_parts.join("\n\n"))
             }
-            (None, None) => None,
-        };
-    }
-
-    let text_fallback = text.unwrap_or_else(|| text_parts.join("\n\n"));
-    let mut parts = Vec::with_capacity(media_parts.len() + usize::from(markdown.is_some()));
-    if let Some(markdown) = markdown.clone() {
-        parts.push(OutputPart::Markdown { markdown });
-    } else if !text_fallback.trim().is_empty() {
-        // 有富媒体但没有 markdown 时，保留纯文本 part，保证图文顺序可渲染。
-        parts.push(OutputPart::Text {
-            text: text_fallback.clone(),
-        });
-    }
-    parts.extend(media_parts);
-
-    Some(AssistantOutput {
-        text_fallback,
-        markdown,
-        parts,
-    })
+            (None, None) => return None,
+        }
+    } else {
+        let text_fallback = text.unwrap_or_else(|| text_parts.join("\n\n"));
+        let mut parts = Vec::with_capacity(media_parts.len() + usize::from(markdown.is_some()));
+        if let Some(markdown) = markdown.clone() {
+            parts.push(OutputPart::Markdown { markdown });
+        } else if !text_fallback.trim().is_empty() {
+            // 有富媒体但没有 markdown 时，保留纯文本 part，保证图文顺序可渲染。
+            parts.push(OutputPart::Text {
+                text: text_fallback.clone(),
+            });
+        }
+        parts.extend(media_parts);
+        AssistantOutput {
+            text_fallback,
+            markdown,
+            parts,
+            mentions: Vec::new(),
+        }
+    };
+    output.mentions = mentions;
+    Some(output)
 }
 
 fn respond_options(config: &AppConfig) -> RespondServiceOptions {

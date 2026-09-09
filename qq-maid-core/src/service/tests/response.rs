@@ -7,6 +7,7 @@ fn core_response_keeps_public_fields_from_respond_response() {
         text: Some("text".to_owned()),
         markdown: Some("**text**".to_owned()),
         output_parts: Vec::new(),
+        mentions: Vec::new(),
         handled: Some(true),
         session_id: Some("session-1".to_owned()),
         command: Some("chat".to_owned()),
@@ -43,6 +44,50 @@ fn core_response_keeps_public_fields_from_respond_response() {
 }
 
 #[test]
+fn respond_response_mentions_flow_into_assistant_output() {
+    use qq_maid_common::identity_context::{
+        IdentitySource, MentionConfidence, MentionIdentity, MessageActorContext,
+    };
+
+    let mention = MentionIdentity {
+        raw_text: None,
+        target: MessageActorContext {
+            user_id: Some("member-2".to_owned()),
+            display_name: Some("玩家B".to_owned()),
+            source: IdentitySource::Event,
+            ..MessageActorContext::default()
+        },
+        is_self: false,
+        confidence: MentionConfidence::Event,
+    };
+    let response = CoreResponse::from(RespondResponse {
+        ok: true,
+        text: Some("轮到你了".to_owned()),
+        markdown: None,
+        output_parts: Vec::new(),
+        mentions: vec![mention.clone()],
+        handled: Some(true),
+        session_id: None,
+        command: Some("initiative".to_owned()),
+        diagnostics: None,
+        visible_entity_snapshot: None,
+        metrics: LlmMetrics {
+            provider: "test".to_owned(),
+            model: "test".to_owned(),
+            stream: false,
+            ttfe_ms: None,
+            ttft_ms: None,
+            total_latency_ms: 1,
+        },
+        usage: None,
+        error: None,
+    });
+
+    let output = response.output.as_ref().expect("assistant output");
+    assert_eq!(output.mentions, vec![mention]);
+}
+
+#[test]
 fn provider_text_parts_do_not_downgrade_markdown_channel() {
     // OpenAI Responses 可能把最终聊天正文同时放进 Text part 与 markdown 通道。
     // 合成后必须保留 Markdown part，避免群聊等非流式路径被 parts 优先逻辑降级成纯文本。
@@ -53,6 +98,7 @@ fn provider_text_parts_do_not_downgrade_markdown_channel() {
         output_parts: vec![OutputPart::Text {
             text: "# Markdown 测试\n\n- **加粗**\n- *斜体*\n- `代码`".to_owned(),
         }],
+        mentions: Vec::new(),
         handled: Some(true),
         session_id: None,
         command: None,
@@ -101,6 +147,7 @@ fn media_parts_keep_markdown_channel_ahead_of_images() {
                 },
             },
         ],
+        mentions: Vec::new(),
         handled: Some(true),
         session_id: None,
         command: None,
@@ -267,6 +314,7 @@ fn voice_delivery_hint_is_kept_only_for_textual_final_output() {
             parts: vec![OutputPart::Image {
                 media: OutputMedia::default(),
             }],
+            mentions: Vec::new(),
         },
         AssistantOutput {
             text_fallback: "文件回复".to_owned(),
@@ -274,6 +322,7 @@ fn voice_delivery_hint_is_kept_only_for_textual_final_output() {
             parts: vec![OutputPart::File {
                 media: OutputMedia::default(),
             }],
+            mentions: Vec::new(),
         },
     ] {
         let response = CoreResponse {

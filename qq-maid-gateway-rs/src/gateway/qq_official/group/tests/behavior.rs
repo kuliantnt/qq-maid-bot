@@ -33,7 +33,7 @@ fn group_at_reply_text_outbound_forces_markdown_mention_when_render_disabled() {
     };
 
     assert_eq!(
-        prefix_group_reply_outbound(&message, outbound, &capability),
+        prefix_group_reply_outbound(&message, &[], outbound, &capability),
         OutboundMessage::Markdown {
             markdown: crate::markdown::MarkdownPayload::new("<@member-1>\n回复正文"),
             fallback_text: "回复正文".to_owned(),
@@ -50,7 +50,7 @@ fn group_text_mention_escapes_dynamic_plain_text_before_markdown() {
     };
 
     assert_eq!(
-        prefix_group_reply_outbound(&message, outbound, &capability),
+        prefix_group_reply_outbound(&message, &[], outbound, &capability),
         OutboundMessage::Markdown {
             markdown: crate::markdown::MarkdownPayload::new(
                 "<@member-1>\n\\[查看\\]\\(https://evil.example\\) \\*原因\\*  \n\\# 标题",
@@ -69,7 +69,7 @@ fn group_text_mention_neutralizes_untrusted_qq_mentions() {
     };
 
     assert_eq!(
-        prefix_group_reply_outbound(&message, outbound, &capability),
+        prefix_group_reply_outbound(&message, &[], outbound, &capability),
         OutboundMessage::Markdown {
             markdown: crate::markdown::MarkdownPayload::new(
                 "<@member-1>\n替 ＜@other\\-member\\> 掷骰",
@@ -88,7 +88,7 @@ fn group_text_placeholder_uses_safe_markdown_mention() {
     };
 
     assert_eq!(
-        prefix_group_reply_outbound(&message, outbound, &capability),
+        prefix_group_reply_outbound(&message, &[], outbound, &capability),
         OutboundMessage::Markdown {
             markdown: crate::markdown::MarkdownPayload::new(
                 "<@member-1>\n图片 \\[失败\\]\\(https://evil.example\\)",
@@ -108,7 +108,7 @@ fn group_at_reply_markdown_outbound_mentions_sender() {
     };
 
     assert_eq!(
-        prefix_group_reply_outbound(&message, outbound, &capability),
+        prefix_group_reply_outbound(&message, &[], outbound, &capability),
         OutboundMessage::Markdown {
             markdown: crate::markdown::MarkdownPayload::new("<@member-1>\n**回复正文**"),
             fallback_text: "回复正文".to_owned(),
@@ -126,7 +126,7 @@ fn group_at_reply_markdown_neutralizes_body_mentions_only() {
     };
 
     assert_eq!(
-        prefix_group_reply_outbound(&message, outbound, &capability),
+        prefix_group_reply_outbound(&message, &[], outbound, &capability),
         OutboundMessage::Markdown {
             markdown: crate::markdown::MarkdownPayload::new(
                 "<@member-1>\n**提醒 ＜@other-member>**",
@@ -145,7 +145,7 @@ fn group_without_bot_mention_also_mentions_sender() {
     };
 
     assert_eq!(
-        prefix_group_reply_outbound(&message, outbound, &capability),
+        prefix_group_reply_outbound(&message, &[], outbound, &capability),
         OutboundMessage::Markdown {
             markdown: crate::markdown::MarkdownPayload::new("<@member-1>\n🎲 掷出了 12 / 20"),
             fallback_text: "🎲 掷出了 12 / 20".to_owned(),
@@ -168,10 +168,62 @@ fn structured_group_mention_markdown_reply_mentions_sender_like_at_event() {
     };
 
     assert_eq!(
-        prefix_group_reply_outbound(&message, outbound, &capability),
+        prefix_group_reply_outbound(&message, &[], outbound, &capability),
         OutboundMessage::Markdown {
             markdown: crate::markdown::MarkdownPayload::new("<@member-1>\n**回复正文**"),
             fallback_text: "回复正文".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn structured_output_mention_precedes_sender_and_deduplicates_same_member() {
+    use qq_maid_common::identity_context::{
+        IdentitySource, MentionConfidence, MentionIdentity, MessageActorContext,
+    };
+
+    let message = group_message("hello", GroupEventType::GroupMessage);
+    let capability = qq_group_capability();
+    let outbound = OutboundMessage::Markdown {
+        markdown: crate::markdown::MarkdownPayload::new("**轮到你了**"),
+        fallback_text: "轮到你了".to_owned(),
+    };
+    let mention = |user_id: &str, display_name: &str| MentionIdentity {
+        raw_text: None,
+        target: MessageActorContext {
+            user_id: Some(user_id.to_owned()),
+            display_name: Some(display_name.to_owned()),
+            source: IdentitySource::Event,
+            ..MessageActorContext::default()
+        },
+        is_self: false,
+        confidence: MentionConfidence::Event,
+    };
+
+    assert_eq!(
+        prefix_group_reply_outbound(
+            &message,
+            &[mention("member-2", "玩家B")],
+            outbound.clone(),
+            &capability,
+        ),
+        OutboundMessage::Markdown {
+            markdown: crate::markdown::MarkdownPayload::new(
+                "<@member-2> <@member-1>\n**轮到你了**",
+            ),
+            fallback_text: "@玩家B\n轮到你了".to_owned(),
+        }
+    );
+    assert_eq!(
+        prefix_group_reply_outbound(
+            &message,
+            &[mention("member-1", "玩家A")],
+            outbound,
+            &capability,
+        ),
+        OutboundMessage::Markdown {
+            markdown: crate::markdown::MarkdownPayload::new("<@member-1>\n**轮到你了**"),
+            fallback_text: "@玩家A\n轮到你了".to_owned(),
         }
     );
 }
@@ -187,7 +239,7 @@ fn group_at_reply_respects_platform_mention_capability() {
     };
 
     assert_eq!(
-        prefix_group_reply_outbound(&message, outbound, &capability),
+        prefix_group_reply_outbound(&message, &[], outbound, &capability),
         OutboundMessage::Markdown {
             markdown: crate::markdown::MarkdownPayload::new("**回复正文**"),
             fallback_text: "回复正文".to_owned(),

@@ -166,7 +166,17 @@ async fn initiative_compact_records_match_spaced_forms_and_dot_prefix() {
         assert!(text.contains(expected_name), "{input}: {text}");
     }
 
-    for input in ["/rich", "/right", "/ring", "/rid20", "/riabc"] {
+    for input in [
+        "/rich",
+        "/right",
+        "/ring",
+        "/rid20",
+        "/riabc",
+        "/initialize",
+        "/initial",
+        "/initabc",
+        "/initfoo",
+    ] {
         let response = service.respond(private_message(input)).await.unwrap();
         assert_eq!(
             response.command.as_deref(),
@@ -190,6 +200,73 @@ async fn initiative_compact_clear_uses_shared_prefix_compatibility() {
         assert!(response.text.unwrap().contains("第 1 轮 · 当前：B"));
         service.respond(message("/init clr")).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn initiative_compact_subcommands_support_dot_prefixes() {
+    let service = test_service();
+
+    let response = service.respond(message(".initlist")).await.unwrap();
+    assert_eq!(response.command.as_deref(), Some("initiative"));
+    assert!(response.text.unwrap().contains("为空"));
+
+    let response = service
+        .respond(message(".initset 哥布林 12"))
+        .await
+        .unwrap();
+    assert_eq!(response.command.as_deref(), Some("initiative"));
+    assert!(response.text.unwrap().contains("哥布林：12"));
+
+    let response = service.respond(message(".initend")).await.unwrap();
+    assert!(response.text.unwrap().contains("当前：哥布林"));
+    let response = service.respond(message(".initdel 哥布林")).await.unwrap();
+    assert!(response.text.unwrap().contains("为空"));
+
+    service.respond(message(".initset A 12")).await.unwrap();
+    let response = service.respond(message(".initrm A")).await.unwrap();
+    assert!(response.text.unwrap().contains("为空"));
+
+    service.respond(message(".ri18 B")).await.unwrap();
+    let response = service.respond(message(".inited")).await.unwrap();
+    assert!(response.text.unwrap().contains("当前：B"));
+
+    let response = service.respond(message("。initclear")).await.unwrap();
+    assert_eq!(response.command.as_deref(), Some("initiative"));
+    assert!(response.text.unwrap().contains("重置"));
+    let response = service.respond(message(".inithelp")).await.unwrap();
+    assert!(response.text.unwrap().contains("先攻"));
+}
+
+#[tokio::test]
+async fn initiative_end_returns_structured_mention_for_default_named_player() {
+    let service = test_service();
+    service.respond(message("/set 昵称 玩家A")).await.unwrap();
+    service.respond(message("/ri18")).await.unwrap();
+
+    let mut set_player_b = message("/set 昵称 玩家B");
+    set_player_b.user_id = Some("u2".to_owned());
+    service.respond(set_player_b).await.unwrap();
+    let mut record_player_b = message("/ri12");
+    record_player_b.user_id = Some("u2".to_owned());
+    service.respond(record_player_b).await.unwrap();
+
+    let response = service.respond(message("/initend")).await.unwrap();
+    assert_eq!(response.mentions.len(), 1);
+    assert_eq!(response.mentions[0].target.user_id.as_deref(), Some("u2"));
+    assert_eq!(
+        response.mentions[0].target.display_name.as_deref(),
+        Some("玩家B")
+    );
+}
+
+#[tokio::test]
+async fn initiative_end_does_not_mention_explicit_npc_units() {
+    let service = test_service();
+    service.respond(message("/set 昵称 玩家A")).await.unwrap();
+    service.respond(message("/ri18 哥布林")).await.unwrap();
+
+    let response = service.respond(message("/initend")).await.unwrap();
+    assert!(response.mentions.is_empty());
 }
 
 #[tokio::test]

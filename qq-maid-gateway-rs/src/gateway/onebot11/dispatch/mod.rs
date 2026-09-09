@@ -341,11 +341,42 @@ impl OneBotInboundDispatcher {
                 .await?;
             return Err(OneBotDispatchError::EmptyResponse);
         }
-        for outbound in &outbounds {
+        let structured_mention_ids = response
+            .output
+            .as_ref()
+            .map(|output| {
+                output
+                    .mentions
+                    .iter()
+                    .filter_map(|mention| {
+                        mention
+                            .target
+                            .user_id
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|user_id| !user_id.is_empty())
+                            .map(str::to_owned)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for (index, outbound) in outbounds.iter().enumerate() {
+            let mut mention_user_ids = if index == 0 {
+                structured_mention_ids.clone()
+            } else {
+                Vec::new()
+            };
+            if let Some(user_id) = mention_user_id
+                && !mention_user_ids
+                    .iter()
+                    .any(|mentioned| mentioned == user_id)
+            {
+                mention_user_ids.push(user_id.to_owned());
+            }
             self.send_outbound(
                 &inbound,
                 outbound,
-                mention_user_id,
+                &mention_user_ids,
                 response.visible_entity_snapshot.clone(),
             )
             .await?;
@@ -357,7 +388,7 @@ impl OneBotInboundDispatcher {
         &self,
         inbound: &InboundMessage,
         outbound: &OutboundMessage,
-        mention_user_id: Option<&str>,
+        mention_user_ids: &[String],
         visible_entity_snapshot: Option<VisibleEntitySnapshot>,
     ) -> Result<OneBotSendResult, OneBotSendError> {
         if let OutboundMessage::Image {
@@ -370,9 +401,9 @@ impl OneBotInboundDispatcher {
                     self.sender.send_private_image(target_id, image).await
                 }
                 ConversationTarget::Group { target_id } => {
-                    if let Some(user_id) = mention_user_id {
+                    if !mention_user_ids.is_empty() {
                         self.sender
-                            .send_group_image_with_mentions(target_id, &[user_id.to_owned()], image)
+                            .send_group_image_with_mentions(target_id, mention_user_ids, image)
                             .await
                     } else {
                         self.sender.send_group_image(target_id, image).await
@@ -390,13 +421,43 @@ impl OneBotInboundDispatcher {
                 }
             }
         }
-        self.send_text(
+        self.send_text_with_mentions(
             inbound,
             outbound.fallback_text(),
-            mention_user_id,
+            mention_user_ids,
             visible_entity_snapshot,
         )
         .await
+    }
+
+    async fn send_text_with_mentions(
+        &self,
+        inbound: &InboundMessage,
+        text: &str,
+        mention_user_ids: &[String],
+        visible_entity_snapshot: Option<VisibleEntitySnapshot>,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        let result = match &inbound.conversation {
+            ConversationTarget::Private { target_id } => {
+                self.sender.send_private_text(target_id, text).await
+            }
+            ConversationTarget::Group { target_id } => {
+                if mention_user_ids.is_empty() {
+                    self.sender.send_group_text(target_id, text).await
+                } else {
+                    self.sender
+                        .send_group_text_with_mentions(target_id, mention_user_ids, text)
+                        .await
+                }
+            }
+            ConversationTarget::Channel { .. } | ConversationTarget::ServiceAccount { .. } => {
+                Err(OneBotSendError::InvalidTargetId)
+            }
+        };
+        if let Ok(sent) = &result {
+            self.record_outbound(inbound, sent, text, visible_entity_snapshot);
+        }
+        result
     }
 
     async fn send_text(
@@ -522,640 +583,4 @@ fn stream_failure_text(failure: &CoreRespondFailure) -> &'static str {
 mod image_tests;
 
 #[cfg(test)]
-mod tests {
-    use std::{collections::VecDeque, sync::Mutex};
-
-    use qq_maid_common::{
-        identity_context::IdentitySource,
-        input_part::{MessageInputPart, QuotedMessageContext},
-        output_part::AssistantOutput,
-    };
-    use qq_maid_core::service::{
-        CoreError, CoreResponseStatus, CoreResponseStatusKind, VisibleEntityItem,
-    };
-
-    use super::*;
-    use crate::gateway::{
-        onebot11::OneBotCallError,
-        platform::{Actor, Platform},
-    };
-
-    struct FakeStream {
-        events: VecDeque<CoreResponseEvent>,
-    }
-
-    impl OneBotResponseEventStream for FakeStream {
-        fn recv_event<'a>(&'a mut self) -> EventFuture<'a> {
-            Box::pin(async move { self.events.pop_front() })
-        }
-    }
-
-    pub(super) struct FakeCore {
-        outputs: Mutex<VecDeque<Result<OneBotCoreTransport, RespondError>>>,
-        calls: Mutex<Vec<(String, String)>>,
-    }
-
-    #[async_trait]
-    impl OneBotCoreResponder for FakeCore {
-        async fn respond(
-            &self,
-            inbound: &InboundMessage,
-            content: String,
-        ) -> Result<OneBotCoreTransport, RespondError> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((inbound.message_id.clone(), content));
-            self.outputs.lock().unwrap().pop_front().unwrap()
-        }
-    }
-
-    #[derive(Default)]
-    pub(super) struct FakeSender {
-        pub(super) sent: Mutex<Vec<(String, String, String)>>,
-        pub(super) fail: bool,
-        pub(super) fail_images: bool,
-    }
-
-    #[async_trait]
-    impl OneBotReplySender for FakeSender {
-        async fn send_private_text(
-            &self,
-            user_id: &str,
-            text: &str,
-        ) -> Result<OneBotSendResult, OneBotSendError> {
-            self.send("private", user_id, text)
-        }
-
-        async fn send_group_text(
-            &self,
-            group_id: &str,
-            text: &str,
-        ) -> Result<OneBotSendResult, OneBotSendError> {
-            self.send("group", group_id, text)
-        }
-
-        async fn send_group_text_with_mentions(
-            &self,
-            group_id: &str,
-            mention_user_ids: &[String],
-            text: &str,
-        ) -> Result<OneBotSendResult, OneBotSendError> {
-            self.send(
-                "group_with_mentions",
-                group_id,
-                &format!("{}|{text}", mention_user_ids.join(",")),
-            )
-        }
-
-        async fn send_private_image(
-            &self,
-            user_id: &str,
-            _image: &ImagePayload,
-        ) -> Result<OneBotSendResult, OneBotSendError> {
-            if self.fail_images {
-                Err(OneBotSendError::Transport(OneBotCallError::NotConnected))
-            } else {
-                self.send("private_image", user_id, "[image]")
-            }
-        }
-
-        async fn send_group_image(
-            &self,
-            group_id: &str,
-            _image: &ImagePayload,
-        ) -> Result<OneBotSendResult, OneBotSendError> {
-            if self.fail_images {
-                Err(OneBotSendError::Transport(OneBotCallError::NotConnected))
-            } else {
-                self.send("group_image", group_id, "[image]")
-            }
-        }
-
-        async fn send_group_image_with_mentions(
-            &self,
-            group_id: &str,
-            mention_user_ids: &[String],
-            _image: &ImagePayload,
-        ) -> Result<OneBotSendResult, OneBotSendError> {
-            if self.fail_images {
-                Err(OneBotSendError::Transport(OneBotCallError::NotConnected))
-            } else {
-                self.send(
-                    "group_image_with_mentions",
-                    group_id,
-                    &format!("{}|[image]", mention_user_ids.join(",")),
-                )
-            }
-        }
-    }
-
-    impl FakeSender {
-        fn send(
-            &self,
-            kind: &str,
-            target: &str,
-            text: &str,
-        ) -> Result<OneBotSendResult, OneBotSendError> {
-            if self.fail {
-                return Err(OneBotSendError::Transport(OneBotCallError::NotConnected));
-            }
-            self.sent
-                .lock()
-                .unwrap()
-                .push((kind.to_owned(), target.to_owned(), text.to_owned()));
-            Ok(OneBotSendResult {
-                message_id: "sent-1".to_owned(),
-            })
-        }
-    }
-
-    fn response(text: Option<&str>) -> Box<CoreResponse> {
-        Box::new(CoreResponse {
-            output: text.map(AssistantOutput::text),
-            handled: Some(true),
-            session_id: None,
-            command: None,
-            diagnostics: None,
-            visible_entity_snapshot: None,
-            delivery_hint: None,
-        })
-    }
-
-    fn suppressed_response() -> Box<CoreResponse> {
-        Box::new(CoreResponse {
-            output: None,
-            handled: Some(true),
-            session_id: None,
-            command: None,
-            diagnostics: Some(serde_json::json!({
-                "suppressed": true,
-                "reason": "unknown_group_slash_command",
-            })),
-            visible_entity_snapshot: None,
-            delivery_hint: None,
-        })
-    }
-
-    fn unhandled_empty_response() -> Box<CoreResponse> {
-        Box::new(CoreResponse {
-            output: None,
-            handled: Some(false),
-            session_id: None,
-            command: None,
-            diagnostics: None,
-            visible_entity_snapshot: None,
-            delivery_hint: None,
-        })
-    }
-
-    fn snapshot(entity_id: &str) -> VisibleEntitySnapshot {
-        VisibleEntitySnapshot {
-            platform: "onebot11".to_owned(),
-            account_id: Some("10001".to_owned()),
-            scope_key: "platform:onebot:account:10001:private:20002".to_owned(),
-            owner_key: Some("platform:onebot:account:10001:private:20002".to_owned()),
-            created_at: "2026-07-13T12:00:00+08:00".to_owned(),
-            items: vec![VisibleEntityItem {
-                domain: "todo".to_owned(),
-                entity_kind: "todo".to_owned(),
-                entity_id: entity_id.to_owned(),
-                visible_number: 1,
-                label: None,
-                status: Some("list".to_owned()),
-            }],
-        }
-    }
-
-    pub(super) fn inbound(message_id: &str, group: bool) -> InboundMessage {
-        InboundMessage {
-            platform: Platform::OneBot11,
-            account_id: Some("10001".to_owned()),
-            conversation: if group {
-                ConversationTarget::Group {
-                    target_id: "30003".to_owned(),
-                }
-            } else {
-                ConversationTarget::Private {
-                    target_id: "20002".to_owned(),
-                }
-            },
-            actor: Actor {
-                sender_id: Some("20002".to_owned()),
-                union_id: None,
-                display_name: None,
-                group_member_role: None,
-                is_bot: false,
-                source: IdentitySource::Event,
-            },
-            message_id: message_id.to_owned(),
-            current_msg_idx: None,
-            timestamp: None,
-            text: "/help".to_owned(),
-            input_parts: vec![MessageInputPart::text("/help")],
-            attachments: Vec::new(),
-            quoted: None,
-            visible_entity_snapshot: None,
-            mentions: Vec::new(),
-            mentioned_bot: group,
-        }
-    }
-
-    pub(super) fn dispatcher(
-        outputs: Vec<Result<OneBotCoreTransport, RespondError>>,
-        sender: Arc<FakeSender>,
-    ) -> (OneBotInboundDispatcher, Arc<FakeCore>) {
-        dispatcher_with_prefix(outputs, sender, CommandPrefix::default())
-    }
-
-    fn dispatcher_with_prefix(
-        outputs: Vec<Result<OneBotCoreTransport, RespondError>>,
-        sender: Arc<FakeSender>,
-        command_prefix: CommandPrefix,
-    ) -> (OneBotInboundDispatcher, Arc<FakeCore>) {
-        let core = Arc::new(FakeCore {
-            outputs: Mutex::new(outputs.into()),
-            calls: Mutex::new(Vec::new()),
-        });
-        (
-            OneBotInboundDispatcher {
-                core: core.clone(),
-                sender,
-                bot_display_name: "小助手".to_owned(),
-                ref_index: crate::gateway::ref_index::ref_index(),
-                commands: None,
-                command_prefix,
-            },
-            core,
-        )
-    }
-
-    #[tokio::test]
-    async fn complete_private_and_group_responses_send_once() {
-        for group in [false, true] {
-            let sender = Arc::new(FakeSender::default());
-            let (dispatcher, core) = dispatcher(
-                vec![Ok(OneBotCoreTransport::Complete(response(Some(
-                    "命令结果",
-                ))))],
-                sender.clone(),
-            );
-
-            let mut message = inbound("m1", group);
-            message.mentioned_bot = false;
-            assert_eq!(
-                dispatcher.dispatch(message).await.unwrap(),
-                OneBotDispatchOutcome::Sent
-            );
-            assert_eq!(core.calls.lock().unwrap().len(), 1);
-            assert_eq!(sender.sent.lock().unwrap().len(), 1);
-            assert_eq!(sender.sent.lock().unwrap()[0].2, "命令结果");
-        }
-    }
-
-    #[tokio::test]
-    async fn direct_group_slash_candidate_without_at_reaches_core_once() {
-        let sender = Arc::new(FakeSender::default());
-        let (dispatcher, core) = dispatcher(
-            vec![Ok(OneBotCoreTransport::Complete(response(Some(
-                "命令结果",
-            ))))],
-            sender.clone(),
-        );
-        let mut command = inbound("direct-command", true);
-        command.mentioned_bot = false;
-
-        assert_eq!(
-            dispatcher.dispatch(command).await.unwrap(),
-            OneBotDispatchOutcome::Sent
-        );
-        assert_eq!(core.calls.lock().unwrap().len(), 1);
-        assert_eq!(sender.sent.lock().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn group_message_at_bot_mentions_actor_with_native_segment() {
-        let sender = Arc::new(FakeSender::default());
-        let (dispatcher, _) = dispatcher(
-            vec![Ok(OneBotCoreTransport::Complete(response(Some(
-                "普通回复，不是骰点结果",
-            ))))],
-            sender.clone(),
-        );
-
-        assert_eq!(
-            dispatcher
-                .dispatch(inbound("group-at-mention", true))
-                .await
-                .unwrap(),
-            OneBotDispatchOutcome::Sent
-        );
-        assert_eq!(
-            sender.sent.lock().unwrap().as_slice(),
-            &[(
-                "group_with_mentions".to_owned(),
-                "30003".to_owned(),
-                "20002|普通回复，不是骰点结果".to_owned(),
-            )]
-        );
-    }
-
-    #[tokio::test]
-    async fn group_command_without_at_does_not_mention_actor() {
-        let sender = Arc::new(FakeSender::default());
-        let (dispatcher, _) = dispatcher(
-            vec![Ok(OneBotCoreTransport::Complete(response(Some(
-                "直接命令回复",
-            ))))],
-            sender.clone(),
-        );
-        let mut command = inbound("group-without-at", true);
-        command.mentioned_bot = false;
-
-        assert_eq!(
-            dispatcher.dispatch(command).await.unwrap(),
-            OneBotDispatchOutcome::Sent
-        );
-        assert_eq!(
-            sender.sent.lock().unwrap().as_slice(),
-            &[(
-                "group".to_owned(),
-                "30003".to_owned(),
-                "直接命令回复".to_owned(),
-            )]
-        );
-    }
-
-    #[tokio::test]
-    async fn direct_group_custom_prefix_candidate_without_at_reaches_core_once() {
-        let sender = Arc::new(FakeSender::default());
-        let (dispatcher, core) = dispatcher_with_prefix(
-            vec![Ok(OneBotCoreTransport::Complete(response(Some(
-                "命令结果",
-            ))))],
-            sender.clone(),
-            CommandPrefix::parse("#").unwrap(),
-        );
-        let mut command = inbound("custom-command", true);
-        command.mentioned_bot = false;
-        command.text = "#help".to_owned();
-        command.input_parts = vec![MessageInputPart::text("#help")];
-
-        assert_eq!(
-            dispatcher.dispatch(command).await.unwrap(),
-            OneBotDispatchOutcome::Sent
-        );
-        assert_eq!(core.calls.lock().unwrap().len(), 1);
-        assert_eq!(sender.sent.lock().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn custom_prefix_rejects_old_slash_and_repeated_prefix_candidates() {
-        let sender = Arc::new(FakeSender::default());
-        let (dispatcher, core) = dispatcher_with_prefix(
-            Vec::new(),
-            sender.clone(),
-            CommandPrefix::parse("#").unwrap(),
-        );
-
-        for (message_id, text) in [("old-slash", "/help"), ("repeated-prefix", "##help")] {
-            let mut command = inbound(message_id, true);
-            command.mentioned_bot = false;
-            command.text = text.to_owned();
-            command.input_parts = vec![MessageInputPart::text(text)];
-            assert_eq!(
-                dispatcher.dispatch(command).await.unwrap(),
-                OneBotDispatchOutcome::IgnoredNonBotReply
-            );
-        }
-
-        assert!(core.calls.lock().unwrap().is_empty());
-        assert!(sender.sent.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn structured_bot_at_with_custom_prefix_reaches_core() {
-        let sender = Arc::new(FakeSender::default());
-        let (dispatcher, core) = dispatcher_with_prefix(
-            vec![Ok(OneBotCoreTransport::Complete(response(Some(
-                "命令结果",
-            ))))],
-            sender,
-            CommandPrefix::parse("#").unwrap(),
-        );
-        let mut command = inbound("at-custom-command", true);
-        command.text = "#help".to_owned();
-        command.input_parts = vec![MessageInputPart::text("#help")];
-
-        assert_eq!(
-            dispatcher.dispatch(command).await.unwrap(),
-            OneBotDispatchOutcome::Sent
-        );
-        assert_eq!(core.calls.lock().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn group_slash_suppressed_by_core_sends_nothing() {
-        let sender = Arc::new(FakeSender::default());
-        let (dispatcher, core) = dispatcher(
-            vec![Ok(OneBotCoreTransport::Complete(suppressed_response()))],
-            sender.clone(),
-        );
-        let mut command = inbound("unknown-command", true);
-        command.mentioned_bot = false;
-        command.text = "/unknown".to_owned();
-        command.input_parts = vec![MessageInputPart::text("/unknown")];
-
-        assert_eq!(
-            dispatcher.dispatch(command).await.unwrap(),
-            OneBotDispatchOutcome::SuppressedByCore
-        );
-        assert_eq!(core.calls.lock().unwrap().len(), 1);
-        assert!(sender.sent.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn unhandled_empty_response_without_marker_is_not_suppressed() {
-        let sender = Arc::new(FakeSender::default());
-        let (dispatcher, core) = dispatcher(
-            vec![Ok(
-                OneBotCoreTransport::Complete(unhandled_empty_response()),
-            )],
-            sender.clone(),
-        );
-
-        let error = dispatcher.dispatch(inbound("empty-response", true)).await;
-
-        assert!(matches!(error, Err(OneBotDispatchError::EmptyResponse)));
-        assert_eq!(core.calls.lock().unwrap().len(), 1);
-        assert_eq!(sender.sent.lock().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn stream_ignores_status_and_delta_then_sends_only_completed_body() {
-        let stream = FakeStream {
-            events: VecDeque::from([
-                CoreResponseEvent::Status(CoreResponseStatus {
-                    kind: CoreResponseStatusKind::CommandStarted,
-                    text: "正在处理".to_owned(),
-                }),
-                CoreResponseEvent::TextDelta("不能提前发送".to_owned()),
-                CoreResponseEvent::Completed(response(Some("最终完整回复"))),
-            ]),
-        };
-        let sender = Arc::new(FakeSender::default());
-        let (dispatcher, _) = dispatcher(
-            vec![Ok(OneBotCoreTransport::Stream(Box::new(stream)))],
-            sender.clone(),
-        );
-
-        assert_eq!(
-            dispatcher
-                .dispatch(inbound("m-stream", false))
-                .await
-                .unwrap(),
-            OneBotDispatchOutcome::Sent
-        );
-        assert_eq!(
-            sender.sent.lock().unwrap().as_slice(),
-            &[(
-                "private".to_owned(),
-                "20002".to_owned(),
-                "最终完整回复".to_owned()
-            )]
-        );
-    }
-
-    #[tokio::test]
-    async fn successful_send_indexes_platform_message_id_and_visible_snapshot() {
-        let expected_snapshot = snapshot("todo-1");
-        let mut output = response(Some("待办列表"));
-        output.visible_entity_snapshot = Some(expected_snapshot.clone());
-        let sender = Arc::new(FakeSender::default());
-        let (dispatcher, _) = dispatcher(vec![Ok(OneBotCoreTransport::Complete(output))], sender);
-        let ref_index = dispatcher.ref_index.clone();
-
-        dispatcher
-            .dispatch(inbound("user-message", false))
-            .await
-            .unwrap();
-
-        let mut quoted = inbound("reply-message", false);
-        quoted.quoted = Some(QuotedMessageContext {
-            current_message_id: Some("reply-message".to_owned()),
-            reference_id: Some("sent-1".to_owned()),
-            ..Default::default()
-        });
-        ref_index.lock().unwrap().enrich_inbound(&mut quoted);
-        let context = quoted.quoted.unwrap();
-        assert!(context.lookup_found);
-        assert_eq!(context.text_summary.as_deref(), Some("待办列表"));
-        assert_eq!(context.from_bot, Some(true));
-        assert_eq!(quoted.visible_entity_snapshot, Some(expected_snapshot));
-    }
-
-    #[tokio::test]
-    async fn group_reply_without_at_only_triggers_when_ref_index_confirms_bot_message() {
-        let sender = Arc::new(FakeSender::default());
-        let (dispatcher, core) = dispatcher(
-            vec![
-                Ok(OneBotCoreTransport::Complete(response(Some("第一条回复")))),
-                Ok(OneBotCoreTransport::Complete(response(Some("引用回复")))),
-            ],
-            sender,
-        );
-        dispatcher
-            .dispatch(inbound("user-message", true))
-            .await
-            .unwrap();
-
-        let mut bot_reply = inbound("reply-to-bot", true);
-        bot_reply.mentioned_bot = false;
-        bot_reply.text = "继续".to_owned();
-        bot_reply.input_parts = vec![MessageInputPart::text("继续")];
-        bot_reply.quoted = Some(QuotedMessageContext {
-            reference_id: Some("sent-1".to_owned()),
-            ..Default::default()
-        });
-        assert_eq!(
-            dispatcher.dispatch(bot_reply).await.unwrap(),
-            OneBotDispatchOutcome::Sent
-        );
-
-        let mut user_reply = inbound("reply-to-user", true);
-        user_reply.mentioned_bot = false;
-        user_reply.text = "继续".to_owned();
-        user_reply.input_parts = vec![MessageInputPart::text("继续")];
-        user_reply.quoted = Some(QuotedMessageContext {
-            reference_id: Some("user-message".to_owned()),
-            ..Default::default()
-        });
-        assert_eq!(
-            dispatcher.dispatch(user_reply).await.unwrap(),
-            OneBotDispatchOutcome::IgnoredNonBotReply
-        );
-        assert_eq!(core.calls.lock().unwrap().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn core_error_stream_failure_and_empty_response_send_explicit_fallbacks() {
-        let cases = [
-            (
-                Err(RespondError::Core(CoreError::new(
-                    "timeout",
-                    "respond",
-                    "timed out",
-                ))),
-                "LLM 请求超时，请稍后重试。",
-            ),
-            (
-                Ok(OneBotCoreTransport::Stream(Box::new(FakeStream {
-                    events: VecDeque::from([CoreResponseEvent::Failed(CoreRespondFailure {
-                        kind: CoreFailureKind::Cancelled,
-                        message: "cancelled".to_owned(),
-                        retryable: false,
-                        agent: None,
-                    })]),
-                }))),
-                STREAM_CANCELLED_TEXT,
-            ),
-            (
-                Ok(OneBotCoreTransport::Complete(response(None))),
-                "唔，小助手刚刚没整理出可用回复。可以再说一次。",
-            ),
-        ];
-
-        for (index, (output, expected_text)) in cases.into_iter().enumerate() {
-            let sender = Arc::new(FakeSender::default());
-            let (dispatcher, _) = dispatcher(vec![output], sender.clone());
-            assert!(
-                dispatcher
-                    .dispatch(inbound(&format!("m-{index}"), false))
-                    .await
-                    .is_err()
-            );
-            assert_eq!(sender.sent.lock().unwrap()[0].2, expected_text);
-        }
-    }
-
-    #[tokio::test]
-    async fn sender_failure_is_returned_instead_of_core_success() {
-        let sender = Arc::new(FakeSender {
-            fail: true,
-            ..FakeSender::default()
-        });
-        let (dispatcher, _) = dispatcher(
-            vec![Ok(OneBotCoreTransport::Complete(response(Some(
-                "不会伪装成功",
-            ))))],
-            sender,
-        );
-
-        assert!(matches!(
-            dispatcher.dispatch(inbound("send-fail", false)).await,
-            Err(OneBotDispatchError::Send(OneBotSendError::Transport(
-                OneBotCallError::NotConnected
-            )))
-        ));
-    }
-}
+mod tests;
