@@ -18,8 +18,16 @@ fn compact_clear_parses_like_spaced_clear() {
 }
 
 #[test]
-fn compact_modifier_records_match_spaced_records() {
+fn compact_records_match_spaced_records() {
     for (compact, spaced, expected) in [
+        ("/ri18 哥布林", "/ri 18 哥布林", "18 哥布林"),
+        ("/ri5 哥布林", "/ri 5 哥布林", "5 哥布林"),
+        ("/ri100 哥布林", "/ri 100 哥布林", "100 哥布林"),
+        (
+            "/ri18 哥布林1，+2 哥布林2",
+            "/ri 18 哥布林1，+2 哥布林2",
+            "18 哥布林1，+2 哥布林2",
+        ),
         ("/ri+5 哥布林1", "/ri +5 哥布林1", "+5 哥布林1"),
         (
             "/ri+5 哥布林1，+2 哥布林2",
@@ -43,9 +51,39 @@ fn compact_modifier_records_match_spaced_records() {
 
 #[test]
 fn compact_record_suffix_rejects_unknown_ri_commands() {
-    for input in ["/rich", "/right", "/ring", "/ri5 哥布林", "/rid20"] {
+    for input in ["/rich", "/right", "/ring", "/rid20", "/riabc"] {
         assert!(parse_command(input).is_none(), "{input}");
     }
+}
+
+#[test]
+fn compact_fixed_records_skip_roller_and_batch_reuses_record_parser() {
+    let service = InitiativeService::default();
+    let reply = service
+        .execute_with_roller(
+            "fixed",
+            &parse_command("/ri18 哥布林").unwrap(),
+            None,
+            &mut |_| panic!("固定先攻不应调用 Roller"),
+        )
+        .unwrap();
+    assert!(reply.contains("哥布林：18 = 18"), "{reply}");
+
+    let mut rolled_sides = Vec::new();
+    let reply = service
+        .execute_with_roller(
+            "fixed-batch",
+            &parse_command("/ri18 哥布林1，+2 哥布林2").unwrap(),
+            None,
+            &mut |sides| {
+                rolled_sides.push(sides);
+                3
+            },
+        )
+        .unwrap();
+    assert_eq!(rolled_sides, vec![20]);
+    assert!(reply.contains("哥布林1：18 = 18"), "{reply}");
+    assert!(reply.contains("哥布林2：3 + 2 = 5"), "{reply}");
 }
 
 #[test]

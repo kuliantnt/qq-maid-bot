@@ -128,16 +128,16 @@ async fn initiative_bare_dice_reuses_manual_display_name() {
 }
 
 #[tokio::test]
-async fn initiative_compact_modifiers_match_spaced_forms_and_dot_prefix() {
+async fn initiative_compact_records_match_spaced_forms_and_dot_prefix() {
     let service = test_service();
 
     let response = service
-        .respond(message("/ri+5 哥布林1，+2 哥布林2"))
+        .respond(message("/ri18 哥布林1，+2 哥布林2"))
         .await
         .unwrap();
     assert_eq!(response.command.as_deref(), Some("initiative"));
     let text = response.text.unwrap();
-    assert!(text.contains("哥布林1："), "{text}");
+    assert!(text.contains("哥布林1：18 = 18"), "{text}");
     assert!(text.contains("哥布林2："), "{text}");
 
     let table = service
@@ -150,8 +150,12 @@ async fn initiative_compact_modifiers_match_spaced_forms_and_dot_prefix() {
     assert!(table.contains("哥布林2："), "{table}");
 
     for (input, expected_name) in [
+        ("/ri18 哥布林", "哥布林"),
+        ("/ri5 哥布林", "哥布林"),
         ("/ri+5 哥布林1", "哥布林1"),
         ("/ri-1 哥布林", "哥布林"),
+        (".ri18 哥布林", "哥布林"),
+        ("。ri18 哥布林", "哥布林"),
         (".ri+5 哥布林1", "哥布林1"),
         (".ri优势+4 哥布林", "哥布林"),
         (".ri劣势-1 哥布林2", "哥布林2"),
@@ -162,7 +166,7 @@ async fn initiative_compact_modifiers_match_spaced_forms_and_dot_prefix() {
         assert!(text.contains(expected_name), "{input}: {text}");
     }
 
-    for input in ["/rich", "/right", "/ring"] {
+    for input in ["/rich", "/right", "/ring", "/rid20", "/riabc"] {
         let response = service.respond(private_message(input)).await.unwrap();
         assert_eq!(
             response.command.as_deref(),

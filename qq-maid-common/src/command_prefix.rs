@@ -187,7 +187,9 @@ fn looks_like_command(remainder: &[char]) -> bool {
             | "set"
             | "unset"
             | "ops"
-    )
+    ) || action
+        .strip_prefix("ri")
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
 }
 
 fn is_cjk(character: char) -> bool {
@@ -292,6 +294,10 @@ mod tests {
         assert_eq!(
             prefix.render("清空先攻使用 /initclr"),
             "清空先攻使用 *initclr"
+        );
+        assert_eq!(
+            prefix.render("录入固定先攻使用 /ri18 哥布林"),
+            "录入固定先攻使用 *ri18 哥布林"
         );
         assert_eq!(
             prefix.render("文件位于 /home/maid/app.db"),
