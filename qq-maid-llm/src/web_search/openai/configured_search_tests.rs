@@ -221,3 +221,50 @@ async fn configured_responses_search_preserves_upstream_error() {
         assert!(error.message.contains("upstream diagnostic detail"));
     }
 }
+
+#[tokio::test]
+async fn responses_search_finishes_on_completed_without_waiting_for_http_eof() {
+    use axum::http::Response;
+    use futures::{StreamExt, stream};
+    use std::{convert::Infallible, time::Duration};
+
+    // 已完成的模型响应后保持连接不关闭，复现代理持续保活导致搜索等待到超时。
+    let app = Router::new().route(
+        "/v1/responses",
+        post(|| async {
+            let completed = json!({"type": "response.completed", "response": {
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": "搜索完成",
+                    "annotations": [{"type": "url_citation", "url": "https://example.test/source", "title": "来源"}]}]}]
+            }});
+            let frames = format!("event: response.output_text.delta\ndata: {{\"type\":\"response.output_text.delta\",\"delta\":\"搜索完成\"}}\n\nevent: response.completed\ndata: {completed}\n\n");
+            let body = stream::once(async move { Ok::<_, Infallible>(frames) })
+                .chain(stream::pending::<Result<String, Infallible>>());
+            Response::builder()
+                .header(header::CONTENT_TYPE, "text/event-stream")
+                .body(Body::from_stream(body)).unwrap()
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let executor = ResponsesWebSearchExecutor::new_configured(
+        &provider_config("deepseek", base),
+        "test-model".to_owned(),
+        5,
+    )
+    .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let result = tokio::time::timeout(
+        Duration::from_millis(300),
+        executor.query_stream(request("test-model"), tx),
+    )
+    .await;
+    server.abort();
+    let outcome = result
+        .expect("response.completed 后必须立即完成，不能等待 HTTP EOF")
+        .unwrap();
+    assert_eq!(outcome.answer, "搜索完成");
+    assert_eq!(outcome.sources[0].url, "https://example.test/source");
+    assert_eq!(rx.recv().await.as_deref(), Some("搜索完成"));
+    assert!(rx.recv().await.is_none());
+}

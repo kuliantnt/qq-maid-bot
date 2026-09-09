@@ -247,7 +247,7 @@ impl WebSearchExecutor for ResponsesWebSearchExecutor {
         let mut answer = String::new();
         let mut completed_response: Option<Value> = None;
         let mut saw_completed = false;
-        while let Some(chunk) = response
+        'read_stream: while let Some(chunk) = response
             .chunk()
             .await
             .map_err(|err| web_search_stream_transport_error(err, &answer))
@@ -271,9 +271,15 @@ impl WebSearchExecutor for ResponsesWebSearchExecutor {
                     &delta_tx,
                 )
                 .await?;
+                if saw_completed {
+                    // Responses 完成事件已经包含最终正文和来源。代理可能继续保活，
+                    // 此时等待 HTTP EOF 会把成功搜索拖到请求超时。
+                    break 'read_stream;
+                }
             }
         }
-        if !frame_buffer.is_empty()
+        if !saw_completed
+            && !frame_buffer.is_empty()
             && let Some(event) = parse_sse_frame(&frame_buffer)?
             && !is_openai_responses_done_sentinel(&event.data)
         {
