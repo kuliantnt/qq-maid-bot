@@ -93,7 +93,7 @@ pub(crate) async fn openai_responses_non_stream_chat(
     req: &OpenAiResponsesChatRequest<'_>,
 ) -> Result<ChatOutcome, LlmError> {
     let recorder = MetricsRecorder::start();
-    let payload = openai_responses_payload(
+    let mut payload = openai_responses_payload(
         req.messages,
         req.model,
         req.media_max_bytes,
@@ -102,6 +102,11 @@ pub(crate) async fn openai_responses_non_stream_chat(
         false,
         req.image_generation_enabled,
     )?;
+    super::payload::apply_responses_provider_options(
+        &mut payload,
+        req.provider,
+        req.reasoning_effort,
+    );
     let response = send_openai_responses_request(
         req.client,
         req.api_key,
@@ -152,7 +157,7 @@ pub(crate) async fn openai_responses_chat_stream(
     req: &OpenAiResponsesChatRequest<'_>,
 ) -> Result<LlmStream, LlmError> {
     let recorder = MetricsRecorder::start();
-    let payload = openai_responses_payload(
+    let mut payload = openai_responses_payload(
         req.messages,
         req.model,
         req.media_max_bytes,
@@ -161,6 +166,11 @@ pub(crate) async fn openai_responses_chat_stream(
         true,
         req.image_generation_enabled,
     )?;
+    super::payload::apply_responses_provider_options(
+        &mut payload,
+        req.provider,
+        req.reasoning_effort,
+    );
     let response = send_openai_responses_request(
         req.client,
         req.api_key,

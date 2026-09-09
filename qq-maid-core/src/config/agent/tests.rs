@@ -360,6 +360,23 @@ fn provider_native_rejects_compatible_provider_but_tavily_can_ignore_route() {
 }
 
 #[test]
+fn provider_native_accepts_deepseek_search_route() {
+    let text = DEFAULT_AGENT_CONFIG.replace(
+        r#"model = "gpt-5.6-luna""#,
+        r#"model = "deepseek:arbitrary-model""#,
+    );
+    let config = AgentRuntimeConfig::from_toml(
+        &text,
+        AgentConfigSource::File("config/agent.toml".to_owned()),
+    )
+    .unwrap();
+    assert_eq!(
+        config.resolve(ChatScene::Private).unwrap().search_model,
+        "deepseek:arbitrary-model"
+    );
+}
+
+#[test]
 fn provider_native_search_route_keeps_bare_model_as_openai_compatibility_default() {
     let config = AgentRuntimeConfig::from_toml(
         DEFAULT_AGENT_CONFIG,

@@ -161,15 +161,17 @@ impl ConfigCenter {
             .map(str::trim)
             .find(|value| !value.is_empty())
             .unwrap_or(default_url);
-        let responses = id == "openai"
-            && crate::config::parse_openai_api_mode(
-                environment
-                    .get("OPENAI_API_MODE")
-                    .map(String::as_str)
-                    .unwrap_or("auto"),
-            )
-            .map_err(|error| ConfigCenterError::invalid(error.message))?
-                != crate::config::OpenAiApiMode::ChatOnly;
+        // 内置 DeepSeek 与运行时一致走 Responses，不能用 Chat 探针伪造兼容结果。
+        let responses = id == "deepseek"
+            || id == "openai"
+                && crate::config::parse_openai_api_mode(
+                    environment
+                        .get("OPENAI_API_MODE")
+                        .map(String::as_str)
+                        .unwrap_or("auto"),
+                )
+                .map_err(|error| ConfigCenterError::invalid(error.message))?
+                    != crate::config::OpenAiApiMode::ChatOnly;
         Ok(ResolvedConnection {
             base_url: base.to_owned(),
             responses,

@@ -81,7 +81,7 @@ fn unsupported_provider_error(provider: &str) -> LlmError {
     LlmError::new(
         "bad_request",
         format!(
-            "search provider `{provider}` is not configured for provider_native search; use built-in OpenAI/Gemini, declare an openai_responses provider, or configure Tavily"
+            "search provider `{provider}` is not configured for provider_native search; use built-in OpenAI/DeepSeek/Gemini, declare an openai_responses provider, or configure Tavily"
         ),
         "request",
     )

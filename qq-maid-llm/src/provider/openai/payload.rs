@@ -42,6 +42,20 @@ pub(crate) fn openai_responses_payload(
     Ok(payload)
 }
 
+/// DeepSeek 的 Responses effort 是供应商协议能力，与模型名称前缀无关。
+/// 保持其他 Provider 的既有参数策略，避免扩散供应商差异。
+pub(crate) fn apply_responses_provider_options(
+    payload: &mut Value,
+    provider: &str,
+    reasoning_effort: Option<ReasoningEffort>,
+) {
+    if provider == "deepseek"
+        && let Some(effort) = reasoning_effort
+    {
+        payload["reasoning"] = json!({"effort": effort.as_str()});
+    }
+}
+
 /// 将内部聊天消息转换为 Responses input items。
 fn openai_responses_input(
     messages: &[ChatMessage],

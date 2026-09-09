@@ -691,7 +691,7 @@ impl AgentRuntimeConfig {
         let provider = model.provider.unwrap_or(ModelProvider::OpenAi);
         // 运行时元数据已规范化 ID，原始 TOML key 可能保留历史大小写。
         match provider {
-            ModelProvider::OpenAi | ModelProvider::Gemini => Ok(()),
+            ModelProvider::OpenAi | ModelProvider::Gemini | ModelProvider::DeepSeek => Ok(()),
             ModelProvider::Custom(name) => match self
                 .providers
                 .values()
@@ -705,7 +705,7 @@ impl AgentRuntimeConfig {
                     "{field_name} references custom provider `{name}`, but providers.{name} is not configured"
                 ))),
             },
-            ModelProvider::DeepSeek | ModelProvider::BigModel => Err(LlmError::config(format!(
+            ModelProvider::BigModel => Err(LlmError::config(format!(
                 "{field_name} references provider `{}`, which does not support provider_native search; configure Tavily instead",
                 provider.as_str()
             ))),

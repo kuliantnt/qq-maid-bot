@@ -8,7 +8,7 @@
 
 所有自定义供应商（包括 OpenCode 预设）使用同一表单，可编辑、启停和删除。删除或停用前须迁移全部模型及搜索路线引用；错误会列出引用位置，服务端不会自动改写路线。手工配置与启动预检遵守相同约束。旧配置未写 `enabled` 时保持启用。新建 Connection 必须使用小写 canonical ID；历史非小写 key 只能在原始 key 精确匹配时编辑或删除，不能改成 canonical 小写，也不能与另一个仅大小写不同的 key 共存。
 
-内置 OpenAI、DeepSeek、BigModel、Gemini 的字段在同一页面展示，继续使用原 runtime/Secret 存储和自动保存；内置定义不可删除，但可停用并显式清除凭证。新增 `provider.<id>.enabled` 对应公开模板中的 `<PROVIDER>_ENABLED`，默认启用，停用同样拒绝所有显式路线引用。内置 OpenAI `auto` 测试采用 Responses，`chat_only` 测试采用 Chat Completions；不自动测试跨协议 fallback。Gemini 在此测试其现有 Chat Adapter，不代表原生搜索已经验证。
+内置 OpenAI、DeepSeek、BigModel、Gemini 的字段在同一页面展示，继续使用原 runtime/Secret 存储和自动保存；内置定义不可删除，但可停用并显式清除凭证。新增 `provider.<id>.enabled` 对应公开模板中的 `<PROVIDER>_ENABLED`，默认启用，停用同样拒绝所有显式路线引用。内置 OpenAI `auto` 测试采用 Responses，`chat_only` 测试采用 Chat Completions；不自动测试跨协议 fallback。内置 DeepSeek 测试固定采用 Responses，沿用[LLM crate 的使用边界](../../qq-maid-llm/README.md#deepseek-responses-使用边界)。Gemini 在此测试其现有 Chat Adapter，不代表原生搜索已经验证。
 
 ## 安全与兼容
 
@@ -35,7 +35,7 @@
 
 `POST /api/v1/console/configuration/providers/models` 接收 `id` 和 `expected_revision`，只读取已保存连接，不写配置或路线。自定义连接使用 Agent revision，内置连接使用 runtime revision。接口仍要求管理员 Session、Origin 与 CSRF；浏览器不能提交 URL、认证或 Credential。响应包含 `connection_id`、请求的 `revision` 和 `discovery`。结果仅属于请求开始时的保存配置，不是运行值，也不缓存或热加载。
 
-模型发现依据 Connection 实际使用的协议 Adapter：内置 OpenAI Responses 使用 `OpenAiResponses`，OpenAI Chat、DeepSeek、Gemini、BigModel 使用 `OpenAiCompatible`。这些内置连接与自定义 `openai_compatible` / `openai_responses` 均从连接自身 Base URL 追加 `/models`，沿用 Header、Scheme 和当前解析出的 Credential。内置 OpenAI 多 Base URL 使用首个非空地址，不跨地址重试；端点返回 404 / 405 / 501 时由 discovery 层返回 `unsupported / endpoint_unsupported`，不按品牌预判支持情况。协议参考 [OpenAI 模型列表](https://platform.openai.com/docs/api-reference/models/list)和 [DeepSeek 模型列表](https://api-docs.deepseek.com/api/list-models)。
+模型发现依据 Connection 实际使用的协议 Adapter：内置 OpenAI Responses 与 DeepSeek 使用 `OpenAiResponses`，OpenAI Chat、Gemini、BigModel 使用 `OpenAiCompatible`。这些内置连接与自定义 `openai_compatible` / `openai_responses` 均从连接自身 Base URL 追加 `/models`，沿用 Header、Scheme 和当前解析出的 Credential。内置 OpenAI 多 Base URL 使用首个非空地址，不跨地址重试；端点返回 404 / 405 / 501 时由 discovery 层返回 `unsupported / endpoint_unsupported`，不按品牌预判支持情况。协议参考 [OpenAI 模型列表](https://platform.openai.com/docs/api-reference/models/list)和 [DeepSeek 模型列表](https://api-docs.deepseek.com/api/list-models)。
 
 发现沿用自定义 `request_timeout_seconds`，缺省用 `LLM_REQUEST_TIMEOUT_SECONDS`，再限制总等待不超过 15 秒、连接不超过 5 秒。最多两个并发，忙时立即返回 `unknown / busy`；禁止重定向、自动重试与分页跳转。响应上限 1 MiB、最多 10000 个条目；model id 去重排序，仅保留 ID 及 `source=connection_discovery`，不透传额外上游字段、错误正文、URL 或凭证。
 
