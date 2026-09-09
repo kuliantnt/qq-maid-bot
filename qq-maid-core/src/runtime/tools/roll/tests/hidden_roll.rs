@@ -2,7 +2,7 @@
 
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc, Barrier, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -66,8 +66,17 @@ fn run_hidden_roll(
     roller: &mut CountingRoller,
     message_id: Option<&str>,
 ) -> String {
+    run_hidden_roll_command(store, roller, message_id, "/rh 1d1 私有原因")
+}
+
+fn run_hidden_roll_command(
+    store: &NotificationOutboxStore,
+    roller: &mut CountingRoller,
+    message_id: Option<&str>,
+    command: &str,
+) -> String {
     execute_extended_command_with_roller(
-        &parse_extended_command("/rh 1d1 私有原因").unwrap(),
+        &parse_extended_command(command).unwrap(),
         20,
         None,
         ConversationKind::Group,
@@ -101,6 +110,67 @@ fn assert_no_leak(text: &str) {
     assert!(!text.contains("私有原因"), "{text}");
     assert!(!text.contains("1d1"), "{text}");
     assert!(!text.contains("= 1"), "{text}");
+}
+
+#[tokio::test]
+async fn concurrent_replays_claim_one_rng_result_and_deliver_once() {
+    let store = hidden_store();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(Barrier::new(2));
+    let mut handles = Vec::new();
+
+    for value in [1_u8, 2] {
+        let store = store.clone();
+        let counter = counter.clone();
+        let barrier = barrier.clone();
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            let mut roller = CountingRoller { value, counter };
+            let reply = run_hidden_roll_command(
+                &store,
+                &mut roller,
+                Some("msg-concurrent-replay"),
+                "/rh 1d2 私有原因",
+            );
+            (reply, value)
+        }));
+    }
+
+    let results = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("并发暗骰线程不应 panic"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "并发重放时 RNG 必须严格只执行一次"
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|(reply, _)| reply.contains("不会重复投骰"))
+            .count(),
+        1,
+        "失败领取者必须只返回重复提示"
+    );
+    let (_, winner_value) = results
+        .iter()
+        .find(|(reply, _)| reply.contains("尚未确认送达"))
+        .expect("必须有一个首次执行者");
+
+    let tasks = store.list_all_for_test().unwrap();
+    assert_eq!(tasks.len(), 1, "并发重放只能形成一个 Outbox 事件");
+    let text = tasks[0].payload["text"].as_str().unwrap();
+    assert!(
+        text.contains(&format!("= {winner_value}")),
+        "payload 必须保留首次执行者的唯一 RNG 结果：{text}"
+    );
+
+    let (sink, worker) = make_worker(&store);
+    let stats = worker.run_once().await.unwrap();
+    assert_eq!(stats.sent_count, 1);
+    assert_eq!(sink.intents.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
