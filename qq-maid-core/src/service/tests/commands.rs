@@ -75,6 +75,43 @@ async fn core_help_command_is_wrapped_as_response_events() {
 }
 
 #[tokio::test]
+async fn initiative_state_is_shared_across_core_requests() {
+    let service = CoreHandle::new(test_state(TestProvider::replying("unused"), 5));
+
+    let recorded = voice_command_completed(
+        service
+            .respond(private_request("/ri 12 张三"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(recorded.command.as_deref(), Some("initiative"));
+    assert!(recorded.text_content().unwrap().contains("张三：12"));
+
+    let listed =
+        voice_command_completed(service.respond(private_request("/init")).await.unwrap()).await;
+    let listed_text = listed.text_content().unwrap();
+    assert!(listed_text.contains("当前：张三"), "{listed_text}");
+    assert!(listed_text.contains("1. 张三：12"), "{listed_text}");
+
+    let advanced =
+        voice_command_completed(service.respond(private_request("/init end")).await.unwrap()).await;
+    let advanced_text = advanced.text_content().unwrap();
+    assert!(
+        advanced_text.contains("第 2 轮 · 当前：张三"),
+        "{advanced_text}"
+    );
+
+    let listed_again =
+        voice_command_completed(service.respond(private_request("/init")).await.unwrap()).await;
+    let listed_again_text = listed_again.text_content().unwrap();
+    assert!(
+        listed_again_text.contains("第 2 轮 · 当前：张三"),
+        "{listed_again_text}"
+    );
+}
+
+#[tokio::test]
 async fn voice_preference_is_read_before_generation_and_forces_complete_without_text_delta() {
     let provider = TestProvider::streaming(vec![
         Ok(LlmStreamEvent::TextDelta("完整".to_owned())),

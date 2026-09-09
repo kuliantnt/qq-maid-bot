@@ -30,6 +30,8 @@ pub(super) enum DispatchOutcome {
 /// 识别结果既用于 pending 前的未知命令收口，也供后续原 handler 分派，避免两处各自
 /// 维护 parser 清单。Todo、Memory 与 RSS 的 handler 仍保留领域内参数解析和校验。
 enum RegisteredSlashCommand {
+    ExtendedRoll(crate::runtime::tools::roll::ExtendedRollCommand),
+    Initiative(crate::runtime::tools::initiative::InitiativeCommand),
     Session(ParsedCommand),
     Translation(translation_flow::ParsedTranslationCommand),
     Set(ParsedCommand),
@@ -50,6 +52,12 @@ enum RegisteredSlashCommand {
 
 impl RegisteredSlashCommand {
     fn parse(text: &str) -> Option<Self> {
+        if let Some(command) = crate::runtime::tools::roll::parse_extended_command(text) {
+            return Some(Self::ExtendedRoll(command));
+        }
+        if let Some(command) = crate::runtime::tools::initiative::parse_command(text) {
+            return Some(Self::Initiative(command));
+        }
         if let Some(command) = crate::runtime::tools::voice::parse_voice_command(text) {
             return Some(Self::Voice(command));
         }
@@ -270,6 +278,48 @@ impl<'a> CommandDispatcher<'a> {
             response.usage = execution.usage;
             response.diagnostics = Some(diagnostics);
             return Ok(DispatchOutcome::Respond(Box::new(response)));
+        }
+
+        if let Some(RegisteredSlashCommand::Initiative(command)) = registered_slash_command.as_ref()
+        {
+            let name = roll_display_name(self.service, &req);
+            let reply =
+                self.service
+                    .initiative_service
+                    .execute(&meta.scope_key, command, name.as_deref());
+            return Ok(DispatchOutcome::Respond(Box::new(command_response(
+                reply,
+                None,
+                Some("initiative"),
+            ))));
+        }
+
+        if let Some(RegisteredSlashCommand::ExtendedRoll(command)) =
+            registered_slash_command.as_ref()
+        {
+            let preference = self
+                .service
+                .roll_preference_service
+                .query(&meta.scope_key)
+                .map_err(|e| LlmError::new(e.code(), e.message(), "roll_preferences"))?;
+            let name = roll_display_name(self.service, &req);
+            let reply = crate::runtime::tools::roll::execute_extended_command(
+                command,
+                preference.rule_system().default_die_sides(),
+                name.as_deref(),
+                req.conversation_kind,
+                req.private_reply_target.as_ref(),
+                &self.service.notification_store,
+                req.message_id.as_deref(),
+                req.platform.as_str(),
+                req.account_id.as_deref(),
+                req.conversation_id.as_deref(),
+            );
+            return Ok(DispatchOutcome::Respond(Box::new(command_response(
+                reply,
+                None,
+                Some("roll"),
+            ))));
         }
 
         // pending、Todo 可见编号和 Memory 列表序号属于群内个人交互状态；
@@ -585,6 +635,8 @@ mod tests {
             Some(RegisteredSlashCommand::IChing(_)) => "iching",
             Some(RegisteredSlashCommand::IChingWithArguments) => "iching_with_arguments",
             Some(RegisteredSlashCommand::Roll(_)) => "roll",
+            Some(RegisteredSlashCommand::ExtendedRoll(_)) => "roll",
+            Some(RegisteredSlashCommand::Initiative(_)) => "initiative",
             Some(RegisteredSlashCommand::WebSearch(_)) => "web_search",
             Some(RegisteredSlashCommand::Rss) => "rss",
             Some(RegisteredSlashCommand::Todo) => "todo",

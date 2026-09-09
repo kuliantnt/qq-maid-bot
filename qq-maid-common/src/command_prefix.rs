@@ -174,11 +174,22 @@ fn looks_like_command(remainder: &[char]) -> bool {
             | "rd"
             | "rap"
             | "rab"
+            | "ri"
+            | "init"
+            | "initclr"
+            | "rh"
+            | "rx"
+            | "rxh"
+            | "rhx"
+            | "rhd"
+            | "rdh"
             | "nn"
             | "set"
             | "unset"
             | "ops"
-    )
+    ) || action
+        .strip_prefix("ri")
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
 }
 
 fn is_cjk(character: char) -> bool {
@@ -245,6 +256,10 @@ mod tests {
             prefix.normalize_with_dot_compat(".rename").as_deref(),
             Some("/rename")
         );
+        assert_eq!(
+            prefix.normalize_with_dot_compat(".ri+5 哥布林1").as_deref(),
+            Some("/ri+5 哥布林1")
+        );
         assert_eq!(prefix.normalize_with_dot_compat("."), None);
         assert_eq!(prefix.normalize_with_dot_compat("。"), None);
         assert_eq!(prefix.normalize_with_dot_compat("..help"), None);
@@ -275,6 +290,14 @@ mod tests {
         assert_eq!(
             prefix.render("骰点使用 /roll 或 /r"),
             "骰点使用 *roll 或 *r"
+        );
+        assert_eq!(
+            prefix.render("清空先攻使用 /initclr"),
+            "清空先攻使用 *initclr"
+        );
+        assert_eq!(
+            prefix.render("录入固定先攻使用 /ri18 哥布林"),
+            "录入固定先攻使用 *ri18 哥布林"
         );
         assert_eq!(
             prefix.render("文件位于 /home/maid/app.db"),

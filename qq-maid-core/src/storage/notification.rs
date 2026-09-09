@@ -5,7 +5,7 @@
 
 use chrono::Duration as ChronoDuration;
 use qq_maid_common::time_context::shanghai_offset;
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::str::FromStr;
@@ -87,6 +87,12 @@ pub enum NotificationStatus {
 pub enum NotificationWriteOutcome {
     Applied,
     LeaseLost,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotificationInsertOutcome {
+    Inserted,
+    AlreadyExists,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +183,56 @@ impl NotificationOutboxStore {
         }
         self.get_by_dedupe_key(&request.dedupe_key)?
             .ok_or_else(|| NotificationError::io("notification disappeared after upsert"))
+    }
+
+    /// 以 `dedupe_key` 为原子领取键插入任务，并只在本次调用成为首次插入者时生成最终 payload。
+    ///
+    /// 占位行和最终 payload 在同一个 `BEGIN IMMEDIATE` 事务内提交：并发调用会由 SQLite
+    /// 串行化首次插入，只有成功插入占位行的调用才会执行 `finalize_payload`；未提交的占位
+    /// 行对 Worker 不可见，生成失败或进程中断时事务回滚，不会留下永久无效任务。
+    ///
+    /// 该方法不改变 `upsert` 对既有任务的更新语义，专供“副作用只能由首次执行者产生”的
+    /// 生产者使用。`finalize_payload` 在事务写锁内同步执行，必须保持短小且不得再次访问
+    /// 本 Store。
+    pub(crate) fn insert_if_absent_with<F>(
+        &self,
+        placeholder: NotificationUpsert,
+        finalize_payload: F,
+    ) -> Result<NotificationInsertOutcome, NotificationError>
+    where
+        F: FnOnce() -> Result<Value, String>,
+    {
+        validate_upsert(&placeholder)?;
+        let mut conn = self.connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(NotificationError::from_sql)?;
+        if !insert_if_absent_on_connection(&tx, &placeholder)? {
+            return Ok(NotificationInsertOutcome::AlreadyExists);
+        }
+        let payload = finalize_payload().map_err(NotificationError::bad_request)?;
+        let payload_json = serde_json::to_string(&payload)
+            .map_err(|err| NotificationError::bad_request(format!("invalid payload: {err}")))?;
+        let changed = tx
+            .execute(
+                "UPDATE notification_outbox
+                 SET payload_json = ?2, updated_at = ?3
+                 WHERE dedupe_key = ?1 AND status = ?4",
+                params![
+                    placeholder.dedupe_key.as_str(),
+                    payload_json,
+                    now_iso_cn(),
+                    NotificationStatus::Pending.as_str(),
+                ],
+            )
+            .map_err(NotificationError::from_sql)?;
+        if changed != 1 {
+            return Err(NotificationError::io(
+                "notification placeholder could not be finalized",
+            ));
+        }
+        tx.commit().map_err(NotificationError::from_sql)?;
+        Ok(NotificationInsertOutcome::Inserted)
     }
 
     pub fn cancel_by_source(
@@ -597,6 +653,44 @@ pub(crate) fn upsert_on_connection(
     .map_err(NotificationError::from_sql)
 }
 
+fn insert_if_absent_on_connection(
+    conn: &Connection,
+    request: &NotificationUpsert,
+) -> Result<bool, NotificationError> {
+    validate_upsert(request)?;
+    let payload_json = serde_json::to_string(&request.payload)
+        .map_err(|err| NotificationError::bad_request(format!("invalid payload: {err}")))?;
+    let now = now_iso_cn();
+    let changed = conn
+        .execute(
+            "INSERT INTO notification_outbox (
+                source_type, source_id, dedupe_key, platform, account_id, target_type, target_id,
+                channel, kind, payload_json, scheduled_at, status, attempts, max_attempts,
+                next_attempt_at, locked_by, locked_at, sent_at, last_error,
+                created_at, updated_at, cancelled_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13, NULL, NULL, NULL, NULL, NULL, ?14, ?14, NULL)
+             ON CONFLICT(dedupe_key) DO NOTHING",
+            params![
+                request.source_type.as_str(),
+                request.source_id.as_str(),
+                request.dedupe_key.as_str(),
+                request.target.platform.as_str(),
+                request.target.account_id.as_deref(),
+                request.target.target_type.as_str(),
+                request.target.target_id.as_str(),
+                request.channel.as_str(),
+                request.kind.as_str(),
+                payload_json,
+                request.scheduled_at.as_str(),
+                NotificationStatus::Pending.as_str(),
+                i64::from(request.max_attempts),
+                now,
+            ],
+        )
+        .map_err(NotificationError::from_sql)?;
+    Ok(changed == 1)
+}
+
 pub(crate) fn cancel_by_source_on_connection(
     conn: &Connection,
     source_type: &str,
@@ -796,191 +890,4 @@ impl std::fmt::Display for NotificationError {
 impl std::error::Error for NotificationError {}
 
 #[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-
-    mod lease;
-
-    fn test_store() -> NotificationOutboxStore {
-        let database =
-            SqliteDatabase::open_temp("notification-tests", NOTIFICATION_MIGRATIONS).unwrap();
-        NotificationOutboxStore::new(database)
-    }
-
-    fn upsert_request(dedupe_key: &str, scheduled_at: &str) -> NotificationUpsert {
-        NotificationUpsert {
-            source_type: "todo".to_owned(),
-            source_id: "1".to_owned(),
-            dedupe_key: dedupe_key.to_owned(),
-            target: PushTarget::qq_official(PushTargetType::Private, "u1"),
-            channel: "qq".to_owned(),
-            kind: "todo_reminder".to_owned(),
-            payload: json!({"message_type":"text","text":"提醒"}),
-            scheduled_at: scheduled_at.to_owned(),
-            max_attempts: 3,
-            reactivate_cancelled: false,
-        }
-    }
-
-    #[test]
-    fn upsert_reuses_dedupe_key() {
-        let store = test_store();
-        let first = store
-            .upsert(upsert_request(
-                "todo:1:reminder",
-                "2026-07-03T09:00:00+08:00",
-            ))
-            .unwrap();
-        let second = store
-            .upsert(upsert_request(
-                "todo:1:reminder",
-                "2026-07-03T10:00:00+08:00",
-            ))
-            .unwrap();
-
-        assert_eq!(first.id, second.id);
-        assert_eq!(second.scheduled_at, "2026-07-03T10:00:00+08:00");
-        assert_eq!(store.list_all_for_test().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn upsert_persists_platform_target_fields() {
-        let store = test_store();
-        let mut request = upsert_request("todo:1:wechat", "2026-07-03T09:00:00+08:00");
-        request.target = PushTarget::new(
-            "wechat_service",
-            Some("gh_service".to_owned()),
-            PushTargetType::Private,
-            "openid-1",
-        );
-
-        let task = store.upsert(request).unwrap();
-
-        assert_eq!(task.target.platform, "wechat_service");
-        assert_eq!(task.target.account_id.as_deref(), Some("gh_service"));
-        assert_eq!(task.target.target_type, PushTargetType::Private);
-        assert_eq!(task.target.target_id, "openid-1");
-    }
-
-    #[test]
-    fn migration_v2_defaults_legacy_rows_to_qq_official() {
-        let path = std::env::temp_dir().join(format!(
-            "notification-legacy-target-{}.db",
-            uuid::Uuid::new_v4()
-        ));
-        let legacy = SqliteDatabase::open(&path, &[NOTIFICATION_OUTBOX_SCHEMA_V1]).unwrap();
-        legacy
-            .connection()
-            .unwrap()
-            .execute(
-                "INSERT INTO notification_outbox (
-                    source_type, source_id, dedupe_key, target_type, target_id,
-                    channel, kind, payload_json, scheduled_at, status,
-                    created_at, updated_at
-                 ) VALUES (
-                    'todo', '1', 'todo:1:reminder', 'private', 'u1',
-                    'qq', 'todo_reminder', '{\"message_type\":\"text\",\"text\":\"提醒\"}',
-                    '2026-07-03T09:00:00+08:00', 'pending',
-                    '2026-07-03T08:00:00+08:00', '2026-07-03T08:00:00+08:00'
-                 )",
-                [],
-            )
-            .unwrap();
-        drop(legacy);
-
-        let store = NotificationOutboxStore::new(
-            SqliteDatabase::open(&path, NOTIFICATION_MIGRATIONS).unwrap(),
-        );
-        let task = store.get_by_dedupe_key("todo:1:reminder").unwrap().unwrap();
-
-        assert_eq!(task.target.platform, QQ_OFFICIAL_PLATFORM);
-        assert_eq!(task.target.account_id, None);
-        assert_eq!(task.target.target_type, PushTargetType::Private);
-        assert_eq!(task.target.target_id, "u1");
-    }
-
-    #[test]
-    fn upsert_keeps_cancelled_by_default() {
-        let store = test_store();
-        store
-            .upsert(upsert_request(
-                "todo:1:reminder",
-                "2099-01-01T09:00:00+08:00",
-            ))
-            .unwrap();
-        store.cancel_by_source("todo", "1").unwrap();
-
-        let resubmitted = store
-            .upsert(upsert_request(
-                "todo:1:reminder",
-                "2099-01-01T10:00:00+08:00",
-            ))
-            .unwrap();
-
-        assert_eq!(resubmitted.status, NotificationStatus::Cancelled);
-        assert!(resubmitted.cancelled_at.is_some());
-    }
-
-    #[test]
-    fn upsert_can_reactivate_cancelled_task() {
-        let store = test_store();
-        store
-            .upsert(upsert_request(
-                "todo:1:reminder",
-                "2099-01-01T09:00:00+08:00",
-            ))
-            .unwrap();
-        store.cancel_by_source("todo", "1").unwrap();
-
-        let mut request = upsert_request("todo:1:reminder", "2099-01-01T10:00:00+08:00");
-        request.reactivate_cancelled = true;
-        let reactivated = store.upsert(request).unwrap();
-
-        assert_eq!(reactivated.status, NotificationStatus::Pending);
-        assert_eq!(reactivated.attempts, 0);
-        assert_eq!(reactivated.scheduled_at, "2099-01-01T10:00:00+08:00");
-        assert!(reactivated.cancelled_at.is_none());
-    }
-
-    #[test]
-    fn claim_marks_due_task_sending_once() {
-        let store = test_store();
-        store
-            .upsert(upsert_request(
-                "todo:1:reminder",
-                "2020-01-01T09:00:00+08:00",
-            ))
-            .unwrap();
-
-        let claimed = store
-            .claim_due("worker-a", 10, "2020-01-01T00:00:00+08:00")
-            .unwrap();
-        let second = store
-            .claim_due("worker-b", 10, "2020-01-01T00:00:00+08:00")
-            .unwrap();
-
-        assert_eq!(claimed.len(), 1);
-        assert!(second.is_empty());
-        assert_eq!(claimed[0].status, NotificationStatus::Sending);
-        assert_eq!(claimed[0].attempts, 1);
-    }
-
-    #[test]
-    fn failed_task_retries_until_limit() {
-        let store = test_store();
-        let mut request = upsert_request("todo:1:reminder", "2020-01-01T09:00:00+08:00");
-        request.max_attempts = 1;
-        let task = store.upsert(request).unwrap();
-        store
-            .claim_due("worker-a", 10, "2020-01-01T00:00:00+08:00")
-            .unwrap();
-
-        store
-            .mark_failed(task.id, "worker-a", "temporary", 60)
-            .unwrap();
-        let failed = store.get_by_dedupe_key("todo:1:reminder").unwrap().unwrap();
-        assert_eq!(failed.status, NotificationStatus::Failed);
-    }
-}
+mod tests;

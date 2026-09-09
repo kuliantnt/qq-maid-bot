@@ -925,5 +925,6 @@ fn test_state_with_group_tool_calling_and_query_executor(
         .unwrap(),
         knowledge_index,
         prompt_config: PromptConfig::new(prompt_dir),
+        initiative_service: crate::runtime::tools::initiative::InitiativeService::default(),
     }
 }

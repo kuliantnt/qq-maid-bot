@@ -153,6 +153,21 @@ pub struct RespondServiceOptions {
     pub voice: crate::config::VoiceFeatureConfig,
 }
 
+/// Core 运行态到 Respond 服务的一次性装配依赖。
+///
+/// 公开构造器没有 Core 共享态时使用独立的默认先攻服务；`CoreHandle` 则通过这里
+/// 注入进程级共享实例，避免每个请求重新创建先攻表。
+pub(crate) struct RespondServiceBootstrap {
+    pub(crate) provider: DynLlmProvider,
+    pub(crate) executors: RespondExecutors,
+    pub(crate) stores: RespondStores,
+    pub(crate) rss_fetcher: RssFetcher,
+    pub(crate) knowledge_index: KnowledgeIndex,
+    pub(crate) prompt_config: PromptConfig,
+    pub(crate) options: RespondServiceOptions,
+    pub(crate) initiative_service: crate::runtime::tools::initiative::InitiativeService,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RespondPlan {
     Immediate,
@@ -268,6 +283,8 @@ impl PartialEq<PlannedRespond> for RespondPlan {
 /// 提供统一的 `respond` 入口点，将请求按业务语义分派到各子处理模块。
 #[derive(Clone)]
 pub struct RustRespondService {
+    /// 共享 conversation 的临时先攻状态；克隆服务时保持同一张表。
+    pub(crate) initiative_service: crate::runtime::tools::initiative::InitiativeService,
     /// LLM 提供商（支持流式 / 非流式聊天）
     pub(crate) provider: DynLlmProvider,
     /// 联网查询执行器
@@ -339,6 +356,33 @@ impl RustRespondService {
         prompt_config: PromptConfig,
         options: RespondServiceOptions,
     ) -> Self {
+        Self::from_bootstrap(RespondServiceBootstrap {
+            provider,
+            executors,
+            stores,
+            rss_fetcher,
+            knowledge_index,
+            prompt_config,
+            options,
+            initiative_service: crate::runtime::tools::initiative::InitiativeService::default(),
+        })
+    }
+
+    /// 使用 Core 运行态持有的先攻服务构造 Respond 服务。
+    ///
+    /// `CoreHandle` 每次请求都会重新构造 Respond 服务，先攻表必须通过这里注入，
+    /// 不能在各请求的构造函数内部新建临时状态。
+    pub(crate) fn from_bootstrap(bootstrap: RespondServiceBootstrap) -> Self {
+        let RespondServiceBootstrap {
+            provider,
+            executors,
+            stores,
+            rss_fetcher,
+            knowledge_index,
+            prompt_config,
+            options,
+            initiative_service,
+        } = bootstrap;
         let translation_service = TranslationService::new(provider.clone(), None)
             .with_agent_config(options.agent_config.clone());
         let memory_dream_worker = options.memory_dream.enabled.then(|| {
@@ -379,6 +423,7 @@ impl RustRespondService {
             task_store: stores.task_store,
             voice_service,
             roll_preference_service: stores.roll_preference_service,
+            initiative_service,
             notification_store: stores.notification_store,
             ops_service,
             rss_store: stores.rss_store,

@@ -40,6 +40,9 @@ pub enum RespondPurpose {
 /// 系统提示词等；该结构暂时保留在 Core 内部编排链路中。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RespondRequest {
+    /// 仅可信 Gateway 可提供的私发地址，不进入模型或 HTTP 序列化。
+    #[serde(skip)]
+    pub private_reply_target: Option<crate::runtime::push::PushTarget>,
     /// 会话 ID，用于关联历史对话
     #[serde(default)]
     pub session_id: String,
@@ -224,6 +227,7 @@ impl Default for RespondRequest {
             interaction_scope_key: String::new(),
             user_id: None,
             user_identity_source: None,
+            private_reply_target: None,
             group_member_role: None,
             group_id: None,
             guild_id: None,

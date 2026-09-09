@@ -85,6 +85,7 @@ impl RadarExecutor for EmptyRadarExecutor {
 
 pub(crate) fn private_request(text: &str) -> CoreRequest {
     CoreRequest {
+        private_reply_target: None,
         text: text.to_owned(),
         message_id: Some("test-private-message".to_owned()),
         input_parts: Vec::new(),
@@ -114,6 +115,7 @@ pub(crate) fn private_scope() -> &'static str {
 
 pub(crate) fn group_request(text: &str) -> CoreRequest {
     CoreRequest {
+        private_reply_target: None,
         text: text.to_owned(),
         message_id: Some("test-group-message".to_owned()),
         input_parts: Vec::new(),
@@ -139,6 +141,7 @@ pub(crate) fn group_request(text: &str) -> CoreRequest {
 
 pub(crate) fn wechat_service_request(text: &str) -> CoreRequest {
     CoreRequest {
+        private_reply_target: None,
         text: text.to_owned(),
         message_id: Some("test-wechat-message".to_owned()),
         input_parts: Vec::new(),

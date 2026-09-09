@@ -16,8 +16,12 @@ use crate::{
     util::metrics::LlmMetrics,
 };
 
-mod dice;
+pub(crate) mod dice;
 mod dm;
+mod extensions;
+pub(crate) use extensions::{
+    ExtendedRollCommand, execute_extended_command, parse_extended_command,
+};
 mod outcome;
 mod preference;
 mod storage;

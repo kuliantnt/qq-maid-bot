@@ -40,7 +40,33 @@ pub(crate) fn to_core_request(
         }
     };
 
+    // OneBot 的群成员 ID 可用于同账号私发；QQ 群 openid 不能当作 C2C openid。
+    let private_reply_target = if inbound.platform == Platform::OneBot11
+        && inbound.actor.source == qq_maid_common::identity_context::IdentitySource::Event
+    {
+        inbound
+            .account_id
+            .as_ref()
+            .filter(|id| !id.trim().is_empty())
+            .and_then(|account| {
+                inbound
+                    .actor
+                    .sender_id
+                    .as_ref()
+                    .filter(|id| !id.trim().is_empty())
+                    .map(|id| {
+                        qq_maid_core::runtime::push::PushTarget::onebot11(
+                            account,
+                            qq_maid_core::runtime::push::PushTargetType::Private,
+                            id,
+                        )
+                    })
+            })
+    } else {
+        None
+    };
     Ok(CoreRequest {
+        private_reply_target,
         text,
         message_id: clean_message_id(&inbound.message_id),
         input_parts: effective_input_parts(inbound),
@@ -202,6 +228,26 @@ mod tests {
         assert_eq!(render_text_for_core(&inbound), "看一下\n[图片]");
         let request = to_core_request(&inbound, "看一下\n[图片]".to_owned()).unwrap();
         assert_eq!(request.message_id.as_deref(), Some("msg-1"));
+        assert_eq!(
+            request.private_reply_target.as_ref().unwrap().target_id,
+            "user-1"
+        );
+        let mut untrusted = inbound.clone();
+        untrusted.actor.source = IdentitySource::TextWeak;
+        assert!(
+            to_core_request(&untrusted, String::new())
+                .unwrap()
+                .private_reply_target
+                .is_none()
+        );
+        untrusted.actor.source = IdentitySource::Event;
+        untrusted.platform = Platform::QqOfficial;
+        assert!(
+            to_core_request(&untrusted, String::new())
+                .unwrap()
+                .private_reply_target
+                .is_none()
+        );
     }
 
     #[test]
@@ -250,8 +296,10 @@ mod tests {
 
         assert_eq!(rendered, "看一下\n[图片 image/png: a.png]");
         assert_eq!(request.message_id.as_deref(), Some("msg-1"));
+
         assert_eq!(request.text, rendered);
         assert_eq!(request.message_id.as_deref(), Some("msg-1"));
+
         assert_eq!(
             request.quoted.as_ref().unwrap().text_summary.as_deref(),
             Some("上一条")
