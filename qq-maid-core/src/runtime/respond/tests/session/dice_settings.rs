@@ -48,3 +48,86 @@ async fn dice_rule_query_reports_the_current_comparison_direction() {
     assert!(text.contains("CoC（D100）"));
     assert!(text.contains("点数 ≤ 目标值时成功"));
 }
+
+#[tokio::test]
+async fn initiative_and_hidden_rolls_are_deterministic_commands() {
+    use crate::runtime::push::{PushTarget, PushTargetType};
+    use qq_maid_common::identity_context::ConversationKind;
+    let service = test_service();
+    service.respond(message("/set 昵称 玩家甲")).await.unwrap();
+    let response = service.respond(message(".ri 12")).await.unwrap();
+    assert_eq!(response.command.as_deref(), Some("initiative"));
+    assert!(response.text.unwrap().contains("玩家甲：12"));
+    let mut other = message("/init");
+    other.scope_key = "other-conversation".to_owned();
+    assert!(
+        service
+            .respond(other)
+            .await
+            .unwrap()
+            .text
+            .unwrap()
+            .contains("为空")
+    );
+
+    let mut hidden = message("/rh 1d1 私有原因");
+    hidden.conversation_kind = ConversationKind::Group;
+    let denied = service.respond(hidden.clone()).await.unwrap().text.unwrap();
+    assert!(denied.contains("本次未投骰"));
+    hidden.private_reply_target = Some(PushTarget::onebot11(
+        "test-bot",
+        PushTargetType::Private,
+        "test-user",
+    ));
+    let response = service.respond(hidden).await.unwrap();
+    let text = response.text.unwrap();
+    assert!(text.contains("私发队列"));
+    assert!(!text.contains("私有原因"));
+    assert!(!text.contains("1d1"));
+    let tasks = service.notification_store.list_all_for_test().unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].target.target_type, PushTargetType::Private);
+    assert!(tasks[0].payload.to_string().contains("私有原因"));
+    assert!(tasks[0].payload.to_string().contains("= 1"));
+
+    for input in ["/rx d20", "/rxh d20", "/rhx d20"] {
+        let response = service.respond(message(input)).await.unwrap();
+        assert_eq!(response.command.as_deref(), Some("roll"));
+        assert!(response.text.unwrap().contains("暂不执行"));
+    }
+    assert!(
+        service
+            .respond(message("/initctr"))
+            .await
+            .unwrap()
+            .text
+            .unwrap()
+            .contains("尚待确认")
+    );
+}
+
+#[tokio::test]
+async fn private_hidden_roll_uses_preference_and_group_players_share_initiative() {
+    let service = test_service();
+    service.respond(private_message("/set coc")).await.unwrap();
+    let text = service
+        .respond(private_message("/rh"))
+        .await
+        .unwrap()
+        .text
+        .unwrap();
+    assert!(text.contains("1d100"));
+    assert!(
+        service
+            .notification_store
+            .list_all_for_test()
+            .unwrap()
+            .is_empty()
+    );
+    service.respond(message("/ri 10 A")).await.unwrap();
+    let mut second = message("/ri 5 B");
+    second.user_id = Some("u2".to_owned());
+    let text = service.respond(second).await.unwrap().text.unwrap();
+    assert!(text.contains("A：10"));
+    assert!(text.contains("B：5"));
+}

@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn private_conversation_derives_private_scope() {
     let req = CoreRequest {
+        private_reply_target: None,
         text: "hello".to_owned(),
         message_id: Some("request-1".to_owned()),
         input_parts: Vec::new(),
@@ -39,6 +40,7 @@ fn private_conversation_derives_private_scope() {
 #[test]
 fn group_conversation_derives_group_scope_without_member_split() {
     let req = CoreRequest {
+        private_reply_target: None,
         text: "/todo".to_owned(),
         message_id: Some("request-2".to_owned()),
         input_parts: Vec::new(),
@@ -80,6 +82,7 @@ fn message_context_is_derived_from_core_request_authoritative_fields() {
     };
 
     let req = CoreRequest {
+        private_reply_target: None,
         text: "hi".to_owned(),
         message_id: Some("request-3".to_owned()),
         input_parts: Vec::new(),

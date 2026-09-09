@@ -32,6 +32,8 @@ pub trait CoreService: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreRequest {
+    /// Gateway 显式授权的当前发言人私发目标；不从业务 scope 反解析。
+    pub private_reply_target: Option<crate::runtime::push::PushTarget>,
     pub text: String,
     /// Gateway 从可信平台事件透传的稳定消息 ID，用于高副作用入口幂等领取。
     pub message_id: Option<String>,

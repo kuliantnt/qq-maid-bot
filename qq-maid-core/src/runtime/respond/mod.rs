@@ -268,6 +268,8 @@ impl PartialEq<PlannedRespond> for RespondPlan {
 /// 提供统一的 `respond` 入口点，将请求按业务语义分派到各子处理模块。
 #[derive(Clone)]
 pub struct RustRespondService {
+    /// 共享 conversation 的临时先攻状态；克隆服务时保持同一张表。
+    pub(crate) initiative_service: crate::runtime::tools::initiative::InitiativeService,
     /// LLM 提供商（支持流式 / 非流式聊天）
     pub(crate) provider: DynLlmProvider,
     /// 联网查询执行器
@@ -379,6 +381,7 @@ impl RustRespondService {
             task_store: stores.task_store,
             voice_service,
             roll_preference_service: stores.roll_preference_service,
+            initiative_service: Default::default(),
             notification_store: stores.notification_store,
             ops_service,
             rss_store: stores.rss_store,

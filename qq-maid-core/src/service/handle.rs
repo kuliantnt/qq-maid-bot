@@ -326,6 +326,7 @@ impl From<CoreRequest> for RespondRequest {
                 ),
             };
         Self {
+            private_reply_target: value.private_reply_target,
             content: value.text,
             input_parts: value.input_parts,
             quoted: value.quoted,
