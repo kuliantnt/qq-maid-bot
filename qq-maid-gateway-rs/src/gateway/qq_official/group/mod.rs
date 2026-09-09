@@ -9,6 +9,7 @@ use std::{
 };
 
 use anyhow::Context;
+use qq_maid_common::identity_context::MentionIdentity;
 use qq_maid_common::markdown::escape_text;
 use qq_maid_core::service::{
     CoreDeliveryHint, CoreInboundKind, CoreRespondFailure, CoreRespondOutput, CoreResponse,
@@ -69,21 +70,59 @@ use crate::{
     tts::provider_from_config,
 };
 
+#[derive(Debug, Default)]
+struct GroupMentionPrefix {
+    markdown: String,
+    fallback: String,
+}
+
 fn group_reply_mention_prefix(
     message: &GroupMessage,
+    mentions: &[MentionIdentity],
     capability: &ReplyCapability,
-) -> Option<String> {
-    if !capability.supports_at_mention {
-        return None;
+) -> Option<GroupMentionPrefix> {
+    let mut prefix = GroupMentionPrefix::default();
+    let mut seen_user_ids = Vec::new();
+    let mut push = |user_id: &str, display_name: Option<&str>| {
+        let user_id = user_id.trim();
+        if user_id.is_empty() || seen_user_ids.iter().any(|seen| seen == user_id) {
+            return;
+        }
+        seen_user_ids.push(user_id.to_owned());
+        if capability.supports_at_mention
+            && let Some(mention) = platform::qq_official::member_mention(user_id)
+        {
+            if !prefix.markdown.is_empty() {
+                prefix.markdown.push(' ');
+            }
+            prefix.markdown.push_str(&mention);
+        }
+        if let Some(display_name) = display_name
+            .map(str::trim)
+            .filter(|display_name| !display_name.is_empty())
+        {
+            if !prefix.fallback.is_empty() {
+                prefix.fallback.push(' ');
+            }
+            prefix.fallback.push('@');
+            prefix.fallback.push_str(display_name);
+        }
+    };
+    for mention in mentions {
+        if let Some(user_id) = mention.target.user_id.as_deref() {
+            push(user_id, mention.target.display_name.as_deref());
+        }
     }
-    message
-        .member_openid
-        .as_deref()
-        .and_then(platform::qq_official::member_mention)
+    if let Some(sender_id) = message.member_openid.as_deref() {
+        push(sender_id, None);
+    }
+    (!prefix.markdown.is_empty() || !prefix.fallback.is_empty()).then_some(prefix)
 }
 
 fn prepend_group_mention(prefix: &str, text: &str) -> String {
-    if text.trim().is_empty() {
+    if prefix.trim().is_empty() {
+        text.to_owned()
+    } else if text.trim().is_empty() {
         prefix.to_owned()
     } else {
         format!("{prefix}\n{text}")
@@ -101,12 +140,14 @@ fn neutralize_qq_body_mentions(text: &str) -> String {
 
 fn prefix_group_reply_outbound(
     message: &GroupMessage,
+    mentions: &[MentionIdentity],
     outbound: OutboundMessage,
     capability: &ReplyCapability,
 ) -> OutboundMessage {
     // 对能够承载正文的群聊回复统一 @ 原发言人，不按是否显式 @ 机器人、命令名称、
-    // 骰点结果或文本来源做额外分支。
-    let Some(prefix) = group_reply_mention_prefix(message, capability) else {
+    // 骰点结果或文本来源做额外分支。Core 的结构化 mention 排在前方，同 ID 去重，
+    // 因此回合玩家与原发言人相同时不会重复 @。
+    let Some(prefix) = group_reply_mention_prefix(message, mentions, capability) else {
         return outbound;
     };
     // QQ 官方的 `<@openid>` 只有作为 Markdown content 发送时才是可靠的原生提及。
@@ -120,10 +161,10 @@ fn prefix_group_reply_outbound(
             let fallback_text = neutralize_qq_body_mentions(&text);
             OutboundMessage::Markdown {
                 markdown: crate::markdown::MarkdownPayload::new(prepend_group_mention(
-                    &prefix,
+                    &prefix.markdown,
                     &escape_text(&fallback_text),
                 )),
-                fallback_text,
+                fallback_text: prepend_group_mention(&prefix.fallback, &fallback_text),
             }
         }
         OutboundMessage::Markdown {
@@ -133,10 +174,13 @@ fn prefix_group_reply_outbound(
             let markdown_body = neutralize_qq_body_mentions(&markdown.content);
             OutboundMessage::Markdown {
                 markdown: crate::markdown::MarkdownPayload::new(prepend_group_mention(
-                    &prefix,
+                    &prefix.markdown,
                     &markdown_body,
                 )),
-                fallback_text: neutralize_qq_body_mentions(&fallback_text),
+                fallback_text: prepend_group_mention(
+                    &prefix.fallback,
+                    &neutralize_qq_body_mentions(&fallback_text),
+                ),
             }
         }
         OutboundMessage::ImagePlaceholder { fallback_text }
@@ -144,10 +188,10 @@ fn prefix_group_reply_outbound(
             let fallback_text = neutralize_qq_body_mentions(&fallback_text);
             OutboundMessage::Markdown {
                 markdown: crate::markdown::MarkdownPayload::new(prepend_group_mention(
-                    &prefix,
+                    &prefix.markdown,
                     &escape_text(&fallback_text),
                 )),
-                fallback_text,
+                fallback_text: prepend_group_mention(&prefix.fallback, &fallback_text),
             }
         }
         outbound => outbound,
@@ -162,6 +206,7 @@ fn group_respond_error_outbound(
     let log_text = respond_error_to_qq_text(err);
     let outbound = prefix_group_reply_outbound(
         message,
+        &[],
         OutboundMessage::Text {
             text: log_text.clone(),
         },
@@ -184,6 +229,7 @@ async fn send_cooldown_hint(
     let capability = ReplyCapability::qq_official_group(config);
     let outbound = prefix_group_reply_outbound(
         message,
+        &[],
         OutboundMessage::Text {
             text: group_cooldown_hint_text(bot_display_name),
         },
@@ -319,7 +365,7 @@ pub(crate) async fn handle_prepared_group_message(
         );
         send_group_local_command(api, runtime, config, &message, {
             let capability = ReplyCapability::qq_official_group(config);
-            prefix_group_reply_outbound(&message, output.render(&capability), &capability)
+            prefix_group_reply_outbound(&message, &[], output.render(&capability), &capability)
         })
         .await?;
         return Ok(());
@@ -628,9 +674,22 @@ async fn send_group_respond_response(
             text: empty_group_reply_fallback_text(config.bot_display_name()),
         });
     }
+    let structured_mentions = response
+        .output
+        .as_ref()
+        .map(|output| output.mentions.as_slice())
+        .unwrap_or_default();
     let outbounds = outbounds
         .into_iter()
-        .map(|outbound| prefix_group_reply_outbound(message, outbound, &capability))
+        .enumerate()
+        .map(|(index, outbound)| {
+            prefix_group_reply_outbound(
+                message,
+                if index == 0 { structured_mentions } else { &[] },
+                outbound,
+                &capability,
+            )
+        })
         .collect::<Vec<_>>();
     let limits = ChunkLimits::new(
         config.markdown_chunk_soft_limit,
@@ -772,6 +831,7 @@ where
     // 不把上游原始错误、工具结果或模型中间内容暴露到群聊。
     let outbound = prefix_group_reply_outbound(
         message,
+        &[],
         OutboundMessage::Text {
             text: failure.message.clone(),
         },

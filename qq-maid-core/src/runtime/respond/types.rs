@@ -11,7 +11,7 @@ use qq_maid_llm::provider::types::{ChatMessage, ReasoningEffort, TokenUsage};
 use crate::{error::ErrorInfo, service::VisibleEntitySnapshot, util::metrics::LlmMetrics};
 use qq_maid_common::output_part::OutputPart;
 use qq_maid_common::{
-    identity_context::{ConversationKind, IdentitySource, MessageContext},
+    identity_context::{ConversationKind, IdentitySource, MentionIdentity, MessageContext},
     input_part::{MessageInputPart, QuotedMessageContext},
 };
 use serde::{Deserialize, Serialize};
@@ -267,6 +267,9 @@ pub struct RespondResponse {
     /// Provider 返回的顺序化富媒体输出，只在 Core 内部传递。
     #[serde(default, skip)]
     pub output_parts: Vec<OutputPart>,
+    /// 平台无关的出站成员提醒，只在 Core → Gateway 内部传递。
+    #[serde(default, skip)]
+    pub mentions: Vec<MentionIdentity>,
     /// 是否已被某个子 flow 处理
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handled: Option<bool>,

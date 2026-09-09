@@ -432,6 +432,7 @@ mod tests {
                         markdown: "## title\n- item".to_owned(),
                     },
                 ],
+                mentions: Vec::new(),
             }),
             handled: Some(true),
             session_id: None,
@@ -468,6 +469,7 @@ mod tests {
                         },
                     },
                 ],
+                mentions: Vec::new(),
             }),
             handled: Some(true),
             session_id: None,
@@ -498,6 +500,7 @@ mod tests {
                         ..OutputMedia::default()
                     },
                 }],
+                mentions: Vec::new(),
             }),
             handled: Some(true),
             session_id: None,
@@ -525,6 +528,7 @@ mod tests {
                 parts: vec![OutputPart::File {
                     media: OutputMedia::default(),
                 }],
+                mentions: Vec::new(),
             }),
             handled: Some(true),
             session_id: None,
@@ -549,6 +553,7 @@ mod tests {
                 text_fallback: "output fallback".to_owned(),
                 markdown: Some("**output markdown**".to_owned()),
                 parts: Vec::new(),
+                mentions: Vec::new(),
             }),
             handled: Some(true),
             session_id: None,
@@ -576,6 +581,7 @@ mod tests {
                 parts: vec![OutputPart::Text {
                     text: "# Markdown 测试\n\n- **加粗**".to_owned(),
                 }],
+                mentions: Vec::new(),
             }),
             handled: Some(true),
             session_id: None,

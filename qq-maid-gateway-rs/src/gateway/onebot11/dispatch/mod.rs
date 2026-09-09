@@ -341,11 +341,42 @@ impl OneBotInboundDispatcher {
                 .await?;
             return Err(OneBotDispatchError::EmptyResponse);
         }
-        for outbound in &outbounds {
+        let structured_mention_ids = response
+            .output
+            .as_ref()
+            .map(|output| {
+                output
+                    .mentions
+                    .iter()
+                    .filter_map(|mention| {
+                        mention
+                            .target
+                            .user_id
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|user_id| !user_id.is_empty())
+                            .map(str::to_owned)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for (index, outbound) in outbounds.iter().enumerate() {
+            let mut mention_user_ids = if index == 0 {
+                structured_mention_ids.clone()
+            } else {
+                Vec::new()
+            };
+            if let Some(user_id) = mention_user_id
+                && !mention_user_ids
+                    .iter()
+                    .any(|mentioned| mentioned == user_id)
+            {
+                mention_user_ids.push(user_id.to_owned());
+            }
             self.send_outbound(
                 &inbound,
                 outbound,
-                mention_user_id,
+                &mention_user_ids,
                 response.visible_entity_snapshot.clone(),
             )
             .await?;
@@ -357,7 +388,7 @@ impl OneBotInboundDispatcher {
         &self,
         inbound: &InboundMessage,
         outbound: &OutboundMessage,
-        mention_user_id: Option<&str>,
+        mention_user_ids: &[String],
         visible_entity_snapshot: Option<VisibleEntitySnapshot>,
     ) -> Result<OneBotSendResult, OneBotSendError> {
         if let OutboundMessage::Image {
@@ -370,9 +401,9 @@ impl OneBotInboundDispatcher {
                     self.sender.send_private_image(target_id, image).await
                 }
                 ConversationTarget::Group { target_id } => {
-                    if let Some(user_id) = mention_user_id {
+                    if !mention_user_ids.is_empty() {
                         self.sender
-                            .send_group_image_with_mentions(target_id, &[user_id.to_owned()], image)
+                            .send_group_image_with_mentions(target_id, mention_user_ids, image)
                             .await
                     } else {
                         self.sender.send_group_image(target_id, image).await
@@ -390,13 +421,43 @@ impl OneBotInboundDispatcher {
                 }
             }
         }
-        self.send_text(
+        self.send_text_with_mentions(
             inbound,
             outbound.fallback_text(),
-            mention_user_id,
+            mention_user_ids,
             visible_entity_snapshot,
         )
         .await
+    }
+
+    async fn send_text_with_mentions(
+        &self,
+        inbound: &InboundMessage,
+        text: &str,
+        mention_user_ids: &[String],
+        visible_entity_snapshot: Option<VisibleEntitySnapshot>,
+    ) -> Result<OneBotSendResult, OneBotSendError> {
+        let result = match &inbound.conversation {
+            ConversationTarget::Private { target_id } => {
+                self.sender.send_private_text(target_id, text).await
+            }
+            ConversationTarget::Group { target_id } => {
+                if mention_user_ids.is_empty() {
+                    self.sender.send_group_text(target_id, text).await
+                } else {
+                    self.sender
+                        .send_group_text_with_mentions(target_id, mention_user_ids, text)
+                        .await
+                }
+            }
+            ConversationTarget::Channel { .. } | ConversationTarget::ServiceAccount { .. } => {
+                Err(OneBotSendError::InvalidTargetId)
+            }
+        };
+        if let Ok(sent) = &result {
+            self.record_outbound(inbound, sent, text, visible_entity_snapshot);
+        }
+        result
     }
 
     async fn send_text(
@@ -682,6 +743,33 @@ mod tests {
         })
     }
 
+    fn response_with_mentions(text: &str, user_ids: &[&str]) -> Box<CoreResponse> {
+        let mentions = user_ids
+            .iter()
+            .map(
+                |user_id| qq_maid_common::identity_context::MentionIdentity {
+                    raw_text: None,
+                    target: qq_maid_common::identity_context::MessageActorContext {
+                        user_id: Some((*user_id).to_owned()),
+                        source: IdentitySource::Event,
+                        ..Default::default()
+                    },
+                    is_self: false,
+                    confidence: qq_maid_common::identity_context::MentionConfidence::Event,
+                },
+            )
+            .collect();
+        Box::new(CoreResponse {
+            output: Some(AssistantOutput::text(text).with_mentions(mentions)),
+            handled: Some(true),
+            session_id: None,
+            command: None,
+            diagnostics: None,
+            visible_entity_snapshot: None,
+            delivery_hint: None,
+        })
+    }
+
     fn suppressed_response() -> Box<CoreResponse> {
         Box::new(CoreResponse {
             output: None,
@@ -856,6 +944,34 @@ mod tests {
                 "group_with_mentions".to_owned(),
                 "30003".to_owned(),
                 "20002|普通回复，不是骰点结果".to_owned(),
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn structured_output_mentions_use_onebot_native_segments_and_deduplicate_sender() {
+        let sender = Arc::new(FakeSender::default());
+        let (dispatcher, _) = dispatcher(
+            vec![Ok(OneBotCoreTransport::Complete(response_with_mentions(
+                "轮到你了",
+                &["20003", "20002"],
+            )))],
+            sender.clone(),
+        );
+
+        assert_eq!(
+            dispatcher
+                .dispatch(inbound("structured-mention", true))
+                .await
+                .unwrap(),
+            OneBotDispatchOutcome::Sent
+        );
+        assert_eq!(
+            sender.sent.lock().unwrap().as_slice(),
+            &[(
+                "group_with_mentions".to_owned(),
+                "30003".to_owned(),
+                "20003,20002|轮到你了".to_owned(),
             )]
         );
     }

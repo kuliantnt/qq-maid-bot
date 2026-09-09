@@ -14,13 +14,19 @@
 
 use std::fmt;
 
-use crate::markdown::{normalize_speakable_plain_text, to_chat_text, to_speakable_text};
+use crate::{
+    identity_context::MentionIdentity,
+    markdown::{normalize_speakable_plain_text, to_chat_text, to_speakable_text},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssistantOutput {
     pub text_fallback: String,
     pub markdown: Option<String>,
     pub parts: Vec<OutputPart>,
+    /// 平台无关的出站成员提醒。Gateway 按平台能力渲染为原生 @，不支持时只保留
+    /// 正文 fallback，绝不能把稳定用户 ID 拼进纯文本。
+    pub mentions: Vec<MentionIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +83,7 @@ impl AssistantOutput {
             text_fallback: text.clone(),
             markdown: None,
             parts: non_empty_output_parts([OutputPart::Text { text }]),
+            mentions: Vec::new(),
         }
     }
 
@@ -98,7 +105,13 @@ impl AssistantOutput {
             text_fallback,
             markdown: Some(markdown),
             parts,
+            mentions: Vec::new(),
         }
+    }
+
+    pub fn with_mentions(mut self, mentions: Vec<MentionIdentity>) -> Self {
+        self.mentions = mentions;
+        self
     }
 
     /// 用户可见纯文本 fallback（直读 `text_fallback` 字段，零分配）。
@@ -302,6 +315,7 @@ mod tests {
                     markdown: "# title".to_owned(),
                 },
             ],
+            mentions: Vec::new(),
         };
         // text_fallback 为空时按 parts 拼接；markdown 段会被 strip。
         assert_eq!(
@@ -318,6 +332,7 @@ mod tests {
             parts: vec![OutputPart::Image {
                 media: OutputMedia::default(),
             }],
+            mentions: Vec::new(),
         };
         assert_eq!(
             output.render_text_fallback("图片不支持", "文件不支持"),
@@ -331,6 +346,7 @@ mod tests {
             text_fallback: String::new(),
             markdown: None,
             parts: Vec::new(),
+            mentions: Vec::new(),
         };
         assert_eq!(output.render_text_fallback("no-img", "no-file"), None);
     }
@@ -348,6 +364,7 @@ mod tests {
                     markdown: "## title".to_owned(),
                 },
             ],
+            mentions: Vec::new(),
         };
         assert_eq!(
             output.render_markdown("no-img", "no-file"),
@@ -361,6 +378,7 @@ mod tests {
             text_fallback: "plain".to_owned(),
             markdown: Some("# legacy".to_owned()),
             parts: Vec::new(),
+            mentions: Vec::new(),
         };
         assert_eq!(output.render_markdown("no-img", "no-file"), "# legacy");
     }
@@ -409,6 +427,7 @@ mod tests {
             text_fallback: "plain".to_owned(),
             markdown: Some("   ".to_owned()),
             parts: Vec::new(),
+            mentions: Vec::new(),
         };
         assert_eq!(output.preferred_text(true), None);
     }

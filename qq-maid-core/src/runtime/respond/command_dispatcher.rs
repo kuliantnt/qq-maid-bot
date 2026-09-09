@@ -282,16 +282,15 @@ impl<'a> CommandDispatcher<'a> {
 
         if let Some(RegisteredSlashCommand::Initiative(command)) = registered_slash_command.as_ref()
         {
-            let name = roll_display_name(self.service, &req);
-            let reply =
-                self.service
-                    .initiative_service
-                    .execute(&meta.scope_key, command, name.as_deref());
-            return Ok(DispatchOutcome::Respond(Box::new(command_response(
-                reply,
-                None,
-                Some("initiative"),
-            ))));
+            let actor = initiative_actor(self.service, &req);
+            let reply = self.service.initiative_service.execute_for_actor(
+                &meta.scope_key,
+                command,
+                actor.as_ref(),
+            );
+            let mut response = command_response(reply.text, None, Some("initiative"));
+            response.mentions = reply.mentions;
+            return Ok(DispatchOutcome::Respond(Box::new(response)));
         }
 
         if let Some(RegisteredSlashCommand::ExtendedRoll(command)) =
@@ -617,6 +616,67 @@ fn roll_display_name(service: &RustRespondService, req: &RespondRequest) -> Opti
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+/// 构造 Initiative 可持久到临时先攻条目中的稳定玩家身份。
+///
+/// 只接受服务端权威 ID，并拒绝旧字段兜底和纯文本昵称来源；展示名仍沿用 `/nn`
+/// 与平台展示名，但只用于条目命名和 fallback，不参与身份判定。
+fn initiative_actor(
+    service: &RustRespondService,
+    req: &RespondRequest,
+) -> Option<qq_maid_common::identity_context::MentionIdentity> {
+    use qq_maid_common::identity_context::{
+        IdentitySource, MentionConfidence, MentionIdentity, MessageActorContext,
+    };
+
+    let user_id = req
+        .user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let actor = req
+        .message_context
+        .as_ref()
+        .and_then(|ctx| ctx.actor.as_ref());
+    let source = req
+        .user_identity_source
+        .or_else(|| actor.map(|actor| actor.source))
+        .unwrap_or(IdentitySource::Event);
+    if matches!(
+        source,
+        IdentitySource::LegacyFallback | IdentitySource::TextWeak
+    ) || actor.and_then(|actor| actor.is_bot) == Some(true)
+    {
+        return None;
+    }
+    let display_name = roll_display_name(service, req)?;
+    let confidence = match source {
+        IdentitySource::MemberApi => MentionConfidence::MemberApi,
+        IdentitySource::Cache => MentionConfidence::Cache,
+        IdentitySource::Event | IdentitySource::LegacyFallback | IdentitySource::TextWeak => {
+            MentionConfidence::Event
+        }
+    };
+    Some(MentionIdentity {
+        raw_text: None,
+        target: MessageActorContext {
+            user_id: Some(user_id.to_owned()),
+            union_id: actor.and_then(|actor| actor.union_id.clone()),
+            display_name: Some(display_name),
+            display_name_source: actor
+                .and_then(|actor| actor.display_name_source.clone())
+                .or_else(|| Some(source.as_str().to_owned())),
+            group_member_role: req
+                .group_member_role
+                .clone()
+                .or_else(|| actor.and_then(|actor| actor.group_member_role.clone())),
+            is_bot: actor.and_then(|actor| actor.is_bot),
+            source,
+        },
+        is_self: false,
+        confidence,
+    })
 }
 
 #[cfg(test)]

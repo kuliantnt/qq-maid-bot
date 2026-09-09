@@ -808,6 +808,7 @@ pub fn response_from_output(output: RespondOutput) -> RespondResponse {
         text: (!output.text.trim().is_empty()).then_some(output.text),
         markdown: output.markdown,
         output_parts: output.parts,
+        mentions: Vec::new(),
         handled: Some(true),
         session_id: None,
         command: None,

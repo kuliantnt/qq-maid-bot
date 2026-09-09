@@ -79,6 +79,7 @@ fn group_send_records_rendered_fallback_when_output_text_field_is_empty() {
                     ..qq_maid_common::output_part::OutputMedia::default()
                 },
             }],
+            mentions: Vec::new(),
         }),
         handled: Some(true),
         session_id: None,

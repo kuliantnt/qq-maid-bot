@@ -3,7 +3,7 @@ use crate::runtime::tools::roll::dice::{
     parse_roll_argument_with_default_die_sides,
 };
 
-pub(super) const HELP: &str = "先攻：/ri 12 张三, +2 李四, =d10+3 王五, d20+4 赵六；/ri18 哥布林 等价 /ri 18 哥布林（固定先攻）；/ri+5 哥布林1，+2 哥布林2 等价 /ri +5 哥布林1，+2 哥布林2（D20 修正）；/ri优势+4 哥布林 等价 /ri 优势+4 哥布林；紧凑先攻仅识别 ri 后紧接 +/-、ASCII 数字、优势或劣势；裸骰式省略名称时使用 /nn 或平台展示名；/init [list|end|clr]；/init set 单位 骰式；/init del 单位1 单位2。名称不含空格或逗号；同名覆盖，重启清空。";
+pub(super) const HELP: &str = "先攻：/ri 12 张三, +2 李四, =d10+3 王五, d20+4 赵六；/ri18 哥布林 等价 /ri 18 哥布林（固定先攻）；/ri+5 哥布林1，+2 哥布林2 等价 /ri +5 哥布林1，+2 哥布林2（D20 修正）；/ri优势+4 哥布林 等价 /ri 优势+4 哥布林；紧凑先攻仅识别 ri 后紧接 +/-、ASCII 数字、优势或劣势；裸骰式省略名称时使用 /nn 或平台展示名；/init [list|end|clr|help]；/init set 单位 骰式；/init del 单位1 单位2；以上子命令均支持 initlist、initend、inited、initclr、initclear、inithelp、initset、initdel、initrm 紧凑写法。名称不含空格或逗号；同名覆盖，重启清空。玩家使用默认名称录入后，推进到该玩家会 @ 提醒；显式命名单位不自动绑定玩家。";
 
 #[derive(Clone, Debug)]
 pub(crate) enum InitiativeCommand {
@@ -35,12 +35,12 @@ pub(crate) fn parse_command(text: &str) -> Option<InitiativeCommand> {
             compact, args,
         )));
     }
+    if let Some(command) = parse_compact_init(&name, args) {
+        return Some(command);
+    }
     Some(match name.as_str() {
         "ri" if args == "help" => InitiativeCommand::Help,
         "ri" => InitiativeCommand::Record(args.to_owned()),
-        // SealDice 的紧凑清空写法复用同一个领域操作，仍拒绝多余参数。
-        "initclr" if args.is_empty() => InitiativeCommand::Clear,
-        "initclr" => InitiativeCommand::Invalid,
         "init" => {
             let (action, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
             let rest = rest.trim();
@@ -55,6 +55,31 @@ pub(crate) fn parse_command(text: &str) -> Option<InitiativeCommand> {
                 }
                 _ => InitiativeCommand::Invalid,
             }
+        }
+        _ => return None,
+    })
+}
+
+/// 统一解析 `/init` 家族的 SealDice 紧凑写法。
+///
+/// 只接受完整白名单后缀；未知的 `initXXX` 返回 `None`，继续交给后续命令解析，
+/// 避免把 `/initialize`、`/initial` 等普通候选误收成先攻命令。
+fn parse_compact_init(name: &str, args: &str) -> Option<InitiativeCommand> {
+    let suffix = name.strip_prefix("init")?;
+    if suffix.is_empty() {
+        return None;
+    }
+    Some(match suffix {
+        "list" if args.is_empty() => InitiativeCommand::List,
+        "end" | "ed" if args.is_empty() => InitiativeCommand::End,
+        "clr" | "clear" if args.is_empty() => InitiativeCommand::Clear,
+        "help" if args.is_empty() => InitiativeCommand::Help,
+        "set" => InitiativeCommand::Set(args.to_owned()),
+        "del" | "rm" if !args.is_empty() => {
+            InitiativeCommand::Delete(args.split_whitespace().map(str::to_owned).collect())
+        }
+        "list" | "end" | "ed" | "clr" | "clear" | "help" | "del" | "rm" => {
+            InitiativeCommand::Invalid
         }
         _ => return None,
     })
@@ -76,11 +101,19 @@ pub(super) fn valid_name(name: &str) -> bool {
             .any(|c| c.is_whitespace() || c.is_control() || matches!(c, ',' | '，'))
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct ParsedEntry {
+    pub(super) name: String,
+    pub(super) expression: DiceExpression,
+    /// 名称来自 `/nn` 或平台展示名时为 true，可用于绑定当前玩家身份。
+    pub(super) binds_actor: bool,
+}
+
 pub(super) fn parse_entries(
     input: &str,
     default_name: Option<&str>,
     set: bool,
-) -> Result<Vec<(String, DiceExpression)>, &'static str> {
+) -> Result<Vec<ParsedEntry>, &'static str> {
     if input.chars().count() > 2000 || input.chars().any(char::is_control) {
         return Err("先攻输入过长或包含控制字符。");
     }
@@ -95,30 +128,36 @@ pub(super) fn parse_entries(
     let mut entries = Vec::new();
     for part in parts {
         let part = part.trim();
-        let (name, expression) = if set {
+        let entry = if set {
             let (name, expr) = part.split_once(char::is_whitespace).ok_or(HELP)?;
             let DiceExpressionParse::Parsed(expression) = parse_expression(expr.trim()) else {
                 return Err("先攻骰式无效；不支持人物属性或多轮骰点。");
             };
-            (name.to_owned(), expression)
+            ParsedEntry {
+                name: name.to_owned(),
+                expression,
+                binds_actor: false,
+            }
         } else {
             parse_record(part, default_name)?
         };
-        if !valid_name(&name) {
+        if !valid_name(&entry.name) {
             return Err("请指定 1–64 字的单位名，不含空格、逗号或控制字符；也可先 /set 昵称。");
         }
-        entries.push((name, expression));
+        entries.push(entry);
     }
-    if entries.iter().map(|(_, e)| e.total_dice()).sum::<u32>() > 200 {
+    if entries
+        .iter()
+        .map(|entry| entry.expression.total_dice())
+        .sum::<u32>()
+        > 200
+    {
         return Err("一次先攻命令最多投掷 200 颗骰子。");
     }
     Ok(entries)
 }
 
-fn parse_record(
-    part: &str,
-    default_name: Option<&str>,
-) -> Result<(String, DiceExpression), &'static str> {
+fn parse_record(part: &str, default_name: Option<&str>) -> Result<ParsedEntry, &'static str> {
     if let Some(expr) = part.strip_prefix('=') {
         return parse_record_expression(expr, default_name)?.ok_or("先攻骰式无效。");
     }
@@ -138,15 +177,16 @@ fn parse_record(
             return Err(HELP);
         };
         let name = part[end..].trim();
-        return Ok((
-            if name.is_empty() {
+        return Ok(ParsedEntry {
+            name: if name.is_empty() {
                 default_name.unwrap_or("")
             } else {
                 name
             }
             .to_owned(),
-            expr,
-        ));
+            expression: expr,
+            binds_actor: name.is_empty() && default_name.is_some(),
+        });
     }
 
     // 裸骰式复用 Roll domain 的完整表达式/“骰式 + 名称”前缀解析；只有确认
@@ -154,30 +194,33 @@ fn parse_record(
     if let Some(entry) = parse_record_expression(part, default_name)? {
         return Ok(entry);
     }
-    Ok((
-        if part.is_empty() {
+    Ok(ParsedEntry {
+        name: if part.is_empty() {
             default_name.unwrap_or("")
         } else {
             part
         }
         .to_owned(),
-        DiceExpression::default_d20(),
-    ))
+        expression: DiceExpression::default_d20(),
+        binds_actor: part.is_empty() && default_name.is_some(),
+    })
 }
 
 fn parse_record_expression(
     text: &str,
     default_name: Option<&str>,
-) -> Result<Option<(String, DiceExpression)>, &'static str> {
+) -> Result<Option<ParsedEntry>, &'static str> {
     match parse_roll_argument_with_default_die_sides(text, 20) {
         DiceRollArgumentParse::Parsed { spec, reason } => {
             if spec.repetitions != 1 {
                 return Err("先攻不支持多轮骰点，请用逗号分隔多个单位。");
             }
-            Ok(Some((
-                reason.or(default_name).unwrap_or("").to_owned(),
-                spec.expression,
-            )))
+            let binds_actor = reason.is_none() && default_name.is_some();
+            Ok(Some(ParsedEntry {
+                name: reason.or(default_name).unwrap_or("").to_owned(),
+                expression: spec.expression,
+                binds_actor,
+            }))
         }
         DiceRollArgumentParse::Invalid(_) => Err("先攻骰式无效。"),
         DiceRollArgumentParse::NotDiceExpression => Ok(None),
