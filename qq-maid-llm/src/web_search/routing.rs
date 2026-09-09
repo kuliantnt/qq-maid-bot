@@ -70,6 +70,16 @@ impl RoutedWebSearchExecutor {
                     .native_providers
                     .get(&provider)
                     .ok_or_else(|| unsupported_provider_error(provider.as_str()))?;
+                // 原生搜索没有 Chat 等价路径，旧模型须在网络请求前明确提示迁移。
+                if provider == ModelProvider::DeepSeek
+                    && crate::provider::deepseek::is_legacy_chat_model(&model.name)
+                {
+                    return Err(LlmError::new(
+                        "bad_request",
+                        "DeepSeek 旧 Chat 模型不支持 provider_native 搜索；请将 tools.web_search.routes.<name>.model 改为 deepseek:deepseek-v4-flash，或使用 Tavily",
+                        "request",
+                    ));
+                }
                 req.model_override = Some(model.name);
                 Ok((executor.clone(), req))
             }
@@ -81,7 +91,7 @@ fn unsupported_provider_error(provider: &str) -> LlmError {
     LlmError::new(
         "bad_request",
         format!(
-            "search provider `{provider}` is not configured for provider_native search; use built-in OpenAI/Gemini, declare an openai_responses provider, or configure Tavily"
+            "search provider `{provider}` is not configured for provider_native search; use built-in OpenAI/DeepSeek/Gemini, declare an openai_responses provider, or configure Tavily"
         ),
         "request",
     )

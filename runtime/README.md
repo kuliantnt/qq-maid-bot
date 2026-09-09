@@ -270,13 +270,13 @@ Markdown 文件
 
 ```toml
 [model_routes.private_main]
-candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-pro", "mimo:mimo-v2.5-pro", "deepseek:deepseek-chat"]
+candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-pro", "mimo:mimo-v2.5-pro", "deepseek:deepseek-v4-flash"]
 
 [model_routes.group_main]
-candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-flash", "mimo:mimo-v2.5", "deepseek:deepseek-chat"]
+candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-flash", "mimo:mimo-v2.5", "deepseek:deepseek-v4-flash"]
 
 [model_routes.aux]
-candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-flash", "mimo:mimo-v2.5", "deepseek:deepseek-chat"]
+candidates = ["openai:gpt-5.6-luna", "gemini:gemini-2.5-flash", "mimo:mimo-v2.5", "deepseek:deepseek-v4-flash"]
 
 [tools.web_search.routes.private_search]
 model = "gpt-5.6-luna"
@@ -300,10 +300,10 @@ auth_scheme = "Bearer"
 
 ```toml
 [model_routes.private_main]
-candidates = ["mimo:mimo-v2.5-pro", "deepseek:deepseek-chat"]
+candidates = ["mimo:mimo-v2.5-pro", "deepseek:deepseek-v4-flash"]
 
 [model_routes.group_main]
-candidates = ["mimo:mimo-v2.5", "deepseek:deepseek-chat"]
+candidates = ["mimo:mimo-v2.5", "deepseek:deepseek-v4-flash"]
 ```
 
 OpenCode 可直接在 Web 配置中心保存共用的 `OPENCODE_API_KEY`，并按需添加三个固定预设。卡片只允许修改 Base URL 和请求超时，`api_key_env`、认证 Header 与 Scheme 固定为 `OPENCODE_API_KEY`、`Authorization` 与 `Bearer`：

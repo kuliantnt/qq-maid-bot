@@ -155,7 +155,7 @@ runtime/.env
 
 ```toml
 [model_routes.private_main]
-candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-chat"]
+candidates = ["openai:gpt-5.4-mini", "deepseek:deepseek-v4-flash"]
 ```
 
 候选项按从左到右的优先级执行。`qq-maid-llm` 会在超时、HTTP/网络错误、Provider 协议错误、上游空响应、429 和 5xx 等可恢复失败后尝试下一个候选；配置错误、本地请求构造错误和业务参数错误不会继续请求其他模型。当前普通聊天使用请求开始时解析出的 `ResolvedAgentPolicy`；会话标题、Memory 草稿、会话压缩、翻译命令和 RSS 翻译使用同一场景策略中的 `aux_route`，缺省辅助路线时继承当前场景 `main_route`。Tool Loop 使用同一请求级策略中的模型、输出预算、reasoning effort 和最大轮数；`/查` 与自然语言 `web_search` 共用 `[tools.web_search]` 后端：`provider_native` 将裸搜索模型兼容为内置 OpenAI，并按显式前缀选择 OpenAI Responses、自定义 `openai_responses` 或 Gemini Google Search；`openai_compatible` 不冒充原生搜索，需改用 Tavily。`tavily` 使用统一 Tavily Search 执行器，`disabled` 则关闭该能力。

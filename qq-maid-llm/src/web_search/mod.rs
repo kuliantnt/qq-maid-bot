@@ -330,6 +330,21 @@ pub fn build_web_search_executor(config: &LlmConfig) -> Result<DynWebSearchExecu
     insert_native_provider(&mut native_providers, ModelProvider::OpenAi, openai)?;
     insert_native_provider(&mut native_providers, ModelProvider::Gemini, gemini)?;
 
+    let deepseek_config = crate::provider::deepseek::responses_config(config);
+    let deepseek: DynWebSearchExecutor = match deepseek_config.api_key.as_deref() {
+        Some(key) if !key.trim().is_empty() => {
+            Arc::new(ResponsesWebSearchExecutor::new_configured(
+                &deepseek_config,
+                config.web_search.default_model.clone(),
+                config.request_timeout_seconds,
+            )?)
+        }
+        _ => Arc::new(MissingConfiguredResponsesWebSearchExecutor {
+            api_key_env: deepseek_config.api_key_env.clone(),
+        }),
+    };
+    insert_native_provider(&mut native_providers, ModelProvider::DeepSeek, deepseek)?;
+
     let mut custom_provider_ids = std::collections::HashSet::new();
     for provider in &config.openai_compatible_providers {
         if !custom_provider_ids.insert(provider.id.clone()) {

@@ -200,7 +200,7 @@ impl AgentStepSession for ResponsesAgentSession {
             log_input_size_after_append(self.provider(), self.model(), self.input_size_estimate());
         }
 
-        let payload = openai_tool_loop_payload(
+        let mut payload = openai_tool_loop_payload(
             &self.input,
             &self.tool_defs,
             &self.model,
@@ -208,6 +208,11 @@ impl AgentStepSession for ResponsesAgentSession {
             self.reasoning_effort,
             allow_tool_calls,
             false,
+        );
+        crate::provider::openai::payload::apply_responses_provider_options(
+            &mut payload,
+            &self.provider,
+            self.reasoning_effort,
         );
         let (payload, tools_disabled) = enforce_tool_loop_budget(self.context_budget, payload)?;
         let response = send_openai_responses_request(
@@ -285,7 +290,7 @@ impl AgentStepSession for ResponsesAgentSession {
                 responses_input_size_estimate(&input),
             );
         }
-        let payload = openai_tool_loop_payload(
+        let mut payload = openai_tool_loop_payload(
             &input,
             &self.tool_defs,
             &self.model,
@@ -293,6 +298,11 @@ impl AgentStepSession for ResponsesAgentSession {
             self.reasoning_effort,
             allow_tool_calls,
             true,
+        );
+        crate::provider::openai::payload::apply_responses_provider_options(
+            &mut payload,
+            &self.provider,
+            self.reasoning_effort,
         );
         let (payload, tools_disabled) = enforce_tool_loop_budget(self.context_budget, payload)?;
         let response = send_openai_responses_request(

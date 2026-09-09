@@ -1,6 +1,6 @@
 //! OpenAI 兼容 Chat Completions Tool Loop 的协议适配层。
 //!
-//! DeepSeek 和 BigModel 都通过 `/chat/completions` 暴露 `tools` / `tool_calls`
+//! BigModel 与 OpenAI-compatible Provider 通过 `/chat/completions` 暴露 `tools` / `tool_calls`
 //! 协议，这里统一把一次模型请求转换为 [`AgentStep`]。轮次推进、最大轮数、
 //! 工具执行和退出条件由 `qq_maid_llm::agent_loop::run_agent_loop` 统一控制；
 //! 本模块不再维护自己的循环，避免 provider 侧重复维护同一套退出逻辑。

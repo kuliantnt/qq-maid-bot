@@ -35,7 +35,7 @@ pub use voice::{
 
 // ---- 默认常量 ----
 pub const DEFAULT_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com"; // DeepSeek 默认 API 地址
-pub const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-chat"; // 默认 DeepSeek 模型
+pub const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-v4-flash"; // 新部署默认使用稳定 Responses 模型
 pub const DEFAULT_BIGMODEL_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4"; // BigModel 通用 API 地址
 pub const DEFAULT_BIGMODEL_MODEL: &str = "glm-5.2"; // 默认 BigModel 模型
 pub const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai"; // Gemini OpenAI-compatible API 地址
