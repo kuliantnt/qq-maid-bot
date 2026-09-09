@@ -310,6 +310,10 @@ impl<'a> CommandDispatcher<'a> {
                 req.conversation_kind,
                 req.private_reply_target.as_ref(),
                 &self.service.notification_store,
+                req.message_id.as_deref(),
+                req.platform.as_str(),
+                req.account_id.as_deref(),
+                req.conversation_id.as_deref(),
             );
             return Ok(DispatchOutcome::Respond(Box::new(command_response(
                 reply,

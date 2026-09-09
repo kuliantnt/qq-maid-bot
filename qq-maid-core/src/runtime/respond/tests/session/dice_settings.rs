@@ -79,6 +79,7 @@ async fn initiative_and_hidden_rolls_are_deterministic_commands() {
         PushTargetType::Private,
         "test-user",
     ));
+    hidden.message_id = Some("hidden-roll-msg-1".to_owned());
     let response = service.respond(hidden).await.unwrap();
     let text = response.text.unwrap();
     assert!(text.contains("私发队列"));

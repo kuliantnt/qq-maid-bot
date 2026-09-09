@@ -13,6 +13,7 @@ use super::*;
 
 mod dm_success;
 mod fallback;
+mod hidden_roll;
 mod local;
 mod parsing;
 

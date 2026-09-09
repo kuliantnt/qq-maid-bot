@@ -1,4 +1,6 @@
 //! 暗骰的私有结果只写 Outbox，不进入群响应、会话历史或模型。
+use std::fmt::Write as _;
+
 use super::{RollCommand, dice::csprng_roller, parse_roll_command_with_default_die_sides};
 use crate::{
     runtime::{
@@ -8,6 +10,7 @@ use crate::{
     storage::notification::{NotificationOutboxStore, NotificationUpsert},
 };
 use qq_maid_common::identity_context::ConversationKind;
+use sha2::{Digest, Sha256};
 
 #[derive(Debug)]
 pub(crate) struct ExtendedRollCommand {
@@ -45,6 +48,7 @@ pub(crate) fn parse_extended_command(text: &str) -> Option<ExtendedRollCommand> 
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_extended_command(
     command: &ExtendedRollCommand,
     sides: u8,
@@ -52,6 +56,41 @@ pub(crate) fn execute_extended_command(
     kind: ConversationKind,
     target: Option<&PushTarget>,
     store: &NotificationOutboxStore,
+    inbound_id: Option<&str>,
+    platform: &str,
+    account_id: Option<&str>,
+    conversation_id: Option<&str>,
+) -> String {
+    let mut roller = csprng_roller();
+    execute_extended_command_with_roller(
+        command,
+        sides,
+        name,
+        kind,
+        target,
+        store,
+        inbound_id,
+        platform,
+        account_id,
+        conversation_id,
+        &mut roller,
+    )
+}
+
+/// 可注入 Roller 的暗骰执行入口；测试用固定 Roller 验证幂等与投递链路。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_extended_command_with_roller<R: super::dice::Roller>(
+    command: &ExtendedRollCommand,
+    sides: u8,
+    name: Option<&str>,
+    kind: ConversationKind,
+    target: Option<&PushTarget>,
+    store: &NotificationOutboxStore,
+    inbound_id: Option<&str>,
+    platform: &str,
+    account_id: Option<&str>,
+    conversation_id: Option<&str>,
+    roller: &mut R,
 ) -> String {
     if command.delegate {
         return "代骰入口已识别；人物卡与被代骰者上下文尚未接入，暂不执行。无状态投掷请用 /r，暗骰请用 /rh。".to_owned();
@@ -69,6 +108,22 @@ pub(crate) fn execute_extended_command(
         return "当前平台未提供可信私发目标，无法执行群内暗骰。请私聊使用 /rh；本次未投骰。"
             .to_owned();
     }
+    // 群聊暗骰属于“随机结果 + 外部通知副作用”的高副作用入口：
+    // 必须先以可信入站事件身份领取稳定幂等键，再进行任何随机投掷。
+    // 同一入站消息重放时命中已有 Outbox 任务，直接返回提示，不重新投骰，
+    // 也不会覆盖第一次已经确定的暗骰 payload。
+    let dedupe_key = if private {
+        String::new()
+    } else {
+        let Some(inbound_id) = inbound_id.map(str::trim).filter(|value| !value.is_empty()) else {
+            return "当前消息缺少可信消息 ID，无法避免暗骰重复执行；本次未投骰。".to_owned();
+        };
+        let key = hidden_roll_dedupe_key(platform, account_id, conversation_id, inbound_id);
+        if matches!(store.get_by_dedupe_key(&key), Ok(Some(_))) {
+            return "该暗骰结果已进入私发队列，请留意机器人私聊；不会重复投骰。".to_owned();
+        }
+        key
+    };
     let parsed =
         parse_roll_command_with_default_die_sides(&format!("/r {}", command.argument), sides);
     let (expression, repetitions, reason) = match parsed {
@@ -81,14 +136,13 @@ pub(crate) fn execute_extended_command(
         }) => (expression, repetitions, reason),
         _ => return "暗骰参数无效；只支持本地骰式及原因，不执行模型判定。".to_owned(),
     };
-    let mut roller = csprng_roller();
     let mut lines = vec![format!(
         "暗骰{}{}",
         name.map(|n| format!(" · {n}")).unwrap_or_default(),
         reason.map(|r| format!(" · {r}")).unwrap_or_default()
     )];
     for _ in 0..repetitions {
-        let Ok(result) = expression.roll(&mut roller) else {
+        let Ok(result) = expression.roll(roller) else {
             return "暗骰计算失败，未发送结果。".to_owned();
         };
         lines.push(format!(
@@ -102,15 +156,21 @@ pub(crate) fn execute_extended_command(
     if private {
         return result;
     }
-    let id = uuid::Uuid::new_v4().to_string();
+    // payload 必须满足 Notification Worker 的校验：message_type 与 text 均非空。
+    // OneBot 文本私发在仓库当前约定中使用 "text"。
+    let fallback_text = result.clone();
     let request = NotificationUpsert {
         source_type: "hidden_roll".to_owned(),
-        source_id: id.clone(),
-        dedupe_key: format!("hidden_roll:{id}"),
+        source_id: dedupe_key.clone(),
+        dedupe_key: dedupe_key.clone(),
         target: target.expect("已校验群内私发目标").clone(),
         channel: "push".to_owned(),
         kind: "hidden_roll".to_owned(),
-        payload: serde_json::json!({"text":result}),
+        payload: serde_json::json!({
+            "message_type": "text",
+            "text": result,
+            "fallback_text": fallback_text,
+        }),
         scheduled_at: now_iso_cn(),
         max_attempts: 3,
         reactivate_cancelled: false,
@@ -119,6 +179,42 @@ pub(crate) fn execute_extended_command(
         Ok(_) => "暗骰结果已进入私发队列，请留意机器人私聊；尚未确认送达。".to_owned(),
         Err(_) => "暗骰结果入队失败，未发送结果，请稍后重试。".to_owned(),
     }
+}
+
+/// 由平台 / 账号 / 会话 / 可信 message_id 构造暗骰专用稳定幂等键。
+/// 不同 conversation 或账号即使 message_id 碰撞也会被 scope 隔离，
+/// 同一可信入站消息重放则始终命中同一个 dedupe_key。
+fn hidden_roll_dedupe_key(
+    platform: &str,
+    account_id: Option<&str>,
+    conversation_id: Option<&str>,
+    inbound_id: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(platform.trim().as_bytes());
+    hasher.update([0]);
+    hasher.update(
+        account_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("-")
+            .as_bytes(),
+    );
+    hasher.update([0]);
+    hasher.update(
+        conversation_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("-")
+            .as_bytes(),
+    );
+    hasher.update([0]);
+    hasher.update(inbound_id.trim().as_bytes());
+    let mut output = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        let _ = write!(output, "{byte:02x}");
+    }
+    format!("hidden_roll:{output}")
 }
 
 #[cfg(test)]
