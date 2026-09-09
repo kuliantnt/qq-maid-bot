@@ -17,13 +17,15 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.25.0`，项目已进入 `25.x` 版本线。这个大版本把模型能力做成了可管理的资产：管理员第一次可以在 Web Console 里完成「新建/编辑供应商连接 → 从连接发现模型 → 查看真实元数据 → 本地覆盖与启停 → 一键加入 Route」的完整闭环；LLM 侧则引入了 Effective Model Catalog（内嵌 Models.dev 快照 + 本地 `models.json` 覆盖）作为模型信息的统一事实源，并把 DeepSeek 迁移到 Responses 协议（含原生联网搜索）。升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)，供应商与模型管理细节见 Wiki [供应商与模型管理](https://github.com/kuliantnt/qq-maid-bot/wiki/供应商与模型管理)。
+当前稳定版本为 `v0.25.1`，项目处于 `25.x` 版本线。本版本在供应商与模型管理闭环基础上新增基础先攻、暗骰和 SealDice 风格紧凑命令，并支持在推进先攻时结构化提醒当前玩家。升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)，供应商与模型管理细节见 Wiki [供应商与模型管理](https://github.com/kuliantnt/qq-maid-bot/wiki/供应商与模型管理)，先攻与骰点用法见 Wiki [骰子使用教程](https://github.com/kuliantnt/qq-maid-bot/wiki/骰子使用教程)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
 想直接使用骰点功能，可查看 [骰子使用教程](./docs/guides/dice.md)。
 
 想试试周易起卦，可发送 `/起卦`、`/算卦` 或 `/卜卦`（别名 `/iching`）；这是不调用模型的本地确定性命令，结果会作为当前会话回执保存，之后可以直接追问，完整使用说明见 Wiki [使用说明](https://github.com/kuliantnt/qq-maid-bot/wiki/使用说明)。
+
+想开一局跑团，可用 `/ri` 录入先攻、`/init` 查看和推进回合、`/rh` 投暗骰；紧凑写法如 `/ri18 哥布林`、`.initend` 也可用。完整语法、身份提醒和平台投递边界见 Wiki [骰子使用教程](https://github.com/kuliantnt/qq-maid-bot/wiki/骰子使用教程)。
 
 ## 快速开始
 
@@ -137,10 +139,12 @@ runtime/botctl.sh status
 
 ## 25.x 版本线更新
 
-当前稳定版本为 `v0.25.0`。需要查看本版本线的详细变更和配置迁移提示时，再展开下面的更新记录：
+当前稳定版本为 `v0.25.1`。需要查看本版本线的详细变更和配置迁移提示时，再展开下面的更新记录：
 
 <details>
 <summary>展开查看 25.x / 24.x 版本更新</summary>
+
+- **基础先攻、暗骰与当前玩家提醒**（v0.25.1，PR #698/#699）：新增 `/ri` 先攻录入和 `/init` 查看、推进、清空、维护，支持固定值、D20 修正、指定骰式、优势／劣势和批量录入；`/rh` 暗骰在私聊直接返回，OneBot 群聊经 Notification Outbox 私发，QQ 官方群缺少可信 C2C 目标时明确拒绝。`/init` 子命令和 `/ri18`、`/ri+5`、`/ri优势+4` 等 SealDice 风格紧凑写法可用，推进到使用默认名称录入的玩家时按平台发送结构化 Mention。先攻表为进程内临时状态，重启清空，无 SQLite migration、配置迁移或必填环境变量。
 
 - **供应商与模型管理闭环（首个 25.x 版本）**（v0.25.0，PR #691/#692/#694/#696）：
   - **统一供应商管理**：Web Console 供应商页新增“＋ 新建供应商”弹窗，支持 OpenCode 三预设以及 OpenAI、DeepSeek、BigModel、Gemini 等受信模板，也支持自定义 Connection 的新建、编辑、启停与删除；自定义连接使用服务端生成的独立 Credential Slot，Secret 走认证加密存储与双 revision 校验，不做品牌专用的前端 CRUD。
