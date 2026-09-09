@@ -733,3 +733,26 @@ fn empty_qweather_configuration_disables_weather_and_uses_default_hosts() {
     assert!(!env_example.contains("你的和风天气"));
     snapshot.restore();
 }
+
+#[test]
+fn deepseek_defaults_and_public_examples_use_supported_responses_model() {
+    use qq_maid_llm::provider::{LlmProvider, ToolCallingProtocol, deepseek::DeepSeekProvider};
+    let _guard = ENV_LOCK.lock().unwrap();
+    let config = AppConfig::from_env().unwrap();
+    let mut llm = config.llm_config();
+    llm.deepseek_api_key = Some("test-key".to_owned());
+    assert_eq!(llm.deepseek_model, "deepseek-v4-flash");
+    let provider = DeepSeekProvider::new(&llm).unwrap();
+    assert_eq!(
+        provider.tool_calling_protocol(None),
+        Some(ToolCallingProtocol::OpenAiResponses)
+    );
+    for text in [
+        include_str!("../../../runtime/config/agent.example.toml"),
+        include_str!("../../../runtime/README.md"),
+        include_str!("../../README.md"),
+    ] {
+        assert!(!text.contains("deepseek:deepseek-chat"));
+        assert!(text.contains("deepseek:deepseek-v4-flash"));
+    }
+}

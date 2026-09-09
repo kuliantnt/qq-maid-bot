@@ -590,21 +590,25 @@ fn default_agent_toml_prefers_luna_and_keeps_provider_fallbacks() {
     let group = config.resolve(ChatScene::Group).unwrap();
     assert_eq!(
         private.main_model,
-        "openai:gpt-5.6-luna,gemini:gemini-2.5-pro,mimo:mimo-v2.5-pro,deepseek:deepseek-chat"
+        "openai:gpt-5.6-luna,gemini:gemini-2.5-pro,mimo:mimo-v2.5-pro,deepseek:deepseek-v4-flash"
     );
     assert_eq!(
         private.aux_model.as_deref(),
-        Some("openai:gpt-5.6-luna,gemini:gemini-2.5-flash,mimo:mimo-v2.5,deepseek:deepseek-chat")
+        Some(
+            "openai:gpt-5.6-luna,gemini:gemini-2.5-flash,mimo:mimo-v2.5,deepseek:deepseek-v4-flash"
+        )
     );
     assert_eq!(private.search_model, "gpt-5.6-luna");
     assert_eq!(private.search_backend, WebSearchBackend::ProviderNative);
     assert_eq!(
         group.main_model,
-        "openai:gpt-5.6-luna,gemini:gemini-2.5-flash,mimo:mimo-v2.5,deepseek:deepseek-chat"
+        "openai:gpt-5.6-luna,gemini:gemini-2.5-flash,mimo:mimo-v2.5,deepseek:deepseek-v4-flash"
     );
     assert_eq!(
         group.aux_model.as_deref(),
-        Some("openai:gpt-5.6-luna,gemini:gemini-2.5-flash,mimo:mimo-v2.5,deepseek:deepseek-chat")
+        Some(
+            "openai:gpt-5.6-luna,gemini:gemini-2.5-flash,mimo:mimo-v2.5,deepseek:deepseek-v4-flash"
+        )
     );
     assert_eq!(group.search_model, "gpt-5.6-luna");
     assert_eq!(
@@ -629,7 +633,7 @@ fn default_agent_toml_declares_luna_first_without_embedding_secrets() {
     assert!(active_config.contains("openai:gpt-5.6-luna"));
     assert!(active_config.contains("gemini:gemini-2.5-pro"));
     assert!(active_config.contains("mimo:mimo-v2.5-pro"));
-    assert!(active_config.contains("deepseek:deepseek-chat"));
+    assert!(active_config.contains("deepseek:deepseek-v4-flash"));
     assert!(active_config.contains("[tools.web_search.routes.private_search]"));
     assert!(active_config.contains("[tools.web_search.routes.group_search]"));
     assert!(active_config.contains("backend = \"provider_native\""));
@@ -713,21 +717,21 @@ fn default_agent_toml_exposes_expected_luna_first_route_displays() {
     assert_eq!(
         route_displays.get("agent.model_routes.private_main"),
         Some(
-            &"openai:gpt-5.6-luna,gemini:gemini-2.5-pro,mimo:mimo-v2.5-pro,deepseek:deepseek-chat"
+            &"openai:gpt-5.6-luna,gemini:gemini-2.5-pro,mimo:mimo-v2.5-pro,deepseek:deepseek-v4-flash"
                 .to_owned()
         )
     );
     assert_eq!(
         route_displays.get("agent.model_routes.group_main"),
         Some(
-            &"openai:gpt-5.6-luna,gemini:gemini-2.5-flash,mimo:mimo-v2.5,deepseek:deepseek-chat"
+            &"openai:gpt-5.6-luna,gemini:gemini-2.5-flash,mimo:mimo-v2.5,deepseek:deepseek-v4-flash"
                 .to_owned()
         )
     );
     assert_eq!(
         route_displays.get("agent.model_routes.aux"),
         Some(
-            &"openai:gpt-5.6-luna,gemini:gemini-2.5-flash,mimo:mimo-v2.5,deepseek:deepseek-chat"
+            &"openai:gpt-5.6-luna,gemini:gemini-2.5-flash,mimo:mimo-v2.5,deepseek:deepseek-v4-flash"
                 .to_owned()
         )
     );

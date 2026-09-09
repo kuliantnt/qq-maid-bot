@@ -58,7 +58,10 @@ impl ConfigCenter {
         let connection = self.resolve_connection_for_read(id, expected_revision)?;
         qq_maid_llm::provider::openai::diagnostics::test_connection(
             &connection.base_url,
-            connection.responses,
+            // 诊断与运行时共用旧模型协议规则；自定义 Connection 仍尊重显式 kind。
+            connection.responses
+                && !(id == "deepseek"
+                    && qq_maid_llm::provider::deepseek::is_legacy_chat_model(model.trim())),
             &connection.auth,
             &connection.api_key,
             model,
@@ -161,7 +164,7 @@ impl ConfigCenter {
             .map(str::trim)
             .find(|value| !value.is_empty())
             .unwrap_or(default_url);
-        // 内置 DeepSeek 与运行时一致走 Responses，不能用 Chat 探针伪造兼容结果。
+        // DeepSeek 默认使用 Responses；模型探针另按旧模型兼容规则选择 Chat。
         let responses = id == "deepseek"
             || id == "openai"
                 && crate::config::parse_openai_api_mode(

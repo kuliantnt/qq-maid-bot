@@ -644,20 +644,30 @@ async fn builtin_discovery_uses_protocol_and_classifies_endpoint_support() {
 }
 
 #[tokio::test]
-async fn deepseek_connection_diagnostic_uses_responses_even_when_openai_is_chat_only() {
-    use axum::{Json, Router, http::HeaderMap, routing::post};
+async fn deepseek_connection_diagnostic_selects_protocol_even_when_openai_is_chat_only() {
+    use axum::{Json, Router, extract::OriginalUri, http::HeaderMap, routing::post};
     use qq_maid_llm::provider::openai::diagnostics::ProbeState;
-    let app = Router::new().route(
-        "/responses",
-        post(
-            |headers: HeaderMap, Json(body): Json<serde_json::Value>| async move {
-                assert_eq!(headers["authorization"], "Bearer test-key");
-                assert_eq!(body["model"], "test-model");
-                assert!(body.get("input").is_some());
-                Json(serde_json::json!({"output": [{"type": "message", "content": [{"type": "output_text", "text": "OK"}]}]}))
-            },
-        ),
-    );
+    async fn handler(
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+        Json(body): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
+        assert_eq!(headers["authorization"], "Bearer test-key");
+        if body["model"] == "deepseek-chat" {
+            assert_eq!(uri.path(), "/chat/completions");
+            assert!(body.get("messages").is_some());
+            Json(serde_json::json!({"choices": [{"message": {"content": "OK"}}]}))
+        } else {
+            assert_eq!(uri.path(), "/responses");
+            assert!(body.get("input").is_some());
+            Json(
+                serde_json::json!({"output": [{"type": "message", "content": [{"type": "output_text", "text": "OK"}]}]}),
+            )
+        }
+    }
+    let app = Router::new()
+        .route("/responses", post(handler))
+        .route("/chat/completions", post(handler));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -668,10 +678,13 @@ async fn deepseek_connection_diagnostic_uses_responses_even_when_openai_is_chat_
         ("DEEPSEEK_API_KEY".into(), "test-key".into()),
     ]));
     let revision = center.managed_file.load().unwrap().revision;
-    let result = center
-        .test_provider_connection("deepseek", &revision, "test-model")
-        .await
-        .unwrap();
-    assert_eq!(result.model_call, ProbeState::Success);
+    // 同一连接顺序验证两种协议，避免并发占用全局诊断限流名额。
+    for model in ["test-model", "deepseek-v4-flash", "deepseek-chat"] {
+        let result = center
+            .test_provider_connection("deepseek", &revision, model)
+            .await
+            .unwrap();
+        assert_eq!(result.model_call, ProbeState::Success);
+    }
     server.abort();
 }

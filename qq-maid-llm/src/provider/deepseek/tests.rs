@@ -366,3 +366,163 @@ async fn missing_search_key_reports_deepseek_config_error() {
         .unwrap_err();
     assert!(error.message.contains("DEEPSEEK_API_KEY"));
 }
+
+#[tokio::test]
+async fn model_protocol_is_selected_before_chat_stream_and_agent_requests() {
+    // 同时覆盖默认值、请求覆盖和带前缀路由；旧模型与未知显式模型均不能被改名。
+    for model in [
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash-vision-exp",
+        "private-model",
+    ] {
+        let legacy = is_legacy_chat_model(model);
+        for use_override in [false, true] {
+            for mode in ["chat", "stream", "agent"] {
+                let body = if legacy {
+                    if mode == "stream" {
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"回复\"}}]}\n\ndata: [DONE]\n\n".to_owned()
+                    } else {
+                        json!({"choices": [{"message": {"role": "assistant", "content": "回复"}, "finish_reason": "stop"}]}).to_string()
+                    }
+                } else if mode == "stream" {
+                    sse(answer())
+                } else {
+                    answer().to_string()
+                };
+                let (url, state) = mock(vec![(StatusCode::OK, body)]).await;
+                let mut cfg = config(url, mode == "stream");
+                cfg.deepseek_model = if use_override {
+                    // 强制验证请求覆盖能跨协议，而非只看初始化默认值。
+                    if legacy {
+                        "deepseek-v4-flash"
+                    } else {
+                        "deepseek-chat"
+                    }
+                    .to_owned()
+                } else {
+                    format!("deepseek:{model}")
+                };
+                let provider = DeepSeekProvider::new(&cfg).unwrap();
+                let mut req = request();
+                req.model = use_override.then(|| format!("deepseek:{model}"));
+                assert_eq!(
+                    provider.tool_calling_protocol(req.model.as_deref()),
+                    Some(if legacy {
+                        ToolCallingProtocol::ChatCompletionsToolCalls
+                    } else {
+                        ToolCallingProtocol::OpenAiResponses
+                    })
+                );
+                let reply = match mode {
+                    "chat" => provider.chat(req).await.unwrap().reply,
+                    "stream" => {
+                        collect_llm_stream(
+                            provider.stream_chat(req).await.unwrap(),
+                            "deepseek",
+                            model,
+                        )
+                        .await
+                        .unwrap()
+                        .reply
+                    }
+                    _ => {
+                        provider
+                            .chat_with_tools(ToolChatRequest {
+                                chat: req,
+                                tools: ToolRegistry::new()
+                                    .register(WeatherToolStub::new("晴"))
+                                    .unwrap(),
+                                tool_context: test_tool_context(),
+                                max_rounds: 2,
+                                progress_sink: None,
+                                final_delta_sink: None,
+                                run_handle: None,
+                            })
+                            .await
+                            .unwrap()
+                            .reply
+                    }
+                };
+                assert_eq!(reply, "回复");
+                let state = state.lock().await;
+                assert_eq!(state.requests.len(), 1, "{model}/{mode}");
+                assert_eq!(
+                    state.requests[0].0,
+                    if legacy {
+                        "/chat/completions"
+                    } else {
+                        "/responses"
+                    }
+                );
+                assert_eq!(state.requests[0].2["model"], model);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn responses_parameter_400_never_switches_to_chat() {
+    for mode in ["chat", "stream", "agent"] {
+        let (url, state) = mock(vec![(
+            StatusCode::BAD_REQUEST,
+            json!({"error": {"message": "input_image cannot have both image_url and file_id"}})
+                .to_string(),
+        )])
+        .await;
+        let provider = DeepSeekProvider::new(&config(url, mode == "stream")).unwrap();
+        let mut req = request();
+        req.model = Some("deepseek:deepseek-v4-flash".to_owned());
+        let error = match mode {
+            "chat" => provider.chat(req).await.unwrap_err(),
+            "stream" => match provider.stream_chat(req).await {
+                Err(error) => error,
+                Ok(stream) => collect_llm_stream(stream, "deepseek", "deepseek-v4-flash")
+                    .await
+                    .unwrap_err(),
+            },
+            _ => provider
+                .chat_with_tools(ToolChatRequest {
+                    chat: req,
+                    tools: ToolRegistry::new()
+                        .register(WeatherToolStub::new("晴"))
+                        .unwrap(),
+                    tool_context: test_tool_context(),
+                    max_rounds: 2,
+                    progress_sink: None,
+                    final_delta_sink: None,
+                    run_handle: None,
+                })
+                .await
+                .unwrap_err(),
+        };
+        assert_eq!(error.upstream_status, Some(400));
+        assert!(error.message.contains("input_image cannot have both"));
+        let state = state.lock().await;
+        assert_eq!(state.requests.len(), 1);
+        assert_eq!(state.requests[0].0, "/responses");
+    }
+}
+
+#[tokio::test]
+async fn legacy_native_search_rejected_before_network_with_migration_hint() {
+    let (url, state) = mock(Vec::new()).await;
+    let executor = build_web_search_executor(&config(url, false)).unwrap();
+    for model in ["deepseek-chat", "deepseek-reasoner"] {
+        for stream in [false, true] {
+            let mut req = search_request();
+            req.model_override = Some(format!("deepseek:{model}"));
+            let error = if stream {
+                let (tx, _rx) = tokio::sync::mpsc::channel(8);
+                executor.query_stream(req, tx).await.unwrap_err()
+            } else {
+                executor.query(req).await.unwrap_err()
+            };
+            assert!(error.message.contains("tools.web_search.routes"));
+            assert!(error.message.contains("deepseek:deepseek-v4-flash"));
+        }
+    }
+    assert!(state.lock().await.requests.is_empty());
+}

@@ -165,7 +165,7 @@ runtime/botctl.sh status
 - **查询与订阅**：查询天气、火车时刻和网页信息，支持多对象对比式联网搜索；订阅 RSS/Atom 并主动推送更新。
 - **记忆与知识库**：个人记忆、群内个人画像和群公共记忆分域管理，并按场景与可见性召回。用户明确要求“记住”时可直接保存；可选的确定性整理（`MEMORY_CONSOLIDATION_ENABLED`）与 Session Dream（`MEMORY_DREAM_ENABLED`）分开开关。Dream 只从会话消息提取安全长期事实，写入个人记忆或当前成员群画像，不覆盖已确认记忆；本地 Markdown 可自动索引并按需检索。
 - **受控工具与运维命令**：模型只能调用服务端注册并按场景放行的工具；管理员可通过默认关闭的 `/ops` 白名单命令触发固定程序，结果以真实执行或持久化结果为准。
-- **多模型路由**：支持 OpenAI、Gemini、MiMo、DeepSeek 和 OpenAI-compatible Provider，并可按候选链自动降级。
+- **多模型路由**：支持 OpenAI、Gemini、MiMo、DeepSeek 和 OpenAI-compatible Provider，并可按候选链自动降级。DeepSeek 新部署默认使用 V4 Flash Responses，旧 Chat 配置保留兼容路径，详见 [协议选择规则](qq-maid-llm/README.md#deepseek-responses-使用边界)。
 
 ## 平台支持
 

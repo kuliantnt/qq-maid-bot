@@ -20,7 +20,7 @@ qq-maid-common / reqwest / serde / tokio
 
 - OpenAI Responses API 主链路（system/user 用 `input_text`、assistant 用 `output_text`、标准 completed 提取，以及“正常 HTTP EOF + 非空文本 + 无未闭合 function call/解析错误/显式失败”的兼容完成；支持 delta/completed/failed/incomplete/error、跨 chunk 与 CRLF、受剩余预算约束的空流回退、usage 与 cached token 提取、HTTP 错误正文裁剪、200 但正文为空返回明确错误）。
 - OpenAI Chat Completions 兼容实现（基于 `reqwest`，统一编码文字与 `image_url` 图片输入，支持流式与非流式、`[DONE]`、usage 与 cached token 提取、空流补非流、401/403/429/timeout/5xx 与非标准错误正文分类）。
-- DeepSeek 复用公共 Responses adapter，支持普通/流式聊天、Function Tool Loop、`input_image` 和显式 reasoning effort；不做同 Provider 的 Chat Completions 回退，失败继续由候选链处理。
+- DeepSeek 复用公共 Responses adapter，支持普通/流式聊天、Function Tool Loop、`input_image` 和显式 reasoning effort；旧 Chat 模型在请求前走兼容 adapter，不做响应错误触发的跨协议回退，失败继续由候选链处理。
 - 模型候选链路由：按 `agent.toml` 中的候选顺序调用、成功立即停止、临时错误降级、永久错误终止、全部失败返回聚合错误；OpenAI Responses → Chat Completions fallback 规则不变。
 - 通用 SSE frame 解析（聊天 Responses 与 Web Search 共用，处理 CRLF、`event:`/`data:`、`[DONE]`）。
 - Responses + `web_search` 工具协议：内置 OpenAI、DeepSeek 与自定义 `openai_responses` Provider 共用请求 payload、HTTP transport、SSE 文本增量、answer 提取和 sources 提取。
@@ -39,7 +39,15 @@ qq-maid-common / reqwest / serde / tokio
 
 ## DeepSeek Responses 使用边界
 
-DeepSeek 继续使用 `DEEPSEEK_API_KEY` 与 `DEEPSEEK_BASE_URL`（默认 `https://api.deepseek.com`），普通聊天请求 `/responses`。原生搜索须在现有 `agent.toml` 的 `tools.web_search` 中选用 `provider_native`，并将对应 `routes.<name>.model` 设为 `deepseek:<model>`；场景与工具白名单仍然生效，普通聊天不会自动添加 `web_search`。
+DeepSeek 继续使用 `DEEPSEEK_API_KEY` 与 `DEEPSEEK_BASE_URL`（默认 `https://api.deepseek.com`），新部署默认模型为 `deepseek-v4-flash`。原生搜索须在现有 `agent.toml` 的 `tools.web_search` 中选用 `provider_native`，并将对应 `routes.<name>.model` 设为 `deepseek:deepseek-v4-flash`；场景与工具白名单仍然生效，普通聊天不会自动添加 `web_search`。
+
+协议在发请求前按有效模型（请求覆盖优先于默认值，支持裸名及 `deepseek:` 前缀）选择：
+
+- `deepseek-chat`、`deepseek-reasoner` 精确匹配历史模型，使用 `/chat/completions`，普通聊天、SSE 和 Tool Loop 共用此规则；已有配置无需强制迁移。
+- `deepseek-v4-flash`、`deepseek-v4-pro`、`deepseek-v4-flash-vision-exp` 使用 `/responses`。
+- 其他显式 DeepSeek 模型名原样使用 Responses，不改写为默认模型、不猜能力；若私有网关模型仅支持 Chat，请通过自定义 `openai_compatible` Provider 明确声明协议。
+
+Responses 的 400 参数错误和其他 HTTP 错误均不会改走 Chat；保留已有候选链错误分类及同协议空流重试。原生搜索没有旧 Chat 等价路径，旧模型会在请求前收到配置迁移提示，需修改 `tools.web_search.routes.<name>.model` 或选择 Tavily。公开模板更新不覆盖已有私有 `agent.toml`。
 
 图片沿用公共 URL / 本地图片 data URL → `input_image` 链路。adapter 的 `supports_vision` 表示能编码图片，不保证所有模型能看图，不按模型名称推断视觉能力。根据 [DeepSeek Responses 文档](https://api-docs.deepseek.com/guides/responses_api/)，当前视觉实验模型能理解图片，其他模型可能仅收到占位文本；应按官方能力说明、模型元数据和实际识图结果选择模型。临时联调模型不写入默认配置。普通文件输入仍不支持。
 
@@ -88,7 +96,7 @@ qq-maid-llm/src/
     ├── types.rs      # ChatMessage、ChatRole、ChatRequest、ModelId、ModelRoute、ModelProvider、TokenUsage
     ├── status.rs     # UpstreamStatus、ObservedProvider 健康观测
         ├── bigmodel.rs   # 智谱 BigModel（复用 OpenAI 兼容 Chat Completions adapter）
-        ├── deepseek.rs   # DeepSeek（装配公共 Responses adapter）
+        ├── deepseek.rs   # DeepSeek（旧 Chat 兼容与 Responses adapter）
         ├── openai_compatible.rs # 配置驱动的 OpenAI-compatible Chat Completions provider
     └── openai/
         ├── mod.rs        # OpenAI provider 组装与 LlmProvider 实现
@@ -128,7 +136,7 @@ qq-maid-core CoreService
   -> LlmService::chat(ChatRequest)
      -> 候选链路由（按候选顺序）
         -> OpenAI provider（Responses API → Chat Completions fallback）
-        -> DeepSeek provider（公共 Responses adapter）
+        -> DeepSeek provider（请求前选择 Chat / Responses）
         -> BigModel provider（OpenAI 兼容 Chat Completions adapter）
         -> 自定义 OpenAI-compatible provider（如 MiMo，Chat Completions adapter）
      -> 成功立即停止；临时错误降级；永久错误终止；全部失败返回聚合错误

@@ -165,7 +165,7 @@ LLM_MODEL=openai:gpt-5.4-mini
 OPENAI_SEARCH_MODEL=gpt-5.5
 
 # 群聊：优先考虑速度和成本
-GROUP_LLM_MODEL=openai:gpt-5.4-mini,deepseek:deepseek-chat
+GROUP_LLM_MODEL=openai:gpt-5.4-mini,deepseek:deepseek-v4-flash
 GROUP_OPENAI_SEARCH_MODEL=gpt-5.5
 
 # 私聊：优先考虑模型质量
