@@ -14,7 +14,6 @@ pub(crate) enum InitiativeCommand {
     End,
     Clear,
     Help,
-    Unconfirmed,
     Invalid,
 }
 
@@ -25,7 +24,9 @@ pub(crate) fn parse_command(text: &str) -> Option<InitiativeCommand> {
     Some(match name.to_ascii_lowercase().as_str() {
         "ri" if args == "help" => InitiativeCommand::Help,
         "ri" => InitiativeCommand::Record(args.to_owned()),
-        "initctr" => InitiativeCommand::Unconfirmed,
+        // SealDice 的紧凑清空写法复用同一个领域操作，仍拒绝多余参数。
+        "initclr" if args.is_empty() => InitiativeCommand::Clear,
+        "initclr" => InitiativeCommand::Invalid,
         "init" => {
             let (action, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
             let rest = rest.trim();

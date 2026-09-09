@@ -42,11 +42,6 @@ impl InitiativeService {
         match command {
             InitiativeCommand::Help => return Ok(HELP.to_owned()),
             InitiativeCommand::Invalid => return Err(HELP),
-            InitiativeCommand::Unconfirmed => {
-                return Err(
-                    "initctr 的来源与语义尚待确认；当前请使用 /init 查看、/init end 推进回合。",
-                );
-            }
             _ => {}
         }
         // 一次批量校验、投骰和更新在同一锁内完成，失败不留下半张先攻表。

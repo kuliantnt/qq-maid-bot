@@ -95,15 +95,22 @@ async fn initiative_and_hidden_rolls_are_deterministic_commands() {
         assert_eq!(response.command.as_deref(), Some("roll"));
         assert!(response.text.unwrap().contains("暂不执行"));
     }
-    assert!(
-        service
-            .respond(message("/initctr"))
-            .await
-            .unwrap()
-            .text
-            .unwrap()
-            .contains("尚待确认")
-    );
+}
+
+#[tokio::test]
+async fn initiative_compact_clear_uses_shared_prefix_compatibility() {
+    let service = test_service();
+    let empty = service.respond(message("/init")).await.unwrap().text;
+    for input in ["/init clr", "/initclr", ".initclr", "。initclr"] {
+        service.respond(message("/ri 10 A")).await.unwrap();
+        service.respond(message("/init end")).await.unwrap();
+        let response = service.respond(message(input)).await.unwrap();
+        assert_eq!(response.command.as_deref(), Some("initiative"), "{input}");
+        assert_eq!(response.text, empty, "{input}");
+        let response = service.respond(message("/ri 5 B")).await.unwrap();
+        assert!(response.text.unwrap().contains("第 1 轮 · 当前：B"));
+        service.respond(message("/init clr")).await.unwrap();
+    }
 }
 
 #[tokio::test]

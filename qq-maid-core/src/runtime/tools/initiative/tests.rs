@@ -1,4 +1,46 @@
 use super::*;
+
+#[test]
+fn compact_clear_parses_like_spaced_clear() {
+    for input in ["/initclr", "/init clr", "/init clear", " /INITCLR "] {
+        assert!(
+            matches!(parse_command(input), Some(InitiativeCommand::Clear)),
+            "{input}"
+        );
+    }
+    for input in ["/initclr extra", "/init clr extra", "/init clear extra"] {
+        assert!(
+            matches!(parse_command(input), Some(InitiativeCommand::Invalid)),
+            "{input}"
+        );
+    }
+}
+
+#[test]
+fn clear_aliases_reset_table_actor_and_round_equally() {
+    let service = InitiativeService::default();
+    let empty = run(&service, "fresh", "/init");
+    for input in ["/initclr", "/init clr", "/init clear"] {
+        run(&service, "a", "/ri 10 A, 5 B");
+        for _ in 0..3 {
+            run(&service, "a", "/init end");
+        }
+        assert!(run(&service, "a", "/init").contains("第 2 轮 · 当前：B"));
+        assert_eq!(run(&service, "a", input), empty);
+        assert_eq!(run(&service, "a", "/init"), empty);
+        assert!(
+            service
+                .execute("a", &InitiativeCommand::End, None)
+                .contains("为空")
+        );
+        assert!(run(&service, "a", "/ri 1 C").contains("第 1 轮 · 当前：C"));
+        // 清空后尚未开战，补录更高先攻者应重新选择表首。
+        assert!(run(&service, "a", "/ri 20 D").contains("第 1 轮 · 当前：D"));
+        assert!(run(&service, "a", "/init end").contains("第 1 轮 · 当前：C"));
+        run(&service, "a", "/init clr");
+    }
+}
+
 fn run(service: &InitiativeService, scope: &str, input: &str) -> String {
     service
         .execute_with_roller(

@@ -176,7 +176,7 @@ fn looks_like_command(remainder: &[char]) -> bool {
             | "rab"
             | "ri"
             | "init"
-            | "initctr"
+            | "initclr"
             | "rh"
             | "rx"
             | "rxh"
@@ -284,6 +284,10 @@ mod tests {
         assert_eq!(
             prefix.render("骰点使用 /roll 或 /r"),
             "骰点使用 *roll 或 *r"
+        );
+        assert_eq!(
+            prefix.render("清空先攻使用 /initclr"),
+            "清空先攻使用 *initclr"
         );
         assert_eq!(
             prefix.render("文件位于 /home/maid/app.db"),
