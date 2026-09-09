@@ -4,6 +4,31 @@
 
 ## [Unreleased]
 
+## [v0.25.1] - 2026-09-09
+
+### Release Focus
+
+* **先攻与暗骰跑团工具**：在现有本地骰点引擎上新增会话级先攻表、暗骰私发和当前玩家提醒，并补齐 SealDice 风格紧凑命令；先攻排序、骰值和投递边界仍由 Core / Gateway 确定性处理，不调用模型。
+
+### Added
+
+* **基础先攻与暗骰**（PR #698）：新增 `/ri` 先攻录入，支持固定值、D20 修正、`=expr` 指定骰式、裸骰式、优势／劣势和批量录入；`/init [list|end|clr|help]`、`/init set`、`/init del` 可查看、推进、清空和维护当前 conversation 的临时先攻表。新增 `/rh` 暗骰：私聊直接返回结果，OneBot 群聊在 Gateway 提供可信私发目标时写入统一 Notification Outbox，群内只回执进入私发队列；`/rx`、`/rxh`、`/rhx` 已建立确定性边界，当前明确提示人物卡／代骰上下文尚未接入。
+* **紧凑先攻与当前玩家提醒**（PR #699）：`/init` 子命令支持 `initlist`、`initend`、`inited`、`initclr`、`initclear`、`inithelp`、`initset`、`initdel`、`initrm` 紧凑写法；`/ri18`、`/ri+5`、`/ri优势+4` 等 SealDice 风格录入复用统一解析。玩家使用 `/nn` 或平台展示名录入先攻时保存 `MentionIdentity`，推进到该玩家时通过结构化 Mention 在 QQ 官方群使用 `<@...>`、OneBot 群使用原生 `at` 提醒；显式命名单位不自动绑定玩家。
+
+### Changed
+
+* **先攻命令与状态边界**（PR #698/#699）：`InitiativeService` 提升到 `CoreRuntimeState`，跨请求共享当前 conversation 的临时先攻表；紧凑 `/init` 只接受完整白名单后缀，未知 `/initialize`、`/initabc` 等不会误进入先攻。条目更新、删除或清空时同步维护身份绑定，重启程序仍清空临时状态。
+
+### Fixed
+
+* **暗骰并发幂等**（PR #698）：同一平台账号和消息 ID 的并发重放使用 SQLite `BEGIN IMMEDIATE` 与 `ON CONFLICT(dedupe_key) DO NOTHING` 原子领取，只有首次插入者执行随机投骰和 Outbox 写入；占位与最终 payload 同事务提交，失败时回滚，避免重复结果或未完成记录被 Worker 投递。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.25.1`；本次实际变更的 `qq-maid-common`、`qq-maid-core`、`qq-maid-gateway-rs` 分别提升到 `0.1.7`、`0.1.32`、`0.1.22`，`qq-maid-llm` 保持 `0.1.14`。
+* 不新增 SQLite migration、配置迁移、必填环境变量或运行时入口。先攻表只保存在进程内，重启后清空；所有先攻、暗骰和紧凑命令均不调用 Provider，不进入普通 session、pending 或 Tool Loop。
+* 暗骰结果私发依赖 OneBot 的私聊能力与 Notification Outbox；QQ 官方群聊缺少可信 C2C 私发目标时会明确拒绝，不会把结果发到群里。`/rx`、`/rxh`、`/rhx` 当前仅保留确定性命令边界，不执行骰点。
+
 ## [v0.25.0] - 2026-09-09
 
 ### Release Focus
@@ -2128,6 +2153,7 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.25.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.25.0...v0.25.1
 [v0.25.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.24.6...v0.25.0
 [v0.16.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.15.2...v0.16.0
 [v0.15.2]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.15.1...v0.15.2
