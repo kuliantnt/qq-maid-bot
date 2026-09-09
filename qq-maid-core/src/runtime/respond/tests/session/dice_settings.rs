@@ -153,6 +153,8 @@ async fn initiative_compact_modifiers_match_spaced_forms_and_dot_prefix() {
         ("/ri+5 哥布林1", "哥布林1"),
         ("/ri-1 哥布林", "哥布林"),
         (".ri+5 哥布林1", "哥布林1"),
+        (".ri优势+4 哥布林", "哥布林"),
+        (".ri劣势-1 哥布林2", "哥布林2"),
     ] {
         let response = service.respond(message(input)).await.unwrap();
         assert_eq!(response.command.as_deref(), Some("initiative"), "{input}");
