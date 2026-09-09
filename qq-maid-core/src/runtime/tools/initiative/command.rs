@@ -3,7 +3,7 @@ use crate::runtime::tools::roll::dice::{
     parse_roll_argument_with_default_die_sides,
 };
 
-pub(super) const HELP: &str = "先攻：/ri 12 张三, +2 李四, =d10+3 王五；/ri 优势 张三, 劣势-1 李四；/init [list|end|clr]；/init set 单位 骰式；/init del 单位1 单位2。名称不含空格或逗号；同名覆盖，重启清空。";
+pub(super) const HELP: &str = "先攻：/ri 12 张三, +2 李四, =d10+3 王五, d20+4 赵六；/ri 优势 张三, 劣势-1 李四；裸骰式省略名称时使用 /nn 或平台展示名；/init [list|end|clr]；/init set 单位 骰式；/init del 单位1 单位2。名称不含空格或逗号；同名覆盖，重启清空。";
 
 #[derive(Clone, Debug)]
 pub(crate) enum InitiativeCommand {
@@ -97,12 +97,14 @@ fn parse_record(
     part: &str,
     default_name: Option<&str>,
 ) -> Result<(String, DiceExpression), &'static str> {
-    let expression_text = if let Some(expr) = part.strip_prefix('=') {
-        Some(expr.to_owned())
-    } else if part.starts_with(['+', '-']) || part.starts_with("优势") || part.starts_with("劣势")
-    {
-        Some(format!("d20{part}"))
-    } else if part.starts_with(|c: char| c.is_ascii_digit()) {
+    if let Some(expr) = part.strip_prefix('=') {
+        return parse_record_expression(expr, default_name)?.ok_or("先攻骰式无效。");
+    }
+    if part.starts_with(['+', '-']) || part.starts_with("优势") || part.starts_with("劣势") {
+        return parse_record_expression(&format!("d20{part}"), default_name)?
+            .ok_or("先攻骰式无效。");
+    }
+    if part.starts_with(|c: char| c.is_ascii_digit()) {
         // 固定数值只消费数字；复杂骰式必须显式使用 =，避免静默误算。
         let end = part
             .find(|c: char| !c.is_ascii_digit())
@@ -123,31 +125,39 @@ fn parse_record(
             .to_owned(),
             expr,
         ));
-    } else {
-        None
-    };
-    if let Some(text) = expression_text {
-        let DiceRollArgumentParse::Parsed { spec, reason } =
-            parse_roll_argument_with_default_die_sides(&text, 20)
-        else {
-            return Err("先攻骰式无效。");
-        };
-        if spec.repetitions != 1 {
-            return Err("先攻不支持多轮骰点，请用逗号分隔多个单位。");
+    }
+
+    // 裸骰式复用 Roll domain 的完整表达式/“骰式 + 名称”前缀解析；只有确认
+    // 不是骰式时才把整个 token 当单位名，避免把 d20+4 误建成角色名。
+    if let Some(entry) = parse_record_expression(part, default_name)? {
+        return Ok(entry);
+    }
+    Ok((
+        if part.is_empty() {
+            default_name.unwrap_or("")
+        } else {
+            part
         }
-        Ok((
-            reason.or(default_name).unwrap_or("").to_owned(),
-            spec.expression,
-        ))
-    } else {
-        Ok((
-            if part.is_empty() {
-                default_name.unwrap_or("")
-            } else {
-                part
+        .to_owned(),
+        DiceExpression::default_d20(),
+    ))
+}
+
+fn parse_record_expression(
+    text: &str,
+    default_name: Option<&str>,
+) -> Result<Option<(String, DiceExpression)>, &'static str> {
+    match parse_roll_argument_with_default_die_sides(text, 20) {
+        DiceRollArgumentParse::Parsed { spec, reason } => {
+            if spec.repetitions != 1 {
+                return Err("先攻不支持多轮骰点，请用逗号分隔多个单位。");
             }
-            .to_owned(),
-            DiceExpression::default_d20(),
-        ))
+            Ok(Some((
+                reason.or(default_name).unwrap_or("").to_owned(),
+                spec.expression,
+            )))
+        }
+        DiceRollArgumentParse::Invalid(_) => Err("先攻骰式无效。"),
+        DiceRollArgumentParse::NotDiceExpression => Ok(None),
     }
 }

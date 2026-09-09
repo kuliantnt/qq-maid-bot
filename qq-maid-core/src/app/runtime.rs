@@ -24,6 +24,7 @@ use crate::{
         session::SessionStore,
         tools::{
             DynRadarExecutor, build_radar_executor,
+            initiative::InitiativeService,
             knowledge::{KnowledgeIndex, KnowledgeSemanticConfig, KnowledgeStore},
             memory::MemoryStore,
             ops::{OpsExecutionStore, OpsTaskRegistry},
@@ -77,6 +78,8 @@ pub struct CoreRuntimeState {
     pub rss_fetcher: RssFetcher,
     pub knowledge_index: KnowledgeIndex,
     pub prompt_config: PromptConfig,
+    /// 进程内共享的临时先攻状态；只随 Core 运行实例存活，重启后清空。
+    pub(crate) initiative_service: InitiativeService,
 }
 
 impl CoreRuntimeState {
@@ -164,6 +167,7 @@ impl CoreRuntimeState {
             rss_fetcher,
             knowledge_index,
             prompt_config,
+            initiative_service: InitiativeService::default(),
         })
     }
 }

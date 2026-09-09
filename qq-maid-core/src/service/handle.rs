@@ -11,8 +11,8 @@ use crate::{
     config::AppConfig,
     error::LlmError,
     runtime::respond::{
-        RespondExecutors, RespondPlan, RespondRequest, RespondResponse, RespondServiceOptions,
-        RespondStores, RustRespondService, StatusAudience,
+        RespondExecutors, RespondPlan, RespondRequest, RespondResponse, RespondServiceBootstrap,
+        RespondServiceOptions, RespondStores, RustRespondService, StatusAudience,
     },
     runtime::tools::{WebSearchTimeouts, memory::MemoryDreamConfig},
     util::metrics::MetricsRecorder,
@@ -40,15 +40,15 @@ impl CoreHandle {
 
     pub(super) fn respond_service(&self) -> RustRespondService {
         let state = self.state.as_ref();
-        RustRespondService::new(
-            state.provider.clone(),
-            RespondExecutors {
+        RustRespondService::from_bootstrap(RespondServiceBootstrap {
+            provider: state.provider.clone(),
+            executors: RespondExecutors {
                 query_executor: state.executors.query_executor.clone(),
                 weather_executor: state.executors.weather_executor.clone(),
                 train_executor: state.executors.train_executor.clone(),
                 radar_executor: state.executors.radar_executor.clone(),
             },
-            RespondStores {
+            stores: RespondStores {
                 memory_store: state.stores.memory_store.clone(),
                 session_store: state.stores.session_store.clone(),
                 task_store: state.stores.todo_store.clone(),
@@ -60,11 +60,12 @@ impl CoreHandle {
                 rss_store: state.stores.rss_store.clone(),
                 display_name_store: state.stores.display_name_store.clone(),
             },
-            state.rss_fetcher.clone(),
-            state.knowledge_index.clone(),
-            state.prompt_config.clone(),
-            respond_options(&state.config),
-        )
+            rss_fetcher: state.rss_fetcher.clone(),
+            knowledge_index: state.knowledge_index.clone(),
+            prompt_config: state.prompt_config.clone(),
+            options: respond_options(&state.config),
+            initiative_service: state.initiative_service.clone(),
+        })
     }
 
     pub fn registered_tool_metadata(&self) -> Vec<qq_maid_llm::tool::ToolMetadata> {

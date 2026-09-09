@@ -1,3 +1,4 @@
+use super::command::parse_entries;
 use super::*;
 
 #[test]
@@ -151,4 +152,54 @@ fn cloned_services_share_atomic_updates() {
         }
     });
     assert_eq!(run(&service, "shared", "/init").lines().count(), 13);
+}
+
+#[test]
+fn bare_dice_uses_default_name_and_explicit_name_prefix() {
+    for (input, expected_expression) in [("d20", "1d20"), ("d20+4", "1d20+4"), ("d8+2", "1d8+2")] {
+        let entries = parse_entries(input, Some("脸脸"), false).unwrap();
+        assert_eq!(entries[0].0, "脸脸", "{input}");
+        assert_eq!(entries[0].1.to_string(), expected_expression, "{input}");
+    }
+
+    let entries = parse_entries("d20+4 哥布林", Some("脸脸"), false).unwrap();
+    assert_eq!(entries[0].0, "哥布林");
+    assert_eq!(entries[0].1.to_string(), "1d20+4");
+    assert!(parse_entries("d20+4", None, false).is_err());
+}
+
+#[test]
+fn bare_dice_executes_the_parsed_expression_with_deterministic_roller() {
+    let service = InitiativeService::default();
+    let mut rolled_sides = Vec::new();
+    let reply = service
+        .execute_with_roller(
+            "default-name",
+            &parse_command("/ri d20+4").unwrap(),
+            Some("脸脸"),
+            &mut |sides| {
+                rolled_sides.push(sides);
+                10
+            },
+        )
+        .unwrap();
+    assert_eq!(rolled_sides, vec![20]);
+    assert!(reply.contains("脸脸：10 + 4 = 14"), "{reply}");
+    assert!(!reply.contains("d20+4："), "{reply}");
+
+    let mut rolled_sides = Vec::new();
+    let reply = service
+        .execute_with_roller(
+            "explicit-name",
+            &parse_command("/ri d20+4 哥布林").unwrap(),
+            Some("脸脸"),
+            &mut |sides| {
+                rolled_sides.push(sides);
+                10
+            },
+        )
+        .unwrap();
+    assert_eq!(rolled_sides, vec![20]);
+    assert!(reply.contains("哥布林：10 + 4 = 14"), "{reply}");
+    assert!(!reply.contains("脸脸："), "{reply}");
 }

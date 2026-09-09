@@ -99,6 +99,35 @@ async fn initiative_and_hidden_rolls_are_deterministic_commands() {
 }
 
 #[tokio::test]
+async fn initiative_bare_dice_reuses_manual_display_name() {
+    let service = test_service();
+    service.respond(message("/nn 脸脸")).await.unwrap();
+
+    let response = service.respond(message("/ri d20+4")).await.unwrap();
+    assert_eq!(response.command.as_deref(), Some("initiative"));
+    let text = response.text.unwrap();
+    assert!(text.contains("脸脸："), "{text}");
+    assert!(!text.contains("d20+4："), "{text}");
+
+    let response = service.respond(message("/init")).await.unwrap();
+    let text = response.text.unwrap();
+    assert!(text.contains("当前：脸脸"), "{text}");
+    assert!(text.contains("1. 脸脸："), "{text}");
+    assert!(!text.contains("d20+4："), "{text}");
+
+    let response = service.respond(message("/ri d20+4 哥布林")).await.unwrap();
+    let text = response.text.unwrap();
+    assert!(text.contains("哥布林："), "{text}");
+    assert!(!text.contains("d20+4："), "{text}");
+
+    let response = service.respond(message("/init")).await.unwrap();
+    let text = response.text.unwrap();
+    assert!(text.contains("脸脸："), "{text}");
+    assert!(text.contains("哥布林："), "{text}");
+    assert!(!text.contains("d20+4："), "{text}");
+}
+
+#[tokio::test]
 async fn initiative_compact_clear_uses_shared_prefix_compatibility() {
     let service = test_service();
     let empty = service.respond(message("/init")).await.unwrap().text;
