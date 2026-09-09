@@ -17,7 +17,7 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.24.6`，项目处于 `24.x` 版本线；版本线能力与升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)。
+当前稳定版本为 `v0.25.0`，项目已进入 `25.x` 版本线。这个大版本把模型能力做成了可管理的资产：管理员第一次可以在 Web Console 里完成「新建/编辑供应商连接 → 从连接发现模型 → 查看真实元数据 → 本地覆盖与启停 → 一键加入 Route」的完整闭环；LLM 侧则引入了 Effective Model Catalog（内嵌 Models.dev 快照 + 本地 `models.json` 覆盖）作为模型信息的统一事实源，并把 DeepSeek 迁移到 Responses 协议（含原生联网搜索）。升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)，供应商与模型管理细节见 Wiki [供应商与模型管理](https://github.com/kuliantnt/qq-maid-bot/wiki/供应商与模型管理)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
@@ -135,12 +135,21 @@ runtime/botctl.sh status
 
 开发调试、Windows 源码构建和测试命令见 Wiki [开发维护文档](https://github.com/kuliantnt/qq-maid-bot/wiki/开发维护文档) 或仓库 [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)。
 
-## 24.x 版本线更新
+## 25.x 版本线更新
 
-当前稳定版本为 `v0.24.6`。需要查看本版本线的详细变更和配置迁移提示时，再展开下面的更新记录：
+当前稳定版本为 `v0.25.0`。需要查看本版本线的详细变更和配置迁移提示时，再展开下面的更新记录：
 
 <details>
-<summary>展开查看 24.x 版本更新</summary>
+<summary>展开查看 25.x / 24.x 版本更新</summary>
+
+- **供应商与模型管理闭环（首个 25.x 版本）**（v0.25.0，PR #691/#692/#694/#696）：
+  - **统一供应商管理**：Web Console 供应商页新增“＋ 新建供应商”弹窗，支持 OpenCode 三预设以及 OpenAI、DeepSeek、BigModel、Gemini 等受信模板，也支持自定义 Connection 的新建、编辑、启停与删除；自定义连接使用服务端生成的独立 Credential Slot，Secret 走认证加密存储与双 revision 校验，不做品牌专用的前端 CRUD。
+  - **连接诊断**：对内置供应商可一键发起最小真实连接诊断，复用 LLM 载荷并限制超时、响应大小、并发与重定向，返回分阶段状态、耗时、HTTP 状态与脱敏分类，不返回上游正文。
+  - **Effective Model Catalog**：`qq-maid-llm` 内嵌 Models.dev 规范化快照（MIT License，可完全离线启动），合并公式为 `base_catalog + official_compatibility_patches + user_overrides`；支持 `config/models.json`（路径可用 `MODELS_CONFIG_FILE` 指定）本地追加、字段覆盖与 `enabled=false` 禁用，且禁止覆盖 Base URL、auth、Credential、Adapter、Route、工具权限等敏感字段。
+  - **模型发现与管理**：供应商卡片新增“管理模型”，读取连接自身 `/models` 并与 Catalog 合并补全 display name、上下文窗口、最大输出、模态、价格、能力及逐字段 provenance；来源区分 connection discovery / catalog / local override，支持搜索、筛选、分批展示，并通过受保护 metadata / override API（独立 opaque revision、原子替换、安全文件校验与脱敏审计）落盘，可把选中的 `provider:model-id` 直接追加进现有 Route。
+  - **DeepSeek Responses 接入**：新部署默认 DeepSeek 模型为 `deepseek-v4-flash`（走 Responses）；旧 `deepseek-chat` / `deepseek-reasoner` 精确匹配时继续走 Chat Completions，协议选择发生在请求前，不根据 HTTP 错误切换。`provider_native` 搜索类型可通过 `deepseek:<model>` 使用原生 `web_search`；旧 Chat 模型在搜索前收到可操作的迁移提示而不是直接失败。同时修复 Responses 流式搜索收到 `response.completed` 后等待 HTTP EOF 导致的卡死问题。
+  - **Codex Radar 修复与并发优化**：适配新版 `/api/intelligence-efficiency-metrics` 效能接口，`/radar codex` 的模型 IQ 榜单重新显示 Astra；陈旧额度不再误报当前 5h 暂停状态；metrics 与 community ratings 改为并发请求，最坏等待从约 30 秒收敛到一个基础请求加一个可选请求的并行窗口。
+  - **升级提示**：无 SQLite migration、必填环境变量或运行时入口变化；`models.json` 为可选新文件，缺省时使用内嵌快照；停用或删除仍被 Route/搜索引用的连接会被服务端拒绝并列出引用位置，请先在 Web Console 中调整引用。
 
 - **微信服务号客服长文本与周易起卦别名**（v0.24.6，PR #690）：慢请求客服补发按 2048 个 UTF-8 字节安全分片并对同一收件人串行发送，避免长文本丢失或多轮回复交错；新增 `/起卦`、`/卜卦` 中文别名，带参数时不回显问题，只提示默念后重新起卦。
 - **周易起卦命令**（v0.24.5，PR #687）：发送 `/算卦` 或 `/iching` 使用固定六轮三钱法（`3d2+3`）在本地起卦，展示六爻、本卦、动爻、之卦和卦辞/译文/注释；不调用模型、不进入 pending 或 Tool Loop，结果作为当前会话回执保存，后续可用自然语言继续追问，带参数形式静默忽略。

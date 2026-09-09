@@ -4,7 +4,37 @@
 
 ## [Unreleased]
 
-后续变更将在下一个版本发布时记录。
+## [v0.25.0] - 2026-09-09
+
+### Release Focus
+
+* **供应商与模型管理闭环**：Web Console 新增通用供应商管理、Connection 模型发现与模型管理页面，配合 Effective Model Catalog 与本地覆盖，实现“连接 → 发现模型 → 查看元数据 → 本地管理 → 加入 Route”的完整闭环；同时 DeepSeek 正式接入 Responses 协议并修复搜索流完成后的卡死问题。
+
+### Added
+
+* **统一供应商管理与连接诊断**（PR #691）：供应商页新增“＋ 新建供应商”弹窗，支持服务端受信预设（原 OpenCode 三预设，以及 OpenAI、DeepSeek、BigModel、Gemini 模板）和自定义 Connection 的新建、编辑、启停与删除；自定义 Connection 由服务端生成独立随机 Credential Slot，Secret 走认证加密存储并做双 revision 校验；内置最小真实连接诊断，按协议复用 LLM 载荷，限制超时、响应大小、并发与重定向，返回分阶段状态、耗时、HTTP 状态与脱敏分类，不返回上游正文。
+* **Effective Model Catalog 与本地模型覆盖**（PR #692）：`qq-maid-llm` 新增 `model_catalog` 领域模块，内嵌规范化快照（源自 Models.dev，MIT License，可完全离线启动）；合并公式为 `base_catalog + official_compatibility_patches + user_overrides`，输出确定且可测试。支持 `config/models.json`（路径可用 `MODELS_CONFIG_FILE` 指定）本地追加、字段覆盖与 `enabled=false` 禁用，且禁止在本地覆盖 Base URL、auth、Credential、Adapter、Route、工具权限等敏感或越权字段。
+* **Connection 模型发现与 Web 模型管理闭环**（PR #694）：供应商卡片新增“管理模型”，读取已保存连接自身 `/models`（沿用已有协议、Header/Scheme、Credential 和超时，无重定向、重试或分页跳转，最多两个并发、1 MiB 响应上限），并明确区分 unsupported / failed / unknown / 成功空列表等状态；内置 Connection 会用 Catalog 身份补全 display name、上下文窗口、最大输出、模态、价格、能力及逐字段 provenance。模型支持搜索、筛选、分批展示，来源区分 connection discovery / catalog / local override；可用普通表单新增、覆盖元数据或启用/禁用，通过受保护 metadata / override API（复用配置写锁、独立 opaque revision、原子替换、安全文件校验与脱敏审计）落盘，并把选中的 `provider:model-id` 追加到现有 Route（保留候选顺序，保留 ID 中的斜杠和冒号后缀）。
+* **DeepSeek 原生联网搜索**（PR #696）：`provider_native` 搜索类型可通过 `deepseek:<model>` 使用 DeepSeek Responses 的原生 `web_search`；旧 Chat 模型在搜索请求发出前收到可操作的配置迁移提示，而不是发出注定失败的请求。
+
+### Changed
+
+* **供应商字段规范化**（PR #691）：Provider 管理字段统一命名与校验，历史大小写 Connection 编辑保持兼容；内置供应商字段收进同一页面，不再维护品牌专用的前端 CRUD。
+* **默认 DeepSeek 模型迁移**（PR #696）：新部署默认值与公开候选路线改为 `deepseek-v4-flash`，不覆盖已有私有配置；旧 `deepseek-chat` / `deepseek-reasoner` 精确匹配时继续走 Chat Completions，V4 及其他显式 DeepSeek 模型走 Responses，模型名原样传递；协议选择发生在请求前，不根据 HTTP 400 等响应错误切换协议。
+* **Codex Radar 并发优化**（PR #693）：基础数据成功后，metrics 与 community ratings 通过 `tokio::join!` 并发请求，单请求 10 秒超时下最坏等待从约 30 秒收敛为一个基础请求加一个可选请求的并行窗口；两个可选接口失败互不影响。
+
+### Fixed
+
+* **Codex Radar Astra IQ 展示恢复**（PR #693）：适配新版 `/api/intelligence-efficiency-metrics` 效能接口，`/radar codex` 的模型 IQ 榜单重新显示 Astra；新版 metrics 只更新 `iq_models`，不再把最高 IQ 写入 legacy `model_label/model_score/model_passed/model_tasks/model_status` 摘要，避免重复展示；无本站白名单有效模型时保留完整 legacy fallback。
+* **Radar 额度时效修复**（PR #693）：陈旧额度不再误报当前 5h 暂停状态；额度新鲜度按精确时长判断并复用 common 时间解析。
+* **搜索流提前结束卡死**（PR #696）：Responses 流式搜索收到 `response.completed` 后不再等待 HTTP EOF，上游完成后即使代理保活也能立即返回答案与来源。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.25.0`；本次实际变更的 `qq-maid-llm` 升至 `0.1.14`、`qq-maid-core` 升至 `0.1.31`，`qq-maid-gateway-rs` 与 `qq-maid-common` 版本保持不变。
+* 不新增 SQLite migration、必填环境变量或运行时入口。新部署默认 DeepSeek 模型为 `deepseek-v4-flash`，已有私有配置不会被覆盖；旧 `deepseek-chat` / `deepseek-reasoner` 继续可用（走 Chat Completions），需要原生联网搜索时请迁移到 `deepseek:<model>` 的 `provider_native` 写法。
+* `config/models.json`（路径可用 `MODELS_CONFIG_FILE` 指定）为新增的可选本地模型覆盖文件，缺省时使用内嵌 Catalog 快照；该文件禁止配置 Base URL、auth、Credential、Adapter、Route、工具权限等敏感字段。
+* 保留旧 `api_key_env`、共享 OpenCode Key 和内置存储兼容，无 schema migration、无启动时配置重写；停用或删除仍被 Route/搜索引用的连接会被服务端拒绝并列出引用位置。
 
 ## [v0.24.6] - 2026-08-30
 
@@ -2098,6 +2128,7 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.25.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.24.6...v0.25.0
 [v0.16.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.15.2...v0.16.0
 [v0.15.2]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.15.1...v0.15.2
 [v0.15.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.15.0...v0.15.1
