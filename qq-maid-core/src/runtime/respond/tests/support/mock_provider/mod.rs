@@ -735,12 +735,17 @@ impl LlmProvider for MockProvider {
                         },
                     });
                 }
-                MockToolAction::ReturnToolResultsThenFail { results, error } => {
+                MockToolAction::ReturnToolResultsThenFail {
+                    results,
+                    attempts,
+                    error,
+                } => {
                     let emitted_tools = results
                         .iter()
                         .map(|result| result.name.clone())
                         .collect::<Vec<_>>();
                     let mut diagnostics = agent_tool_trace(emitted_tools, results);
+                    diagnostics.tool_attempts = attempts;
                     diagnostics.model_rounds = 4;
                     diagnostics.final_candidate_tool_result_start = None;
                     diagnostics.stop_reason = Some(AgentStopReason::Failed);

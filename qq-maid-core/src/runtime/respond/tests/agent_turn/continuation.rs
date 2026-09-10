@@ -105,6 +105,17 @@ async fn reproduce(
     redundant: bool,
     expected_status: &str,
 ) -> String {
+    reproduce_with_finalization(name, arguments, redundant, expected_status, None).await
+}
+
+// None 沿用模型正文；Ok 模拟空正文，Err 模拟拿到真实工具轨迹后的最终生成失败。
+async fn reproduce_with_finalization(
+    name: &str,
+    arguments: &[Value],
+    redundant: bool,
+    expected_status: &str,
+    finalization: Option<Result<String, LlmError>>,
+) -> String {
     let executors = Executors::default();
     let registry = ToolRegistry::new()
         .register(TrainScheduleTool::new(Arc::new(executors.clone())))
@@ -169,19 +180,34 @@ async fn reproduce(
     if redundant && name == "get_train_schedule" {
         verify_unassociated_train_trace(&result).await;
     }
-    let provider = MockProvider::new()
-        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
-        .with_raw_tool_results_and_attempts(
+    let finalization_failed = matches!(finalization, Some(Err(_)));
+    let provider = MockProvider::new().with_tool_protocol(ToolCallingProtocol::OpenAiResponses);
+    let provider = match finalization {
+        Some(Err(error)) => provider.with_raw_tool_results_and_attempts_then_error(
             result.agent.tool_results,
             result.agent.tool_attempts,
-            result.reply,
-        );
+            error,
+        ),
+        reply => provider.with_raw_tool_results_and_attempts(
+            result.agent.tool_results,
+            result.agent.tool_attempts,
+            reply.and_then(Result::ok).unwrap_or(result.reply),
+        ),
+    };
     let response = test_service_with_provider_and_tool_calling(provider, true)
         .respond(private_message("执行查询任务"))
         .await
         .unwrap();
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["agent_turn_status"], expected_status);
+    if finalization_failed {
+        assert_eq!(diagnostics["agent_finalization_fallback_used"], true);
+        assert_eq!(
+            diagnostics["agent_finalization_error_code"],
+            "context_budget_exceeded"
+        );
+        assert_eq!(diagnostics["error_code"], Value::Null);
+    }
     let attempts = diagnostics["agent_tool_attempts"].as_array().unwrap();
     assert_eq!(attempts.len(), arguments.len());
     assert_eq!(
@@ -292,6 +318,7 @@ async fn search_success_then_missing_arguments_does_not_append_error() {
 async fn first_search_call_missing_arguments_still_reports_error() {
     let text = reproduce("web_search", &[serde_json::json!({})], false, "failed").await;
     assert!(!text.contains("查询全部完成"));
+    assert!(text.contains("本次联网查询的参数无效，查询未执行。"));
 }
 
 #[tokio::test]
@@ -351,5 +378,36 @@ async fn model_reply(name: &str) -> String {
         )
     } else {
         "查询全部完成：已取得公开铁路资料".into()
+    }
+}
+
+#[tokio::test]
+async fn train_redundant_missing_arguments_keeps_fallback_when_finalization_fails_or_is_empty() {
+    for finalization in [
+        Err(LlmError::new(
+            "context_budget_exceeded",
+            "final answer generation failed",
+            "tool_loop",
+        )),
+        Ok(String::new()),
+    ] {
+        let text = reproduce_with_finalization(
+            "get_train_schedule",
+            &[
+                serde_json::json!({"train_code":"K349", "travel_date":"2026-09-10"}),
+                serde_json::json!({"travel_date":"2026-09-10"}),
+            ],
+            true,
+            "succeeded",
+            Some(finalization),
+        )
+        .await;
+        for fact in ["K349", "北京南", "上海虹桥", "11:24"] {
+            assert!(text.contains(fact), "确定性回退必须保留时刻表：{fact}");
+        }
+        assert!(!text.contains("参数不完整"));
+        assert!(!text.contains("【火车】"));
+        assert!(!text.contains("final answer generation failed"));
+        assert!(!text.contains("查询全部完成"));
     }
 }

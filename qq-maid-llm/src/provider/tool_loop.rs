@@ -192,6 +192,8 @@ impl<'a> ToolLoopExecutor<'a> {
         let mut stop_remaining_batch = false;
         let mut tool_started = false;
         let mut redundant_of = None;
+        // 有意只关联 prepare 成功后的参数错误；prepare 拒绝时缺少已准备的
+        // 参数与 effect，不从原始输入猜测退化关系，保留独立失败。
         let read_only = prepared
             .as_ref()
             .is_ok_and(|call| call.effect == ToolEffect::ReadOnly);

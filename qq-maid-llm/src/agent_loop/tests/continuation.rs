@@ -247,3 +247,86 @@ async fn continuation_indexes_are_local_until_candidate_diagnostics_are_merged()
     assert_eq!(outcome.agent.tool_attempts[3].redundant_of, Some(2));
     assert_eq!(outcome.agent.final_candidate_tool_result_start, Some(1));
 }
+
+struct PrepareValidatedQuery;
+
+#[async_trait]
+impl crate::tool::Tool for PrepareValidatedQuery {
+    fn metadata(&self) -> ToolMetadata {
+        ValidatedQuery {
+            effect: ToolEffect::ReadOnly,
+        }
+        .metadata()
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    fn prepare(
+        &self,
+        _: &ToolContext,
+        arguments: Value,
+    ) -> Result<crate::tool::ToolPreparation, LlmError> {
+        if arguments.get("target").is_none() {
+            return Err(LlmError::new(
+                "bad_tool_arguments",
+                "target required in prepare",
+                "tool",
+            ));
+        }
+        Ok(crate::tool::ToolPreparation::ready(arguments))
+    }
+
+    async fn execute(&self, context: ToolContext, args: Value) -> Result<ToolOutput, LlmError> {
+        ValidatedQuery {
+            effect: ToolEffect::ReadOnly,
+        }
+        .execute(context, args)
+        .await
+    }
+}
+
+#[tokio::test]
+async fn prepare_argument_rejection_conservatively_keeps_independent_failure() {
+    let session = Box::new(ScriptedSession::new(
+        "mock",
+        "m",
+        vec![
+            tool_calls(vec![tool_call("query", "c1", r#"{"target":"a"}"#)]),
+            tool_calls(vec![tool_call("query", "c2", "{}")]),
+            final_reply("done"),
+        ],
+    ));
+    let observed = session.observed.clone();
+    let outcome = run_agent_loop(
+        session,
+        registry_with(vec![Arc::new(PrepareValidatedQuery)]),
+        test_context(),
+        3,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.agent.model_rounds, 3);
+    assert_eq!(outcome.agent.tool_results.len(), 2);
+    assert!(outcome.agent.tool_results[0].succeeded);
+    let failure = &outcome.agent.tool_results[1];
+    assert!(!failure.succeeded);
+    assert_eq!(failure.output["error"]["code"], "bad_tool_arguments");
+    assert!(
+        failure
+            .output
+            .to_string()
+            .contains("target required in prepare")
+    );
+    // prepare 未成功时不推断退化关系，即便工具声明只读且上轮已有成功。
+    assert_eq!(outcome.agent.tool_attempts[1].redundant_of, None);
+    let inputs = observed.lock().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&inputs[2].0[0].output).unwrap()["ok"],
+        false
+    );
+    assert!(!inputs[2].0[0].output.contains("continuation_hint"));
+}
