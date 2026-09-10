@@ -26,11 +26,13 @@ pub(crate) struct ToolLoopExecutor<'a> {
     progress_sink: Option<ToolLoopProgressSink>,
     execution_attempted: bool,
     rejected_call: bool,
-    completed_read_only_calls: HashMap<String, String>,
+    completed_read_only_calls: HashMap<String, (usize, String)>,
     /// 工具显式声明可缓存的确定性失败，在同一请求内不会因模型再次调用而重复执行。
     terminal_read_only_failures: HashMap<String, String>,
     execution_counts: HashMap<String, usize>,
     last_batch: Vec<BatchAttempt>,
+    /// 只跨越同一成功查询的冗余续调；新步骤、写操作或批量调用会清除锚点。
+    continuation_anchor: Option<BatchAttempt>,
     current_batch: Vec<BatchAttempt>,
 }
 
@@ -79,6 +81,7 @@ struct BatchAttempt {
     name: String,
     arguments: Value,
     execution_succeeded: bool,
+    read_only: bool,
     executed: bool,
     round: usize,
 }
@@ -103,6 +106,7 @@ impl<'a> ToolLoopExecutor<'a> {
             execution_counts: HashMap::new(),
             tool_attempts: Vec::new(),
             last_batch: Vec::new(),
+            continuation_anchor: None,
             current_batch: Vec::new(),
         }
     }
@@ -143,6 +147,29 @@ impl<'a> ToolLoopExecutor<'a> {
     }
 
     pub(crate) fn finish_batch(&mut self) {
+        self.continuation_anchor = match self.current_batch.as_slice() {
+            [call]
+                if call.read_only
+                    && call.executed
+                    && self.tool_results[call.result_index].succeeded =>
+            {
+                Some(call.clone())
+            }
+            [call]
+                if self.tool_attempts.last().is_some_and(|attempt| {
+                    attempt.result_index == call.result_index
+                        && attempt.redundant_of.is_some()
+                        && attempt.redundant_of
+                            == self
+                                .continuation_anchor
+                                .as_ref()
+                                .map(|anchor| anchor.result_index)
+                }) =>
+            {
+                self.continuation_anchor.take()
+            }
+            _ => None,
+        };
         self.last_batch = std::mem::take(&mut self.current_batch);
     }
 
@@ -164,6 +191,12 @@ impl<'a> ToolLoopExecutor<'a> {
         let mut skipped_for_finalization = false;
         let mut stop_remaining_batch = false;
         let mut tool_started = false;
+        let mut redundant_of = None;
+        // 有意只关联 prepare 成功后的参数错误；prepare 拒绝时缺少已准备的
+        // 参数与 effect，不从原始输入猜测退化关系，保留独立失败。
+        let read_only = prepared
+            .as_ref()
+            .is_ok_and(|call| call.effect == ToolEffect::ReadOnly);
         let prepared_arguments = prepared
             .as_ref()
             .ok()
@@ -217,13 +250,14 @@ impl<'a> ToolLoopExecutor<'a> {
                             false,
                             ToolCallProgressDisposition::CacheHit,
                         )
-                    } else if let Some(cached_output) = read_only_key
+                    } else if let Some((result_index, cached_output)) = read_only_key
                         .as_ref()
                         .and_then(|key| self.completed_read_only_calls.get(key))
                     {
                         // 缓存只保存已完成的只读结果；命中只回传紧凑引用，避免把
                         // 完整证据再次写入上下文。缓存命中不增加真实执行次数。
                         debug!(tool = %tool_name, "Agent 只读工具命中缓存");
+                        redundant_of = Some(*result_index);
                         let output = compact_cached_output(cached_output);
                         (
                             tool_name,
@@ -298,8 +332,10 @@ impl<'a> ToolLoopExecutor<'a> {
                                         let execution_succeeded =
                                             tool_output_indicates_execution_success(&output);
                                         if execution_succeeded && let Some(key) = read_only_key {
-                                            self.completed_read_only_calls
-                                                .insert(key, output.clone());
+                                            self.completed_read_only_calls.insert(
+                                                key,
+                                                (self.tool_results.len(), output.clone()),
+                                            );
                                         }
                                         (
                                             tool_name,
@@ -351,6 +387,19 @@ impl<'a> ToolLoopExecutor<'a> {
         {
             self.terminal_read_only_failures.insert(key, output.clone());
         }
+        // 缺参错误属于模型调用错误；只有紧邻的单例只读调用丢失已有参数、没有
+        // 新增目标或选项时，才将它关联到此前成功结果。超时、不同参数、批量调用
+        // 和写操作均保持独立失败；绝不以“已有成功”替代真实执行结果。
+        let degraded_of = (redundant_of.is_none() && read_only)
+            .then(|| {
+                self.degraded_continuation(round, batch_len, prepared_arguments.as_ref(), &output)
+            })
+            .flatten();
+        redundant_of = redundant_of.or(degraded_of);
+        if let Some(index) = redundant_of {
+            debug!(tool = %tool_name, round, result_index = self.tool_results.len(), redundant_of = index,
+                "已关联 Agent 工具的冗余续调");
+        }
         // 前序依赖只能使用领域成功。`empty_result` 虽然已完成网络请求，但不能成为
         // 依赖工具继续执行的事实依据。
         self.previous_call_succeeded = domain_succeeded;
@@ -376,6 +425,7 @@ impl<'a> ToolLoopExecutor<'a> {
             call_id: call_id.clone(),
             round,
             retry_of,
+            redundant_of,
         });
         if let Some((name, arguments)) = prepared_arguments {
             self.current_batch.push(BatchAttempt {
@@ -384,6 +434,7 @@ impl<'a> ToolLoopExecutor<'a> {
                 name,
                 arguments,
                 execution_succeeded,
+                read_only,
                 executed: tool_started,
                 round,
             });
@@ -393,6 +444,17 @@ impl<'a> ToolLoopExecutor<'a> {
         if let Some(event) = event {
             self.emit_progress(event).await?;
         }
+        // 回填仍明确 ok=false，不伪造成功；提示模型复用已有证据或为新步骤补全
+        // 参数，而不是把自己的退化调用归咎于用户。原始错误留在 tool_results。
+        let output = if degraded_of.is_some() {
+            let mut value: Value = serde_json::from_str(&output).expect("工具错误为合法 JSON");
+            value["continuation_hint"] = json!(
+                "此前同一查询已成功。本次调用丢失了原有参数且没有提供新目标，不代表用户缺参。若任务已完成，请基于已有结果回答；若仍有必要的新步骤，请补全该步骤参数后继续，不能声称未执行步骤成功。"
+            );
+            value.to_string()
+        } else {
+            output
+        };
         Ok(ToolLoopCallOutput {
             output,
             skipped_for_finalization,
@@ -427,6 +489,49 @@ impl<'a> ToolLoopExecutor<'a> {
         // progress sink 是 Core stream 的取消边界：返回 Err 表示上层不再消费事件，
         // 继续执行工具可能产生无人接收的副作用，因此必须把错误向外传播。
         sink(event).await
+    }
+
+    fn degraded_continuation(
+        &self,
+        round: usize,
+        batch_len: usize,
+        prepared: Option<&(String, Value)>,
+        output: &str,
+    ) -> Option<usize> {
+        if batch_len != 1 || self.last_batch.len() != 1 {
+            return None;
+        }
+        let previous = self.continuation_anchor.as_ref()?;
+        let (name, arguments) = prepared?;
+        let result = self.tool_results.get(previous.result_index)?;
+        if !previous.read_only
+            || !previous.executed
+            || !result.succeeded
+            || self.last_batch[0].round + 1 != round
+            || previous.name != *name
+            || result.output.get("truncated").and_then(Value::as_bool) == Some(true)
+        {
+            return None;
+        }
+        let output: Value = serde_json::from_str(output).ok()?;
+        if !matches!(
+            output.get("error")?.get("code")?.as_str()?,
+            "bad_tool_arguments" | "invalid_arguments"
+        ) {
+            return None;
+        }
+        let current = arguments.as_object()?;
+        let prior = previous.arguments.as_object()?;
+        // 只接受原参数的退化子集；任何新增/改变的非空参数都可能代表必要的新步骤。
+        let empty =
+            |value: &Value| value.is_null() || value.as_str().is_some_and(|s| s.trim().is_empty());
+        let no_new_information = current
+            .iter()
+            .all(|(key, value)| empty(value) || prior.get(key) == Some(value));
+        let lost_information = prior
+            .iter()
+            .any(|(key, value)| !empty(value) && current.get(key).is_none_or(&empty));
+        (no_new_information && lost_information).then_some(previous.result_index)
     }
 
     fn retry_parent(

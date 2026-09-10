@@ -432,6 +432,7 @@ impl LlmProvider for MockProvider {
                         call_id: call_id.to_owned(),
                         round: 0,
                         retry_of: None,
+                        redundant_of: None,
                     });
                     return Ok(ChatOutcome {
                         reply,
@@ -524,12 +525,14 @@ impl LlmProvider for MockProvider {
                                     call_id: call_id.to_owned(),
                                     round: 0,
                                     retry_of: None,
+                                    redundant_of: None,
                                 },
                                 ToolExecutionAttempt {
                                     result_index: 1,
                                     call_id: call_id.to_owned(),
                                     round: 1,
                                     retry_of: Some(0),
+                                    redundant_of: None,
                                 },
                             ],
                             final_candidate_tool_result_start: Some(0),
@@ -732,12 +735,17 @@ impl LlmProvider for MockProvider {
                         },
                     });
                 }
-                MockToolAction::ReturnToolResultsThenFail { results, error } => {
+                MockToolAction::ReturnToolResultsThenFail {
+                    results,
+                    attempts,
+                    error,
+                } => {
                     let emitted_tools = results
                         .iter()
                         .map(|result| result.name.clone())
                         .collect::<Vec<_>>();
                     let mut diagnostics = agent_tool_trace(emitted_tools, results);
+                    diagnostics.tool_attempts = attempts;
                     diagnostics.model_rounds = 4;
                     diagnostics.final_candidate_tool_result_start = None;
                     diagnostics.stop_reason = Some(AgentStopReason::Failed);

@@ -57,10 +57,7 @@ pub(crate) fn project_results(
             continue;
         };
         consumed_result_indexes.insert(index);
-        if attempts
-            .iter()
-            .any(|attempt| attempt.retry_of == Some(index))
-        {
+        if super::super::agent_turn::is_noncontributing_result(index, attempts) {
             continue;
         }
         if let SearchResultProjection::Visible(outcome) = projection {

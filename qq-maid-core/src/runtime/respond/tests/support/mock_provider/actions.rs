@@ -44,6 +44,7 @@ pub(super) enum MockToolAction {
     },
     ReturnToolResultsThenFail {
         results: Vec<ToolExecutionResult>,
+        attempts: Vec<ToolExecutionAttempt>,
         error: LlmError,
     },
     ReplyWithoutTool {
@@ -213,7 +214,28 @@ impl MockProvider {
         self.tool_actions
             .lock()
             .unwrap()
-            .push(MockToolAction::ReturnToolResultsThenFail { results, error });
+            .push(MockToolAction::ReturnToolResultsThenFail {
+                results,
+                attempts: Vec::new(),
+                error,
+            });
+        self
+    }
+
+    pub(crate) fn with_raw_tool_results_and_attempts_then_error(
+        self,
+        results: Vec<ToolExecutionResult>,
+        attempts: Vec<ToolExecutionAttempt>,
+        error: LlmError,
+    ) -> Self {
+        self.tool_actions
+            .lock()
+            .unwrap()
+            .push(MockToolAction::ReturnToolResultsThenFail {
+                results,
+                attempts,
+                error,
+            });
         self
     }
 

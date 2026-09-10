@@ -274,7 +274,7 @@ fn project_tool_turn(
     let mut search_outcomes = search_projection.outcomes.into_iter().peekable();
 
     for (index, result) in output.agent.tool_results.iter().enumerate() {
-        if is_retry_superseded_result(index, &output.agent.tool_attempts) {
+        if is_noncontributing_result(index, &output.agent.tool_attempts) {
             let mut discarded = Vec::new();
             drain_domain_outcomes_for_result(index, &mut todo_outcomes, &mut discarded);
             drain_domain_outcomes_for_result(index, &mut search_outcomes, &mut discarded);
@@ -327,15 +327,16 @@ fn drain_domain_outcomes_for_result(
     }
 }
 
-/// 重试后的旧结果仍保留在原始 Agent 轨迹中，但不能再参与用户展示或领域回执。
-/// 这是所有领域共用的 Tool Loop 语义，不属于 Todo 专用逻辑。
-pub(crate) fn is_retry_superseded_result(
+/// 重试覆盖的旧结果、缓存命中与退化续调仍保留在原始 Agent 轨迹中，但不能
+/// 作为独立领域结果参与展示、会话快照或成功验真。所有领域共用服务端调用关系。
+pub(crate) fn is_noncontributing_result(
     result_index: usize,
     attempts: &[qq_maid_llm::provider::ToolExecutionAttempt],
 ) -> bool {
-    attempts
-        .iter()
-        .any(|attempt| attempt.retry_of == Some(result_index))
+    attempts.iter().any(|attempt| {
+        attempt.retry_of == Some(result_index)
+            || (attempt.result_index == result_index && attempt.redundant_of.is_some())
+    })
 }
 
 /// 最终模型轮次失败后，使用已经形成结果的工具轨迹作为候选回退。

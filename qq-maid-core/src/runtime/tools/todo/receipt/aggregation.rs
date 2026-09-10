@@ -16,7 +16,7 @@ use crate::{
         },
         session::{LastTodoQuery, SessionMeta, SessionRecord},
         tools::{
-            agent_turn::is_retry_superseded_result,
+            agent_turn::is_noncontributing_result,
             todo::{
                 TodoOwner, TodoStore, todo_last_action_visible_entity_snapshot,
                 todo_visible_entity_snapshot,
@@ -105,7 +105,7 @@ pub(crate) fn aggregate_todo_tool_results(
             continue;
         }
         let pending_query = if result.name == LIST_TODOS_TOOL_NAME {
-            if is_retry_superseded_result(index, attempts) {
+            if is_noncontributing_result(index, attempts) {
                 None
             } else {
                 attempts
@@ -160,7 +160,7 @@ fn todo_validation_failure_was_corrected(
     if result.succeeded || !is_tool_argument_failure(&result.output) {
         return false;
     }
-    if is_retry_superseded_result(result_index, attempts) {
+    if is_noncontributing_result(result_index, attempts) {
         return true;
     }
     let Some(failed_round) = tool_result_round(result_index, attempts) else {

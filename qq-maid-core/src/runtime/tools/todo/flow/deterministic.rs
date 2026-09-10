@@ -358,6 +358,7 @@ async fn execute_deterministic_todo(
         call_id,
         round: 0,
         retry_of: None,
+        redundant_of: None,
     };
     let executed_tools = if succeeded {
         vec![plan.action.tool_name().to_owned()]

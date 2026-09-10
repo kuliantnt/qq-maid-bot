@@ -23,7 +23,7 @@ use crate::{
             TaskStore,
             agent_turn::{
                 DomainResultProjection, DomainTurnDiagnostics, DomainTurnPostprocessor,
-                is_retry_superseded_result,
+                is_noncontributing_result,
             },
             todo,
         },
@@ -267,7 +267,7 @@ fn published_todo_list_result_indexes_from_trace(
             let result = &results[*index];
             result.name == todo::LIST_TODOS_TOOL_NAME
                 && result.succeeded
-                && !is_retry_superseded_result(*index, attempts)
+                && !is_noncontributing_result(*index, attempts)
         })
         .collect::<Vec<_>>();
     indexes.sort_unstable();
