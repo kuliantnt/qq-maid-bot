@@ -35,10 +35,10 @@ pub struct ToolExecutionResult {
 
 /// Tool 结果在 Agent Loop 内部的尝试关系。
 ///
-/// 该轨迹不属于 LLM 工具返回 JSON，只用于 Core 在最终响应组装时选择重试链的
-/// 最后一次结果；原始 `tool_results` 仍完整保留，便于诊断和错误分析。
+/// 该轨迹不属于 LLM 工具返回 JSON，供 Core 在最终响应组装时区分独立结果、
+/// 重试覆盖与冗余续调；原始 `tool_results` 仍完整保留，便于诊断和错误分析。
 ///
-/// 写入累计 `AgentRunDiagnostics` 后，`result_index` 与 `retry_of` 都是相对整次
+/// 写入累计 `AgentRunDiagnostics` 后，`result_index`、`retry_of` 与 `redundant_of` 都是相对整次
 /// 请求 `tool_results` 的全局下标；`ToolLoopExecutor` 内部短暂使用的局部下标
 /// 会在候选同步时按 baseline 偏移。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -47,6 +47,8 @@ pub struct ToolExecutionAttempt {
     pub call_id: String,
     pub round: usize,
     pub retry_of: Option<usize>,
+    /// 已有结果覆盖的缓存命中或退化续调；原始失败仍保留，不能作为新的领域结果。
+    pub redundant_of: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

@@ -359,6 +359,21 @@ impl RustRespondService {
                 })
             })
             .collect::<Vec<_>>();
+        // 只投影服务端轮次与结果关系，不返回模型参数、call_id 或查询正文。
+        let agent_tool_attempts = output
+            .agent
+            .tool_attempts
+            .iter()
+            .map(|attempt| {
+                json!({
+                    "result_index": attempt.result_index,
+                    "round": attempt.round,
+                    "retry_of": attempt.retry_of,
+                    "redundant_of": attempt.redundant_of,
+                })
+            })
+            .collect::<Vec<_>>();
+        let agent_emitted_tool_count = output.agent.emitted_tools.len();
         let tool_retry_count = output
             .agent
             .tool_attempts
@@ -450,6 +465,11 @@ impl RustRespondService {
             },
         });
         if let Some(fields) = diagnostics.as_object_mut() {
+            fields.insert("agent_tool_attempts".to_owned(), json!(agent_tool_attempts));
+            fields.insert(
+                "agent_emitted_tool_count".to_owned(),
+                json!(agent_emitted_tool_count),
+            );
             tool_turn_diagnostics.extend_response_diagnostics(fields);
         }
         response.diagnostics = Some(diagnostics);
