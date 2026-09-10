@@ -4,6 +4,26 @@
 
 ## [Unreleased]
 
+## [v0.25.2] - 2026-09-10
+
+### Release Focus
+
+* **工具成功后的冗余续调不再追加错误回执**：列车查询、联网搜索等只读工具成功后再出现退化缺参调用时，服务端调用轨迹把冗余续调关联到已有成功结果，统一投影、Search 整轮统计与 Todo 回执只展示真实成功事实；原始失败仍回填模型并保留纠正提示。
+
+### Added
+
+* **工具调用轨迹诊断**（PR #701）：脱敏响应诊断新增 `agent_tool_attempts`，按 `round`、`result_index`、`retry_of`、`redundant_of` 描述模型轮次、工具调用与重试／冗余续调关系，只输出服务端轮次与结果下标，不输出参数、`call_id` 或正文。
+
+### Fixed
+
+* **冗余续调追加错误回执**（PR #701）：此前只读工具成功后再出现退化缺参调用时，旧投影只识别失败后的重试覆盖，会把成功结果和参数错误块一起展示，看起来像“正确回答后追加错误”。现在通用执行器在服务端轨迹中记录 `redundant_of`：同请求只读缓存命中直接关联原结果；`Tool::prepare()` 成功后产生的 `bad_tool_arguments` / `invalid_arguments` 只在连续单例只读调用、已有未截断成功结果、参数是原参数的退化子集且没有新增或改变的非空信息时才建立关联。原始失败值仍保留为 `ok=false` 并带回纠正提示，模型可以补全参数继续调用。
+* **Train 只读缓存回执误判**（PR #701）：成功只读缓存命中返回的紧凑 `{"ok":true,"deduplicated":true}` 不再被 Train 当作时刻表解析失败；新目标、新日期、新选项、批量调用、写操作、超时、未知错误和无法解析的 JSON 仍作为独立失败展示，首轮缺参与必要的第二步超时也不会被已有成功隐藏。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.25.2`；本次实际变更的 `qq-maid-core`、`qq-maid-llm` 分别提升到 `0.1.33`、`0.1.15`，`qq-maid-gateway-rs` 与 `qq-maid-common` 保持 `0.1.22`、`0.1.7`。
+* 不新增 SQLite migration、配置迁移、必填环境变量或运行时入口。续调关联规则有意保守：`Tool::prepare()` 直接拒绝缺参时仍保留独立失败，候选切换时的关联下标按 baseline 转为全局下标，不跨候选猜测续调关系。排查方法与可重复验证见 [docs/analysis/agent-tool-continuation.md](./docs/analysis/agent-tool-continuation.md)。
+
 ## [v0.25.1] - 2026-09-09
 
 ### Release Focus
@@ -2153,6 +2173,7 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.25.2]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.25.1...v0.25.2
 [v0.25.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.25.0...v0.25.1
 [v0.25.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.24.6...v0.25.0
 [v0.16.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.15.2...v0.16.0

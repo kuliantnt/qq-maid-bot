@@ -17,7 +17,7 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.25.1`，项目处于 `25.x` 版本线。本版本在供应商与模型管理闭环基础上新增基础先攻、暗骰和 SealDice 风格紧凑命令，并支持在推进先攻时结构化提醒当前玩家。升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)，供应商与模型管理细节见 Wiki [供应商与模型管理](https://github.com/kuliantnt/qq-maid-bot/wiki/供应商与模型管理)，先攻与骰点用法见 Wiki [骰子使用教程](https://github.com/kuliantnt/qq-maid-bot/wiki/骰子使用教程)。
+当前稳定版本为 `v0.25.2`，项目处于 `25.x` 版本线。本版本修复工具成功后的冗余续调：列车查询、联网搜索等只读工具成功后再出现退化缺参调用时，不再把参数错误块追加到已经正确的结果上，并补齐调用轨迹诊断与回归。升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)，供应商与模型管理细节见 Wiki [供应商与模型管理](https://github.com/kuliantnt/qq-maid-bot/wiki/供应商与模型管理)，先攻与骰点用法见 Wiki [骰子使用教程](https://github.com/kuliantnt/qq-maid-bot/wiki/骰子使用教程)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
@@ -139,10 +139,12 @@ runtime/botctl.sh status
 
 ## 25.x 版本线更新
 
-当前稳定版本为 `v0.25.1`。需要查看本版本线的详细变更和配置迁移提示时，再展开下面的更新记录：
+当前稳定版本为 `v0.25.2`。需要查看本版本线的详细变更和配置迁移提示时，再展开下面的更新记录：
 
 <details>
 <summary>展开查看 25.x / 24.x 版本更新</summary>
+
+- **工具成功后不再追加错误回执**（v0.25.2，PR #701）：列车 / 联网搜索等只读工具成功后再出现退化缺参调用时，服务端调用轨迹把冗余续调关联到已有成功结果，回复只保留真实成功事实，参数错误不再追加在正确结果之后；原始失败仍回填模型用于补全参数。同请求只读缓存命中的紧凑回执不再被 Train 误判为解析失败，新目标、新日期、新选项、批量调用、写操作和超时仍是独立失败。脱敏诊断新增 `agent_tool_attempts`（只含轮次与结果下标）。本版本无 SQLite migration、配置迁移或必填环境变量。
 
 - **基础先攻、暗骰与当前玩家提醒**（v0.25.1，PR #698/#699）：新增 `/ri` 先攻录入和 `/init` 查看、推进、清空、维护，支持固定值、D20 修正、指定骰式、优势／劣势和批量录入；`/rh` 暗骰在私聊直接返回，OneBot 群聊经 Notification Outbox 私发，QQ 官方群缺少可信 C2C 目标时明确拒绝。`/init` 子命令和 `/ri18`、`/ri+5`、`/ri优势+4` 等 SealDice 风格紧凑写法可用，推进到使用默认名称录入的玩家时按平台发送结构化 Mention。先攻表为进程内临时状态，重启清空，无 SQLite migration、配置迁移或必填环境变量。
 
