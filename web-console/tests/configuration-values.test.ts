@@ -8,7 +8,7 @@ function field(overrides: Partial<ConfigFieldSnapshot>): ConfigFieldSnapshot {
     key: "command.prefix",
     module: "command",
     valueType: "string",
-    source: "file",
+    source: "managed_toml",
     overridden: false,
     editable: true,
     configured: true,

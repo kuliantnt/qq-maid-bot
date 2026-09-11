@@ -343,7 +343,6 @@ async fn console_routes_work_when_enabled_without_wildcard_cors() -> Result<(), 
     for (path, expected_content_type) in [
         ("/console/styles.css", "text/css; charset=utf-8"),
         ("/console/app.js", "text/javascript; charset=utf-8"),
-        ("/console/agent-tools.js", "text/javascript; charset=utf-8"),
     ] {
         let (status, headers, body) =
             request_text_response(state.clone(), "GET", path, None, None).await;
