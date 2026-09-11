@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { MigrationPlaceholder } from "../components/layout/migration-placeholder.js";
+import { TodoPage } from "../features/todo/todo-page.js";
 
 export const Route = createFileRoute("/todo")({
-  component: () => <MigrationPlaceholder title="Todo" />,
+  component: TodoPage,
 });

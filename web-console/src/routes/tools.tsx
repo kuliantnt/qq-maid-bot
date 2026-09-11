@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { MigrationPlaceholder } from "../components/layout/migration-placeholder.js";
+import { MarkdownPage } from "../features/tools/markdown-page.js";
 
 export const Route = createFileRoute("/tools")({
-  component: () => <MigrationPlaceholder title="工具" />,
+  component: MarkdownPage,
 });
