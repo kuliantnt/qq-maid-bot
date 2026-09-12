@@ -24,6 +24,10 @@ import {
   type ConfigurationBusinessGroup,
 } from "./configuration-navigation.js";
 import { configInputValue, configurationSummary, isEmptyInputValue, parseConfigInputValue } from "./configuration-values.js";
+import { AgentEditor } from "./agent-editor.js";
+
+/** Agent 编辑器覆盖的业务域：这些 Tab 由 snapshot.agent 驱动，不依赖 runtime 字段存在。 */
+const AGENT_GROUPS: ReadonlySet<ConfigurationBusinessGroup> = new Set(["model-routing", "online-tools", "memory-knowledge"]);
 
 /** 配置中心：runtime 公开字段、secret 凭据与 Agent 策略状态。
  * 契约见 docs/INTERACTION_CONTRACTS.md：只提交真实变更、secret 留空不修改、
@@ -85,6 +89,10 @@ export function ConfigurationPage() {
 
   const availableGroups = useMemo(() => {
     const present = new Set((snapshot?.fields ?? []).map((field) => businessGroupOf(field.key)));
+    // “模型路由”等 Tab 承载 agent.toml 编辑器而非 runtime 字段；agent 可用时必须始终出现。
+    if (snapshot?.agent?.fileExists) {
+      for (const group of AGENT_GROUPS) present.add(group);
+    }
     return BUSINESS_GROUPS.filter((group) => present.has(group.id));
   }, [snapshot]);
 
@@ -109,7 +117,7 @@ export function ConfigurationPage() {
   const summary = configurationSummary(snapshot);
   const activePublic = publicFields.filter((field) => businessGroupOf(field.key) === activeGroup);
   const activeSecret = secretFields.filter((field) => businessGroupOf(field.key) === activeGroup);
-  const activeAgent = activeGroup === "models-providers" || activeGroup === "online-tools" || activeGroup === "memory-knowledge";
+  const activeAgent = activeGroup === "models-providers" || activeGroup === "online-tools" || activeGroup === "memory-knowledge" || activeGroup === "model-routing";
 
   const savePublic = () => {
     if (!snapshot) return;
@@ -287,7 +295,12 @@ export function ConfigurationPage() {
                 </section>
               ) : null}
 
-              {activeAgent && snapshot.agent ? <AgentStatusCard agent={snapshot.agent} /> : null}
+              {activeAgent && snapshot.agent ? (
+                <>
+                  <AgentStatusCard agent={snapshot.agent} />
+                  <AgentEditor snapshot={snapshot} group={activeGroup} />
+                </>
+              ) : null}
 
               <div className="flex flex-wrap items-center gap-3 border-t border-line pt-4">
                 <Button onClick={savePublic} disabled={runtimeSave.isPending}>
@@ -385,7 +398,7 @@ function PublicFieldRow({ field, value, onChange, onRemove, busy }: {
   );
 }
 
-/** Agent 策略区当前先呈现真实运行/保存状态；结构化编辑器在后续提交中恢复。 */
+/** Agent 策略的保存状态摘要：revision、来源与待重启标记；编辑能力见 agent-editor.tsx。 */
 function AgentStatusCard({ agent }: { agent: NonNullable<ConfigurationSnapshot["agent"]> }) {
   return (
     <section aria-label="Agent 策略状态" className="border border-line bg-glass-muted p-4">
