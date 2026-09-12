@@ -27,6 +27,7 @@ import { configInputValue, configurationSummary, isEmptyInputValue, parseConfigI
 import { AgentEditor } from "./agent-editor.js";
 import { ThemePreferencesSection } from "./theme-preferences.js";
 import { BackgroundPreferencesSection } from "./background-preferences.js";
+import { TTS_PROVIDER_KEY, ttsNumberRange, ttsProviderOptions } from "./tts-config.js";
 
 /** Agent 编辑器覆盖的业务域：这些 Tab 由 snapshot.agent 驱动，不依赖 runtime 字段存在。 */
 const AGENT_GROUPS: ReadonlySet<ConfigurationBusinessGroup> = new Set(["model-routing", "online-tools", "memory-knowledge"]);
@@ -364,6 +365,7 @@ function PublicFieldRow({ field, value, onChange, onRemove, busy }: {
   const current = value ?? configInputValue(field);
   const dirty = value !== undefined;
   const id = `config-${field.key}`;
+  const range = ttsNumberRange(field.key);
   return (
     <div className="flex flex-col gap-1 border-b border-line-inner pb-3 last:border-b-0">
       <Field
@@ -373,10 +375,24 @@ function PublicFieldRow({ field, value, onChange, onRemove, busy }: {
           field.applyMode === "restart" ? "重启后生效" : null,
           field.editable ? null : "只读",
           dirty ? "有未保存修改" : null,
+          range ? `范围 ${range[0]} 到 ${range[1]} 的整数` : null,
         ].filter(Boolean).join(" · ") || undefined}
       >
         {(props) =>
-          field.valueType === "boolean" ? (
+          field.key === TTS_PROVIDER_KEY ? (
+            // TTS Provider 是受控下拉：保留未知历史值，避免把自定义 Provider 静默改写。
+            <select
+              {...props}
+              disabled={!field.editable}
+              value={current === "" ? "disabled" : current}
+              onChange={(event) => onChange(event.target.value)}
+              className="border border-line bg-input px-3 py-2 text-sm text-ink outline-none"
+            >
+              {ttsProviderOptions(field.savedValue ?? field.effectiveValue).map(([optionValue, label]) => (
+                <option key={optionValue} value={optionValue}>{label}</option>
+              ))}
+            </select>
+          ) : field.valueType === "boolean" ? (
             <select
               {...props}
               disabled={!field.editable}
