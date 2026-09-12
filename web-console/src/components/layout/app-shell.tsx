@@ -1,12 +1,15 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useAtomValue, useSetAtom } from "jotai";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { requestRestart } from "../../api.js";
+import { backgroundController } from "../../stores/background.js";
+import { hydrateUserData } from "../../stores/user-data.js";
 import { autoRefreshAtom, useConsoleStatusQuery } from "../../queries/console-status.js";
 import { logout, sessionAtom } from "../../stores/auth.js";
 import { showToast } from "../../stores/toast.js";
 import { cn } from "../../lib/utils.js";
+import type { TransitionImage } from "../../background.js";
 import { Button } from "../ui/button.js";
 import { ConfirmDialog } from "../ui/dialog.js";
 import { ConsoleIcon, type ConsoleIconName } from "../ui/icons.js";
@@ -36,6 +39,11 @@ function wait(duration: number): Promise<void> {
  * prefers-reduced-motion 下直接切换。转换中到达的请求只保留最新一个。 */
 export function AppShell() {
   const [restartOpen, setRestartOpen] = useState(false);
+
+  // 认证完成后加载用户界面偏好：主题自定义色、背景状态与旧 cookie 迁移以服务端为权威。
+  useEffect(() => {
+    void hydrateUserData();
+  }, []);
 
   return (
     <>
@@ -179,10 +187,11 @@ function RestartConfirmDialog({ open, onOpenChange }: { open: boolean; onOpenCha
   );
 }
 
-/** 页面切换过渡：只在点击导航时播放；背景图接入 background controller 后填充切片。 */
+/** 页面切换过渡：只在点击导航时播放；中心切片由背景 controller 提供（无背景时为主题清洗过渡）。 */
 function usePageTransition() {
   const navigate = useNavigate();
   const [running, setRunning] = useState(false);
+  const [transitionImage, setTransitionImage] = useState<TransitionImage>(null);
   const busyRef = useRef(false);
   const pendingRef = useRef<string | null>(null);
 
@@ -195,6 +204,7 @@ function usePageTransition() {
       busyRef.current = true;
       const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       if (!reducedMotion) {
+        setTransitionImage(backgroundController.nextTransitionImage());
         setRunning(true);
         await wait(COVER_DURATION_MS);
       }
@@ -216,7 +226,13 @@ function usePageTransition() {
   const transitionOverlay = (
     <div className={cn("console-transition", running && "is-running")} aria-hidden="true" hidden={!running}>
       <div className="console-transition-wash" />
-      <div className="console-transition-image" style={{ backgroundImage: "none" }} />
+      <div
+        className="console-transition-image"
+        style={{
+          backgroundImage: transitionImage ? `url("${transitionImage.url}")` : "none",
+          backgroundPosition: transitionImage?.position ?? "",
+        }}
+      />
     </div>
   );
 

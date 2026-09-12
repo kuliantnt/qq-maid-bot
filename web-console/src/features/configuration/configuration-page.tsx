@@ -25,6 +25,8 @@ import {
 } from "./configuration-navigation.js";
 import { configInputValue, configurationSummary, isEmptyInputValue, parseConfigInputValue } from "./configuration-values.js";
 import { AgentEditor } from "./agent-editor.js";
+import { ThemePreferencesSection } from "./theme-preferences.js";
+import { BackgroundPreferencesSection } from "./background-preferences.js";
 
 /** Agent 编辑器覆盖的业务域：这些 Tab 由 snapshot.agent 驱动，不依赖 runtime 字段存在。 */
 const AGENT_GROUPS: ReadonlySet<ConfigurationBusinessGroup> = new Set(["model-routing", "online-tools", "memory-knowledge"]);
@@ -299,6 +301,13 @@ export function ConfigurationPage() {
                 <>
                   <AgentStatusCard agent={snapshot.agent} />
                   <AgentEditor snapshot={snapshot} group={activeGroup} />
+                </>
+              ) : null}
+
+              {activeGroup === "system-security" ? (
+                <>
+                  <ThemePreferencesSection />
+                  <BackgroundPreferencesSection />
                 </>
               ) : null}
 
