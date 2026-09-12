@@ -1,0 +1,310 @@
+@import "tailwindcss";
+
+/*
+ * 语义主题 token（DESIGN.md §2）。
+ * :root 提供与 Console Dark 一致的默认值，保证脚本加载前不闪回浅色画布；
+ * theme.ts 运行时通过 setProperty 覆盖同名变量完成主题切换，
+ * 因此这里的 @theme inline 只做引用注册，不拥有颜色值。
+ */
+:root {
+  color-scheme: var(--console-color-scheme);
+  --console-color-scheme: dark;
+  --console-background: #0d1117;
+  --console-surface: #161b22;
+  --console-surface-secondary: #1b2028;
+  --console-card: #21262d;
+  --console-input: #0d1117;
+  --console-border: #30363d;
+  --console-text-primary: #e6edf3;
+  --console-text-secondary: #8b949e;
+  --console-accent: #3fb950;
+  --console-accent-hover: #56d364;
+  --console-accent-contrast: #0d1117;
+  --console-success: #3fb950;
+  --console-warning: #d29922;
+  --console-error: #f85149;
+  --console-error-contrast: #ffffff;
+
+  /* 派生 token：组件状态只从语义色推导，不拥有独立主题色。 */
+  --console-glass: color-mix(in srgb, var(--console-surface) 94%, transparent);
+  --console-glass-raised: color-mix(in srgb, var(--console-card) 94%, transparent);
+  --console-glass-muted: color-mix(in srgb, var(--console-surface-secondary) 92%, transparent);
+  --console-line-inner: color-mix(in srgb, var(--console-border) 48%, transparent);
+  --console-accent-soft: color-mix(in srgb, var(--console-accent) 14%, var(--console-surface));
+  --console-focus: color-mix(in srgb, var(--console-accent) 42%, transparent);
+  --console-shadow: 0 16px 40px rgb(0 0 0 / 28%);
+  --console-z-top: 40;
+  --console-z-bottom: 50;
+}
+
+/* 把语义 token 注册为 Tailwind 颜色 token：
+   bg-surface / text-muted / border-line 等类名在内联处引用变量，
+   运行时主题切换与自定义三色覆盖对全部 utility 立即生效。 */
+@theme inline {
+  --color-canvas: var(--console-background);
+  --color-surface: var(--console-surface);
+  --color-surface-2: var(--console-surface-secondary);
+  --color-card: var(--console-card);
+  --color-input: var(--console-input);
+  --color-line: var(--console-border);
+  --color-ink: var(--console-text-primary);
+  --color-muted: var(--console-text-secondary);
+  --color-accent: var(--console-accent);
+  --color-accent-strong: var(--console-accent-hover);
+  --color-accent-contrast: var(--console-accent-contrast);
+  --color-accent-soft: var(--console-accent-soft);
+  --color-glass: var(--console-glass);
+  --color-glass-raised: var(--console-glass-raised);
+  --color-glass-muted: var(--console-glass-muted);
+  --color-line-inner: var(--console-line-inner);
+  --color-success: var(--console-success);
+  --color-warning: var(--console-warning);
+  --color-error: var(--console-error);
+  --color-error-contrast: var(--console-error-contrast);
+  --color-focus-ring: var(--console-focus);
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --shadow-console: var(--console-shadow);
+
+  --animate-page-in: page-in 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-fade-in: fade-in 0.18s ease-out both;
+}
+
+/* 设计系统：0 圆角的方形双线框体语言，第三方注入的圆角一律压平。 */
+@layer base {
+  *,
+  ::before,
+  ::after {
+    border-radius: 0;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    min-width: 320px;
+    margin: 0;
+    background: var(--console-background);
+    color: var(--console-text-primary);
+    font-family: var(--font-sans);
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+
+  [hidden] {
+    display: none !important;
+  }
+
+  :is(button, input, select, textarea, summary, [role="button"]):focus-visible {
+    outline: 3px solid var(--console-focus);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--console-accent-soft);
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--console-border) transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--console-border);
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  .noscript-error {
+    margin: 2rem;
+    color: var(--console-error);
+  }
+}
+
+/* 方形双线框体：外部 1px 线、1px 空隙、内部 1px 线（DESIGN.md §7）。 */
+@utility console-frame {
+  position: relative;
+  border: 1px solid var(--console-border);
+  background: var(--console-glass);
+
+  &::before {
+    content: "";
+    position: absolute;
+    inset: 2px;
+    border: 1px solid var(--console-line-inner);
+    pointer-events: none;
+  }
+}
+
+/* 等宽小标签（eyebrow / kicker / badge 共用）。 */
+@utility console-mono-tag {
+  color: var(--console-accent);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+/* 背景层与页面切换过渡保留为结构化 CSS：
+   九宫格切片位置和关键帧节奏不适合展开为 utility。 */
+.console-background {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  background: var(--console-background);
+  pointer-events: none;
+}
+
+/* 默认（未选择背景）不渲染任何背景图层，页面只呈现主题底色。 */
+.console-background--special {
+  display: none;
+}
+
+.console-background--custom {
+  display: none;
+  background-position: center;
+  background-size: cover;
+}
+
+.console-background-grid {
+  display: grid;
+  width: min(100vw, 100vh);
+  height: min(100vw, 100vh);
+  margin: auto;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: repeat(3, minmax(0, 1fr));
+  opacity: 0.72;
+  filter: saturate(0.82) contrast(0.92);
+}
+
+.console-background-grid-cell {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  background-image: url("/console/background/special.webp");
+  background-size: 300% 300%;
+  background-repeat: no-repeat;
+}
+
+.console-background-grid-cell:nth-child(1) { background-position: 0% 0%; }
+.console-background-grid-cell:nth-child(2) { background-position: 50% 0%; }
+.console-background-grid-cell:nth-child(3) { background-position: 100% 0%; }
+.console-background-grid-cell:nth-child(4) { background-position: 0% 50%; }
+.console-background-grid-cell:nth-child(5) { background-position: 50% 50%; }
+.console-background-grid-cell:nth-child(6) { background-position: 100% 50%; }
+.console-background-grid-cell:nth-child(7) { background-position: 0% 100%; }
+.console-background-grid-cell:nth-child(8) { background-position: 50% 100%; }
+.console-background-grid-cell:nth-child(9) { background-position: 100% 100%; }
+
+:root[data-background="special"] .console-background--special {
+  display: grid;
+  place-items: center;
+}
+
+:root[data-background="custom"] .console-background--custom {
+  display: block;
+}
+
+/* 页面切换：784ms 中心扩散遮蔽后换页，896ms 清洗淡出；
+   默认模式无中心图，特殊模式循环九宫格切片。 */
+.console-transition {
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.console-transition-wash {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--console-surface) 82%, transparent);
+  backdrop-filter: blur(22px) saturate(1.18);
+  opacity: 0;
+  clip-path: circle(150px at 50% 50%);
+}
+
+.console-transition-image {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 300px;
+  height: 300px;
+  background-image: url("/console/background/special.webp");
+  background-size: 300% 300%;
+  background-repeat: no-repeat;
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.88);
+  filter: saturate(0.88) contrast(0.96);
+}
+
+.console-transition.is-running .console-transition-wash {
+  animation:
+    console-transition-cover 0.768s cubic-bezier(0.65, 0, 0.35, 1) forwards,
+    console-transition-wash-out 0.896s ease-in 0.768s forwards;
+}
+
+.console-transition.is-running .console-transition-image {
+  animation:
+    console-transition-image-in 0.192s ease-out 0.096s forwards,
+    console-transition-image-out 0.896s ease-in 0.768s forwards;
+}
+
+@keyframes console-transition-cover {
+  from { opacity: 0; clip-path: circle(150px at 50% 50%); }
+  24% { opacity: 1; }
+  to { opacity: 1; clip-path: circle(150vmax at 50% 50%); }
+}
+
+@keyframes console-transition-image-in {
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+@keyframes console-transition-wash-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes console-transition-image-out {
+  to { opacity: 0; transform: translate(-50%, -50%) scale(1.04); }
+}
+
+@keyframes page-in {
+  from { opacity: 0; transform: translateY(8px); filter: blur(2px); }
+  to { opacity: 1; transform: translateY(0); filter: blur(0); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  .console-transition,
+  .animate-page-in,
+  .animate-fade-in {
+    animation: none !important;
+    transition: none !important;
+  }
+}
