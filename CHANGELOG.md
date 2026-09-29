@@ -4,6 +4,23 @@
 
 ## [Unreleased]
 
+## [v0.25.3] - 2026-09-29
+
+### Release Focus
+
+* **会话摘要权限隔离与视觉候选原图保留**：避免历史摘要中的错误能力声明成为运行时规则，并修复非视觉首候选导致后续视觉候选丢失原图的问题。
+
+### Fixed
+
+* **历史摘要权限过高**（PR #705）：新旧 Compact 摘要统一以 JSON 包裹的 user 历史数据注入，由独立、不可裁剪的系统规则限定权限；压缩时明确舍弃机器人能力、权限和 Provider 临时状态声明，保留会话事实与 `actor_ref` 成员归属。
+* **模型候选链提前丢图**（PR #705）：任一已加载候选支持视觉时保留原始 Image part；普通聊天、流式和 Tool Loop 仅降级不支持视觉的候选副本，后续视觉候选仍收到原图。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.25.3`；本次实际变更的 `qq-maid-core`、`qq-maid-llm` 分别提升到 `0.1.34`、`0.1.16`，`qq-maid-gateway-rs` 与 `qq-maid-common` 保持 `0.1.22`、`0.1.7`。
+* 无 SQLite migration、配置迁移或新增必填环境变量；已有摘要格式兼容，无需清空会话或数据库。候选顺序与错误 fallback 条件保持不变，非视觉首候选成功时仍返回其结果，不会仅因输入图片而跳过该候选。
+* 自动回归验证消息角色、摘要边界与原图传递，不保证具体模型的图片回答；真实上游识图效果需部署后验证。
+
 ## [v0.25.2] - 2026-09-10
 
 ### Release Focus
@@ -2173,6 +2190,7 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.25.3]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.25.2...v0.25.3
 [v0.25.2]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.25.1...v0.25.2
 [v0.25.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.25.0...v0.25.1
 [v0.25.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.24.6...v0.25.0
