@@ -39,6 +39,7 @@ mod cache_diagnostics;
 mod compact_messages;
 pub(crate) mod context_diagnostics;
 mod message_parts;
+mod summary_boundary;
 mod trace;
 
 use agent_output::{AgentDisplayContract, parse_agent_reply};
@@ -48,6 +49,7 @@ use context_diagnostics::{
     log_after_build_llm_messages, log_request_stage, warn_large_request_context,
 };
 use message_parts::current_user_parts_for_model;
+use summary_boundary::history_summary_messages;
 #[cfg(test)]
 use trace::{CHAT_TRACE_TEXT_LIMIT, trace_text};
 use trace::{
@@ -531,7 +533,7 @@ fn build_chat_messages_with_time_context(
         }
     }
     if !req.history_summary.trim().is_empty() {
-        messages.push(ChatMessage::system(req.history_summary.clone()));
+        messages.extend(history_summary_messages(&req.history_summary));
     }
     messages.extend(
         req.history_messages
@@ -566,11 +568,10 @@ fn budget_chat_messages(
         }
     }
     if !req.history_summary.trim().is_empty() {
-        push_message_item(
-            &mut items,
-            BudgetItemKind::HistorySummary,
-            ChatMessage::system(req.history_summary.clone()),
-        )?;
+        // 边界规则不可淘汰；摘要数据沿用历史摘要预算优先级。
+        let [boundary, summary] = history_summary_messages(&req.history_summary);
+        push_message_item(&mut items, BudgetItemKind::Required, boundary)?;
+        push_message_item(&mut items, BudgetItemKind::HistorySummary, summary)?;
     }
 
     let history = req

@@ -137,7 +137,8 @@ pub struct RespondRequest {
     /// 会话状态上下文
     #[serde(default)]
     pub session_context: String,
-    /// 已持久化的会话摘要锚点；与每轮变化的 session_context 分离以保持缓存前缀。
+    /// 已持久化的派生会话摘要（非指令数据，不具有系统规则或运行时能力定义权）。
+    /// 与每轮变化的 session_context 分离以保持缓存前缀。
     #[serde(default)]
     pub history_summary: String,
     /// 当前 Compact 批次内按时间追加的历史消息

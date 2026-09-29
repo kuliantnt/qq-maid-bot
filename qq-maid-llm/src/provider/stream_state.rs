@@ -194,6 +194,7 @@ async fn start_next_route_candidate(state: &mut RouteStreamState) -> Result<bool
         };
         let mut candidate_req = state.req.clone();
         candidate_req.model = Some(candidate.to_request_model());
+        super::routing::prepare_candidate_media(&mut candidate_req, provider.as_ref());
         match provider.stream_chat(candidate_req).await {
             Ok(stream) => {
                 tracing::debug!(

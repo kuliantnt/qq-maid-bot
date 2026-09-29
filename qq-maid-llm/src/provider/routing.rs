@@ -162,6 +162,7 @@ impl LlmProvider for ModelRouteProvider {
             };
             let mut candidate_req = req.clone();
             candidate_req.model = Some(candidate.to_request_model());
+            prepare_candidate_media(&mut candidate_req, provider.as_ref());
 
             match provider.chat(candidate_req).await {
                 Ok(mut outcome) => {
@@ -320,6 +321,7 @@ impl LlmProvider for ModelRouteProvider {
             let model = candidate.to_request_model();
             let mut chat = req.chat.clone();
             chat.model = Some(model.clone());
+            prepare_candidate_media(&mut chat, provider.as_ref());
             let result = if provider.tool_calling_protocol(Some(&model)).is_some() {
                 tracing::debug!(
                     task,
@@ -488,7 +490,10 @@ impl LlmProvider for ModelRouteProvider {
                 continue;
             };
             let request_model = candidate.to_request_model();
-            return provider.supports_vision(Some(&request_model));
+            // 只要后续候选能接收图片，Core 就必须保留原始 Image part。
+            if provider.supports_vision(Some(&request_model)) {
+                return true;
+            }
         }
         false
     }
@@ -537,5 +542,27 @@ impl LlmProvider for ModelRouteProvider {
             .first()
             .map(|(_, provider)| provider.stream_enabled())
             .unwrap_or(false)
+    }
+}
+
+/// 只修改候选副本，避免文本候选降级后污染后续视觉候选的输入。
+pub(super) fn prepare_candidate_media(req: &mut ChatRequest, provider: &dyn LlmProvider) {
+    use qq_maid_common::input_part::{MessageInputPart, TextSource};
+
+    if provider.supports_vision(req.model.as_deref()) {
+        return;
+    }
+    for message in &mut req.messages {
+        for part in &mut message.content_parts {
+            if matches!(part, MessageInputPart::Image { .. }) {
+                *part = MessageInputPart::Text {
+                    text: format!(
+                        "{}（当前模型不支持读取图片/附件内容，仅保留媒体摘要）",
+                        part.fallback_text()
+                    ),
+                    source: Some(TextSource::Supplement),
+                };
+            }
+        }
     }
 }

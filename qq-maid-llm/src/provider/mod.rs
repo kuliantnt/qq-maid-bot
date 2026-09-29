@@ -150,6 +150,7 @@ pub trait LlmProvider: Send + Sync {
         None
     }
     /// 当前 provider 是否能接收图片输入。未适配多模态的 provider 必须保守返回 false。
+    /// 候选链表示任一已加载候选可接收图片；执行时按实际候选能力降级副本，保留原图供 fallback。
     fn supports_vision(&self, _model: Option<&str>) -> bool {
         false
     }

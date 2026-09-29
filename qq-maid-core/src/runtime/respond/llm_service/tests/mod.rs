@@ -750,17 +750,18 @@ fn chat_messages_keep_summary_and_history_before_dynamic_context() {
         vec![
             "固定 prompt",
             "固定补充规则",
-            "稳定摘要锚点",
+            messages[2].content.as_str(),
+            messages[3].content.as_str(),
             "上一轮用户",
             "上一轮助手",
             "知识片段",
             "长期记忆",
             "会话上下文",
-            messages[8].content.as_str(),
+            messages[9].content.as_str(),
             "继续",
         ]
     );
-    assert!(messages[8].content.contains("请求时间上下文："));
+    assert!(messages[9].content.contains("请求时间上下文："));
 }
 
 mod budget;

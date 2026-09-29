@@ -182,10 +182,10 @@ fn different_request_times_only_change_bytes_after_stable_history_prefix() {
     let second = build_chat_messages_with_time_context(&req, true, &second_time);
 
     assert_eq!(
-        serde_json::to_vec(&first[..4]).unwrap(),
-        serde_json::to_vec(&second[..4]).unwrap()
+        serde_json::to_vec(&first[..5]).unwrap(),
+        serde_json::to_vec(&second[..5]).unwrap()
     );
-    assert_ne!(first[4].content, second[4].content);
+    assert_ne!(first[5].content, second[5].content);
 }
 
 #[test]
@@ -206,8 +206,8 @@ fn dynamic_context_changes_do_not_rewrite_summary_or_history_prefix() {
         let second = build_chat_messages_with_time_context(&changed, true, &time);
 
         assert_eq!(
-            serde_json::to_vec(&first[..4]).unwrap(),
-            serde_json::to_vec(&second[..4]).unwrap()
+            serde_json::to_vec(&first[..5]).unwrap(),
+            serde_json::to_vec(&second[..5]).unwrap()
         );
         assert_ne!(first, second);
     }
@@ -242,7 +242,8 @@ fn budgeted_chat_messages_protect_stable_summary_while_evicting_dynamic_context(
     };
     let protected_groups = [
         vec![ChatMessage::system("稳定 system")],
-        vec![ChatMessage::system("稳定历史摘要")],
+        vec![history_summary_messages("稳定历史摘要")[0].clone()],
+        vec![history_summary_messages("稳定历史摘要")[1].clone()],
         vec![
             normalize_user_message_for_provider(ChatMessage::user("受保护最近用户")),
             ChatMessage {
@@ -284,7 +285,8 @@ fn budgeted_chat_messages_protect_stable_summary_while_evicting_dynamic_context(
         let messages = budget_chat_messages(&req, config, true).unwrap();
         let contents = message_contents_with_time_marker(&messages);
 
-        assert_eq!(&contents[..2], ["稳定 system", "稳定历史摘要"]);
+        assert_eq!(contents[0], "稳定 system");
+        assert_eq!(&messages[1..3], &history_summary_messages("稳定历史摘要"));
         assert!(contents.iter().any(|content| content == "受保护最近用户"));
         assert!(contents.iter().any(|content| content == "受保护最近助手"));
         assert!(!contents.iter().any(|content| content.contains("可淘汰旧")));

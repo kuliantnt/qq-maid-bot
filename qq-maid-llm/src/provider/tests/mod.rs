@@ -517,3 +517,5 @@ fn handle_route_provider(
 
 mod config;
 mod routing;
+
+mod vision_routing;
