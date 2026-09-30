@@ -1,0 +1,16 @@
+# Web Console 源模板与 dist 文本产物统一 LF。
+#
+# 背景：Vite 以工作区的 index.html 为构建输入并保留其行尾；在 Windows 上
+# core.autocrlf 会把模板 checkout 成 CRLF，导致 dist/index.html 成为
+# "模板 CRLF + Vite 注入行 LF" 的混合行尾。混合行尾含孤立 CR 时 git 的
+# 文本转换会把文件当二进制跳过，CRLF 原样入库，与 Linux CI 重新构建出的
+# 纯 LF 产物不一致，dist 可复现检查因此失败。
+# eol=lf 让这些文件在 checkout 与入库两个方向都保持 LF，构建产物与平台无关。
+web-console/index.html text eol=lf
+web-console/dist/index.html text eol=lf
+web-console/dist/app.js text eol=lf
+web-console/dist/styles.css text eol=lf
+
+# 背景资产是二进制文件，禁止任何换行转换。
+web-console/dist/background/*.png binary
+web-console/dist/background/*.webp binary

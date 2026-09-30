@@ -12,6 +12,20 @@ npm run build
 
 `src/` 是唯一人工维护的源码，`dist/` 由构建脚本完整清理并生成，禁止直接编辑。`dist/` 会提交到 Git，Rust 使用 `include_str!` 直接嵌入这些产物，因此普通 Cargo 构建、测试、发布和机器人运行均不依赖 Node.js。
 
+## 无后端预览（dev mock）
+
+`npm run dev` 会自动启用 `mock/` 目录下的内存 mock API（vite dev 中间件，`apply: "serve"`），无需启动 Rust 后端即可预览全部页面：
+
+```bash
+npm run dev          # 打开 http://localhost:5173/console/
+MOCK_API=off npm run dev   # 关闭 mock（需要自行接入真实后端代理）
+MOCK_AUTH=gate npm run dev # 会话返回 401，用于预览登录/首次初始化/密码重置表单（任意凭据可登录）
+```
+
+- 数据由 `@faker-js/faker` 以固定种子生成（`mock/state.ts`），跨重启稳定，便于截图对比与回归排查。
+- Todo / Memory / 知识库 / 用户偏好 / 配置均为有状态内存实现，页面可以真实增删改查；配置保存会推进 revision 并按 apply_mode 展示"待重启"状态。
+- mock 只在 dev server 生效，`npm run build` 的 `dist/` 产物不受任何影响；不要在 `src/` 中引用 `mock/` 模块。
+
 ## 增量修改流程
 
 前端采用“源码增量修改、产物完整重建”的方式，不直接修改服务器上的静态文件，也不手工编辑 `dist/`。

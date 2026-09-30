@@ -1,0 +1,327 @@
+@import "tailwindcss";
+
+/*
+ * 语义主题 token（DESIGN.md §2）。
+ * :root 提供与「暮蔷薇」一致的默认值，保证脚本加载前不闪回旧画布；
+ * theme.ts 运行时通过 setProperty 覆盖同名变量完成主题切换，
+ * 因此这里的 @theme inline 只做引用注册，不拥有颜色值。
+ */
+:root {
+  color-scheme: var(--console-color-scheme);
+  --console-color-scheme: dark;
+  --console-background: #161022;
+  --console-surface: #1f1830;
+  --console-surface-secondary: #261d3b;
+  --console-card: #2d2344;
+  --console-input: #120d1d;
+  --console-border: #3b2f55;
+  --console-text-primary: #f2ece1;
+  --console-text-secondary: #ab9dbf;
+  --console-accent: #e8a3b9;
+  --console-accent-hover: #f3bcce;
+  --console-accent-contrast: #251226;
+  --console-success: #82d996;
+  --console-warning: #e6b966;
+  --console-error: #f2837c;
+  --console-error-contrast: #2b0f0d;
+
+  /* 派生 token：组件状态只从语义色推导，不拥有独立主题色。 */
+  --console-glass: color-mix(in srgb, var(--console-surface) 94%, transparent);
+  --console-glass-raised: color-mix(in srgb, var(--console-card) 94%, transparent);
+  --console-glass-muted: color-mix(in srgb, var(--console-surface-secondary) 92%, transparent);
+  --console-line-inner: color-mix(in srgb, var(--console-border) 48%, transparent);
+  --console-accent-soft: color-mix(in srgb, var(--console-accent) 14%, var(--console-surface));
+  --console-success-soft: color-mix(in srgb, var(--console-success) 14%, var(--console-surface));
+  --console-warning-soft: color-mix(in srgb, var(--console-warning) 14%, var(--console-surface));
+  --console-error-soft: color-mix(in srgb, var(--console-error) 14%, var(--console-surface));
+  --console-focus: color-mix(in srgb, var(--console-accent) 42%, transparent);
+  --console-shadow: 0 24px 48px -16px rgb(12 6 24 / 55%), 0 2px 8px rgb(12 6 24 / 30%);
+  --console-z-top: 40;
+  --console-z-bottom: 50;
+
+  /* 框体几何：面板大圆角 + 控件小圆角，替代旧版全局 0 圆角。 */
+  --console-radius: 10px;
+  --console-radius-lg: 16px;
+}
+
+/* 把语义 token 注册为 Tailwind 颜色 token：
+   bg-surface / text-muted / border-line 等类名在内联处引用变量，
+   运行时主题切换与自定义三色覆盖对全部 utility 立即生效。 */
+@theme inline {
+  --color-canvas: var(--console-background);
+  --color-surface: var(--console-surface);
+  --color-surface-2: var(--console-surface-secondary);
+  --color-card: var(--console-card);
+  --color-input: var(--console-input);
+  --color-line: var(--console-border);
+  --color-ink: var(--console-text-primary);
+  --color-muted: var(--console-text-secondary);
+  --color-accent: var(--console-accent);
+  --color-accent-strong: var(--console-accent-hover);
+  --color-accent-contrast: var(--console-accent-contrast);
+  --color-accent-soft: var(--console-accent-soft);
+  --color-glass: var(--console-glass);
+  --color-glass-raised: var(--console-glass-raised);
+  --color-glass-muted: var(--console-glass-muted);
+  --color-line-inner: var(--console-line-inner);
+  --color-success: var(--console-success);
+  --color-warning: var(--console-warning);
+  --color-error: var(--console-error);
+  --color-error-contrast: var(--console-error-contrast);
+  --color-success-soft: var(--console-success-soft);
+  --color-warning-soft: var(--console-warning-soft);
+  --color-error-soft: var(--console-error-soft);
+  --color-focus-ring: var(--console-focus);
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  /* 标题衬线：中文走宋体族（Noto/思源宋体优先），给页面标题「值班手记」的编辑感。 */
+  --font-display: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "SimSun", ui-serif, Georgia, serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --radius-console: var(--console-radius);
+  --radius-console-lg: var(--console-radius-lg);
+
+  --shadow-console: var(--console-shadow);
+
+  --animate-page-in: page-in 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-fade-in: fade-in 0.18s ease-out both;
+}
+
+/* 设计系统：暖夜蔷薇主题。圆角由 token 提供，控件 10px、面板 16px。 */
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    min-width: 320px;
+    margin: 0;
+    background: var(--console-background);
+    color: var(--console-text-primary);
+    font-family: var(--font-sans);
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-display);
+    letter-spacing: 0.015em;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+
+  /* 移动端防护：select/textarea 的固有宽度（最长 option）不允许撑破容器，
+     否则整页出现横向平移，fixed 弹层也会随布局视口跑偏。 */
+  input,
+  select,
+  textarea {
+    max-width: 100%;
+  }
+
+  [hidden] {
+    display: none !important;
+  }
+
+  :is(button, input, select, textarea, summary, [role="button"]):focus-visible {
+    outline: 3px solid var(--console-focus);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--console-accent-soft);
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--console-border) transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--console-border);
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  .noscript-error {
+    margin: 2rem;
+    color: var(--console-error);
+  }
+}
+
+/* 框体语言：单 1px 发丝线 + 大圆角 + 暖夜投影；背景透出 glass 层。 */
+@utility console-frame {
+  border: 1px solid var(--console-border);
+  border-radius: var(--console-radius-lg);
+  background: var(--console-glass);
+}
+
+/* 小节标签（eyebrow / kicker）：安静的字距标签，主色只留给可交互元素。 */
+@utility console-mono-tag {
+  color: var(--console-text-secondary);
+  font-family: var(--font-sans);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+/* 背景层与页面切换过渡保留为结构化 CSS：
+   九宫格切片位置和关键帧节奏不适合展开为 utility。 */
+.console-background {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  background: var(--console-background);
+  pointer-events: none;
+}
+
+/* 默认（未选择背景）不渲染任何背景图层，页面只呈现主题底色。 */
+.console-background--special {
+  display: none;
+}
+
+.console-background--custom {
+  display: none;
+  background-position: center;
+  background-size: cover;
+}
+
+.console-background-grid {
+  display: grid;
+  width: min(100vw, 100vh);
+  height: min(100vw, 100vh);
+  margin: auto;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: repeat(3, minmax(0, 1fr));
+  opacity: 0.72;
+  filter: saturate(0.82) contrast(0.92);
+}
+
+.console-background-grid-cell {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  background-image: url("/console/background/special.webp");
+  background-size: 300% 300%;
+  background-repeat: no-repeat;
+}
+
+.console-background-grid-cell:nth-child(1) { background-position: 0% 0%; }
+.console-background-grid-cell:nth-child(2) { background-position: 50% 0%; }
+.console-background-grid-cell:nth-child(3) { background-position: 100% 0%; }
+.console-background-grid-cell:nth-child(4) { background-position: 0% 50%; }
+.console-background-grid-cell:nth-child(5) { background-position: 50% 50%; }
+.console-background-grid-cell:nth-child(6) { background-position: 100% 50%; }
+.console-background-grid-cell:nth-child(7) { background-position: 0% 100%; }
+.console-background-grid-cell:nth-child(8) { background-position: 50% 100%; }
+.console-background-grid-cell:nth-child(9) { background-position: 100% 100%; }
+
+:root[data-background="special"] .console-background--special {
+  display: grid;
+  place-items: center;
+}
+
+:root[data-background="custom"] .console-background--custom {
+  display: block;
+}
+
+/* 页面切换：784ms 中心扩散遮蔽后换页，896ms 清洗淡出；
+   默认模式无中心图，特殊模式循环九宫格切片。 */
+.console-transition {
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.console-transition-wash {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--console-surface) 82%, transparent);
+  backdrop-filter: blur(22px) saturate(1.18);
+  opacity: 0;
+  clip-path: circle(150px at 50% 50%);
+}
+
+.console-transition-image {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 300px;
+  height: 300px;
+  background-image: url("/console/background/special.webp");
+  background-size: 300% 300%;
+  background-repeat: no-repeat;
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.88);
+  filter: saturate(0.88) contrast(0.96);
+}
+
+.console-transition.is-running .console-transition-wash {
+  animation:
+    console-transition-cover 0.768s cubic-bezier(0.65, 0, 0.35, 1) forwards,
+    console-transition-wash-out 0.896s ease-in 0.768s forwards;
+}
+
+.console-transition.is-running .console-transition-image {
+  animation:
+    console-transition-image-in 0.192s ease-out 0.096s forwards,
+    console-transition-image-out 0.896s ease-in 0.768s forwards;
+}
+
+@keyframes console-transition-cover {
+  from { opacity: 0; clip-path: circle(150px at 50% 50%); }
+  24% { opacity: 1; }
+  to { opacity: 1; clip-path: circle(150vmax at 50% 50%); }
+}
+
+@keyframes console-transition-image-in {
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+@keyframes console-transition-wash-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes console-transition-image-out {
+  to { opacity: 0; transform: translate(-50%, -50%) scale(1.04); }
+}
+
+@keyframes page-in {
+  from { opacity: 0; transform: translateY(8px); filter: blur(2px); }
+  to { opacity: 1; transform: translateY(0); filter: blur(0); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  .console-transition,
+  .animate-page-in,
+  .animate-fade-in {
+    animation: none !important;
+    transition: none !important;
+  }
+}

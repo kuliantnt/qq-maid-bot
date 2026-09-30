@@ -136,13 +136,16 @@ export async function fetchUserPreferences(): Promise<UserPreferences> {
   return parseUserPreferences(payload.data);
 }
 
-export async function updateUserPreferences(patch: {
+/** 用户界面偏好的可更新字段；未传字段保持服务端现值。 */
+export type PreferencesPatch = {
   readonly customColors?: readonly string[];
   readonly backgroundFileIds?: readonly string[];
   readonly activeBackgroundFileId?: string | null;
   readonly backgroundMode?: "default" | "special";
   readonly kuliantnt?: boolean;
-}): Promise<UserPreferences> {
+};
+
+export async function updateUserPreferences(patch: PreferencesPatch): Promise<UserPreferences> {
   const payload = record(await mutatingJson(USER_DATA_ROUTES.preferencesUpdate, "POST", {
     ...(patch.customColors === undefined ? {} : { custom_colors: patch.customColors }),
     ...(patch.backgroundFileIds === undefined ? {} : { background_file_ids: patch.backgroundFileIds }),

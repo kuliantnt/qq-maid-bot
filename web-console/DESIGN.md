@@ -4,7 +4,7 @@
 
 ## 1. Atmosphere & Identity
 
-这是一个本地优先的运维控制台。它应该像安静、精确的控制室，而不是营销页面。默认使用低饱和黑灰背景，通过背景、面板、卡片和输入框的明暗关系建立层级；绿色只承担操作、焦点和成功信号。识别性来自方形双线框体：外部 1px 线、1px 空隙、内部 1px 线。
+这是一个本地优先的运维控制台。它应该像安静、精确的控制室，而不是营销页面。默认使用低饱和黑灰背景，通过背景、面板、卡片和输入框的明暗关系建立层级；绿色只承担操作、焦点和成功信号。识别性来自「暖夜值班室」主题：暖紫墨底与暖象牙文字、衬线中文标题、蔷薇色承担操作与焦点，框体为 1px 发丝线加大圆角。
 
 生产页面采用“信号先于说明”的构图规则：页面标题只负责定位，主模块负责判断，旁侧模块负责扫描，长解释退到紧邻控件的短提示或原生 disclosure。Overview 是运行信号面板，Platforms 是身份卡与能力矩阵，Storage 是资源健康清单，Configuration 是控制面工作台，Tools 是编辑器与可信预览的分栏工作区。
 
@@ -32,7 +32,7 @@
 
 | 角色 | CSS token | 用途 |
 |---|---|---|
-| 方形几何 | `--console-radius` | 统一保持 0 圆角的框体语言 |
+| 圆角几何 | `--console-radius` / `--console-radius-lg` | 控件 10px、面板 16px 的框体语言 |
 | 轻层次 | `--console-shadow` | 仅用于浮动导航、认证门和 toast，不用于普通业务行 |
 | 背景网格 | `.console-background-grid` | 由单张 `special.webp` 拼图按 3×3 切片组成的全屏背景 |
 | 透明玻璃 | `--console-glass` / `--console-glass-raised` / `--console-glass-muted` | 页面组件的半透明填充，让背景图透出但保留文字对比度 |
@@ -120,7 +120,7 @@
 
 ## 7. Depth & Surface
 
-采用液态玻璃和双线框体的混合策略：半透明深色填充、背景模糊、轻微饱和度、上方内高光、下方内暗线。页面底层默认不显示背景图，只呈现主题底色；特殊模式使用 `.console-background-grid` 以固定的左上到右下顺序铺设单张 `special.webp` 拼图的 3×3 切片（原 9 张独立图合并压缩，减少包体积）。特殊模式由浏览器控制台输入 `kuliantnt` 解锁；认证后背景的权威状态来自服务端用户偏好（`background_file_ids`、`active_background_file_id`、`background_mode`、`kuliantnt`），`background_mode` 表达当前模式（`default` 无背景 / `special` 特殊九宫格），自定义背景继续由 `active_background_file_id` 表达，`kuliantnt` 只表示是否解锁。旧 Cookie 只允许在首次认证成功时一次性迁移（解锁状态与旧背景模式一起写入服务端成功后才清理），不再作为持久化状态。背景层不可交互、不承载信息，内容组件通过 `--console-glass*` token 透出背景。输入框、编辑器、状态按钮和危险操作可以使用更高不透明度以维持可读性。组件不使用圆角，不用重阴影制造层次。边框结构固定为 1px 外线、1px 空隙、1px 内线。
+采用液态玻璃和双线框体的混合策略：半透明深色填充、背景模糊、轻微饱和度、上方内高光、下方内暗线。页面底层默认不显示背景图，只呈现主题底色；特殊模式使用 `.console-background-grid` 以固定的左上到右下顺序铺设单张 `special.webp` 拼图的 3×3 切片（原 9 张独立图合并压缩，减少包体积）。特殊模式由浏览器控制台输入 `kuliantnt` 解锁；认证后背景的权威状态来自服务端用户偏好（`background_file_ids`、`active_background_file_id`、`background_mode`、`kuliantnt`），`background_mode` 表达当前模式（`default` 无背景 / `special` 特殊九宫格），自定义背景继续由 `active_background_file_id` 表达，`kuliantnt` 只表示是否解锁。旧 Cookie 只允许在首次认证成功时一次性迁移（解锁状态与旧背景模式一起写入服务端成功后才清理），不再作为持久化状态。背景层不可交互、不承载信息，内容组件通过 `--console-glass*` token 透出背景。输入框、编辑器、状态按钮和危险操作可以使用更高不透明度以维持可读性。组件使用圆角 token（面板 16px、控件 10px），层次靠柔和投影与表面明暗表达；边框为单 1px 发丝线（旧版 1px 外线 + 1px 空隙 + 1px 内线的双线结构已移除）。
 
 ## 8. Accessibility Constraints & Accepted Debt
 
