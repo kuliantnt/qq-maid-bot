@@ -1,6 +1,6 @@
 # Web Console
 
-8787 部署管理控制台的原生 TypeScript 源码。这套 Console 是仓库原有前端的替代实现，页面复用 Rust 侧部署管理员服务端会话、CSRF、配置中心和业务管理 API，仍只适合本机或受控内网，不应将端口裸露到公网。
+8787 部署管理控制台使用 React 19、Vite 7 和 TypeScript。页面复用 Rust 侧部署管理员服务端会话、CSRF、配置中心和业务管理 API，仍只适合本机或受控内网，不应将端口裸露到公网。
 
 前端契约文档已统一放在仓库根目录 [`docs/`](../docs/README.md)，本文件只保留源码、构建和增量修改流程。
 
@@ -10,7 +10,7 @@ npm run check
 npm run build
 ```
 
-`src/` 是唯一人工维护的源码，`dist/` 由构建脚本完整清理并生成，禁止直接编辑。`dist/` 会提交到 Git，Rust 使用 `include_str!` 直接嵌入这些产物，因此普通 Cargo 构建、测试、发布和机器人运行均不依赖 Node.js。
+`src/`、入口 `index.html`、开发用 `mock/` 和构建配置是人工维护的源码；`dist/` 由构建脚本完整清理并生成，禁止直接编辑。`dist/` 会提交到 Git，Rust 直接嵌入这些产物，因此普通 Cargo 构建、测试、发布和机器人运行均不依赖 Node.js。
 
 ## 无后端预览（dev mock）
 
@@ -36,7 +36,7 @@ MOCK_AUTH=gate npm run dev # 会话返回 401，用于预览登录/首次初始�
    git status --short --branch
    ```
 
-2. 只修改对应领域的 `src/` 文件：页面结构改 `src/index.html`，页面行为改 `src/views/<page>.ts`，API 边界改 `src/api.ts` 和 `src/types.ts`，主题/背景/导航改各自模块。后端 DTO 或路由发生变化时，先确认 Rust API 契约，再同步前端解析器。
+2. 只修改对应领域的源码：页面路由在 `src/routes/`，交互逻辑在 `src/features/`，复用组件在 `src/components/`，API 边界在 `src/api.ts`、`src/api-routes.ts` 和 `src/types.ts`，主题与背景分别在对应模块。后端 DTO 或路由发生变化时，先确认 Rust API 契约，再同步前端解析器。
 
 3. 在 `web-console/` 运行检查和构建：
 
@@ -59,7 +59,7 @@ MOCK_AUTH=gate npm run dev # 会话返回 401，用于预览登录/首次初始�
 
    如果 `dist` 与源码构建结果不一致，先重新运行 `npm run build`，不要手工修补生成文件。
 
-5. 涉及 Rust 静态资源登记、响应头或 API DTO 时，再运行对应 Rust 测试；新增前端模块必须同步更新 `qq-maid-core/src/http/console_routes.rs` 的资源 allowlist。涉及缓存策略时，HTML 使用可重新验证的缓存，带有当前构建内容的静态 JS/CSS/图片才使用长期缓存。
+5. 涉及 Rust 静态资源登记、响应头或 API DTO 时，再运行对应 Rust 测试；只有构建产物的文件集合变化时才需要同步调整 `qq-maid-core/src/http/console_routes.rs` 的资源登记。涉及缓存策略时，HTML 使用可重新验证的缓存，带有当前构建内容的静态 JS/CSS/图片才使用长期缓存。
 
 6. 提交时按功能拆分：页面/API/后端契约/文档分别保持可独立审查；不要提交 `scripts/deploy.conf`、密钥、`.omo/` 或本地构建缓存。
 
@@ -86,4 +86,4 @@ git diff --exit-code -- web-console/dist
 | [INTERACTION_CONTRACTS.md](../docs/INTERACTION_CONTRACTS.md) | 配置保存、修改、冲突、密钥和重启交互协议 |
 | [ADDING_A_PAGE.md](ADDING_A_PAGE.md) | 新增页面、组件、主题和 API 消费者的步骤 |
 
-当前顶层信息架构包含 Overview、Platforms、Todo、知识库、Configuration、Storage、Tools。知识库页面管理托管文件的查看、上传、下载、删除和失败重试；目录来源文件只读。Configuration 在原页面内按模型与供应商、模型路由、联网与工具、记忆与知识库、回复与语音、平台接入、待办与通知、系统与安全组织；runtime、Secret 和 Agent 只是保存边界，不再作为用户的主导航结构。
+当前顶层页面包含 Overview、Platforms、Todo、Memory、知识库、Configuration、Storage、Tools。知识库页面管理托管文件的查看、上传、下载、删除和失败重试；目录来源文件只读。Configuration 按模型与供应商、模型路由、联网与工具、记忆与知识库、回复与语音、平台接入、待办与通知、系统与安全组织。供应商连接和模型管理复用已有受保护 API，Secret 只呈现配置状态，诊断结果随配置 revision 失效。

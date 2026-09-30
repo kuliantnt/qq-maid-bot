@@ -4,6 +4,24 @@
 
 ## [Unreleased]
 
+## [v0.26.0] - 2026-09-30
+
+### Release Focus
+
+* **Web Console 全面改版**（PR #703）：管理界面迁移到 React 19、Vite 7 和 TypeScript，保留 `/console/` 地址、Rust 内嵌静态资源及现有管理 API 与认证边界。
+
+### Changed
+
+* 总览、平台、存储、Todo、Memory、知识库、配置和工具页面以及登录、首次初始化、密码重置流程全部迁移。服务端状态由 TanStack Query 管理，客户端状态由 Jotai 管理；配置表单使用 TanStack Form + Zod，Markdown 编辑器改用 CodeMirror 6，预览仍由 Rust 后端清理。
+* 配置中心保留 Agent 模型路线与场景白名单、主题和背景偏好、TTS 校验，并恢复供应商连接与模型管理完整流程：自定义连接增删改、Credential 状态与替换/清除、真实连接诊断、模型发现与本地 override、启停和加入 Route。
+* 前端改为 Vite 可复现构建，`dist/` 与仓库共同提交；Rust 继续直接嵌入产物，部署和普通 Cargo 构建无需 Node.js。开发环境可使用内存 mock API 预览页面。
+
+### Compatibility
+
+* 根包 `qq-maid-bot` 提升到 `0.26.0`，内部 crate 版本不变；根 `Cargo.lock` 同步纳入本次依赖更新。
+* 本次没有 SQLite migration、必填环境变量或配置迁移。已有管理员会话、同源校验、CSRF、Secret 脱敏和 revision 冲突保护沿用原有服务端契约；升级后刷新控制台并重新登录，确认供应商连接和模型路线仍符合预期。
+* 前端改版的本地与 CI 自动检查不等于真实部署联调；浏览器中的实际 Provider 诊断与管理员操作仍需在部署环境验证。
+
 ## [v0.25.3] - 2026-09-29
 
 ### Release Focus
@@ -2190,6 +2208,7 @@ bash scripts/deploy-local.sh
 - 移除已废弃的 Python 接入层和旧 Provider
 - rig-core 升级至 0.38.2
 
+[v0.26.0]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.25.3...v0.26.0
 [v0.25.3]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.25.2...v0.25.3
 [v0.25.2]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.25.1...v0.25.2
 [v0.25.1]: https://github.com/kuliantnt/qq-maid-bot/compare/v0.25.0...v0.25.1
