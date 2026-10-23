@@ -53,6 +53,50 @@ fn web_search_errors_have_actionable_user_replies() {
     }
 }
 
+#[test]
+fn deepseek_search_errors_use_deepseek_guidance_instead_of_tavily() {
+    // 缺少 Key / 401 / 402 与 Tavily 共享错误码，但用户需要操作的是 DeepSeek 凭据。
+    let cases = [
+        (
+            "web_search_not_configured",
+            "deepseek_search_config",
+            "DEEPSEEK_API_KEY",
+        ),
+        (
+            "authentication_failed",
+            "deepseek_search_http",
+            "DeepSeek API Key",
+        ),
+        ("quota_exhausted", "deepseek_search_http", "DeepSeek"),
+    ];
+
+    for (code, stage, expected) in cases {
+        let error = LlmError::new(code, "upstream detail", stage);
+        let reply = crate::runtime::tools::search::format_web_search_error_reply(&error);
+        assert!(
+            reply.contains(expected),
+            "unexpected reply for {code}: {reply}"
+        );
+        assert!(!reply.contains("Tavily"), "leaked Tavily hint: {reply}");
+    }
+
+    // Tavily 原有文案保持不变。
+    let tavily = [
+        ("web_search_not_configured", "config", "TAVILY_API_KEY"),
+        ("tavily_auth_error", "tavily_http", "Tavily API Key"),
+        ("quota_exhausted", "tavily_http", "Tavily 查询额度"),
+    ];
+    for (code, stage, expected) in tavily {
+        let error = LlmError::new(code, "upstream detail", stage);
+        let reply = crate::runtime::tools::search::format_web_search_error_reply(&error);
+        assert!(
+            reply.contains(expected),
+            "unexpected reply for {code}: {reply}"
+        );
+        assert!(!reply.contains("DeepSeek"), "leaked DeepSeek hint: {reply}");
+    }
+}
+
 #[async_trait]
 impl WebSearchExecutor for LongAnswerWebSearchExecutor {
     async fn query(&self, req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {

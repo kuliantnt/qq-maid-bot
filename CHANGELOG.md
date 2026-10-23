@@ -9,7 +9,7 @@
 ### Added
 
 * 新增 DeepSeek 独立 Search API 后端：`tools.web_search.backend = "deepseek"`，复用 DeepSeek API Key 和 Base URL，供 `/查` 与 Agent 搜索使用；无需绑定搜索模型。
-* 控制台新增 DeepSeek Search 选项，保留场景白名单、结果数硬上限、超时保护和真实错误投影。检索摘要优先使用官方 `summary`，空结果与调用失败分别处理。
+* 控制台新增 DeepSeek Search 选项，保留场景白名单、结果数硬上限、超时保护和真实错误投影。检索摘要优先使用官方 `summary`，`answer` 汇总逐条摘要后附参考来源，缺少 Key、401 和 402 使用 DeepSeek 专属提示；空结果与调用失败分别处理。
 
 ### Changed
 

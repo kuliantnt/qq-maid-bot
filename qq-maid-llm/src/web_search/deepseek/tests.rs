@@ -66,6 +66,8 @@ async fn routed_search_uses_independent_api_and_summary_without_conversation() {
     assert_eq!(outcome.provider, "deepseek");
     assert_eq!(outcome.sources.len(), 1);
     assert_eq!(outcome.sources[0].snippet, "模型读取的长摘要");
+    // answer 必须带真实检索摘要，而不只是参考来源链接。
+    assert!(outcome.answer.contains("模型读取的长摘要"));
     assert!(outcome.answer.contains("https://rust-lang.org"));
     // 非流式上游仍通过公共默认实现输出最终文本。
     assert!(rx.recv().await.is_some());
@@ -73,6 +75,43 @@ async fn routed_search_uses_independent_api_and_summary_without_conversation() {
         captured.lock().await[0],
         json!({"query":"Rust site:rust-lang.org", "count":3, "need_content":false})
     );
+}
+
+#[tokio::test]
+async fn answer_keeps_each_retrieval_summary_within_display_budget() {
+    let summaries = (0..5)
+        .map(|index| format!("第 {index} 条检索摘要|{}", "内容".repeat(300)))
+        .collect::<Vec<_>>();
+    let body = json!({
+        "results": summaries.iter().enumerate().map(|(index, summary)| json!({
+            "title": format!("来源 {index}"),
+            "url": format!("https://example.test/{index}"),
+            "snippet": "短摘要",
+            "summary": summary,
+        })).collect::<Vec<_>>()
+    });
+    let (config, _) = server(200, body).await;
+    let outcome = DeepSeekSearchExecutor::new(&config)
+        .unwrap()
+        .query(request())
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.sources.len(), 5);
+    for (index, summary) in summaries.iter().enumerate() {
+        let head = summary.chars().take(20).collect::<String>();
+        assert!(outcome.answer.contains(&head), "missing summary {index}");
+        // 参考来源链接仍完整保留在 answer 和结构化 sources 中。
+        assert!(
+            outcome
+                .answer
+                .contains(&format!("https://example.test/{index}"))
+        );
+        // 结构化 sources 保留完整摘要，展示层的截断只作用于 answer。
+        assert_eq!(&outcome.sources[index].snippet, summary);
+    }
+    // 摘要正文受总预算约束，`/查` 的 1500 字符展示上限仍能容纳参考来源。
+    assert!(outcome.answer.chars().count() < 1_500);
 }
 
 #[tokio::test]
@@ -132,15 +171,14 @@ async fn validates_unicode_length_and_missing_key_before_network() {
         deepseek_api_key: None,
         ..config
     };
-    assert_eq!(
-        DeepSeekSearchExecutor::new(&config)
-            .unwrap()
-            .query(request())
-            .await
-            .unwrap_err()
-            .code,
-        "web_search_not_configured"
-    );
+    let err = DeepSeekSearchExecutor::new(&config)
+        .unwrap()
+        .query(request())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "web_search_not_configured");
+    // Core 依靠 stage 前缀区分 DeepSeek 和 Tavily 的缺 Key 文案。
+    assert_eq!(err.stage, "deepseek_search_config");
 }
 
 fn config(base_url: String, stream: bool) -> LlmConfig {

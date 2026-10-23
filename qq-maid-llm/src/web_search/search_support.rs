@@ -40,7 +40,8 @@ pub(super) fn render_source_links(answer: Option<&str>, sources: &[WebSearchSour
     output
 }
 
-fn escape_markdown_label(value: &str) -> String {
+/// 转义 Markdown 链接标签中的方括号和反斜杠，供来源链接与 answer 摘要共用。
+pub(super) fn escape_markdown_label(value: &str) -> String {
     value
         .replace('\\', "\\\\")
         .replace('[', "\\[")

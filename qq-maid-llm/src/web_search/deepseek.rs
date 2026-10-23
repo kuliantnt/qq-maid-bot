@@ -15,6 +15,13 @@ use crate::{
     error::{LlmError, LlmErrorKind},
     metrics::duration_ms,
 };
+use qq_maid_common::text::truncate_chars_with_ellipsis_trimmed;
+
+/// answer 中单条检索摘要的长度上限；与 `/查` 的 1500 字符展示预算配合，
+/// 保证摘要之外仍能看到参考来源链接。
+const ANSWER_SOURCE_SUMMARY_MAX_CHARS: usize = 180;
+/// answer 摘要正文的总预算，长摘要不能挤掉结构化 `sources` 之外的参考链接。
+const ANSWER_SUMMARY_TOTAL_MAX_CHARS: usize = 900;
 
 pub(super) struct DeepSeekSearchExecutor {
     client: reqwest::Client,
@@ -52,10 +59,12 @@ impl DeepSeekSearchExecutor {
 impl WebSearchExecutor for DeepSeekSearchExecutor {
     async fn query(&self, req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
         let api_key = self.api_key.as_deref().ok_or_else(|| {
+            // stage 统一带 `deepseek_search` 前缀：Core 需要据此为用户选择 DeepSeek
+            // 专属错误文案，不能把缺少 DeepSeek Key 误报成 Tavily 配置问题。
             LlmError::new(
                 "web_search_not_configured",
                 "DEEPSEEK_API_KEY is required for DeepSeek Search",
-                "config",
+                "deepseek_search_config",
             )
         })?;
         let query = req.query.trim();
@@ -128,7 +137,7 @@ impl WebSearchExecutor for DeepSeekSearchExecutor {
         let answer = if sources.is_empty() {
             String::new()
         } else {
-            super::search_support::render_source_links(None, &sources)
+            render_answer(&sources)
         };
         Ok(WebSearchOutcome {
             answer,
@@ -141,6 +150,42 @@ impl WebSearchExecutor for DeepSeekSearchExecutor {
     fn provider_name(&self) -> &'static str {
         "deepseek"
     }
+}
+
+/// DeepSeek 只返回逐条检索结果，不生成整段回答；answer 必须汇总真实检索摘要，
+/// 否则 `/查`、Agent 搜索和多实体调研只能拿到参考链接而没有可核实内容。
+fn render_answer(sources: &[WebSearchSource]) -> String {
+    let mut digest = String::from("搜索到以下公开网页结果：");
+    let summarized = sources
+        .iter()
+        .filter(|source| !source.snippet.trim().is_empty())
+        .count();
+    // 按摘要条数均分总预算，避免前部长摘要挤掉后部结果的摘要。
+    let per_source =
+        (ANSWER_SUMMARY_TOTAL_MAX_CHARS / summarized.max(1)).min(ANSWER_SOURCE_SUMMARY_MAX_CHARS);
+    let mut used = 0usize;
+    let mut rendered = 0usize;
+    for source in sources {
+        let summary = source.snippet.trim();
+        if summary.is_empty() {
+            continue;
+        }
+        let budget = per_source.min(ANSWER_SUMMARY_TOTAL_MAX_CHARS.saturating_sub(used));
+        if budget == 0 {
+            break;
+        }
+        let entry = format!(
+            "\n{}. {}：{}",
+            rendered + 1,
+            super::search_support::escape_markdown_label(&source.title),
+            truncate_chars_with_ellipsis_trimmed(summary, budget),
+        );
+        used += entry.chars().count();
+        digest.push_str(&entry);
+        rendered += 1;
+    }
+    // 摘要为空时仍保留原有「只有参考来源」的兜底输出。
+    super::search_support::render_source_links(Some(&digest), sources)
 }
 
 fn transport_error(err: reqwest::Error) -> LlmError {
