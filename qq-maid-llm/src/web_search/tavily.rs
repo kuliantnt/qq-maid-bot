@@ -1,3 +1,4 @@
+use super::search_support::{render_source_links, validate_timeouts};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -138,7 +139,7 @@ impl WebSearchExecutor for TavilyWebSearchExecutor {
         }
 
         Ok(WebSearchOutcome {
-            answer: render_tavily_answer(body.answer.as_deref(), &sources),
+            answer: render_source_links(body.answer.as_deref(), &sources),
             sources,
             provider: "tavily".to_owned(),
             elapsed_ms: duration_ms(started.elapsed()),
@@ -266,28 +267,6 @@ struct TavilySearchResult {
     content: String,
 }
 
-fn validate_timeouts(config: &WebSearchConfig) -> Result<(), LlmError> {
-    if config.connect_timeout_seconds == 0
-        || config.first_response_timeout_seconds == 0
-        || config.total_timeout_seconds == 0
-    {
-        return Err(LlmError::config(
-            "tools.web_search timeout values must be greater than zero",
-        ));
-    }
-    if config.connect_timeout_seconds > config.first_response_timeout_seconds {
-        return Err(LlmError::config(
-            "tools.web_search.connect_timeout_seconds must not exceed first_response_timeout_seconds",
-        ));
-    }
-    if config.first_response_timeout_seconds > config.total_timeout_seconds {
-        return Err(LlmError::config(
-            "tools.web_search.first_response_timeout_seconds must not exceed total_timeout_seconds",
-        ));
-    }
-    Ok(())
-}
-
 fn request_topic(
     value: Option<&str>,
     configured: WebSearchTopic,
@@ -348,29 +327,6 @@ fn tavily_sources(results: Vec<TavilySearchResult>, limit: usize) -> Vec<WebSear
         })
         .take(limit)
         .collect()
-}
-
-fn render_tavily_answer(answer: Option<&str>, sources: &[WebSearchSource]) -> String {
-    let answer = answer.map(str::trim).filter(|value| !value.is_empty());
-    let mut output = answer
-        .map(str::to_owned)
-        .unwrap_or_else(|| "搜索到以下公开网页结果：".to_owned());
-    output.push_str("\n\n参考来源：");
-    for source in sources {
-        output.push_str("\n- [");
-        output.push_str(&escape_markdown_label(&source.title));
-        output.push_str("](");
-        output.push_str(&source.url);
-        output.push(')');
-    }
-    output
-}
-
-fn escape_markdown_label(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('[', "\\[")
-        .replace(']', "\\]")
 }
 
 fn truncate_chars(value: &str, limit: usize) -> String {

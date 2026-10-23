@@ -790,3 +790,19 @@ fn toml_config_rejects_unknown_enabled_tool() {
     assert_eq!(err.code, "config");
     assert!(err.message.contains("unknown tool `run_shell`"));
 }
+
+#[test]
+fn deepseek_search_does_not_require_model_routes() {
+    let mut document: toml::Value = toml::from_str(DEFAULT_AGENT_CONFIG).unwrap();
+    let search = document["tools"]["web_search"].as_table_mut().unwrap();
+    search.insert("backend".into(), toml::Value::String("deepseek".into()));
+    search.remove("routes");
+    let config = AgentRuntimeConfig::from_toml(
+        &toml::to_string(&document).unwrap(),
+        AgentConfigSource::File("config/agent.toml".into()),
+    )
+    .unwrap();
+    let policy = config.resolve(ChatScene::Private).unwrap();
+    assert_eq!(policy.search_backend, WebSearchBackend::DeepSeek);
+    assert!(policy.search_model.is_empty());
+}

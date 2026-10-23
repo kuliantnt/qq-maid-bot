@@ -19,6 +19,7 @@ pub(super) struct RoutedWebSearchExecutor {
     default_max_results: u8,
     native_providers: HashMap<ModelProvider, DynWebSearchExecutor>,
     tavily: DynWebSearchExecutor,
+    deepseek: DynWebSearchExecutor,
     disabled: DynWebSearchExecutor,
 }
 
@@ -29,6 +30,7 @@ impl RoutedWebSearchExecutor {
         default_max_results: u8,
         native_providers: HashMap<ModelProvider, DynWebSearchExecutor>,
         tavily: DynWebSearchExecutor,
+        deepseek: DynWebSearchExecutor,
         disabled: DynWebSearchExecutor,
     ) -> Self {
         Self {
@@ -37,6 +39,7 @@ impl RoutedWebSearchExecutor {
             default_max_results,
             native_providers,
             tavily,
+            deepseek,
             disabled,
         }
     }
@@ -59,6 +62,7 @@ impl RoutedWebSearchExecutor {
             .as_deref()
             .unwrap_or(self.default_model.as_str());
         match backend {
+            WebSearchBackend::DeepSeek => Ok((self.deepseek.clone(), req)),
             WebSearchBackend::Tavily => Ok((self.tavily.clone(), req)),
             WebSearchBackend::Disabled => Ok((self.disabled.clone(), req)),
             WebSearchBackend::ProviderNative => {
@@ -178,6 +182,7 @@ mod tests {
             8,
             native_providers,
             Arc::new(MarkerExecutor("tavily")),
+            Arc::new(MarkerExecutor("deepseek")),
             Arc::new(MarkerExecutor("disabled")),
         );
         let base_req = WebSearchRequest {

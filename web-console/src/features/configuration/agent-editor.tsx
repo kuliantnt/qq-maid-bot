@@ -36,6 +36,7 @@ const KNOWLEDGE_MODE_OPTIONS: ReadonlyArray<readonly [string, string]> = [
 const WEB_SEARCH_BACKEND_OPTIONS: ReadonlyArray<readonly [AgentWebSearchBackend, string]> = [
   ["provider_native", "Provider 原生搜索"],
   ["tavily", "Tavily"],
+  ["deepseek", "DeepSeek Search"],
   ["disabled", "关闭联网搜索"],
 ];
 
@@ -252,8 +253,9 @@ function WebSearchSection({ draft, onDraftChange, editable, tavilyKeyConfigured,
           </select>
         )}
       </Field>
+      {webSearch.backend === "deepseek" && <p>DeepSeek Search 复用 DeepSeek API Key 和 Base URL，无需搜索模型路线。仅使用查询词与结果数；Tavily 专属参数不生效。</p>}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <Field label="Tavily 结果数" id="agent-web-search-max-results" hint="1 到 10 之间的整数">
+        <Field label="搜索结果数" id="agent-web-search-max-results" hint="1 到 10 之间的整数">
           {(props) => (
             <Input
               {...props}
