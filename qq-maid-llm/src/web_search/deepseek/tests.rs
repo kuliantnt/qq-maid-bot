@@ -251,3 +251,238 @@ async fn upstream_errors_redact_credentials() {
     assert!(!err.message.contains("test-key"));
     assert!(err.message.contains("<redacted>"));
 }
+
+/// 校验正文里每个 Markdown 行内链接都完整：`](` 后必须在同一行遇到 `)`，
+/// 且以 `- [` 开头的来源行必须整行闭合。
+fn assert_no_broken_markdown_links(answer: &str) {
+    for (offset, _) in answer.match_indices("](") {
+        let tail = &answer[offset + 2..];
+        let Some(end) = tail.find(')') else {
+            panic!("链接缺少右括号: {}", &answer[offset.saturating_sub(60)..]);
+        };
+        assert!(!tail[..end].contains('\n'), "链接被截断: {}", &tail[..end]);
+    }
+    for line in answer.lines().filter(|line| line.starts_with("- [")) {
+        assert!(line.ends_with(')'), "来源行被截断: {line}");
+    }
+}
+
+fn source_link_lines(answer: &str) -> Vec<&str> {
+    answer
+        .lines()
+        .filter(|line| line.starts_with("- ["))
+        .collect()
+}
+
+fn summary_entries(answer: &str) -> Vec<&str> {
+    answer
+        .lines()
+        .filter(|line| line.starts_with(|ch: char| ch.is_ascii_digit()))
+        .collect()
+}
+
+fn long_title(index: usize) -> String {
+    format!("结果 {index} 标题{}🚀", "超长标题".repeat(48))
+}
+
+#[test]
+fn answer_budget_keeps_links_whole_with_long_titles_summaries_and_urls() {
+    // 标题接近 200 字符、URL 超过 200 字符、摘要远超单条上限，且含中文、Emoji 和
+    // Markdown 特殊字符：这是最容易产生残缺链接和摘要断层的组合。
+    let sources = (0..8)
+        .map(|index| WebSearchSource {
+            title: long_title(index),
+            url: format!("https://example.test/{index}/{}", "a".repeat(200)),
+            snippet: format!(
+                "结果 {index} 摘要{}[内嵌](https://inner.test/{index})😀",
+                "公开内容".repeat(80)
+            ),
+        })
+        .collect::<Vec<_>>();
+
+    let answer = render_answer(&sources);
+
+    assert!(
+        answer.chars().count() <= 1_400,
+        "answer 超出预算: {}",
+        answer.chars().count()
+    );
+    // `/查` 的 1500 字符上限包含「【联网查询】\n\n」前缀，因此下游不能再整体截断。
+    assert!(
+        answer.chars().count() + "【联网查询】\n\n".chars().count() <= 1_500,
+        "answer 与 /查 前缀合计超出展示上限"
+    );
+    assert_no_broken_markdown_links(&answer);
+
+    // 前几条长标题、长链接不能挤掉后续结果：每条有摘要的结果都保留有意义摘要。
+    let entries = summary_entries(&answer);
+    assert_eq!(entries.len(), 8);
+    for (index, entry) in entries.iter().enumerate() {
+        let (_, summary) = entry.split_once('：').expect("摘要条目缺少分隔符");
+        assert!(
+            summary.chars().count() >= 30,
+            "第 {index} 条摘要过短: {summary}"
+        );
+        assert!(
+            summary.contains("公开内容"),
+            "第 {index} 条摘要丢失: {summary}"
+        );
+    }
+
+    // 参考来源链接完整展示，超预算来源只省略展示、不进入残缺状态。
+    let links = source_link_lines(&answer);
+    assert!(links.len() >= 2, "参考来源链接不足: {}", links.len());
+    for (index, link) in links.iter().enumerate() {
+        assert!(
+            sources[index].url.is_empty() || link.contains(&sources[index].url),
+            "来源与链接不对应: {link}"
+        );
+    }
+    // 结构化 sources 不受正文预算影响。
+    assert_eq!(sources.len(), 8);
+    assert_eq!(sources[7].title, long_title(7));
+}
+
+#[test]
+fn long_leading_titles_do_not_crowd_out_later_result_summaries() {
+    let sources = (0..6)
+        .map(|index| WebSearchSource {
+            title: if index < 2 {
+                "很长的标题".repeat(40)
+            } else {
+                format!("来源 {index}")
+            },
+            url: format!("https://example.test/{index}"),
+            snippet: format!("第 {index} 条摘要：{}", "可核实内容".repeat(30)),
+        })
+        .collect::<Vec<_>>();
+
+    let answer = render_answer(&sources);
+
+    assert!(answer.chars().count() <= 1_400);
+    assert_no_broken_markdown_links(&answer);
+    let entries = summary_entries(&answer);
+    assert_eq!(entries.len(), 6, "后续结果不应被前部超长标题挤掉");
+    for (index, entry) in entries.iter().enumerate() {
+        let (prefix, summary) = entry.split_once('：').expect("摘要条目缺少分隔符");
+        assert!(
+            prefix.chars().count() <= 70,
+            "展示标题未按上限截断: {prefix}"
+        );
+        assert!(
+            summary.chars().count() >= 30,
+            "第 {index} 条摘要过短: {summary}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn oversized_url_link_is_omitted_while_structured_source_remains() {
+    // 单条 URL 超过整个展示预算，无论怎么压缩摘要都无法完整展示：整条链接省略。
+    let long_url = format!("https://example.test/segment/{}", "b".repeat(1_500));
+    let body = json!({"results":[
+        {"title":"长链接来源", "url":long_url, "snippet":"长链接摘要", "summary":"长链接摘要"},
+        {"title":"正常来源", "url":"https://example.test/normal", "snippet":"正常摘要", "summary":"正常摘要"}
+    ]});
+    let (config, _) = server(200, body).await;
+    let outcome = DeepSeekSearchExecutor::new(&config)
+        .unwrap()
+        .query(request())
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.sources.len(), 2);
+    assert_eq!(outcome.sources[0].url, long_url);
+    assert_eq!(outcome.sources[0].snippet, "长链接摘要");
+    assert_no_broken_markdown_links(&outcome.answer);
+    assert!(
+        !outcome.answer.contains(&long_url),
+        "超长链接必须整条省略，不能截断"
+    );
+    assert!(outcome.answer.contains("https://example.test/normal"));
+    assert!(outcome.answer.contains("长链接摘要") && outcome.answer.contains("正常摘要"));
+}
+
+#[test]
+fn sources_without_summary_keep_links_without_empty_entries() {
+    let sources = vec![
+        WebSearchSource {
+            title: "有摘要".to_owned(),
+            url: "https://example.test/a".to_owned(),
+            snippet: "第一段摘要内容".to_owned(),
+        },
+        WebSearchSource {
+            title: "无摘要".to_owned(),
+            url: "https://example.test/b".to_owned(),
+            snippet: "   ".to_owned(),
+        },
+        WebSearchSource {
+            title: "有摘要二".to_owned(),
+            url: "https://example.test/c".to_owned(),
+            snippet: "第三段摘要内容".to_owned(),
+        },
+    ];
+
+    let answer = render_answer(&sources);
+
+    assert_no_broken_markdown_links(&answer);
+    let entries = summary_entries(&answer);
+    assert_eq!(entries.len(), 2, "没有摘要的结果不生成空条目");
+    assert!(entries[0].contains("第一段摘要内容"));
+    assert!(entries[1].contains("第三段摘要内容"));
+    assert!(!answer.contains("无摘要："));
+    // 来源链接不受摘要缺失影响，三条都能完整展示。
+    assert_eq!(source_link_lines(&answer).len(), 3);
+    assert!(answer.contains("https://example.test/b"));
+}
+
+#[test]
+fn summary_markdown_links_are_never_cut_in_half() {
+    // 官方摘要里自带 Markdown 链接时，按条预算可能正好落在链接内部。
+    let long_url = format!("https://example.test/{}", "c".repeat(120));
+    let sources = (0..10)
+        .map(|index| WebSearchSource {
+            title: format!("来源 {index}"),
+            url: format!("https://example.test/{index}"),
+            snippet: format!("说明 {index} [详细资料]({long_url}) 后续文字"),
+        })
+        .collect::<Vec<_>>();
+
+    let answer = render_answer(&sources);
+
+    assert!(answer.chars().count() <= 1_400);
+    assert_no_broken_markdown_links(&answer);
+    let entries = summary_entries(&answer);
+    assert_eq!(entries.len(), 10);
+    for (index, entry) in entries.iter().enumerate() {
+        let (_, summary) = entry.split_once('：').expect("摘要条目缺少分隔符");
+        assert!(summary.contains("说明"), "第 {index} 条摘要丢失: {summary}");
+        assert!(
+            !summary.contains("](http"),
+            "第 {index} 条摘要出现残缺链接: {summary}"
+        );
+        assert!(summary.ends_with('…'), "第 {index} 条摘要未截断: {summary}");
+    }
+}
+
+#[test]
+fn markdown_special_characters_stay_escaped_and_links_complete() {
+    let sources = vec![WebSearchSource {
+        title: "标题[含]方括号\\与反斜杠".to_owned(),
+        url: "https://example.test/wiki/Rust_(programming_language)".to_owned(),
+        snippet: "摘要 [内嵌](https://example.test/inner) 😀 `code` *粗*".to_owned(),
+    }];
+
+    let answer = render_answer(&sources);
+
+    assert_no_broken_markdown_links(&answer);
+    assert!(answer.contains("\\[含\\]"));
+    // 链接标签只转义一次，不能因为再次转义而破坏标题可读性。
+    assert!(
+        answer.contains("- [标题\\[含\\]方括号\\\\与反斜杠](https://example.test/wiki/Rust_(programming_language))"),
+        "来源链接标签转义异常: {answer}"
+    );
+    // URL 中的成对圆括号属于合法链接，不能被当成 Markdown 结构截断。
+    assert!(answer.contains("https://example.test/wiki/Rust_(programming_language)"));
+    assert!(answer.contains("😀"));
+}

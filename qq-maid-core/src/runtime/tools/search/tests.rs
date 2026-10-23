@@ -863,3 +863,151 @@ async fn web_search_tool_rejects_invalid_options() {
 mod agent_loop;
 mod argument_validation;
 mod research;
+
+/// 校验正文里每个 Markdown 行内链接都完整：`](` 后必须在同一行遇到 `)`。
+fn assert_no_broken_markdown_links(text: &str) {
+    for (offset, _) in text.match_indices("](") {
+        let tail = &text[offset + 2..];
+        let Some(end) = tail.find(')') else {
+            panic!("链接缺少右括号: {}", &text[offset.saturating_sub(60)..]);
+        };
+        assert!(!tail[..end].contains('\n'), "链接被截断: {}", &tail[..end]);
+    }
+    for line in text.lines().filter(|line| line.starts_with("- [")) {
+        // 展示层会在裁剪处追加省略号，但来源链接本身必须完整闭合。
+        let line = line.trim_end_matches('…');
+        assert!(line.ends_with(')'), "来源行被截断: {line}");
+    }
+}
+
+fn long_source_link_answer(entry_count: usize, summary_repeat: usize, url_len: usize) -> String {
+    let mut answer = String::from("搜索到以下公开网页结果：");
+    for index in 0..entry_count {
+        answer.push_str(&format!(
+            "\n{}. 来源 {index}：{}",
+            index + 1,
+            "摘要内容".repeat(summary_repeat)
+        ));
+    }
+    answer.push_str("\n\n参考来源：");
+    for index in 0..entry_count {
+        answer.push_str(&format!(
+            "\n- [来源 {index}](https://example.test/{index}/{}",
+            "a".repeat(url_len)
+        ));
+        answer.push(')');
+    }
+    answer
+}
+
+#[test]
+fn command_reply_truncation_omits_links_it_cannot_display_whole() {
+    let answer = long_source_link_answer(10, 20, 90);
+    assert!(answer.chars().count() > 1500);
+
+    let reply = format_web_search_command_reply(&answer);
+
+    assert!(reply.chars().count() <= 1500);
+    assert_no_broken_markdown_links(&reply);
+    assert!(reply.starts_with("【联网查询】"));
+    // 裁剪点落在后部来源行内时整条省略，最后一行仍是完整链接（省略号表示后续被裁剪）。
+    let last = reply.lines().last().unwrap().trim_end_matches('…');
+    assert!(last.starts_with("- [") && last.ends_with(')'), "{last}");
+}
+
+#[test]
+fn markdown_safe_truncation_omits_link_cut_in_half() {
+    let body = format!(
+        "摘要部分\n\n参考来源：\n- [来源](https://example.test/{})",
+        "a".repeat(100)
+    );
+    let cut = super::format::truncate_markdown_safely(&body, 60);
+
+    assert!(cut.text.chars().count() <= 60);
+    assert_eq!(cut.text, "摘要部分…");
+    assert_eq!(cut.kept_chars, 12);
+}
+
+#[test]
+fn markdown_safe_truncation_keeps_complete_links_and_ignores_escaped_brackets() {
+    // 标签里的转义方括号和 URL 里的成对圆括号都属于同一行完整链接。
+    let first_line = "摘要：\n- [来源 \\[一\\]](https://example.test/a_(b))";
+    let body = format!("{first_line}\n- [来源二](https://example.test/c)");
+
+    // 正文恰好等于预算时不做裁剪，链接保持原样。
+    let exact = super::format::truncate_markdown_safely(first_line, first_line.chars().count());
+    assert_eq!(exact.text, first_line.to_owned());
+
+    // 截断点落在第二条链接内部：整行省略，不会留下半截 `[标题](URL)`。
+    let cut = super::format::truncate_markdown_safely(&body, 48);
+    assert_eq!(cut.text, format!("{first_line}…"));
+    assert!(!cut.text.contains("来源二"));
+}
+
+#[test]
+fn tool_reply_truncation_marks_omitted_source_links_as_not_rendered() {
+    let output = json!({
+        "mode": "multi_entity_research",
+        "successful": 1,
+        "failed": 0,
+        "results": [{
+            "entity": "项目甲",
+            "status": "success",
+            "facts": "事实".repeat(700),
+            "sources": [{
+                "title": "项目甲文档",
+                "url": format!("https://example.test/{}", "a".repeat(200)),
+                "snippet": "公开摘要"
+            }]
+        }]
+    });
+
+    let formatted = format_web_search_tool_reply_with_sources(&output);
+
+    assert!(formatted.body.chars().count() <= 1500);
+    assert_no_broken_markdown_links(&formatted.body);
+    assert!(!formatted.body.contains("]("), "正文不应出现被裁剪的链接");
+    assert_eq!(formatted.rendered_sources.len(), 1);
+    assert!(!formatted.rendered_sources[0].identity_rendered);
+    assert!(!formatted.body.ends_with("来源："));
+}
+
+#[test]
+fn compacted_tool_output_never_splits_source_links() {
+    const OUTPUT_MAX_CHARS: usize = 1_200;
+    let answer = long_source_link_answer(8, 15, 40);
+    let outcome = WebSearchOutcome {
+        answer,
+        sources: (0..8)
+            .map(|index| WebSearchSource {
+                title: format!("来源 {index}"),
+                url: format!("https://example.test/{index}/{}", "a".repeat(40)),
+                snippet: "摘要内容".repeat(15),
+            })
+            .collect(),
+        provider: "deepseek".to_owned(),
+        elapsed_ms: 12,
+    };
+
+    let output = web_search_tool_output(&outcome, "deepseek", OUTPUT_MAX_CHARS);
+
+    assert!(serialized_value_chars(&output) <= OUTPUT_MAX_CHARS);
+    let compacted = output["answer"].as_str().unwrap();
+    assert!(!compacted.is_empty());
+    assert_no_broken_markdown_links(compacted);
+    assert!(
+        compacted
+            .lines()
+            .filter(|line| line.starts_with("- ["))
+            .all(|line| line.ends_with(')')),
+        "压缩后的 answer 出现残缺链接: {compacted}"
+    );
+    // 结构化 sources 仍保留完整 URL，不受正文裁剪影响。
+    assert!(!output["sources"].as_array().unwrap().is_empty());
+    assert!(output["sources"].as_array().unwrap().iter().all(|source| {
+        source["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://example.test/")
+    }));
+}

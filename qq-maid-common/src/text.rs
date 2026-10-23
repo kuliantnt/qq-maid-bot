@@ -79,6 +79,126 @@ pub fn truncate_chars_trimmed(text: &str, limit: usize) -> String {
         .to_owned()
 }
 
+/// 在不超过 `limit` 字符的前提下返回正文前缀，且不切断 Markdown 行内链接。
+///
+/// 省略号由调用方追加，因此最多保留 `limit - 1` 个字符。截断点落在
+/// `[标签](URL)` 内部时回退到整条链接（或整条列表项）之前：残缺链接既不可点击
+/// 也会破坏 Markdown 结构，展示层宁可少展示一条。返回值为（正文前缀，从原文
+/// 保留的字符数），后者供来源展示标记判断对应片段是否仍然可见。
+pub fn truncate_markdown_prefix(text: &str, limit: usize) -> (String, usize) {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.len() <= limit {
+        return (text.trim().to_owned(), chars.len());
+    }
+
+    let mut kept = limit.saturating_sub(1).min(chars.len());
+    for span in markdown_link_spans(&chars) {
+        // 截断点正好落在链接起点时同样回退：链接一行都没保留，不应留下悬空的 `- `。
+        if span.start <= kept && kept < span.end {
+            kept = markdown_safe_rewind(&chars, span.start);
+        }
+    }
+    (
+        chars[..kept]
+            .iter()
+            .collect::<String>()
+            .trim_end()
+            .to_owned(),
+        kept,
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MarkdownLinkSpan {
+    start: usize,
+    end: usize,
+}
+
+/// 扫描完整的 Markdown 行内链接 `[标签](URL)` 的字符区间。标签内的转义方括号、
+/// 嵌套方括号和 URL 中的成对圆括号按层级匹配，避免把普通文本误判成链接。
+fn markdown_link_spans(chars: &[char]) -> Vec<MarkdownLinkSpan> {
+    let mut spans = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '['
+            && !is_escaped(chars, index)
+            && let Some(end) = markdown_link_end(chars, index)
+        {
+            spans.push(MarkdownLinkSpan { start: index, end });
+            index = end;
+            continue;
+        }
+        index += 1;
+    }
+    spans
+}
+
+/// 返回从 `open` 处 `[` 开始、以 `)` 结束的完整链接区间的结束位置（不含）。
+fn markdown_link_end(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut cursor = open;
+    let label_end = loop {
+        let ch = *chars.get(cursor)?;
+        if !is_escaped(chars, cursor) {
+            if ch == '[' {
+                depth += 1;
+            } else if ch == ']' {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    break cursor;
+                }
+            }
+        }
+        cursor += 1;
+    };
+    if chars.get(label_end + 1) != Some(&'(') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    let mut cursor = label_end + 1;
+    loop {
+        let ch = *chars.get(cursor)?;
+        if !is_escaped(chars, cursor) {
+            if ch == '(' {
+                depth += 1;
+            } else if ch == ')' {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(cursor + 1);
+                }
+            }
+        }
+        cursor += 1;
+    }
+}
+
+fn is_escaped(chars: &[char], index: usize) -> bool {
+    let mut backslashes = 0usize;
+    let mut cursor = index;
+    while cursor > 0 && chars[cursor - 1] == '\\' {
+        backslashes += 1;
+        cursor -= 1;
+    }
+    backslashes % 2 == 1
+}
+
+/// 链接被整体省略时连带省略同一行的列表标记，避免输出悬空的 `- `。
+fn markdown_safe_rewind(chars: &[char], link_start: usize) -> usize {
+    let line_start = chars[..link_start]
+        .iter()
+        .rposition(|&ch| ch == '\n')
+        .map_or(0, |index| index + 1);
+    let is_list_marker = chars[line_start..link_start]
+        .iter()
+        .all(|ch| matches!(ch, '-' | '*' | '+' | '.' | ')' | ' ' | '\t') || ch.is_ascii_digit());
+    if is_list_marker {
+        line_start
+    } else {
+        link_start
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,6 +251,35 @@ mod tests {
         assert_eq!(truncate_chars_with_ellipsis("  ab  ", 6), "  ab  ");
         assert_eq!(truncate_chars_with_ellipsis("  abcd  ", 6), "  abc…");
         assert_eq!(truncate_chars_with_ellipsis("abc", 0), "…");
+    }
+
+    #[test]
+    fn markdown_prefix_keeps_complete_inline_links() {
+        let first_line = "摘要：\n- [来源 \\[一\\]](https://example.test/a_(b))";
+        let body = format!("{first_line}\n- [来源二](https://example.test/c)");
+
+        // 正文恰好等于预算时不做裁剪。
+        assert_eq!(
+            truncate_markdown_prefix(first_line, first_line.chars().count()),
+            (first_line.to_owned(), first_line.chars().count())
+        );
+
+        // 截断点落在第二条链接内部：整行省略，不会留下半截 `[标签](URL)`。
+        let (prefix, kept) = truncate_markdown_prefix(&body, 48);
+        assert_eq!(prefix, first_line);
+        assert_eq!(kept, 45);
+    }
+
+    #[test]
+    fn markdown_prefix_returns_prefix_when_links_are_cut() {
+        let body = format!(
+            "摘要部分\n\n参考来源：\n- [来源](https://example.test/{})",
+            "a".repeat(100)
+        );
+        let (prefix, kept) = truncate_markdown_prefix(&body, 60);
+
+        assert_eq!(prefix, "摘要部分\n\n参考来源：");
+        assert_eq!(kept, 12);
     }
 
     #[test]

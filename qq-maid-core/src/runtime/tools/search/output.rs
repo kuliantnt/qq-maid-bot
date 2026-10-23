@@ -92,7 +92,14 @@ fn compact_web_search_tool_output(
             high = mid - 1;
         }
     }
-    let answer = answer_chars[..low].iter().collect::<String>();
+    let answer = if low == 0 {
+        String::new()
+    } else {
+        // 压缩工具输出同样不能切断 Markdown 链接：预算内放不下的来源整条省略，
+        // 避免模型拿到的 answer 里出现残缺的 `[标题](URL)`。
+        let answer = answer_chars.iter().collect::<String>();
+        super::format::truncate_markdown_safely(&answer, low).text
+    };
     successful_web_search_output(outcome, backend, result_count, &answer, &sources)
 }
 

@@ -117,6 +117,47 @@ impl WebSearchExecutor for LongAnswerWebSearchExecutor {
     }
 }
 
+/// 模拟 DeepSeek 摘要 + 参考来源的长正文，覆盖 `/查` 最终 1500 字符裁剪链路。
+struct LongSourceLinkWebSearchExecutor;
+
+#[async_trait]
+impl WebSearchExecutor for LongSourceLinkWebSearchExecutor {
+    async fn query(&self, req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
+        let mut answer = format!("搜索到以下公开网页结果：\n1. {}：", req.query);
+        answer.push_str(&"摘要内容".repeat(20));
+        for index in 1..10 {
+            answer.push_str(&format!(
+                "\n{}. 来源 {index}：{}",
+                index + 1,
+                "摘要内容".repeat(20)
+            ));
+        }
+        answer.push_str("\n\n参考来源：");
+        for index in 0..10 {
+            answer.push_str(&format!(
+                "\n- [来源 {index}](https://example.test/{index}/{})",
+                "a".repeat(90)
+            ));
+        }
+        Ok(WebSearchOutcome {
+            answer,
+            sources: (0..10)
+                .map(|index| WebSearchSource {
+                    title: format!("来源 {index}"),
+                    url: format!("https://example.test/{index}/{}", "a".repeat(90)),
+                    snippet: "摘要内容".repeat(20),
+                })
+                .collect(),
+            provider: "deepseek".to_owned(),
+            elapsed_ms: 12,
+        })
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "deepseek-search"
+    }
+}
+
 #[async_trait]
 impl WebSearchExecutor for IdleAfterFirstDeltaWebSearchExecutor {
     async fn query(&self, _req: WebSearchRequest) -> Result<WebSearchOutcome, LlmError> {
@@ -283,6 +324,42 @@ async fn web_search_command_long_answer_uses_untruncated_tool_result() {
     let diagnostics = response.diagnostics.unwrap();
     assert_eq!(diagnostics["query_provider"], "long-answer-query");
     assert_eq!(diagnostics["search_tool"], "web_search");
+}
+
+#[tokio::test]
+async fn web_search_command_keeps_source_links_whole_under_display_budget() {
+    let (service, _base) = test_service_with_provider_base_title_and_query(
+        MockProvider::new(),
+        None,
+        Arc::new(LongSourceLinkWebSearchExecutor),
+    );
+
+    let response = service.respond(message("/查 long keyword")).await.unwrap();
+
+    let markdown = response.markdown.as_deref().unwrap();
+    assert!(markdown.starts_with("【联网查询】"));
+    assert!(markdown.chars().count() <= 1500);
+    // 裁剪点落在来源行内时整条省略，Markdown 正文里不能出现残缺的 `[标题](URL)`。
+    for (offset, _) in markdown.match_indices("](") {
+        let tail = &markdown[offset + 2..];
+        let end = tail.find(')').expect("来源链接缺少右括号");
+        assert!(
+            !tail[..end].contains('\n'),
+            "来源链接被截断: {}",
+            &tail[..end]
+        );
+    }
+    for line in markdown.lines().filter(|line| line.starts_with("- [")) {
+        assert!(
+            line.trim_end_matches('…').ends_with(')'),
+            "来源行被截断: {line}"
+        );
+    }
+    // 至少保留一条完整来源链接，其余来源仍由结构化 sources 承载。
+    let last = markdown.lines().last().unwrap().trim_end_matches('…');
+    assert!(last.starts_with("- [") && last.ends_with(')'), "{last}");
+    // 纯文本渲染复用同一份正文，展示预算同样生效。
+    assert!(response.text.as_deref().unwrap().chars().count() <= 1500);
 }
 
 #[tokio::test]

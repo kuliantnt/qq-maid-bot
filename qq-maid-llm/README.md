@@ -41,7 +41,7 @@ qq-maid-common / reqwest / serde / tokio
 
 将 `agent.toml` 的 `[tools.web_search] backend` 设为 `"deepseek"`（控制台选项为 **DeepSeek Search**），并配置现有 `DEEPSEEK_API_KEY`。执行器使用 `DEEPSEEK_BASE_URL` 下的 `/v1/tools/search`；末尾 `/v1` 会去重，网关部署前缀保留。无需指定搜索模型，聊天模型可继续使用其他 Provider。
 
-此后端与 `provider_native` 的 Responses 内置搜索独立，默认配置不变。`/查` 和 Agent 搜索共用路由、场景权限及每次请求 1–10 条结果的硬上限。查询词按官方限制校验为 1–128 个 Unicode 字符，超长明确报错，不静默截断；只发送查询词、结果数和 `need_content=false`，不发送原始会话上下文或身份。优先以 `summary` 提供来源摘要，空摘要回退 `snippet`；`answer` 汇总逐条检索摘要后再追加参考来源链接，`sources` 仍保留完整结构，`/查` 现有正文长度上限不变。Tavily 专属的主题、时间范围和搜索深度不生效；需要限定站点或日期时可在查询词中使用 `site:`、`after:`、`before:`。
+此后端与 `provider_native` 的 Responses 内置搜索独立，默认配置不变。`/查` 和 Agent 搜索共用路由、场景权限及每次请求 1–10 条结果的硬上限。查询词按官方限制校验为 1–128 个 Unicode 字符，超长明确报错，不静默截断；只发送查询词、结果数和 `need_content=false`，不发送原始会话上下文或身份。优先以 `summary` 提供来源摘要，空摘要回退 `snippet`；`answer` 汇总逐条检索摘要后再追加参考来源链接，`sources` 仍保留完整结构，`/查` 现有正文长度上限不变。answer 预算把编号、展示标题、摘要和参考来源分别计入：链接按整行优先保留，放不下的来源整条省略，长标题只影响自身条目，不会挤掉后续摘要。Tavily 专属的主题、时间范围和搜索深度不生效；需要限定站点或日期时可在查询词中使用 `site:`、`after:`、`before:`。
 
 HTTP 鉴权、余额、限流和超时失败按真实错误返回；缺少 DeepSeek Key、401/402 使用 DeepSeek 自己的提示，不再指向 Tavily；正常空结果保留为空结果。此改动只接入搜索，不注册 Fetch 网页抓取工具。接口契约见 [DeepSeek Search 官方文档](https://api-docs.deepseek.com/api/search/)。
 

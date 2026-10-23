@@ -15,13 +15,20 @@ use crate::{
     error::{LlmError, LlmErrorKind},
     metrics::duration_ms,
 };
-use qq_maid_common::text::truncate_chars_with_ellipsis_trimmed;
+use qq_maid_common::text::truncate_markdown_prefix;
 
-/// answer 中单条检索摘要的长度上限；与 `/查` 的 1500 字符展示预算配合，
-/// 保证摘要之外仍能看到参考来源链接。
-const ANSWER_SOURCE_SUMMARY_MAX_CHARS: usize = 180;
-/// answer 摘要正文的总预算，长摘要不能挤掉结构化 `sources` 之外的参考链接。
-const ANSWER_SUMMARY_TOTAL_MAX_CHARS: usize = 900;
+/// answer 整体字符预算。`/查` 会在「【联网查询】\n\n」前缀之后按 1500 字符展示
+/// 正文，这里预留头部空间，保证下游不会再把 answer 整体截断，也就不会切断
+/// Markdown 参考来源链接。
+const ANSWER_TOTAL_MAX_CHARS: usize = 1_400;
+/// answer 中单条检索摘要的展示上限。
+const ANSWER_SOURCE_SUMMARY_MAX_CHARS: usize = 160;
+/// 单条检索摘要的展示下限；放不下下限时从尾部减少展示条数，而不是只留几个字。
+const ANSWER_SOURCE_SUMMARY_MIN_CHARS: usize = 30;
+/// answer 中单条标题的展示上限；完整标题仍保留在结构化 `sources`。
+const ANSWER_SOURCE_TITLE_MAX_CHARS: usize = 60;
+const ANSWER_HEADER: &str = "搜索到以下公开网页结果：";
+const ANSWER_SOURCE_HEADER: &str = "\n\n参考来源：";
 
 pub(super) struct DeepSeekSearchExecutor {
     client: reqwest::Client,
@@ -154,38 +161,123 @@ impl WebSearchExecutor for DeepSeekSearchExecutor {
 
 /// DeepSeek 只返回逐条检索结果，不生成整段回答；answer 必须汇总真实检索摘要，
 /// 否则 `/查`、Agent 搜索和多实体调研只能拿到参考链接而没有可核实内容。
+///
+/// 预算分配顺序：
+/// 1. 先为每条有摘要的结果锁定编号、展示标题和一段最短摘要，前部长结果无法
+///    挤占后续结果的展示位；
+/// 2. 参考来源链接在剩余预算内按整行优先占据，放不下的来源整条省略，
+///    保证链接永远完整且可追溯；
+/// 3. 最后把剩下的预算平均补给摘要；预算异常收缩时才从尾部减少展示条数。
+///
+/// 结构调整只影响 answer 正文，结构化 `sources` 始终保留全部有效来源。
 fn render_answer(sources: &[WebSearchSource]) -> String {
-    let mut digest = String::from("搜索到以下公开网页结果：");
-    let summarized = sources
+    let entries = summary_entries(sources);
+    let digest_floor = entries
+        .iter()
+        .map(|(prefix, _)| prefix.chars().count())
+        .sum::<usize>()
+        + entries.len() * ANSWER_SOURCE_SUMMARY_MIN_CHARS;
+    let link_budget = ANSWER_TOTAL_MAX_CHARS
+        .saturating_sub(ANSWER_HEADER.chars().count())
+        .saturating_sub(ANSWER_SOURCE_HEADER.chars().count())
+        .saturating_sub(digest_floor);
+    let link_section = render_source_link_section(sources, link_budget);
+    let entry_budget = ANSWER_TOTAL_MAX_CHARS
+        .saturating_sub(ANSWER_HEADER.chars().count())
+        .saturating_sub(link_section.chars().count());
+
+    let mut digest = String::from(ANSWER_HEADER);
+    digest.push_str(&render_summary_entries(&entries, entry_budget));
+    digest.push_str(&link_section);
+    digest
+}
+
+/// 先把每条有摘要的结果渲染成「编号 + 展示标题 + 分隔符」，标题按展示上限
+/// 缩写，完整标题仍保留在结构化 `sources`。
+fn summary_entries(sources: &[WebSearchSource]) -> Vec<(String, &WebSearchSource)> {
+    sources
         .iter()
         .filter(|source| !source.snippet.trim().is_empty())
-        .count();
-    // 按摘要条数均分总预算，避免前部长摘要挤掉后部结果的摘要。
-    let per_source =
-        (ANSWER_SUMMARY_TOTAL_MAX_CHARS / summarized.max(1)).min(ANSWER_SOURCE_SUMMARY_MAX_CHARS);
-    let mut used = 0usize;
-    let mut rendered = 0usize;
+        .enumerate()
+        .map(|(index, source)| {
+            let title =
+                super::search_support::display_title(&source.title, ANSWER_SOURCE_TITLE_MAX_CHARS);
+            (format!("\n{}. {title}：", index + 1), source)
+        })
+        .collect()
+}
+
+/// 参考来源链接按整行纳入预算：单条链接必须完整展示，放不下的来源整条省略，
+/// 结构化 `sources` 仍保留全部有效来源，因此不影响可追溯性。
+fn render_source_link_section(sources: &[WebSearchSource], budget: usize) -> String {
+    let header_len = ANSWER_SOURCE_HEADER.chars().count();
+    let mut section = String::new();
+    let mut used = header_len;
     for source in sources {
-        let summary = source.snippet.trim();
-        if summary.is_empty() {
+        let Some(line) = super::search_support::source_link_line(
+            &source.title,
+            &source.url,
+            ANSWER_SOURCE_TITLE_MAX_CHARS,
+        ) else {
+            continue;
+        };
+        let next = used + line.chars().count();
+        if next > budget {
+            // 整条省略放不下的链接，继续尝试后面更短的来源。
             continue;
         }
-        let budget = per_source.min(ANSWER_SUMMARY_TOTAL_MAX_CHARS.saturating_sub(used));
-        if budget == 0 {
+        section.push_str(&line);
+        used = next;
+    }
+    if used > header_len {
+        format!("{ANSWER_SOURCE_HEADER}{section}")
+    } else {
+        String::new()
+    }
+}
+
+/// 把摘要区预算先按每条下限分配，剩余额度均分补给各条（单条不超过展示上限）。
+fn render_summary_entries(entries: &[(String, &WebSearchSource)], budget: usize) -> String {
+    // 预算已为每条结果锁定了下限，这里是常量被调小时的兜底：后续条目整体不展示。
+    let mut shown = 0usize;
+    let mut fixed = 0usize;
+    for (prefix, _) in entries {
+        let next_fixed = fixed + prefix.chars().count();
+        if next_fixed + (shown + 1) * ANSWER_SOURCE_SUMMARY_MIN_CHARS > budget {
             break;
         }
-        let entry = format!(
-            "\n{}. {}：{}",
-            rendered + 1,
-            super::search_support::escape_markdown_label(&source.title),
-            truncate_chars_with_ellipsis_trimmed(summary, budget),
-        );
-        used += entry.chars().count();
-        digest.push_str(&entry);
-        rendered += 1;
+        fixed = next_fixed;
+        shown += 1;
     }
-    // 摘要为空时仍保留原有「只有参考来源」的兜底输出。
-    super::search_support::render_source_links(Some(&digest), sources)
+    if shown == 0 {
+        return String::new();
+    }
+
+    let spare = budget - fixed - shown * ANSWER_SOURCE_SUMMARY_MIN_CHARS;
+    let summary_budget =
+        (ANSWER_SOURCE_SUMMARY_MIN_CHARS + spare / shown).min(ANSWER_SOURCE_SUMMARY_MAX_CHARS);
+    let mut digest = String::new();
+    for (prefix, source) in entries.iter().take(shown) {
+        digest.push_str(prefix);
+        digest.push_str(&truncate_summary(&source.snippet, summary_budget));
+    }
+    digest
+}
+
+/// 摘要按展示预算截断，但不能切断摘要文本自带的 Markdown 行内链接。
+///
+/// 摘要整体就是一条放不下的链接时安全前缀为空，此时宁可只输出省略号，也不
+/// 输出残缺的 `[标签](URL)`；完整摘要在结构化 `sources` 中仍可追溯。
+fn truncate_summary(summary: &str, budget: usize) -> String {
+    let summary = summary.trim();
+    if summary.chars().count() <= budget {
+        return summary.to_owned();
+    }
+    let (prefix, _) = truncate_markdown_prefix(summary, budget);
+    if prefix.is_empty() {
+        return "…".to_owned();
+    }
+    format!("{}…", prefix)
 }
 
 fn transport_error(err: reqwest::Error) -> LlmError {

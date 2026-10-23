@@ -3,7 +3,7 @@
 //! formatter 同时生成正文和来源字段的展示状态，调用方不需要再扫描最终字符串
 //! 推断来源是否已经出现，避免 URL 或摘要子串造成误判。
 
-use qq_maid_common::text::truncate_chars_with_ellipsis_trimmed as truncate_chars;
+use qq_maid_common::text::truncate_markdown_prefix;
 use serde_json::Value;
 
 use crate::error::LlmError;
@@ -31,6 +31,9 @@ const WEB_SEARCH_QUOTA_REPLY: &str =
 const WEB_SEARCH_TIMEOUT_REPLY: &str = "【联网查询】\n\n联网查询超时了，请稍后再试。";
 const WEB_SEARCH_UPSTREAM_ERROR_REPLY: &str =
     "【联网查询】\n\n联网查询服务暂时不可用，可能是上游接口、代理或网络配置异常。请稍后再试。";
+
+/// `/查` 与 Agent fallback 共用的展示上限。
+const WEB_SEARCH_REPLY_MAX_CHARS: usize = 1500;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FormattedWebSearchToolReply {
@@ -137,7 +140,49 @@ pub(crate) fn format_web_search_command_reply(answer: &str) -> String {
     if !text.starts_with("【联网查询】") {
         text = format!("【联网查询】\n\n{text}");
     }
-    truncate_chars(&text, 1500)
+    truncate_markdown_safely(&text, WEB_SEARCH_REPLY_MAX_CHARS).text
+}
+
+/// Markdown 安全截断结果：`text` 是最终正文，`kept_chars` 是从原文保留的
+/// 字符数，供来源展示标记判断对应片段是否仍可见。
+pub(super) struct MarkdownSafeCut {
+    pub(super) text: String,
+    pub(super) kept_chars: usize,
+}
+
+/// 按展示预算截断正文，并保证不切断 Markdown 行内链接。
+///
+/// 链接完整性由 `qq_maid_common::text::truncate_markdown_prefix` 统一保证；这里
+/// 再移除因整条链接被省略而留下的空来源标题。结构化 sources 不受正文裁剪影响。
+pub(super) fn truncate_markdown_safely(text: &str, limit: usize) -> MarkdownSafeCut {
+    let original_chars = text.chars().count();
+    if original_chars <= limit {
+        return MarkdownSafeCut {
+            text: text.trim().to_owned(),
+            kept_chars: original_chars,
+        };
+    }
+
+    let (body, kept_chars) = truncate_markdown_prefix(text, limit);
+    MarkdownSafeCut {
+        text: format!("{}…", strip_dangling_source_label(&body)),
+        kept_chars,
+    }
+}
+
+/// 链接整条省略后，去掉由此留下的空来源标题，避免用户看到没有内容的「来源：」。
+fn strip_dangling_source_label(body: &str) -> String {
+    let trimmed = body.trim_end();
+    let Some(last_line) = trimmed.rsplit('\n').next() else {
+        return trimmed.to_owned();
+    };
+    if matches!(last_line.trim(), "参考来源：" | "- 来源：" | "来源：") {
+        trimmed[..trimmed.len() - last_line.len()]
+            .trim_end()
+            .to_owned()
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 /// DeepSeek 独立搜索的错误阶段前缀，用于区分与 Tavily 重叠的错误码。
@@ -387,28 +432,18 @@ fn finalize_web_search_tool_reply(mut builder: SearchReplyBuilder) -> FormattedW
         }
     }
 
-    let original_length = builder.body.chars().count();
-    let body = truncate_chars(&builder.body, 1500);
-    let keep_limit = 1500usize.saturating_sub(1);
+    let cut = truncate_markdown_safely(&builder.body, WEB_SEARCH_REPLY_MAX_CHARS);
     let rendered_sources = builder
         .markers
         .into_iter()
         .map(|marker| WebSearchRenderedSource {
             location: marker.location,
-            identity_rendered: source_range_survives_truncation(
-                marker.identity,
-                original_length,
-                keep_limit,
-            ),
-            snippet_rendered: source_range_survives_truncation(
-                marker.snippet,
-                original_length,
-                keep_limit,
-            ),
+            identity_rendered: source_range_survives_truncation(marker.identity, cut.kept_chars),
+            snippet_rendered: source_range_survives_truncation(marker.snippet, cut.kept_chars),
         })
         .collect();
     FormattedWebSearchToolReply {
-        body,
+        body: cut.text,
         rendered_sources,
     }
 }
@@ -420,12 +455,8 @@ fn shift_source_range(range: &mut Option<SourceTextRange>, offset: usize) {
     }
 }
 
-fn source_range_survives_truncation(
-    range: Option<SourceTextRange>,
-    original_length: usize,
-    keep_limit: usize,
-) -> bool {
-    range.is_some_and(|range| original_length <= keep_limit + 1 || range.end <= keep_limit)
+fn source_range_survives_truncation(range: Option<SourceTextRange>, kept_chars: usize) -> bool {
+    range.is_some_and(|range| range.end <= kept_chars)
 }
 
 /// 解析搜索 JSON 中的非空字符串字段，供 formatter 与整轮投影共用。

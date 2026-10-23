@@ -132,6 +132,73 @@ async fn empty_model_reply_keeps_search_answer_and_sources_once() {
 }
 
 #[tokio::test]
+async fn long_search_answer_keeps_source_links_whole_in_fact_card() {
+    // 单次搜索返回 10 条长结果：正文超过展示上限时只能省略整条来源链接。
+    let mut answer = String::from("搜索到以下公开网页结果：");
+    for index in 0..10 {
+        answer.push_str(&format!(
+            "\n{}. 来源 {index}：{}",
+            index + 1,
+            "摘要内容".repeat(20)
+        ));
+    }
+    answer.push_str("\n\n参考来源：");
+    for index in 0..10 {
+        answer.push_str(&format!(
+            "\n- [来源 {index}](https://example.test/{index}/{})",
+            "a".repeat(90)
+        ));
+    }
+    let sources = (0..10)
+        .map(|index| {
+            serde_json::json!({
+                "title": format!("来源 {index}"),
+                "url": format!("https://example.test/{index}/{}", "a".repeat(90)),
+                "snippet": "摘要内容".repeat(20),
+            })
+        })
+        .collect::<Vec<_>>();
+    let inspector = MockProvider::new()
+        .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
+        .with_raw_tool_results(
+            vec![raw_tool_result(
+                "web_search",
+                serde_json::json!({
+                    "ok": true,
+                    "answer": answer,
+                    "sources": sources,
+                }),
+                true,
+            )],
+            "  ",
+        );
+    let service = test_service_with_provider_and_tool_calling(inspector, true);
+
+    let response = service
+        .respond(private_message("搜索一个公开项目"))
+        .await
+        .unwrap();
+
+    let markdown = response.markdown.unwrap();
+    assert!(markdown.contains("搜索到以下公开网页结果："));
+    for (offset, _) in markdown.match_indices("](") {
+        let tail = &markdown[offset + 2..];
+        let end = tail.find(')').expect("来源链接缺少右括号");
+        assert!(
+            !tail[..end].contains('\n'),
+            "来源链接被截断: {}",
+            &tail[..end]
+        );
+    }
+    for line in markdown.lines().filter(|line| line.starts_with("- [")) {
+        assert!(
+            line.trim_end_matches('…').ends_with(')'),
+            "来源行被截断: {line}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn empty_model_reply_appends_research_source_truncated_from_card() {
     let inspector = MockProvider::new()
         .with_tool_protocol(ToolCallingProtocol::OpenAiResponses)
