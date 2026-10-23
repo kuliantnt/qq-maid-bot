@@ -530,7 +530,7 @@ impl<'a> ToolLoopExecutor<'a> {
             .all(|(key, value)| empty(value) || prior.get(key) == Some(value));
         let lost_information = prior
             .iter()
-            .any(|(key, value)| !empty(value) && current.get(key).is_none_or(&empty));
+            .any(|(key, value)| !empty(value) && current.get(key).is_none_or(empty));
         (no_new_information && lost_information).then_some(previous.result_index)
     }
 
