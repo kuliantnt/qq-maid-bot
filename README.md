@@ -17,7 +17,7 @@
 
 > 💡 仓库早期以 QQ 机器人为主，因此仍保留 `qq-maid-bot` 名称。当前项目正在从 QQ 官方机器人演进为多入口平台型小女仆机器人。
 
-当前稳定版本为 `v0.26.0`，项目进入 `26.x` 版本线。本版本把 Web Console 迁移到 React 19 + Vite，保留现有部署管理员认证、同源与 CSRF 保护，以及可复现构建并嵌入 Rust 二进制的部署方式。升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)，控制台配置见 Wiki [配置中心](https://github.com/kuliantnt/qq-maid-bot/wiki/配置中心)，先攻与骰点用法见 Wiki [骰子使用教程](https://github.com/kuliantnt/qq-maid-bot/wiki/骰子使用教程)。
+当前稳定版本为 `v0.26.1`，项目进入 `26.x` 版本线。本版本新增 DeepSeek 独立 Search API 后端，并更新兼容依赖；默认搜索行为及现有认证、配置与数据格式保持不变。升级说明见 [Releases](https://github.com/kuliantnt/qq-maid-bot/releases) 和 [CHANGELOG.md](./CHANGELOG.md)，控制台配置见 Wiki [配置中心](https://github.com/kuliantnt/qq-maid-bot/wiki/配置中心)，先攻与骰点用法见 Wiki [骰子使用教程](https://github.com/kuliantnt/qq-maid-bot/wiki/骰子使用教程)。
 
 使用、安装和配置优先看 [项目 Wiki](https://github.com/kuliantnt/qq-maid-bot/wiki)：从第一次对话、一键安装、Docker / GHCR、配置中心与 `/console/` 首次向导，到 NapCat、`/ops` 运维和 Codex 长任务，都按场景拆开了。仓库内 `docs/` 与各 crate README 更偏开发边界和实现细节。
 
@@ -139,11 +139,12 @@ runtime/botctl.sh status
 
 ## 26.x 版本线更新
 
-当前稳定版本为 `v0.26.0`。需要查看本版本线的详细变更和配置迁移提示时，再展开下面的更新记录：
+当前稳定版本为 `v0.26.1`。需要查看本版本线的详细变更和配置迁移提示时，再展开下面的更新记录：
 
 <details>
 <summary>展开查看 26.x / 25.x / 24.x 版本更新</summary>
 
+- **DeepSeek 独立搜索**（v0.26.1）：控制台可选择 DeepSeek Search，复用现有 DeepSeek 凭据，无需绑定搜索模型。配置与限制见 [LLM 文档](qq-maid-llm/README.md#deepseek-独立-search-api)。
 - **Web Console React 改版**（v0.26.0，PR #703）：全部管理页面与首次认证流程迁移到 React 19 + Vite；配置中心恢复供应商连接、模型发现与覆盖、Agent 策略、主题和背景编辑。Todo、Memory、知识库等仍调用原有受保护 API，敏感值只显示配置状态，保存继续使用 revision 冲突保护。现有 `/console/` 地址、管理员会话、同源与 CSRF 边界不变；无需 SQLite migration、必填环境变量或配置迁移。升级后请刷新控制台并重新登录，再核对供应商连接和模型路线。
 
 - **摘要权限隔离与视觉候选原图保留**（v0.25.3，PR #705）：新旧会话摘要统一作为非指令历史数据读取，独立系统规则限制其权限；普通聊天、流式和 Tool Loop 仅对非视觉候选副本降级图片，后续视觉候选仍可收到原图。候选顺序和错误 fallback 条件不变，无需清库、SQLite migration 或配置迁移。
