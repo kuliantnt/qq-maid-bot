@@ -3,9 +3,11 @@
 //! Core 只负责 `/查` 命令解析、权限、session 记录和回复排版；本模块负责
 //! 搜索 provider 路由、请求 payload、HTTP transport、SSE 文本增量、answer 和 sources 提取。
 
+mod deepseek;
 mod gemini;
 mod openai;
 mod routing;
+mod search_support;
 mod tavily;
 
 use std::{collections::HashMap, env, sync::Arc};
@@ -40,6 +42,7 @@ pub enum WebSearchBackend {
     #[default]
     ProviderNative,
     Tavily,
+    DeepSeek,
     Disabled,
 }
 
@@ -48,9 +51,10 @@ impl WebSearchBackend {
         match value.trim().to_ascii_lowercase().as_str() {
             "provider_native" => Ok(Self::ProviderNative),
             "tavily" => Ok(Self::Tavily),
+            "deepseek" => Ok(Self::DeepSeek),
             "disabled" => Ok(Self::Disabled),
             _ => Err(LlmError::config(format!(
-                "{name} must be provider_native, tavily, or disabled"
+                "{name} must be provider_native, tavily, deepseek, or disabled"
             ))),
         }
     }
@@ -59,6 +63,7 @@ impl WebSearchBackend {
         match self {
             Self::ProviderNative => "provider_native",
             Self::Tavily => "tavily",
+            Self::DeepSeek => "deepseek",
             Self::Disabled => "disabled",
         }
     }
@@ -153,7 +158,7 @@ impl WebSearchTimeRange {
     }
 }
 
-/// 统一联网搜索配置。Provider 原生后端只使用 max_results，Tavily 额外使用其余字段。
+/// 统一联网搜索配置。独立 Search API 共用结果数和超时，搜索深度、主题和时间范围仅用于 Tavily。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebSearchConfig {
     /// 默认搜索后端；请求未带场景 route 时使用。
@@ -376,6 +381,7 @@ pub fn build_web_search_executor(config: &LlmConfig) -> Result<DynWebSearchExecu
         config.web_search.max_results,
         native_providers,
         tavily,
+        Arc::new(deepseek::DeepSeekSearchExecutor::new(config)?),
         Arc::new(DisabledWebSearchExecutor),
     )))
 }

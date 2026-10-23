@@ -193,16 +193,22 @@ impl MockDispatcher {
                 reason: "dispatcher_reject_suppressed",
             });
         }
-        if self
-            .fail_next_enqueues
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                value.checked_sub(1)
-            })
-            .is_ok()
-        {
-            return Some(DispatcherEnqueueError::Unavailable {
-                reason: "dispatcher_injected_failure",
-            });
+        // 使用 CAS 保持零值不递减，同时兼容容器旧工具链与弃用 fetch_update 的新版 Rust。
+        let mut remaining = self.fail_next_enqueues.load(Ordering::Relaxed);
+        while remaining > 0 {
+            match self.fail_next_enqueues.compare_exchange_weak(
+                remaining,
+                remaining - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Some(DispatcherEnqueueError::Unavailable {
+                        reason: "dispatcher_injected_failure",
+                    });
+                }
+                Err(actual) => remaining = actual,
+            }
         }
         let mut contents = self.fail_next_contents.lock().unwrap();
         if let Some(index) = contents

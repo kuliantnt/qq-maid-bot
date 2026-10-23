@@ -550,12 +550,13 @@ impl AgentRuntimeConfig {
                         scene.as_str()
                     ))
                 })?,
-            // Tavily 和 disabled 不调用模型原生搜索，允许配置中完全移除旧 search route。
-            WebSearchBackend::Tavily | WebSearchBackend::Disabled => self
-                .web_search_routes
-                .get(search_route_name)
-                .cloned()
-                .unwrap_or_default(),
+            // 独立搜索后端和 disabled 不调用模型原生搜索，允许配置中完全移除旧 search route。
+            WebSearchBackend::Tavily | WebSearchBackend::DeepSeek | WebSearchBackend::Disabled => {
+                self.web_search_routes
+                    .get(search_route_name)
+                    .cloned()
+                    .unwrap_or_default()
+            }
         };
         let max_tool_rounds = scene_policy
             .max_tool_rounds

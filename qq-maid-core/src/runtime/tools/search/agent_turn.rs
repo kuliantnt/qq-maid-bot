@@ -791,4 +791,59 @@ mod tests {
         assert!(body.text.contains("联网查询服务暂时不可用"));
         assert!(!body.text.contains("内部错误"));
     }
+
+    #[test]
+    fn deepseek_search_failure_uses_deepseek_hint_in_agent_projection() {
+        // Agent 和多目标调研只会透传 error.stage，不能因为缺少 Provider 上下文
+        // 把 DeepSeek 的缺失 Key / 401 / 402 提示成 Tavily 配置问题。
+        for (code, stage, expected) in [
+            (
+                "web_search_not_configured",
+                "deepseek_search_config",
+                // 正文清洗会去掉下划线，这里只断言不受影响的品牌标识。
+                "DeepSeek Search",
+            ),
+            (
+                "authentication_failed",
+                "deepseek_search_http",
+                "DeepSeek API Key",
+            ),
+            ("quota_exhausted", "deepseek_search_http", "DeepSeek"),
+        ] {
+            let SearchResultProjection::Visible(outcome) =
+                project_result(&web_search_result(json!({
+                    "ok": false,
+                    "execution_succeeded": false,
+                    "backend": "deepseek",
+                    "provider": "deepseek",
+                    "answer": "",
+                    "sources": [],
+                    "result_count": 0,
+                    "error": {
+                        "code": code,
+                        "stage": stage,
+                        "message": "DeepSeek Search HTTP 401: upstream detail"
+                    }
+                })))
+                .expect("web search result should be handled")
+            else {
+                panic!("expected visible web search result");
+            };
+
+            assert_eq!(outcome.status, ToolOutcomeStatus::Failed);
+            let ResponseBlock::Error(body) = &outcome.blocks[0] else {
+                panic!("expected web search error block");
+            };
+            assert!(
+                body.text.contains(expected),
+                "unexpected body for {code}: {}",
+                body.text
+            );
+            assert!(
+                !body.text.contains("Tavily"),
+                "leaked Tavily hint for {code}: {}",
+                body.text
+            );
+        }
+    }
 }

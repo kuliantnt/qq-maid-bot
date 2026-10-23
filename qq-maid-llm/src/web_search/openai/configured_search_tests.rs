@@ -176,6 +176,7 @@ async fn same_model_name_routes_to_each_configured_responses_base_url() {
         native_providers,
         Arc::new(MissingWebSearchExecutor),
         Arc::new(MissingWebSearchExecutor),
+        Arc::new(MissingWebSearchExecutor),
     );
 
     let first = router.query(request("routera:same-model")).await.unwrap();

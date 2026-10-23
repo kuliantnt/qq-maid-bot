@@ -3,7 +3,7 @@
 //! formatter 同时生成正文和来源字段的展示状态，调用方不需要再扫描最终字符串
 //! 推断来源是否已经出现，避免 URL 或摘要子串造成误判。
 
-use qq_maid_common::text::truncate_chars_with_ellipsis_trimmed as truncate_chars;
+use qq_maid_common::text::truncate_markdown_prefix;
 use serde_json::Value;
 
 use crate::error::LlmError;
@@ -19,6 +19,11 @@ const WEB_SEARCH_TAVILY_KEY_MISSING_REPLY: &str =
     "【联网查询】\n\n已选择 Tavily，但还没有配置 TAVILY_API_KEY。请在配置中心完成设置后重启。";
 const WEB_SEARCH_TAVILY_AUTH_REPLY: &str =
     "【联网查询】\n\nTavily API Key 无效或已失效，请在配置中心检查后重启。";
+const WEB_SEARCH_DEEPSEEK_KEY_MISSING_REPLY: &str = "【联网查询】\n\n已选择 DeepSeek Search，但还没有配置 DEEPSEEK_API_KEY。请在配置中心完成设置后重启。";
+const WEB_SEARCH_DEEPSEEK_AUTH_REPLY: &str =
+    "【联网查询】\n\nDeepSeek API Key 无效或已失效，请在配置中心检查后重启。";
+const WEB_SEARCH_DEEPSEEK_QUOTA_REPLY: &str =
+    "【联网查询】\n\nDeepSeek 查询额度已用尽或账户余额不足，请检查账户额度。";
 const WEB_SEARCH_RATE_LIMIT_REPLY: &str =
     "【联网查询】\n\n联网查询请求过于频繁，已被上游限流，请稍后再试。";
 const WEB_SEARCH_QUOTA_REPLY: &str =
@@ -26,6 +31,9 @@ const WEB_SEARCH_QUOTA_REPLY: &str =
 const WEB_SEARCH_TIMEOUT_REPLY: &str = "【联网查询】\n\n联网查询超时了，请稍后再试。";
 const WEB_SEARCH_UPSTREAM_ERROR_REPLY: &str =
     "【联网查询】\n\n联网查询服务暂时不可用，可能是上游接口、代理或网络配置异常。请稍后再试。";
+
+/// `/查` 与 Agent fallback 共用的展示上限。
+const WEB_SEARCH_REPLY_MAX_CHARS: usize = 1500;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FormattedWebSearchToolReply {
@@ -132,17 +140,69 @@ pub(crate) fn format_web_search_command_reply(answer: &str) -> String {
     if !text.starts_with("【联网查询】") {
         text = format!("【联网查询】\n\n{text}");
     }
-    truncate_chars(&text, 1500)
+    truncate_markdown_safely(&text, WEB_SEARCH_REPLY_MAX_CHARS).text
 }
+
+/// Markdown 安全截断结果：`text` 是最终正文，`kept_chars` 是从原文保留的
+/// 字符数，供来源展示标记判断对应片段是否仍可见。
+pub(super) struct MarkdownSafeCut {
+    pub(super) text: String,
+    pub(super) kept_chars: usize,
+}
+
+/// 按展示预算截断正文，并保证不切断 Markdown 行内链接。
+///
+/// 链接完整性由 `qq_maid_common::text::truncate_markdown_prefix` 统一保证；这里
+/// 再移除因整条链接被省略而留下的空来源标题。结构化 sources 不受正文裁剪影响。
+pub(super) fn truncate_markdown_safely(text: &str, limit: usize) -> MarkdownSafeCut {
+    let original_chars = text.chars().count();
+    if original_chars <= limit {
+        return MarkdownSafeCut {
+            text: text.trim().to_owned(),
+            kept_chars: original_chars,
+        };
+    }
+
+    let (body, kept_chars) = truncate_markdown_prefix(text, limit);
+    MarkdownSafeCut {
+        text: format!("{}…", strip_dangling_source_label(&body)),
+        kept_chars,
+    }
+}
+
+/// 链接整条省略后，去掉由此留下的空来源标题，避免用户看到没有内容的「来源：」。
+fn strip_dangling_source_label(body: &str) -> String {
+    let trimmed = body.trim_end();
+    let Some(last_line) = trimmed.rsplit('\n').next() else {
+        return trimmed.to_owned();
+    };
+    if matches!(last_line.trim(), "参考来源：" | "- 来源：" | "来源：") {
+        trimmed[..trimmed.len() - last_line.len()]
+            .trim_end()
+            .to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// DeepSeek 独立搜索的错误阶段前缀，用于区分与 Tavily 重叠的错误码。
+const DEEPSEEK_SEARCH_STAGE_PREFIX: &str = "deepseek_search";
 
 /// 把搜索工具错误映射为用户可执行的稳定文案；上游原始错误只进入日志和诊断。
 pub(crate) fn format_web_search_error_reply(err: &LlmError) -> String {
+    // DeepSeek 缺少 Key、401/402 与 Tavily 共用部分错误码，但操作入口不同。`/查`
+    // 错误保留路由 Provider，Agent 和多目标调研只透传 stage，因此两处都要识别。
+    let deepseek = err.upstream_provider() == Some("deepseek")
+        || err.stage.starts_with(DEEPSEEK_SEARCH_STAGE_PREFIX);
     match err.code.as_str() {
         "config" => WEB_SEARCH_CONFIG_ERROR_REPLY.to_owned(),
         "web_search_disabled" => WEB_SEARCH_DISABLED_REPLY.to_owned(),
+        "web_search_not_configured" if deepseek => WEB_SEARCH_DEEPSEEK_KEY_MISSING_REPLY.to_owned(),
         "web_search_not_configured" => WEB_SEARCH_TAVILY_KEY_MISSING_REPLY.to_owned(),
         "tavily_auth_error" => WEB_SEARCH_TAVILY_AUTH_REPLY.to_owned(),
+        "authentication_failed" if deepseek => WEB_SEARCH_DEEPSEEK_AUTH_REPLY.to_owned(),
         "rate_limited" => WEB_SEARCH_RATE_LIMIT_REPLY.to_owned(),
+        "quota_exhausted" if deepseek => WEB_SEARCH_DEEPSEEK_QUOTA_REPLY.to_owned(),
         "quota_exhausted" => WEB_SEARCH_QUOTA_REPLY.to_owned(),
         "empty_result" => WEB_SEARCH_EMPTY_RESULT_REPLY.to_owned(),
         "invalid_arguments" | "bad_tool_arguments" => WEB_SEARCH_ARGUMENT_ERROR_REPLY.to_owned(),
@@ -372,28 +432,18 @@ fn finalize_web_search_tool_reply(mut builder: SearchReplyBuilder) -> FormattedW
         }
     }
 
-    let original_length = builder.body.chars().count();
-    let body = truncate_chars(&builder.body, 1500);
-    let keep_limit = 1500usize.saturating_sub(1);
+    let cut = truncate_markdown_safely(&builder.body, WEB_SEARCH_REPLY_MAX_CHARS);
     let rendered_sources = builder
         .markers
         .into_iter()
         .map(|marker| WebSearchRenderedSource {
             location: marker.location,
-            identity_rendered: source_range_survives_truncation(
-                marker.identity,
-                original_length,
-                keep_limit,
-            ),
-            snippet_rendered: source_range_survives_truncation(
-                marker.snippet,
-                original_length,
-                keep_limit,
-            ),
+            identity_rendered: source_range_survives_truncation(marker.identity, cut.kept_chars),
+            snippet_rendered: source_range_survives_truncation(marker.snippet, cut.kept_chars),
         })
         .collect();
     FormattedWebSearchToolReply {
-        body,
+        body: cut.text,
         rendered_sources,
     }
 }
@@ -405,12 +455,8 @@ fn shift_source_range(range: &mut Option<SourceTextRange>, offset: usize) {
     }
 }
 
-fn source_range_survives_truncation(
-    range: Option<SourceTextRange>,
-    original_length: usize,
-    keep_limit: usize,
-) -> bool {
-    range.is_some_and(|range| original_length <= keep_limit + 1 || range.end <= keep_limit)
+fn source_range_survives_truncation(range: Option<SourceTextRange>, kept_chars: usize) -> bool {
+    range.is_some_and(|range| range.end <= kept_chars)
 }
 
 /// 解析搜索 JSON 中的非空字符串字段，供 formatter 与整轮投影共用。

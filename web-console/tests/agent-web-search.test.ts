@@ -61,7 +61,7 @@ describe("联网搜索配置读取", () => {
 
 describe("联网搜索保存契约", () => {
   it("为三种后端生成 set_web_search 且不携带 route 或 secret", () => {
-    for (const backend of ["provider_native", "tavily", "disabled"] as const) {
+    for (const backend of ["provider_native", "tavily", "deepseek", "disabled"] as const) {
       const change = webSearchConfigChange({ ...baseConfig, backend });
       expect(change.action).toBe("set_web_search");
       expect(change.backend).toBe(backend);

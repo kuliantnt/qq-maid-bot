@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+## [v0.26.1] - 2026-10-23
+
+### Added
+
+* 新增 DeepSeek 独立 Search API 后端：`tools.web_search.backend = "deepseek"`，复用 DeepSeek API Key 和 Base URL，供 `/查` 与 Agent 搜索使用；无需绑定搜索模型。
+* 控制台新增 DeepSeek Search 选项，保留场景白名单、结果数硬上限、超时保护和真实错误投影。检索摘要优先使用官方 `summary`，`answer` 汇总逐条摘要后附参考来源，缺少 Key、401 和 402 使用 DeepSeek 专属提示；空结果与调用失败分别处理。
+
+### Changed
+
+* 更新 Rust 与前端现有兼容版本约束内的依赖，并同步锁文件和可复现控制台产物；Vitest 升至 `5.0.5`，修复审计发现的测试工具链漏洞（兼容现有 Node 24 / Vite 7）。
+* 根包升至 `0.26.1`，Core 升至 `0.1.35`、LLM 升至 `0.1.17`、Web Console 升至 `0.12.1`、Common 升至 `0.1.8`；未修改业务逻辑的 Gateway 保持原版本。
+* 更新 DeepSeek 搜索使用文档、Wiki 和项目文档知识库。
+
+### Fixed
+
+* DeepSeek 搜索 `answer` 改为按「编号 + 展示标题 + 摘要 + 参考来源」分别计入总预算：先为每条结果锁定最短摘要和完整来源链接，再均分剩余预算。长标题、长 URL 和多结果不再挤掉后续摘要，`/查`、Agent 搜索与工具输出压缩也不会再切断 Markdown 来源链接；结构化 `sources` 始终保留真实来源和完整摘要。
+
+### Compatibility
+
+* 默认仍使用 `provider_native`，现有 Responses 内置搜索不变。新后端只发送查询词与结果数，不发送原始会话上下文；查询词限制为 1–128 个 Unicode 字符，超长明确报错。
+* 无 SQLite migration 或必填配置迁移。新后端不使用 Tavily 专属主题、时间范围和搜索深度参数；可在检索词中使用官方支持的站点和日期运算符。本次不新增 Fetch 工具。
+* 自动测试采用本地 HTTP 替身，真实 DeepSeek 凭据、计费及部署效果仍需在部署环境验证。
+
 ## [v0.26.0] - 2026-09-30
 
 ### Release Focus

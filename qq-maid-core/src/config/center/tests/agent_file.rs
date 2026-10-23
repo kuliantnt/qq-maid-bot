@@ -270,6 +270,7 @@ fn agent_web_search_backend_switches_preserve_routes_and_parameters() {
 
     for (backend, expected) in [
         ("tavily", WebSearchBackend::Tavily),
+        ("deepseek", WebSearchBackend::DeepSeek),
         ("disabled", WebSearchBackend::Disabled),
         ("provider_native", WebSearchBackend::ProviderNative),
     ] {

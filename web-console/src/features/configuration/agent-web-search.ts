@@ -6,7 +6,7 @@
  * 不携带 route 或 secret，搜索路线单独走 set_search_route。
  */
 
-export type AgentWebSearchBackend = "provider_native" | "tavily" | "disabled";
+export type AgentWebSearchBackend = "provider_native" | "tavily" | "deepseek" | "disabled";
 
 export interface AgentWebSearchConfig {
   backend: AgentWebSearchBackend;
@@ -126,7 +126,7 @@ export function webSearchRouteChanges(
 }
 
 export function isWebSearchBackend(value: string): value is AgentWebSearchBackend {
-  return value === "provider_native" || value === "tavily" || value === "disabled";
+  return value === "provider_native" || value === "tavily" || value === "deepseek" || value === "disabled";
 }
 
 export function isWebSearchTimeRange(value: string): value is "day" | "week" | "month" | "year" {
@@ -134,5 +134,5 @@ export function isWebSearchTimeRange(value: string): value is "day" | "week" | "
 }
 
 export function webSearchBackendLabel(value: AgentWebSearchBackend): string {
-  return ({ provider_native: "Provider 原生搜索", tavily: "Tavily", disabled: "已关闭" } as const)[value];
+  return ({ provider_native: "Provider 原生搜索", tavily: "Tavily", deepseek: "DeepSeek Search", disabled: "已关闭" } as const)[value];
 }
